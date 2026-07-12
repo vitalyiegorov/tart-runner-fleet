@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Europe/Vienna
+    open-pull-requests-limit: 5
+    groups:
+      go-runtime-dependencies:
+        dependency-type: production
+      go-development-dependencies:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:30"
+      timezone: Europe/Vienna
+    open-pull-requests-limit: 3
+

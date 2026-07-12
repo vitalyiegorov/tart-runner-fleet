@@ -1,0 +1,66 @@
+# Tart Runner Fleet
+
+Private, fail-closed control plane for dynamically scheduling ephemeral GitHub
+Actions runners on a single Apple Silicon host using Tart.
+
+The current shell manager remains production authority while this daemon moves
+through observe, shadow, canary, and controlled cutover phases.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  SS["GitHub Scale Set messages"] --> SNAP["Immutable observation snapshot"]
+  REST["Bounded REST compatibility"] --> SNAP
+  HOST["macOS host probe"] --> SNAP
+  TART["Tart inventory"] --> SNAP
+  SNAP --> CORE["Pure deterministic scheduler"]
+  DB[("SQLite WAL: state + plans + outbox")] --> CORE
+  CORE --> DB
+  DB --> EXEC["Leased idempotent operation workers"]
+  EXEC --> TART
+  EXEC --> SS
+  EXEC --> RECON["Fresh-state reconciliation"]
+  RECON --> DB
+```
+
+The design follows ports and adapters rather than a class hierarchy. Domain
+values and state transitions are explicit; scheduler functions are pure;
+GitHub, SQLite, Tart, clocks, randomness, and host probes are replaceable ports.
+This keeps policy testable and prevents backend mechanics from leaking into
+fairness or safety decisions.
+
+## Engineering contract
+
+- deterministic functional scheduling core;
+- durable SQLite WAL state and idempotent operation outbox;
+- official GitHub Actions Scale Set protocol for demand and JIT registration;
+- explicit host-mode and instance state machines;
+- fail closed when GitHub, Tart, or host observations are stale/unavailable;
+- no Linux/macOS overlap beyond configured, proven resource envelopes;
+- aged global FIFO with fair, capacity-aware backfill;
+- ephemeral runners and two-phase drain before deletion;
+- secrets never persisted or emitted;
+- race detector, replay/contract/chaos tests, and at least 99% statement coverage.
+
+## Local development
+
+```sh
+make verify
+```
+
+The repository expects Go 1.25.3 or newer. Production deployment is deliberately
+disabled until shadow-mode decisions match the incumbent manager and all canary
+gates pass.
+
+## Promotion gates
+
+- **Observe:** ingest and persist facts; emit no mutations.
+- **Shadow:** compute plans and compare them with incumbent decisions.
+- **Canary:** own one dedicated scale set/profile with bounded capacity.
+- **Authority:** take all configured profiles after a zero-overlap handoff.
+- **Rollback:** stop admission, drain owned instances, atomically reactivate the
+  pinned incumbent release.
+
+The checked-in daemon currently enforces an observe/shadow ceiling. See
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) for configuration and rollout.

@@ -1,0 +1,8 @@
+/bin/
+/coverage.out
+/coverage.html
+/fleet.db*
+/.idea/
+/.vscode/
+.DS_Store
+

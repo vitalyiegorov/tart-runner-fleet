@@ -1,0 +1,226 @@
+package operations
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestStateOwnershipOperationAndConfirmationValidation(t *testing.T) {
+	for _, state := range []State{StatePlanned, StateCloning, StateBooting, StateReachable, StateRegistering, StateOnlineIdle, StateAssigned, StateRunning, StateDraining, StateDeregistering, StateStopping, StateDeleted, StateFailed} {
+		if !ValidState(state) {
+			t.Fatalf("expected valid state %q", state)
+		}
+	}
+	if ValidState(State("unknown")) {
+		t.Fatal("unknown state is valid")
+	}
+	ownership := Ownership{ControllerID: "controller", ResourceID: "resource", OperationID: "operation"}
+	if !ownership.Valid() || (Ownership{}).Valid() {
+		t.Fatal("ownership validation mismatch")
+	}
+	now := time.Unix(100, 0).UTC()
+	op := Operation{ID: "op", IdempotencyKey: "idem", EffectKey: "effect", Kind: "clone", ResourceID: "resource", AvailableAt: now}
+	if !op.Valid() {
+		t.Fatal("operation should be valid")
+	}
+	op.ID = ""
+	if op.Valid() {
+		t.Fatal("operation without ID should be invalid")
+	}
+	op.ID = "op"
+	op.DependsOn = []string{"op"}
+	if op.Valid() || op.DependenciesValid() {
+		t.Fatal("self dependency accepted")
+	}
+	op.DependsOn = []string{"root", "root"}
+	if op.DependenciesValid() {
+		t.Fatal("duplicate dependency accepted")
+	}
+	op.DependsOn = []string{""}
+	if op.DependenciesValid() {
+		t.Fatal("empty dependency accepted")
+	}
+	confirmation := DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
+	if !confirmation.Safe(now.Add(time.Second), time.Minute) {
+		t.Fatal("fresh confirmation rejected")
+	}
+	confirmation.JobsInactive = false
+	if confirmation.Safe(now, time.Minute) {
+		t.Fatal("active jobs accepted")
+	}
+	confirmation.JobsInactive = true
+	if confirmation.Safe(now.Add(2*time.Minute), time.Minute) || confirmation.Safe(now.Add(-time.Second), time.Minute) {
+		t.Fatal("invalid confirmation time accepted")
+	}
+}
+
+func TestDemandEventValidation(t *testing.T) {
+	for _, kind := range []DemandEventKind{DemandJobAvailable, DemandJobAssigned, DemandJobStarted, DemandJobCompleted} {
+		if !(DemandEvent{Kind: kind, RunnerRequestID: 1}).Valid() {
+			t.Fatalf("valid demand event rejected: %s", kind)
+		}
+	}
+	if (DemandEvent{Kind: "unknown", RunnerRequestID: 1}).Valid() || (DemandEvent{Kind: DemandJobAvailable}).Valid() {
+		t.Fatal("invalid demand event accepted")
+	}
+}
+
+func TestRetryPolicy(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	policy := RetryPolicy{Initial: time.Second, Maximum: 4 * time.Second, MaxAttempts: 4}
+	for attempt, want := range map[int]time.Duration{1: time.Second, 2: 2 * time.Second, 3: 4 * time.Second} {
+		got, ok := policy.Next(attempt, now)
+		if !ok || got.Sub(now) != want {
+			t.Fatalf("attempt %d: got %v %v", attempt, got.Sub(now), ok)
+		}
+	}
+	if _, ok := policy.Next(4, now); ok {
+		t.Fatal("max attempts should stop")
+	}
+	got, ok := (RetryPolicy{}).Next(1, now)
+	if !ok || got.Sub(now) != time.Second {
+		t.Fatal("default retry delay mismatch")
+	}
+	got, ok = (RetryPolicy{Initial: time.Second, Maximum: 2 * time.Second, Jitter: func(int, time.Duration) time.Duration { return 5 * time.Second }}).Next(1, now)
+	if !ok || got.Sub(now) != 2*time.Second {
+		t.Fatal("positive jitter was not capped")
+	}
+	got, ok = (RetryPolicy{Initial: time.Second, Jitter: func(int, time.Duration) time.Duration { return -2 * time.Second }}).Next(1, now)
+	if !ok || got != now {
+		t.Fatal("negative jitter was not clamped")
+	}
+	got, ok = (RetryPolicy{Initial: 3 * time.Second, Maximum: 2 * time.Second}).Next(1, now)
+	if !ok || got.Sub(now) != 2*time.Second {
+		t.Fatal("initial retry delay was not capped")
+	}
+}
+
+func TestPlanDependencyValidationAndDigest(t *testing.T) {
+	now := time.Unix(123, 0).UTC()
+	op := func(id string, dependencies ...string) Operation {
+		return Operation{ID: id, IdempotencyKey: id, EffectKey: id, Kind: "test", ResourceID: "vm", AvailableAt: now, DependsOn: dependencies}
+	}
+	plan := Plan{ID: "plan", CreatedAt: now, Scheduler: SchedulerState{Version: 1}, Operations: []Operation{op("a"), op("b", "a")}}
+	if !plan.Valid() {
+		t.Fatal("valid dependency DAG rejected")
+	}
+	first, err := plan.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _ := plan.Digest()
+	if first != second {
+		t.Fatal("plan digest is not deterministic")
+	}
+	for name, operations := range map[string][]Operation{
+		"self":      {op("a", "a")},
+		"duplicate": {op("a"), op("b", "a", "a")},
+		"cycle":     {op("a", "b"), op("b", "a")},
+		"empty":     {op("a", "")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := plan
+			invalid.Operations = operations
+			if invalid.Valid() {
+				t.Fatal("invalid dependency graph accepted")
+			}
+		})
+	}
+	shared := plan
+	shared.Operations = []Operation{op("a", "c"), op("b", "c"), op("c", "external")}
+	for range 20 {
+		if shared.hasDependencyCycleOrSelf() {
+			t.Fatal("shared dependency reported as a cycle")
+		}
+	}
+}
+
+func TestPlanValidationRejectsEveryInvalidIntent(t *testing.T) {
+	now := time.Unix(124, 0).UTC()
+	ownership := Ownership{ControllerID: "c", ResourceID: "r", OperationID: "o"}
+	valid := Plan{ID: "plan", CreatedAt: now, Scheduler: SchedulerState{Version: 1}, Instances: []InstanceIntent{{ExpectedVersion: -1, Instance: Instance{ID: "vm", State: StatePlanned, Ownership: ownership}}}}
+	mutations := map[string]func(*Plan){
+		"id":                func(p *Plan) { p.ID = "" },
+		"created":           func(p *Plan) { p.CreatedAt = time.Time{} },
+		"scheduler version": func(p *Plan) { p.Scheduler.Version = 2 },
+		"instance id":       func(p *Plan) { p.Instances[0].Instance.ID = "" },
+		"state":             func(p *Plan) { p.Instances[0].Instance.State = State("bogus") },
+		"ownership":         func(p *Plan) { p.Instances[0].Instance.Ownership = Ownership{} },
+		"expected state": func(p *Plan) {
+			p.Instances[0].ExpectedVersion = 0
+			p.Instances[0].ExpectedState = State("bogus")
+		},
+		"transition": func(p *Plan) {
+			p.Instances[0].ExpectedVersion = 0
+			p.Instances[0].ExpectedState = StateDeleted
+		},
+		"operation": func(p *Plan) { p.Operations = []Operation{{}} },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			plan := valid
+			plan.Instances = append([]InstanceIntent(nil), valid.Instances...)
+			mutate(&plan)
+			if plan.Valid() {
+				t.Fatal("invalid plan accepted")
+			}
+		})
+	}
+	invalidJSON := valid
+	invalidJSON.Scheduler.Data = json.RawMessage(`{`)
+	if _, err := invalidJSON.Digest(); err == nil {
+		t.Fatal("invalid JSON unexpectedly produced digest")
+	}
+}
+
+type drainerStore struct {
+	Store
+	transition Transition
+}
+
+func (s *drainerStore) Transition(_ context.Context, transition Transition) (Instance, Operation, error) {
+	s.transition = transition
+	return Instance{ID: transition.InstanceID, State: transition.NextState, DrainPhase: transition.DrainPhase}, transition.Operation, nil
+}
+
+type confirmer struct {
+	confirmation DeletionConfirmation
+	err          error
+}
+
+func (c confirmer) ConfirmDeletion(context.Context, string) (DeletionConfirmation, error) {
+	return c.confirmation, c.err
+}
+
+func TestDrainerRequiresTwoPhaseFreshConfirmation(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	store := &drainerStore{}
+	drainer := Drainer{Store: store, Confirmer: confirmer{confirmation: DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}}, ConfirmationMaxAge: time.Minute, Now: func() time.Time { return now }}
+	instance := Instance{ID: "vm", State: StateDraining, Version: 2, DrainPhase: 1}
+	op := Operation{ID: "delete", IdempotencyKey: "delete-vm", EffectKey: "delete-vm", Kind: "delete", ResourceID: "vm"}
+	got, _, err := drainer.Confirm(context.Background(), instance, op)
+	if err != nil || got.State != StateDeregistering || got.DrainPhase != 2 || store.transition.ExpectedVersion != 2 {
+		t.Fatalf("confirm drain: %#v %v", got, err)
+	}
+	instance.State = StateOnlineIdle
+	if _, _, err := drainer.Confirm(context.Background(), instance, op); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected conflict, got %v", err)
+	}
+	instance.State = StateDraining
+	drainer.Confirmer = confirmer{err: errors.New("api down")}
+	if _, _, err := drainer.Confirm(context.Background(), instance, op); err == nil {
+		t.Fatal("confirmation error ignored")
+	}
+	drainer.Confirmer = confirmer{confirmation: DeletionConfirmation{Fresh: false}}
+	if _, _, err := drainer.Confirm(context.Background(), instance, op); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("expected uncertainty, got %v", err)
+	}
+	drainer.Now = nil
+	drainer.Confirmer = confirmer{confirmation: DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: time.Now()}}
+	if _, _, err := drainer.Confirm(context.Background(), instance, op); err != nil {
+		t.Fatalf("default clock: %v", err)
+	}
+}

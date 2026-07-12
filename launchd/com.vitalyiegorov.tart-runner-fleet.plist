@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vitalyiegorov.tart-runner-fleet</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RELEASE_DIR__/fleetd</string>
+    <string>run</string>
+    <string>--mode=observe</string>
+    <string>--config=__STATE_DIR__/fleet.json</string>
+    <string>--database=__STATE_DIR__/fleet.db</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__STATE_DIR__/fleet.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_DIR__/fleet.stderr.log</string>
+</dict>
+</plist>
+

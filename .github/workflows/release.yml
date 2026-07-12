@@ -1,0 +1,51 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Immutable release identifier
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux-tiered, linux-medium]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify source
+        run: |
+          set -euo pipefail
+          go mod verify
+          go test -race -shuffle=on -count=1 ./...
+          ./scripts/check-coverage.sh 99.0
+      - name: Build reproducible macOS arm64 binaries
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test -n "$VERSION"
+          mkdir -p dist
+          export CGO_ENABLED=0 GOOS=darwin GOARCH=arm64
+          go build -trimpath -buildvcs=true -ldflags="-s -w -X main.version=$VERSION" -o dist/fleetd ./cmd/fleetd
+          go build -trimpath -buildvcs=true -ldflags="-s -w -X main.version=$VERSION" -o dist/fleetctl ./cmd/fleetctl
+          (cd dist && shasum -a 256 fleetd fleetctl > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tart-runner-fleet-${{ inputs.version }}-darwin-arm64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+

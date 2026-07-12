@@ -1,0 +1,655 @@
+// Package scheduler implements the deterministic, side-effect-free fleet
+// planner. Adapters provide immutable observations and execute its operations.
+package scheduler
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"sort"
+	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+)
+
+type Config struct {
+	LinuxCapacity domain.Resources
+	FairnessAge   time.Duration
+	RepoCaps      map[string]int
+	Profiles      map[domain.ProfileID]domain.Profile
+}
+
+type State struct {
+	// Reservation is deliberately singular: aged global FIFO permits only its
+	// head to reserve a vector. Backfill may use only the vector remainder.
+	Reservation *domain.Reservation
+	DRRCursor   string
+}
+
+type Input struct {
+	Now       time.Time
+	Config    Config
+	Demands   domain.Observation[[]domain.Demand]
+	Instances domain.Observation[[]domain.Instance]
+	Host      domain.Observation[domain.Host]
+	Prior     State
+}
+
+type OperationKind string
+
+const (
+	OperationSpawn OperationKind = "spawn"
+	OperationDrain OperationKind = "drain"
+)
+
+type Operation struct {
+	ID        string
+	Kind      OperationKind
+	Demand    domain.DemandKey
+	Instance  string
+	Profile   domain.ProfileID
+	Route     domain.Route
+	DependsOn []string
+}
+
+type PlanStatus string
+
+const (
+	PlanReady              PlanStatus = "ready"
+	PlanBlockedObservation PlanStatus = "blocked_observation"
+	PlanInvalidObservation PlanStatus = "invalid_observation"
+)
+
+type Plan struct {
+	ID         string
+	Status     PlanStatus
+	Operations []Operation
+	Next       State
+}
+
+// PlanTick computes a complete plan without performing side effects.
+func PlanTick(in Input) Plan {
+	if !in.Demands.Usable() || !in.Instances.Usable() || !in.Host.Usable() {
+		return finish(Plan{Status: PlanBlockedObservation, Next: in.Prior})
+	}
+	mode, err := domain.DeriveHostMode(in.Instances.Value)
+	if err != nil {
+		return finish(Plan{Status: PlanInvalidObservation, Next: in.Prior})
+	}
+
+	demands := normalizedDemands(in)
+	plan := Plan{Status: PlanReady, Next: in.Prior}
+	if len(demands) == 0 {
+		plan.Next.Reservation = nil
+		return finish(plan)
+	}
+
+	linux, macos := partition(demands)
+	switch chosenPlatform(in.Now, in.Config.FairnessAge, demands) {
+	case domain.PlatformMacOS:
+		if mode == domain.HostLinux {
+			plan = planMacHandoff(in, plan, macos)
+		} else {
+			plan = planMacOS(in, plan, macos)
+		}
+	case domain.PlatformLinux:
+		if mode == domain.HostMacOS {
+			plan = planLinuxHandoff(in, plan, linux)
+		} else {
+			plan = planLinux(in, plan, linux)
+		}
+	}
+	return finish(plan)
+}
+
+func chosenPlatform(now time.Time, fairnessAge time.Duration, demands []domain.Demand) domain.Platform {
+	aged, _ := splitAged(now, fairnessAge, demands)
+	if len(aged) > 0 {
+		return aged[0].Platform
+	}
+	return demands[0].Platform
+}
+
+func normalizedDemands(in Input) []domain.Demand {
+	seen := make(map[domain.DemandKey]bool)
+	result := make([]domain.Demand, 0, len(in.Demands.Value))
+	for _, demand := range in.Demands.Value {
+		profile, ok := in.Config.Profiles[demand.Profile]
+		if seen[demand.Key] || demand.Key.Validate() != nil || !ok || profile.Platform != demand.Platform || profile.Route != demand.Route {
+			continue
+		}
+		if !demand.NotBefore.IsZero() && demand.NotBefore.After(in.Now) {
+			continue
+		}
+		seen[demand.Key] = true
+		result = append(result, demand)
+	}
+	sort.Slice(result, func(i, j int) bool { return demandLess(result[i], result[j]) })
+	return result
+}
+
+func demandLess(a, b domain.Demand) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.Key.String() < b.Key.String()
+}
+
+func partition(demands []domain.Demand) (linux, macos []domain.Demand) {
+	for _, demand := range demands {
+		if demand.Platform == domain.PlatformMacOS {
+			macos = append(macos, demand)
+		} else if demand.Platform == domain.PlatformLinux {
+			linux = append(linux, demand)
+		}
+	}
+	return linux, macos
+}
+
+func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
+	demands = consumeCompatibleIdle(demands, in.Instances.Value)
+	if len(demands) == 0 {
+		plan.Next.Reservation = nil
+		return plan
+	}
+	free := linuxFree(in)
+	// The exact Linux allocator deliberately has a tiny, auditable search
+	// envelope. Production owns at most four Linux VM slots even if an adapter
+	// accidentally reports a larger host slot count.
+	free.Slots = min(free.Slots, 4)
+	baseCounts := activeRepoCounts(in.Instances.Value)
+
+	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok {
+		profile := in.Config.Profiles[reserved.Profile]
+		if feasible(profile.Resources, free, reserved.Key.Repo, baseCounts, nil, in.Config.RepoCaps) {
+			plan.Operations = append(plan.Operations, spawnOperation(reserved, nil))
+			plan.Next.Reservation = nil
+		} else {
+			plan.Next.Reservation = copyReservation(in.Prior.Reservation)
+			backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, nil)
+			plan.Operations = append(plan.Operations, backfill...)
+			if len(backfill) > 0 {
+				plan.Next.DRRCursor = backfill[len(backfill)-1].Demand.Repo
+			}
+		}
+		return plan
+	}
+	plan.Next.Reservation = nil
+
+	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
+	if len(aged) > 0 {
+		for _, candidate := range aged {
+			profile := in.Config.Profiles[candidate.Profile]
+			selected := spawnedDemands(plan.Operations)
+			if !feasible(profile.Resources, free, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps) {
+				plan.Next.Reservation = &domain.Reservation{Demand: candidate.Key, Profile: candidate.Profile, Resources: profile.Resources, Since: in.Now}
+				backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, selected)
+				plan.Operations = append(plan.Operations, backfill...)
+				if len(backfill) > 0 {
+					plan.Next.DRRCursor = backfill[len(backfill)-1].Demand.Repo
+				}
+				break
+			}
+			plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
+			free, _ = free.Sub(profile.Resources)
+		}
+		return plan
+	}
+
+	ordered := fairOrder(young, in.Prior.DRRCursor)
+	selected := exactSelect(ordered, free, baseCounts, in.Config)
+	for _, candidate := range selected {
+		plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
+	}
+	if len(selected) > 0 {
+		plan.Next.DRRCursor = selected[len(selected)-1].Key.Repo
+	}
+	return plan
+}
+
+func linuxFree(in Input) domain.Resources {
+	free := in.Config.LinuxCapacity
+	for _, instance := range in.Instances.Value {
+		if instance.Live() {
+			var ok bool
+			free, ok = free.Sub(instance.Resources)
+			if !ok {
+				return domain.Resources{}
+			}
+		}
+	}
+	return minResources(free, in.Host.Value.Available)
+}
+
+func minResources(a, b domain.Resources) domain.Resources {
+	return domain.Resources{CPU: min(a.CPU, b.CPU), MemoryMB: min(a.MemoryMB, b.MemoryMB), Slots: min(a.Slots, b.Slots)}
+}
+
+func activeRepoCounts(instances []domain.Instance) map[string]int {
+	counts := make(map[string]int)
+	for _, instance := range instances {
+		if !instance.Live() || instance.State == domain.InstanceOnlineIdle || teardownState(instance.State) {
+			continue
+		}
+		counts[instance.Repo]++
+	}
+	return counts
+}
+
+func teardownState(state domain.InstanceState) bool {
+	switch state {
+	case domain.InstanceDraining, domain.InstanceDeregistering, domain.InstanceStopping, domain.InstanceDeleted, domain.InstanceFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func consumeCompatibleIdle(demands []domain.Demand, instances []domain.Instance) []domain.Demand {
+	idle := make(map[string]int)
+	for _, instance := range instances {
+		if instance.State == domain.InstanceOnlineIdle {
+			idle[matchKey(instance.Repo, instance.Profile, instance.Route)]++
+		}
+	}
+	result := make([]domain.Demand, 0, len(demands))
+	for _, demand := range demands {
+		key := matchKey(demand.Key.Repo, demand.Profile, demand.Route)
+		if idle[key] > 0 {
+			idle[key]--
+			continue
+		}
+		result = append(result, demand)
+	}
+	return result
+}
+
+func matchKey(repo string, profile domain.ProfileID, route domain.Route) string {
+	return repo + "\x00" + string(profile) + "\x00" + string(route)
+}
+
+func reservedDemand(reservation *domain.Reservation, demands []domain.Demand) (domain.Demand, bool) {
+	if reservation == nil {
+		return domain.Demand{}, false
+	}
+	for _, demand := range demands {
+		if demand.Key == reservation.Demand && demand.Profile == reservation.Profile {
+			return demand, true
+		}
+	}
+	return domain.Demand{}, false
+}
+
+func copyReservation(reservation *domain.Reservation) *domain.Reservation {
+	if reservation == nil {
+		return nil
+	}
+	copy := *reservation
+	return &copy
+}
+
+// safeBackfill reserves the full resource vector, then performs exact
+// admission only inside the component-wise remainder. Thus backfill can never
+// delay the reserved job once its non-resource blocker clears.
+func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, baseCounts map[string]int, reservation *domain.Reservation, alreadySelected []domain.Demand) []Operation {
+	backfillCapacity, ok := free.Sub(reservation.Resources)
+	if !ok {
+		return nil
+	}
+	excluded := map[domain.DemandKey]bool{reservation.Demand: true}
+	for _, demand := range alreadySelected {
+		excluded[demand.Key] = true
+	}
+	var candidates []domain.Demand
+	for _, demand := range demands {
+		if !excluded[demand.Key] {
+			candidates = append(candidates, demand)
+		}
+	}
+	aged, young := splitAged(in.Now, in.Config.FairnessAge, candidates)
+	ordered := append(aged, fairOrder(young, in.Prior.DRRCursor)...)
+	counts := cloneCounts(baseCounts)
+	for _, demand := range alreadySelected {
+		counts[demand.Key.Repo]++
+	}
+	selected := exactSelect(ordered, backfillCapacity, counts, in.Config)
+	operations := make([]Operation, 0, len(selected))
+	for _, demand := range selected {
+		operations = append(operations, spawnOperation(demand, nil))
+	}
+	return operations
+}
+
+func splitAged(now time.Time, age time.Duration, demands []domain.Demand) (aged, young []domain.Demand) {
+	for _, demand := range demands {
+		if age > 0 && !demand.CreatedAt.IsZero() && now.Sub(demand.CreatedAt) >= age {
+			aged = append(aged, demand)
+		} else {
+			young = append(young, demand)
+		}
+	}
+	return aged, young
+}
+
+func fairOrder(demands []domain.Demand, cursor string) []domain.Demand {
+	byRepo := make(map[string][]domain.Demand)
+	var repos []string
+	for _, demand := range demands {
+		if _, exists := byRepo[demand.Key.Repo]; !exists {
+			repos = append(repos, demand.Key.Repo)
+		}
+		byRepo[demand.Key.Repo] = append(byRepo[demand.Key.Repo], demand)
+	}
+	sort.Strings(repos)
+	for repo := range byRepo {
+		sort.Slice(byRepo[repo], func(i, j int) bool {
+			a, b := byRepo[repo][i], byRepo[repo][j]
+			if eventRank(a.Event) != eventRank(b.Event) {
+				return eventRank(a.Event) < eventRank(b.Event)
+			}
+			return demandLess(a, b)
+		})
+	}
+	if len(repos) > 1 && cursor != "" {
+		start := sort.SearchStrings(repos, cursor)
+		if start < len(repos) && repos[start] == cursor {
+			start = (start + 1) % len(repos)
+			repos = append(append([]string{}, repos[start:]...), repos[:start]...)
+		}
+	}
+	var result []domain.Demand
+	for round := 0; ; round++ {
+		added := false
+		for _, repo := range repos {
+			if round < len(byRepo[repo]) {
+				result = append(result, byRepo[repo][round])
+				added = true
+			}
+		}
+		if !added {
+			return result
+		}
+	}
+}
+
+func eventRank(event domain.Event) int {
+	if event == domain.EventPullRequest {
+		return 0
+	}
+	return 1
+}
+
+// exactSelect enumerates all feasible combinations while selecting at most the
+// configured slot vector (four in production). That makes feasibility exact
+// without an unbounded 2^N search.
+func exactSelect(candidates []domain.Demand, free domain.Resources, baseCounts map[string]int, config Config) []domain.Demand {
+	var best []int
+	var search func(index int, remaining domain.Resources, counts map[string]int, chosen []int)
+	search = func(index int, remaining domain.Resources, counts map[string]int, chosen []int) {
+		if betterSelection(chosen, best) {
+			best = append([]int(nil), chosen...)
+		}
+		if index >= len(candidates) || len(chosen) >= free.Slots {
+			return
+		}
+		for i := index; i < len(candidates); i++ {
+			candidate := candidates[i]
+			profile := config.Profiles[candidate.Profile]
+			cap := config.RepoCaps[candidate.Key.Repo]
+			if cap <= 0 {
+				cap = 1
+			}
+			if counts[candidate.Key.Repo] >= cap || !remaining.CanFit(profile.Resources) {
+				continue
+			}
+			nextRemaining, _ := remaining.Sub(profile.Resources)
+			nextCounts := cloneCounts(counts)
+			nextCounts[candidate.Key.Repo]++
+			search(i+1, nextRemaining, nextCounts, append(chosen, i))
+		}
+	}
+	search(0, free, cloneCounts(baseCounts), nil)
+	selected := make([]domain.Demand, 0, len(best))
+	for _, index := range best {
+		selected = append(selected, candidates[index])
+	}
+	return selected
+}
+
+func betterSelection(candidate, incumbent []int) bool {
+	if len(candidate) != len(incumbent) {
+		return len(candidate) > len(incumbent)
+	}
+	for i := range candidate {
+		if candidate[i] != incumbent[i] {
+			return candidate[i] < incumbent[i]
+		}
+	}
+	return false
+}
+
+func cloneCounts(source map[string]int) map[string]int {
+	result := make(map[string]int, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	return result
+}
+
+func feasible(resources, free domain.Resources, repo string, base map[string]int, selected []domain.Demand, caps map[string]int) bool {
+	if !free.CanFit(resources) {
+		return false
+	}
+	count := base[repo]
+	for _, demand := range selected {
+		if demand.Key.Repo == repo {
+			count++
+		}
+	}
+	cap := caps[repo]
+	if cap <= 0 {
+		cap = 1
+	}
+	return count < cap
+}
+
+func spawnedDemands(operations []Operation) []domain.Demand {
+	result := make([]domain.Demand, 0, len(operations))
+	for _, operation := range operations {
+		if operation.Kind == OperationSpawn {
+			result = append(result, domain.Demand{Key: operation.Demand})
+		}
+	}
+	return result
+}
+
+func planMacHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
+	var drains []Operation
+	allIdle := true
+	for _, instance := range sortedInstances(in.Instances.Value) {
+		if instance.Platform != domain.PlatformLinux || !instance.Live() {
+			continue
+		}
+		if instance.State != domain.InstanceOnlineIdle {
+			allIdle = false
+			continue
+		}
+		drains = append(drains, drainOperation(instance))
+	}
+	plan.Operations = append(plan.Operations, drains...)
+	if allIdle {
+		plan = appendMacSpawns(in, plan, demands, operationIDs(drains))
+	}
+	return plan
+}
+
+func planLinuxHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
+	var drains []Operation
+	allIdle := true
+	filtered := append([]domain.Instance(nil), in.Instances.Value...)
+	for _, instance := range sortedInstances(in.Instances.Value) {
+		if instance.Platform != domain.PlatformMacOS || !instance.Live() {
+			continue
+		}
+		if instance.State != domain.InstanceOnlineIdle {
+			allIdle = false
+			continue
+		}
+		drains = append(drains, drainOperation(instance))
+		filtered = removeInstance(filtered, instance.ID)
+	}
+	plan.Operations = append(plan.Operations, drains...)
+	if !allIdle {
+		return plan
+	}
+	nextInput := in
+	nextInput.Instances = domain.Fresh(filtered, in.Instances.ObservedAt)
+	next := planLinux(nextInput, Plan{Status: plan.Status, Next: plan.Next}, demands)
+	dependencies := operationIDs(drains)
+	for _, operation := range next.Operations {
+		operation.DependsOn = append([]string(nil), dependencies...)
+		operation.ID = stableID("op", operation)
+		plan.Operations = append(plan.Operations, operation)
+	}
+	plan.Next = next.Next
+	return plan
+}
+
+func removeInstance(instances []domain.Instance, id string) []domain.Instance {
+	result := make([]domain.Instance, 0, len(instances))
+	for _, instance := range instances {
+		if instance.ID != id {
+			result = append(result, instance)
+		}
+	}
+	return result
+}
+
+func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
+	profile := chosenMacProfile(in.Now, in.Config.FairnessAge, demands)
+	var drains []Operation
+	allSwitchable := true
+	for _, instance := range sortedInstances(in.Instances.Value) {
+		if instance.Platform != domain.PlatformMacOS || !instance.Live() || instance.Profile == profile {
+			continue
+		}
+		if instance.State != domain.InstanceOnlineIdle {
+			allSwitchable = false
+			continue
+		}
+		drains = append(drains, drainOperation(instance))
+	}
+	plan.Operations = append(plan.Operations, drains...)
+	if allSwitchable {
+		plan = appendMacSpawns(in, plan, demandsForProfile(demands, profile), operationIDs(drains))
+	}
+	return plan
+}
+
+func chosenMacProfile(now time.Time, fairnessAge time.Duration, demands []domain.Demand) domain.ProfileID {
+	aged, _ := splitAged(now, fairnessAge, demands)
+	if len(aged) > 0 {
+		return aged[0].Profile
+	}
+	return demands[0].Profile
+}
+
+func demandsForProfile(demands []domain.Demand, profile domain.ProfileID) []domain.Demand {
+	var result []domain.Demand
+	for _, demand := range demands {
+		if demand.Profile == profile {
+			result = append(result, demand)
+		}
+	}
+	return result
+}
+
+func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies []string) Plan {
+	if len(demands) == 0 {
+		return plan
+	}
+	profile := in.Config.Profiles[demands[0].Profile]
+	limit := profile.MaxActive
+	if profile.ID == "maestro" && (limit <= 0 || limit > 2) {
+		limit = 2
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	active := 0
+	free := in.Host.Value.Available
+	for _, instance := range in.Instances.Value {
+		if instance.Live() && instance.Platform == domain.PlatformMacOS && instance.Profile == profile.ID {
+			active++
+			var ok bool
+			free, ok = free.Sub(instance.Resources)
+			if !ok {
+				return plan
+			}
+		}
+	}
+	available := limit - active
+	if available <= 0 {
+		return plan
+	}
+	ordered := fairOrder(demands, in.Prior.DRRCursor)
+	selected := make([]domain.Demand, 0, available)
+	for _, demand := range ordered {
+		if len(selected) >= available || !free.CanFit(profile.Resources) {
+			break
+		}
+		free, _ = free.Sub(profile.Resources)
+		selected = append(selected, demand)
+	}
+	for _, demand := range selected {
+		plan.Operations = append(plan.Operations, spawnOperation(demand, dependencies))
+	}
+	if len(selected) > 0 {
+		plan.Next.DRRCursor = selected[len(selected)-1].Key.Repo
+	}
+	return plan
+}
+
+func sortedInstances(instances []domain.Instance) []domain.Instance {
+	result := append([]domain.Instance(nil), instances...)
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func spawnOperation(demand domain.Demand, dependencies []string) Operation {
+	operation := Operation{Kind: OperationSpawn, Demand: demand.Key, Profile: demand.Profile, Route: demand.Route, DependsOn: append([]string(nil), dependencies...)}
+	operation.ID = stableID("op", operation)
+	return operation
+}
+
+func drainOperation(instance domain.Instance) Operation {
+	operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route}
+	operation.ID = stableID("op", operation)
+	return operation
+}
+
+func operationIDs(operations []Operation) []string {
+	result := make([]string, 0, len(operations))
+	for _, operation := range operations {
+		result = append(result, operation.ID)
+	}
+	return result
+}
+
+func finish(plan Plan) Plan {
+	if len(plan.Operations) == 0 {
+		plan.Operations = nil
+	}
+	plan.ID = stableID("plan", struct {
+		Status     PlanStatus
+		Operations []Operation
+		Next       State
+	}{plan.Status, plan.Operations, plan.Next})
+	return plan
+}
+
+func stableID(prefix string, value any) string {
+	encoded, _ := json.Marshal(value)
+	sum := sha256.Sum256(encoded)
+	return prefix + "-" + hex.EncodeToString(sum[:12])
+}

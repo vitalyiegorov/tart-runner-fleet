@@ -1,0 +1,32 @@
+{
+  "baseVm": "linux-runner-base",
+  "vmPrefix": "gha-linux",
+  "pollSeconds": 20,
+  "maxLinuxWhenMacosIdle": 4,
+  "maxLinuxCpu": 8,
+  "maxLinuxMemoryMb": 16384,
+  "linuxReservationAgeSeconds": 300,
+  "minFreeDiskGb": 60,
+  "githubTimeoutSeconds": 15,
+  "tartControlTimeoutSeconds": 45,
+  "bootTimeoutSeconds": 180,
+  "linuxProfiles": [
+    { "id": "small", "label": "linux-small", "cpu": 1, "memoryMb": 2048 },
+    { "id": "medium", "label": "linux-medium", "cpu": 2, "memoryMb": 4096 },
+    { "id": "large", "label": "linux-large", "cpu": 4, "memoryMb": 8192 }
+  ],
+  "macosBurst": {
+    "enabled": true,
+    "baseVm": "macos-tartelet-base",
+    "vmPrefix": "gha-macos",
+    "builder": { "id": "builder", "label": "macos-builder", "cpu": 8, "memoryMb": 12288, "maxActive": 1 },
+    "maestro": { "id": "maestro", "label": "macos-maestro", "cpu": 4, "memoryMb": 7168, "maxActive": 2 }
+  },
+  "targets": [
+    { "type": "repo", "slug": "vitalyiegorov/knee-doctor", "maxActive": 4 },
+    { "type": "repo", "slug": "budgie-at/budgie", "maxActive": 2, "defaultLinuxProfile": "large", "runnerLabels": ["self-hosted", "linux-ci", "linux-burst"] },
+    { "type": "repo", "slug": "vitalyiegorov/hotel-provence", "maxActive": 4 },
+    { "type": "repo", "slug": "vitalyiegorov/suuudokuuu", "maxActive": 3 }
+  ]
+}
+

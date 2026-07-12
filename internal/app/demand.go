@@ -1,0 +1,89 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
+)
+
+type DemandStore interface {
+	ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (bool, error)
+	ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error)
+}
+
+type MessageSource interface {
+	Handle(context.Context, func(context.Context, githubscaleset.Demand) error) error
+}
+
+type Binding struct {
+	ScaleSetID int64
+	Profile    domain.Profile
+}
+
+func (b Binding) valid() bool {
+	return b.ScaleSetID > 0 && b.Profile.ID != "" && b.Profile.Route != "" &&
+		(b.Profile.Platform == domain.PlatformLinux || b.Profile.Platform == domain.PlatformMacOS)
+}
+
+type DemandCoordinator struct{ Store DemandStore }
+
+func (c DemandCoordinator) IngestOnce(ctx context.Context, binding Binding, source MessageSource) error {
+	if c.Store == nil || source == nil || !binding.valid() {
+		return operations.ErrInvalid
+	}
+	return source.Handle(ctx, func(ctx context.Context, demand githubscaleset.Demand) error {
+		events := make([]operations.DemandEvent, 0, len(demand.Events))
+		for _, event := range demand.Events {
+			events = append(events, convertEvent(event))
+		}
+		_, err := c.Store.ApplyDemandBatch(ctx, binding.ScaleSetID, int64(demand.MessageID), events)
+		return err
+	})
+}
+
+func convertEvent(event githubscaleset.JobEvent) operations.DemandEvent {
+	return operations.DemandEvent{Kind: operations.DemandEventKind(event.Kind), RunnerRequestID: event.RunnerRequestID,
+		Owner: event.Owner, Repository: event.Repository, WorkflowRunID: event.WorkflowRunID, JobID: event.JobID,
+		EventName: event.EventName, Labels: append([]string(nil), event.Labels...), QueueTime: event.QueueTime,
+		RunnerID: event.RunnerID, RunnerName: event.RunnerName, Result: event.Result}
+}
+
+func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) ([]domain.Demand, error) {
+	if c.Store == nil || !binding.valid() {
+		return nil, operations.ErrInvalid
+	}
+	records, err := c.Store.ActiveDemands(ctx, binding.ScaleSetID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.Demand, 0, len(records))
+	for _, record := range records {
+		if record.Status != operations.DemandJobAvailable {
+			continue
+		}
+		if record.RunnerRequestID <= 0 || record.WorkflowRunID <= 0 || record.Owner == "" || record.Repository == "" || record.QueueTime.IsZero() {
+			return nil, fmt.Errorf("incomplete durable demand %d: %w", record.RunnerRequestID, operations.ErrUncertain)
+		}
+		result = append(result, domain.Demand{
+			Key:       domain.DemandKey{Repo: record.Owner + "/" + record.Repository, RunID: record.WorkflowRunID, Attempt: 1, JobID: record.RunnerRequestID},
+			CreatedAt: record.QueueTime.UTC(), Profile: binding.Profile.ID, Route: binding.Profile.Route, Platform: binding.Profile.Platform,
+			Event: event(record.EventName), RunStatus: domain.RunQueued,
+		})
+	}
+	return result, nil
+}
+
+func event(name string) domain.Event {
+	switch strings.ToLower(name) {
+	case "pull_request", "pull_request_target", "merge_group":
+		return domain.EventPullRequest
+	case "schedule":
+		return domain.EventSchedule
+	default:
+		return domain.EventPush
+	}
+}
