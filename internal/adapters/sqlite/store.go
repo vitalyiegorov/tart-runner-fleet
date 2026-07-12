@@ -441,6 +441,19 @@ func (s *Store) LiveInstances(ctx context.Context) ([]operations.Instance, error
 	return result, nil
 }
 
+// OperationCounts returns bounded aggregate telemetry without exposing payloads
+// or coupling callers to the operations table schema.
+func (s *Store) OperationCounts(ctx context.Context) (retrying, dead int, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN attempts>0 AND status NOT IN (?,?) THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END),0)
+		FROM operations`, operations.OperationCompleted, operations.OperationDead, operations.OperationDead).Scan(&retrying, &dead)
+	if err != nil {
+		return 0, 0, fmt.Errorf("summarize operations: %w", err)
+	}
+	return retrying, dead, nil
+}
+
 type rowScanner interface {
 	Scan(...any) error
 }

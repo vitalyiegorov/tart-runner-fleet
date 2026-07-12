@@ -129,6 +129,36 @@ func TestRetryRecoveryOwnershipAndErrors(t *testing.T) {
 	}
 }
 
+func TestOperationCountsExcludeCompletedAndSeparateDead(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Unix(250, 0).UTC()
+	_, _ = seed(t, store, now)
+	if retrying, dead, err := store.OperationCounts(ctx); err != nil || retrying != 0 || dead != 0 {
+		t.Fatalf("initial retrying=%d dead=%d err=%v", retrying, dead, err)
+	}
+	claimed, err := store.Claim(ctx, "worker", 1, now, time.Minute)
+	if err != nil || len(claimed) != 1 {
+		t.Fatal(err)
+	}
+	if err := store.Retry(ctx, claimed[0].ID, "worker", "retry", now.Add(time.Minute), false); err != nil {
+		t.Fatal(err)
+	}
+	if retrying, dead, err := store.OperationCounts(ctx); err != nil || retrying != 1 || dead != 0 {
+		t.Fatalf("retrying=%d dead=%d err=%v", retrying, dead, err)
+	}
+	claimed, err = store.Claim(ctx, "worker", 1, now.Add(time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 {
+		t.Fatal(err)
+	}
+	if err := store.Retry(ctx, claimed[0].ID, "worker", "terminal", now.Add(2*time.Minute), true); err != nil {
+		t.Fatal(err)
+	}
+	if retrying, dead, err := store.OperationCounts(ctx); err != nil || retrying != 0 || dead != 1 {
+		t.Fatalf("terminal retrying=%d dead=%d err=%v", retrying, dead, err)
+	}
+}
+
 func TestConcurrentLeaseClaimUsesFencing(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()

@@ -27,6 +27,7 @@ type runtimeStore interface {
 	app.EngineStore
 	app.LiveInstanceStore
 	DemandCursor(context.Context, int64) (int64, error)
+	OperationCounts(context.Context) (int, int, error)
 	Close() error
 }
 
@@ -109,7 +110,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	for id := range schedulerConfig.Profiles {
 		profiles = append(profiles, string(id))
 	}
-	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles, CriticalObservations: []string{"scheduler"}})
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles, CriticalObservations: []string{"operations", "scheduler"}})
 	serverConfig := telemetry.ServerConfig{ControllerVersion: version, ControllerMode: string(opts.Mode)}
 	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
@@ -172,7 +173,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	}
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
-	ticker := engineTicker{engine: engine, health: health, profiles: profiles}
+	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
@@ -207,9 +208,10 @@ func (b boundIngester) Ingest(ctx context.Context) error {
 }
 
 type engineTicker struct {
-	engine   app.Engine
-	health   *telemetry.Health
-	profiles []string
+	engine          app.Engine
+	health          *telemetry.Health
+	profiles        []string
+	operationCounts func(context.Context) (int, int, error)
 }
 
 func (e engineTicker) Tick(ctx context.Context) error {
@@ -225,6 +227,15 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	_ = e.health.RecordObservation("scheduler", freshness)
 	if err == nil {
 		e.recordMetrics(result)
+		if e.operationCounts != nil {
+			retrying, dead, countErr := e.operationCounts(ctx)
+			if countErr != nil {
+				_ = e.health.RecordObservation("operations", telemetry.ObservationUnavailable)
+			} else {
+				_ = e.health.SetOperations(retrying, dead)
+				_ = e.health.RecordObservation("operations", telemetry.ObservationFresh)
+			}
+		}
 	}
 	return err
 }

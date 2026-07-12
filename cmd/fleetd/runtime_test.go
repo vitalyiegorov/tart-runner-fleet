@@ -295,11 +295,32 @@ func TestEngineTickerRecordsBlockedAsStale(t *testing.T) {
 	now := time.Now().UTC()
 	stale := staleInventory{now: now}
 	engine := app.Engine{Store: store, Inventory: stale, Config: app.BuildSchedulerConfig(config.Default()), ControllerID: "c", Mode: reconcile.Observe, Now: func() time.Time { return now }}
-	health, _ := telemetryHealthForTest()
-	if err := (engineTicker{engine: engine, health: health}).Tick(context.Background()); err != nil {
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{CriticalObservations: []string{"operations", "scheduler"}})
+	if err := (engineTicker{engine: engine, health: health, operationCounts: func(context.Context) (int, int, error) { return 2, 1, nil }}).Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if health.Snapshot().Observations["scheduler"].Freshness != telemetry.ObservationStale {
+	if health.Snapshot().Observations["scheduler"].Freshness != telemetry.ObservationStale ||
+		health.Snapshot().Observations["operations"].Freshness != telemetry.ObservationFresh ||
+		health.Snapshot().OperationRetries != 2 || health.Snapshot().DeadOperations != 1 {
+		t.Fatalf("snapshot=%#v", health.Snapshot())
+	}
+}
+
+func TestEngineTickerMarksOperationSummaryUnavailable(t *testing.T) {
+	d := testDependencies(t)
+	store, err := d.openStore(context.Background(), filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	engine := app.Engine{Store: store, Inventory: runtimeInventory{}, Config: app.BuildSchedulerConfig(config.Default()), ControllerID: "c", Mode: reconcile.Observe, Now: func() time.Time { return now }}
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{CriticalObservations: []string{"operations", "scheduler"}})
+	ticker := engineTicker{engine: engine, health: health, operationCounts: func(context.Context) (int, int, error) { return 0, 0, errors.New("db unavailable") }}
+	if err := ticker.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if health.Snapshot().Observations["operations"].Freshness != telemetry.ObservationUnavailable {
 		t.Fatalf("snapshot=%#v", health.Snapshot())
 	}
 }
