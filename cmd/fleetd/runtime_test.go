@@ -29,6 +29,16 @@ func (runtimeInventory) Observe(context.Context) (domain.Observation[[]domain.In
 	return domain.Fresh([]domain.Instance(nil), now), domain.Fresh(domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 16000, Slots: 4}}, now)
 }
 
+type notifyingInventory struct {
+	ready chan struct{}
+	once  *sync.Once
+}
+
+func (i notifyingInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
+	i.once.Do(func() { close(i.ready) })
+	return runtimeInventory{}.Observe(ctx)
+}
+
 type keyRunner struct {
 	out []byte
 	err error
@@ -97,17 +107,35 @@ func TestRunObserveAndShadow(t *testing.T) {
 	for _, mode := range []reconcile.Mode{reconcile.Observe, reconcile.Shadow} {
 		t.Run(string(mode), func(t *testing.T) {
 			d := testDependencies(t)
+			ready := make(chan struct{})
+			var readyOnce sync.Once
+			d.inventory = func(runtimeStore, config.Config) app.Inventory {
+				return notifyingInventory{ready: ready, once: &readyOnce}
+			}
 			var sources []*fakeSource
 			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 				source := &fakeSource{}
 				sources = append(sources, source)
 				return source, nil
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-			defer cancel()
+			ctx, cancel := context.WithCancel(context.Background())
 			opts := options{ConfigPath: writeConfig(t, mode == reconcile.Shadow), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"), HealthAddress: "127.0.0.1:0", Mode: mode}
-			if err := runWithDependencies(ctx, opts, d); err != nil {
-				t.Fatal(err)
+			done := make(chan error, 1)
+			go func() { done <- runWithDependencies(ctx, opts, d) }()
+			select {
+			case <-ready:
+				cancel()
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatal("runtime did not become ready")
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("runtime did not stop after cancellation")
 			}
 			if mode == reconcile.Shadow {
 				if len(sources) != 5 {
