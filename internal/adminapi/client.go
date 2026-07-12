@@ -116,7 +116,7 @@ func (c *Client) do(ctx context.Context, path, contentType string, allowUnavaila
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	allowed := response.StatusCode >= 200 && response.StatusCode < 300
 	if allowUnavailable && response.StatusCode == http.StatusServiceUnavailable {
 		allowed = true

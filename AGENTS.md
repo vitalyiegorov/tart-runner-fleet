@@ -16,7 +16,7 @@ all changes as safety critical.
    runner credentials.
 7. Never assemble shell commands from external values. Use argument vectors and
    context deadlines.
-8. Run `make verify`; coverage must remain at least 99% and race tests must pass.
+8. Run `make ci`; lint, CPD, deadcode, vulnerabilities, coverage, race, and build gates must pass.
 9. Do not enable authority mode in a code change. Promotion is an explicit
    operational action after observe/shadow/canary evidence and rollback proof.
 
@@ -61,10 +61,8 @@ turn either condition into an empty queue or an authorization to clean runners.
 ## Required handoff evidence
 
 ```sh
-gofmt -w <changed-go-files>
-go vet ./...
-go test -race -shuffle=on -count=1 ./...
-./scripts/check-coverage.sh 99.0
+make fmt
+make ci
 git diff --check
 ```
 

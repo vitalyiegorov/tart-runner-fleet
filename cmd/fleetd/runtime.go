@@ -51,6 +51,7 @@ var deps = defaultDependencies()
 
 func defaultDependencies() dependencies {
 	return dependencies{
+		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
 		loadKey: func(ctx context.Context, service, account string) (*credentials.Secret, error) {
@@ -60,7 +61,9 @@ func defaultDependencies() dependencies {
 			return githubscaleset.NewGitHubAppScaleSet(ctx, cfg)
 		},
 		inventory: func(store runtimeStore, cfg config.Config) app.Inventory {
-			return app.ProductionInventory{Store: store, Tart: &tart.Adapter{}, Host: &macos.Probe{},
+			return app.ProductionInventory{Store: store,
+				Tart:     &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
+				Host:     &macos.Probe{Timeout: cfg.Timeouts.Tart},
 				Capacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
 				Guards:   macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB)}}
 		},
@@ -99,7 +102,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	schedulerConfig := app.BuildSchedulerConfig(cfg)
 	bindings, err := app.BuildBindings(cfg, schedulerConfig)
 	if err != nil {
@@ -110,20 +113,27 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	for id := range schedulerConfig.Profiles {
 		profiles = append(profiles, string(id))
 	}
-	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles, CriticalObservations: []string{"operations", "scheduler"}})
+	criticalObservations := []string{"operations", "scheduler"}
+	if opts.Mode == reconcile.Shadow {
+		for _, binding := range bindings {
+			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.ScaleSetID))
+		}
+	}
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
+		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute})
 	serverConfig := telemetry.ServerConfig{ControllerVersion: version, ControllerMode: string(opts.Mode)}
 	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
 	if err != nil {
 		return fmt.Errorf("listen health: %w", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	adminServer, _ := telemetry.NewServer(health, serverConfig)
 	adminListener, err := d.adminListen(opts.AdminSocket)
 	if err != nil {
 		return fmt.Errorf("listen admin: %w", err)
 	}
-	defer adminListener.Close()
+	defer func() { _ = adminListener.Close() }()
 	type serverResult struct {
 		name string
 		err  error
@@ -163,12 +173,14 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 			source, err := d.newScaleSet(ctx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: cfg.GitHub.ConfigURL,
 				ClientID: cfg.GitHub.ClientID, InstallationID: cfg.GitHub.InstallationID, PrivateKey: privateKey,
 				ScaleSetID: scale.ID, Owner: cfg.GitHub.Owner, MaxCapacity: scale.MaxCapacity, InitialCursor: int(cursor),
-				System: "tart-runner-fleet", Version: version, Subsystem: "controller"})
+				RequestTimeout: cfg.Timeouts.GitHub,
+				System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
 			if err != nil {
 				return err
 			}
 			closers = append(closers, source)
-			ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source})
+			ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
+				health: health, observation: fmt.Sprintf("github-%d", binding.ScaleSetID)})
 		}
 	}
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg), Config: schedulerConfig,
@@ -185,7 +197,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		return err
 	case result := <-serverDone:
 		cancelRun()
-		<-serviceDone
+		select {
+		case <-serviceDone:
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("%s %w: service shutdown timed out", result.name, serverFailure(result.err))
+		}
 		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
 	}
 }
@@ -201,10 +217,20 @@ type boundIngester struct {
 	coordinator app.DemandCoordinator
 	binding     app.Binding
 	source      app.MessageSource
+	health      *telemetry.Health
+	observation string
 }
 
 func (b boundIngester) Ingest(ctx context.Context) error {
-	return b.coordinator.IngestOnce(ctx, b.binding, b.source)
+	err := b.coordinator.IngestOnce(ctx, b.binding, b.source)
+	if b.health != nil && b.observation != "" {
+		freshness := telemetry.ObservationFresh
+		if err != nil {
+			freshness = telemetry.ObservationUnavailable
+		}
+		_ = b.health.RecordObservation(b.observation, freshness)
+	}
+	return err
 }
 
 type engineTicker struct {
@@ -278,9 +304,10 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 		_ = e.health.SetInstances(profile, instance.count, instance.cpu, instance.memory)
 	}
 	mode := telemetry.ModeIdle
-	if result.HostMode == domain.HostLinux {
+	switch result.HostMode {
+	case domain.HostLinux:
 		mode = telemetry.ModeLinux
-	} else if result.HostMode == domain.HostMacOS {
+	case domain.HostMacOS:
 		mode = telemetry.ModeMacOS
 	}
 	_ = e.health.SetMode(mode)

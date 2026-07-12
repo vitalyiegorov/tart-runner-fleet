@@ -265,6 +265,7 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	path := flags.Arg(0)
+	// #nosec G304 -- the operator explicitly selects the configuration file to validate.
 	file, err := os.Open(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "open config: %v\n", err)

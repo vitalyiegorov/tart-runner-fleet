@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - self-hosted
+    - linux-tiered
+    - linux-small
+    - linux-medium
+    - linux-large

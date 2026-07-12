@@ -108,7 +108,7 @@ fairness or safety decisions.
 make verify
 ```
 
-The repository expects Go 1.25.3 or newer. Production deployment is deliberately
+The repository requires Go 1.25.12. Production deployment is deliberately
 disabled until shadow-mode decisions match the incumbent manager and all canary
 gates pass.
 
@@ -119,6 +119,22 @@ go test -race ./cmd/fleetctl ./internal/adminapi ./internal/telemetry
 go test -fuzz=Fuzz -fuzztime=30s ./internal/scheduler
 ./scripts/check-coverage.sh 99.0
 ```
+
+The blocking CI pipeline is intentionally layered and uses only dynamically
+provisioned self-hosted Linux runners:
+
+- small preflight: module integrity, formatting, actionlint, SHA pinning;
+- medium quality: vet, golangci-lint with gosec, CPD, official deadcode,
+  govulncheck;
+- medium unit/coverage and large race jobs run concurrently;
+- a small required build gate produces verified macOS ARM64 binaries.
+
+All Go analysis tools are pinned through Go 1.25 tool directives, every action
+uses an immutable commit SHA, and Go 1.25.12 is the minimum toolchain because it
+contains the required standard-library vulnerability fixes. Nightly CI repeats
+replay/contract/integration/chaos tests and fuzzes the deterministic scheduler.
+Tagged releases rebuild each macOS ARM64 binary twice, compare both binaries and
+their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256 manifests.
 
 ## Documentation
 

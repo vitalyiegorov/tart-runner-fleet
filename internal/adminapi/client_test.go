@@ -143,7 +143,7 @@ func TestClientBoundsResponsesAndHonorsCancellation(t *testing.T) {
 			_, _ = w.Write([]byte(strings.Repeat("x", MaxResponseBytes+1)))
 		}
 	})}
-	go server.Serve(listener) //nolint:errcheck -- closed by cleanup
+	go server.Serve(listener)
 	t.Cleanup(func() { _ = server.Close() })
 	client, _ := NewClient("unix://"+path, time.Second)
 	if _, err := client.Status(context.Background()); !errors.Is(err, ErrResponseTooLarge) {

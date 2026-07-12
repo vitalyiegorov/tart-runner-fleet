@@ -159,14 +159,17 @@ func (o *Observer) pages(ctx context.Context, path string, target any, consume f
 			return err
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-			resp.Body.Close()
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
 			return ClassifyResponse(resp, o.clock.Now(), nil)
 		}
 		err = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(target)
-		resp.Body.Close()
+		closeErr := resp.Body.Close()
 		if err != nil {
 			return fmt.Errorf("decode GitHub response: %w", err)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close GitHub response: %w", closeErr)
 		}
 		consume()
 		nextURL, err := o.next(resp.Header.Get("Link"))

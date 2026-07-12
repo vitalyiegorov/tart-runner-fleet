@@ -31,7 +31,7 @@ func (s *Store) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int6
 	if err != nil {
 		return false, fmt.Errorf("begin demand batch: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var existing []byte
 	err = s.txRow(ctx, tx, "inbox.load", `SELECT digest FROM scale_set_inbox WHERE scale_set_id=? AND message_id=?`, scaleSetID, messageID).Scan(&existing)
 	if err == nil {
@@ -154,7 +154,7 @@ func (s *Store) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operatio
 	if err != nil {
 		return nil, fmt.Errorf("list active demands: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []operations.DemandRecord
 	for rows.Next() {
 		record, err := scanDemand(rows)

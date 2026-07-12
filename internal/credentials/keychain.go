@@ -20,6 +20,7 @@ type Runner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, binary string, args ...string) ([]byte, error) {
+	// #nosec G204 -- the trusted keychain executable is injected without shell expansion.
 	return exec.CommandContext(ctx, binary, args...).Output()
 }
 

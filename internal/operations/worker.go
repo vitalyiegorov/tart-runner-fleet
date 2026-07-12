@@ -2,13 +2,14 @@ package operations
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
 
 func errorsJoin(executionErr, storeErr error) error {
-	return fmt.Errorf("execution failed: %v; persist retry: %w", executionErr, storeErr)
+	return errors.Join(fmt.Errorf("execution failed: %w", executionErr), fmt.Errorf("persist retry: %w", storeErr))
 }
 
 type Executor interface {
@@ -74,8 +75,8 @@ func (w Worker) runOperation(parent context.Context, operation Operation) (bool,
 		err := w.Store.Retry(context.WithoutCancel(parent), operation.ID, w.Owner, "unknown operation kind", w.now(), true)
 		return false, err
 	}
-	ctx := parent
-	cancel := func() {}
+	var ctx context.Context
+	var cancel context.CancelFunc
 	if deadline := w.operationDeadline(); deadline > 0 {
 		ctx, cancel = context.WithTimeout(parent, deadline)
 	} else {

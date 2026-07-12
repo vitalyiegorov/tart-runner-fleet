@@ -1,0 +1,31 @@
+name: Nightly resilience
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-resilience
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  resilience:
+    runs-on: [self-hosted, linux-tiered, linux-large]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Repeated replay, integration, contract, and chaos suites
+        run: go test -race -shuffle=on -count=10 ./tests/...
+      - name: Bounded deterministic scheduler fuzzing
+        run: go test -fuzz=FuzzPlanTickDeterministicAndSafe -fuzztime=3m ./internal/scheduler

@@ -1,10 +1,12 @@
-name: Release candidate
+name: Release
 
 on:
+  push:
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       version:
-        description: Immutable release identifier
+        description: Immutable semver release identifier (v1.2.3)
         required: true
         type: string
 
@@ -15,37 +17,69 @@ concurrency:
   group: fleet-release
   cancel-in-progress: false
 
+env:
+  GOTOOLCHAIN: local
+  GOLANGCI_LINT_VERSION: v2.12.2
+
 jobs:
   build:
+    name: Verify and build release
     runs-on: [self-hosted, linux-tiered, linux-medium]
-    timeout-minutes: 15
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ inputs.version || github.ref_name }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-          cache: true
-      - name: Verify source
+          cache: false
+      - name: Require tagged commits to belong to main
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -euo pipefail
-          go mod verify
-          go test -race -shuffle=on -count=1 ./...
-          ./scripts/check-coverage.sh 99.0
-      - name: Build reproducible macOS arm64 binaries
-        env:
-          VERSION: ${{ inputs.version }}
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Verify source and workflows
         run: |
           set -euo pipefail
-          test -n "$VERSION"
-          mkdir -p dist
-          export CGO_ENABLED=0 GOOS=darwin GOARCH=arm64
-          go build -trimpath -buildvcs=true -ldflags="-s -w -X main.version=$VERSION" -o dist/fleetd ./cmd/fleetd
-          go build -trimpath -buildvcs=true -ldflags="-s -w -X main.version=$VERSION" -o dist/fleetctl ./cmd/fleetctl
-          (cd dist && shasum -a 256 fleetd fleetctl > SHA256SUMS)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          make preflight vet
+      - name: Lint release source
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          name: tart-runner-fleet-${{ inputs.version }}-darwin-arm64
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+          skip-cache: true
+      - name: Reject dead code, duplication, and reachable vulnerabilities
+        run: make deadcode cpd vuln
+      - name: Verify race safety and exact coverage
+        run: make race unit
+      - name: Build twice and compare reproducible binaries and CycloneDX SBOMs
+        run: ./scripts/build-release.sh "$VERSION" dist
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tart-runner-fleet-${{ env.VERSION }}-darwin-arm64
           path: dist/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    permissions:
+      contents: write
+    runs-on: [self-hosted, linux-tiered, linux-small]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: tart-runner-fleet-${{ github.ref_name }}-darwin-arm64
+          path: dist
+      - name: Publish verified tag assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes

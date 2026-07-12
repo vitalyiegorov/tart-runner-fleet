@@ -86,7 +86,7 @@ func (s *Store) ApplyPlan(ctx context.Context, plan operations.Plan) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("begin plan: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var existingDigest []byte
 	err = s.txRow(ctx, tx, "apply.load", `SELECT digest FROM plans WHERE id=?`, plan.ID).Scan(&existingDigest)
 	if err == nil {
@@ -237,7 +237,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("begin migration: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := s.txExec(ctx, tx, "migrate.table", `CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
 		return fmt.Errorf("create migration table: %w", err)
 	}
@@ -426,7 +426,7 @@ func (s *Store) LiveInstances(ctx context.Context) ([]operations.Instance, error
 	if err != nil {
 		return nil, fmt.Errorf("list live instances: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []operations.Instance
 	for rows.Next() {
 		instance, err := scanInstance(rows)
@@ -491,7 +491,7 @@ func (s *Store) Transition(ctx context.Context, transition operations.Transition
 	if err != nil {
 		return operations.Instance{}, operations.Operation{}, fmt.Errorf("begin transition: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if existing, found, err := s.operationByKey(ctx, tx, transition.Operation.IdempotencyKey); err != nil {
 		return operations.Instance{}, operations.Operation{}, err
@@ -576,7 +576,7 @@ func (s *Store) Claim(ctx context.Context, owner string, limit int, now time.Tim
 	if err != nil {
 		return nil, fmt.Errorf("begin claim: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := s.txExec(ctx, tx, "claim.propagate", `WITH RECURSIVE doomed(id) AS (
 			SELECT dependency.operation_id FROM operation_dependencies dependency
 			JOIN operations prerequisite ON prerequisite.id=dependency.depends_on
@@ -605,7 +605,7 @@ func (s *Store) Claim(ctx context.Context, owner string, limit int, now time.Tim
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan claimable: %w", err)
 		}
 		ids = append(ids, id)
@@ -658,7 +658,7 @@ func (s *Store) Complete(ctx context.Context, id, owner, effectKey string, now t
 	if err != nil {
 		return false, fmt.Errorf("begin completion: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var status, leaseOwner, storedEffect string
 	err = s.txRow(ctx, tx, "complete.load", `SELECT status,lease_owner,effect_key FROM operations WHERE id=?`, id).Scan(&status, &leaseOwner, &storedEffect)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -724,7 +724,7 @@ func (s *Store) AcquireLease(ctx context.Context, name, owner string, now time.T
 	if err != nil {
 		return operations.Lease{}, fmt.Errorf("begin lease: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var currentOwner string
 	var token, expires int64
 	err = s.txRow(ctx, tx, "lease.load", `SELECT owner,token,expires_at FROM leases WHERE name=?`, name).Scan(&currentOwner, &token, &expires)
