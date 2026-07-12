@@ -6,6 +6,32 @@
 off until a disposable real-VM lifecycle canary and rollback drill pass. The
 incumbent shell manager remains production authority.
 
+## Self-hosting and bootstrap
+
+`vitalyiegorov/tart-runner-fleet` is a first-class target with three concurrent
+Linux slots. Its preflight, quality, coverage, race, reproducible-build, release,
+and nightly jobs therefore run on ephemeral VMs scheduled by this fleet. There
+are no GitHub-hosted fallback runners.
+
+Self-hosting uses a two-generation rule to avoid circular upgrades:
+
+1. Generation N (currently the pinned shell incumbent) remains installed under
+   launchd and owns scheduling while generation N+1 is proposed.
+2. Generation N provisions the ephemeral Linux runners that execute N+1's
+   complete Required CI and reproducible release build.
+3. N+1 is installed as a versioned, immutable candidate outside its source
+   checkout. It starts in observe, then shadow, while N remains authority.
+4. A disposable scale-set canary and rollback drill must pass before an atomic
+   launchd authority handoff. Never stop N merely because N+1 was downloaded.
+5. Keep the previous binary, launchd plist, configuration, and SQLite files until
+   the new generation has survived its soak window. Rollback atomically restores
+   that pinned generation; it does not depend on GitHub Actions being available.
+
+If all dynamic runners are unavailable, recovery is deliberately local: restore
+the pinned incumbent launchd unit, run `fleetctl doctor`, and verify one disposable
+Linux canary before releasing queued work. A workflow cannot repair a stopped
+runner controller because that would recreate the same dependency cycle.
+
 ## Observe
 
 Observe validates configuration, migrates/quick-checks the private SQLite WAL,

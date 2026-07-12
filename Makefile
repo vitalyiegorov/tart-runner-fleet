@@ -6,7 +6,7 @@ CPD_THRESHOLD ?= 100
 
 export GOTOOLCHAIN ?= local
 
-.PHONY: fmt fmt-check mod-check vet workflow-lint lint deadcode cpd vuln test unit race coverage build preflight quality verify ci
+.PHONY: fmt fmt-check mod-check vet workflow-lint self-host-check lint deadcode cpd vuln test unit race coverage build preflight quality verify ci
 
 fmt:
 	@files="$$(find . -name '*.go' -not -path './vendor/*')"; \
@@ -27,6 +27,9 @@ vet:
 workflow-lint:
 	$(TOOL) actionlint -config-file .github/actionlint.yaml
 	./scripts/check-actions-pinned.sh
+
+self-host-check:
+	$(GO) test -run '^TestExampleConfigCanBuildItsSuccessor$$' ./internal/config
 
 lint:
 	$(GOLANGCI_LINT) run --timeout=5m
@@ -52,6 +55,6 @@ race:
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath ./...
 
-preflight: mod-check fmt-check workflow-lint
+preflight: mod-check fmt-check workflow-lint self-host-check
 quality: vet lint deadcode cpd vuln
 verify ci: preflight quality unit race build

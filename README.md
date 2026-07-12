@@ -136,6 +136,13 @@ replay/contract/integration/chaos tests and fuzzes the deterministic scheduler.
 Tagged releases rebuild each macOS ARM64 binary twice, compare both binaries and
 their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256 manifests.
 
+The controller is itself a permanent fleet target. Its three parallel CI jobs
+exactly fill the Linux envelope, while the installed release or pinned incumbent
+remains authority long enough to build and verify its successor. CI tests this
+self-hosting capacity invariant on every change; upgrades never replace the
+running controller before the successor has completed Required CI. See the
+two-generation bootstrap procedure in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 ## Documentation
 
 - [`docs/CLI.md`](docs/CLI.md) — operator commands, output, and exit codes

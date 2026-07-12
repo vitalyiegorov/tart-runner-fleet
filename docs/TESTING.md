@@ -7,6 +7,8 @@
 - module verification and `go mod tidy -diff`;
 - non-mutating `gofmt` check and `go vet`;
 - actionlint plus immutable Action SHA enforcement;
+- a self-hosting invariant proving this repository is a three-slot fleet target
+  whose CI fanout exactly fills the configured Linux envelope;
 - curated golangci-lint v2 correctness and source-security analysis;
 - official RTA-based `deadcode -test` analysis;
 - reachable-vulnerability analysis with `govulncheck`;
