@@ -23,8 +23,9 @@ manifests and an immutable archive.
 The CI DAG fans quality (2 CPU/4 GiB), unit coverage (2 CPU/4 GiB), and race
 (4 CPU/8 GiB) out after a small preflight. Together they exactly match the
 host's 8 CPU/16 GiB Linux envelope. No job uses a GitHub-hosted macOS runner.
-The final required job runs even after upstream failures or skips and explicitly
-rejects every result other than `success`, preventing branch-protection bypasses.
+The final required job runs after upstream success or failure and explicitly
+rejects every result other than `success`. It uses `!cancelled()` so superseded
+runs terminate cleanly instead of preserving a queued aggregator indefinitely.
 
 The 99% line is a floor, not the safety argument. The suite is layered:
 

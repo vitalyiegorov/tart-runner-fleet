@@ -124,7 +124,9 @@ jobs:
   verify:
     name: Required CI
     needs: [quality, unit, race, build]
-    if: ${{ always() }}
+    # Run after upstream success or failure, but terminate with a superseded or
+    # manually cancelled workflow. GitHub preserves always() jobs on cancel.
+    if: ${{ !cancelled() }}
     runs-on: [self-hosted, linux-tiered, linux-small]
     timeout-minutes: 5
     steps:

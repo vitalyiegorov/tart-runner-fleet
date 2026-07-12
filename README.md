@@ -129,6 +129,10 @@ provisioned self-hosted Linux runners:
 - medium unit/coverage and large race jobs run concurrently;
 - a small required build gate produces verified macOS ARM64 binaries.
 
+`Required CI` fails closed for unsuccessful upstream gates but does not survive
+workflow cancellation, so a superseded commit cannot retain the concurrency
+group and starve its successor.
+
 All Go analysis tools are pinned through Go 1.25 tool directives, every action
 uses an immutable commit SHA, and Go 1.25.12 is the minimum toolchain because it
 contains the required standard-library vulnerability fixes. Nightly CI repeats
