@@ -97,6 +97,7 @@ func testDependencies(t *testing.T) dependencies {
 	d := defaultDependencies()
 	d.inventory = func(runtimeStore, config.Config) app.Inventory { return runtimeInventory{} }
 	d.listen = func(_, _ string) (net.Listener, error) { return newFakeListener(), nil }
+	d.adminListen = func(string) (net.Listener, error) { return newFakeListener(), nil }
 	d.loadKey = func(ctx context.Context, _, _ string) (*credentials.Secret, error) {
 		return (credentials.Keychain{Runner: keyRunner{out: []byte("key")}}).Load(ctx, "s", "a")
 	}
@@ -168,6 +169,7 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 			d.openStore = func(context.Context, string) (runtimeStore, error) { return nil, want }
 		}},
 		{name: "listen", opts: options{Mode: reconcile.Observe, ConfigPath: valid, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) { d.listen = func(string, string) (net.Listener, error) { return nil, want } }},
+		{name: "admin listen", opts: options{Mode: reconcile.Observe, ConfigPath: valid, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) { d.adminListen = func(string) (net.Listener, error) { return nil, want } }},
 		{name: "key", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
 			d.loadKey = func(context.Context, string, string) (*credentials.Secret, error) { return nil, want }
 		}},

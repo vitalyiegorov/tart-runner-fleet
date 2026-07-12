@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 )
 
@@ -20,6 +21,7 @@ type options struct {
 	ConfigPath    string
 	DatabasePath  string
 	HealthAddress string
+	AdminSocket   string
 	Mode          reconcile.Mode
 }
 
@@ -39,6 +41,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "fleet.json", "configuration path")
 	databasePath := flags.String("database", "fleet.db", "SQLite state path")
 	healthAddress := flags.String("health-address", "127.0.0.1:9876", "local health listener")
+	adminSocket := flags.String("admin-socket", adminapi.DefaultSocketPath(), "private fleetctl Unix socket")
 	mode := flags.String("mode", string(reconcile.Observe), "observe or shadow")
 	if len(args) == 0 || args[0] != "run" {
 		fmt.Fprintln(stderr, "usage: fleetd version | run [--config path --database path --mode observe|shadow]")
@@ -50,7 +53,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 2
 	}
-	opts := options{ConfigPath: *configPath, DatabasePath: *databasePath, HealthAddress: *healthAddress, Mode: reconcile.Mode(*mode)}
+	opts := options{ConfigPath: *configPath, DatabasePath: *databasePath, HealthAddress: *healthAddress, AdminSocket: *adminSocket, Mode: reconcile.Mode(*mode)}
 	if err := run(ctx, opts); err != nil {
 		fmt.Fprintf(stderr, "fleetd failed: %v\n", err)
 		return 1

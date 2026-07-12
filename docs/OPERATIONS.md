@@ -43,7 +43,18 @@ The `github` configuration requires `configUrl`, `owner`, `clientId`,
 - `GET /readyz`: successful recent tick plus fresh critical observations.
 - `GET /metrics`: bounded-cardinality Prometheus text.
 
-The server rejects non-loopback TCP listeners. Never expose it directly.
+The health server rejects non-loopback TCP listeners. Never expose it directly.
+
+The operator API uses a private Unix socket. With the launchd template it is
+`__STATE_DIR__/fleetd.sock`:
+
+```sh
+fleetctl status --endpoint unix://__STATE_DIR__/fleetd.sock
+fleetctl doctor --endpoint unix://__STATE_DIR__/fleetd.sock
+```
+
+The socket is `0600`, is unlinked on clean shutdown, and only a stale socket
+owned by the current user may be replaced. `fleetctl` never opens `fleet.db`.
 
 ## Recovery
 

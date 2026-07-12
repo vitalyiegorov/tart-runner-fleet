@@ -11,6 +11,7 @@
     <string>--mode=observe</string>
     <string>--config=__STATE_DIR__/fleet.json</string>
     <string>--database=__STATE_DIR__/fleet.db</string>
+    <string>--admin-socket=__STATE_DIR__/fleetd.sock</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -29,4 +30,3 @@
   <string>__STATE_DIR__/fleet.stderr.log</string>
 </dict>
 </plist>
-

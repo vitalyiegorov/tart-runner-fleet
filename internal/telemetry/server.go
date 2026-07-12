@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 )
 
 const (
@@ -39,6 +42,8 @@ type ServerConfig struct {
 	IdleTimeout       time.Duration
 	ReadHeaderTimeout time.Duration
 	MaxHeaderBytes    int
+	ControllerVersion string
+	ControllerMode    string
 }
 
 type Server struct {
@@ -76,11 +81,85 @@ func NewServer(health *Health, config ServerConfig) (*Server, error) {
 	mux.HandleFunc("/healthz", healthHandler(health.Live, "live", "not_live"))
 	mux.HandleFunc("/readyz", healthHandler(health.Ready, "ready", "not_ready"))
 	mux.HandleFunc("/metrics", metricsHandler(health))
+	mux.HandleFunc(adminapi.StatusPath, statusHandler(health, config.ControllerVersion, config.ControllerMode))
 	return &Server{httpServer: &http.Server{
 		Handler: mux, ReadTimeout: config.ReadTimeout, WriteTimeout: config.WriteTimeout,
 		IdleTimeout: config.IdleTimeout, ReadHeaderTimeout: config.ReadHeaderTimeout,
 		MaxHeaderBytes: config.MaxHeaderBytes,
 	}}, nil
+}
+
+func statusHandler(health *Health, controllerVersion, controllerMode string) http.HandlerFunc {
+	if controllerVersion == "" {
+		controllerVersion = "dev"
+	}
+	if controllerMode == "" {
+		controllerMode = "unknown"
+	}
+	return func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			response.Header().Set("Allow", http.MethodGet)
+			http.Error(response, "method_not_allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		snapshot := health.Snapshot()
+		etag := fmt.Sprintf(`"%d"`, snapshot.Revision)
+		response.Header().Set("ETag", etag)
+		response.Header().Set("Cache-Control", "no-store")
+		if request.Header.Get("If-None-Match") == etag {
+			response.WriteHeader(http.StatusNotModified)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready())
+		if err := json.NewEncoder(response).Encode(envelope); err != nil {
+			return
+		}
+	}
+}
+
+func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready HealthResult) adminapi.StatusEnvelope {
+	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
+	for _, profile := range sortedKeys(snapshot.Queues) {
+		metric := snapshot.Queues[profile]
+		age := time.Duration(0)
+		if !metric.OldestEnqueuedAt.IsZero() && snapshot.Now.After(metric.OldestEnqueuedAt) {
+			age = snapshot.Now.Sub(metric.OldestEnqueuedAt)
+		}
+		queues = append(queues, adminapi.Queue{Profile: profile, Jobs: metric.Count,
+			OldestEnqueuedAt: metric.OldestEnqueuedAt, OldestAgeSeconds: age.Seconds()})
+	}
+	instances := make([]adminapi.Instance, 0, len(snapshot.Instances))
+	for _, profile := range sortedKeys(snapshot.Instances) {
+		metric := snapshot.Instances[profile]
+		instances = append(instances, adminapi.Instance{Profile: profile, Count: metric.Count, CPU: metric.CPU, MemoryMiB: metric.MemoryMiB})
+	}
+	observations := make([]adminapi.Observation, 0, len(snapshot.Observations))
+	for _, name := range sortedKeys(snapshot.Observations) {
+		metric := snapshot.Observations[name]
+		age := time.Duration(0)
+		if !metric.ObservedAt.IsZero() && snapshot.Now.After(metric.ObservedAt) {
+			age = snapshot.Now.Sub(metric.ObservedAt)
+		}
+		observations = append(observations, adminapi.Observation{Name: name, Freshness: string(metric.Freshness),
+			ObservedAt: metric.ObservedAt, AgeSeconds: age.Seconds()})
+	}
+	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
+		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
+			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
+			LastLoopTick: snapshot.LastLoopTick, LastSuccessfulTick: snapshot.LastSuccessfulTick,
+			Live:   adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
+			Ready:  adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
+			Queues: queues, Instances: instances, Observations: observations,
+			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations},
+		}}
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 func validOptionalTimeout(value time.Duration) bool {

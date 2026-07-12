@@ -26,7 +26,7 @@ func TestExecute(t *testing.T) {
 	}{
 		{name: "version", args: []string{"version"}, code: 0, out: "dev"},
 		{name: "run defaults", args: []string{"run"}, code: 0},
-		{name: "run flags", args: []string{"run", "--config", "x", "--database", "d", "--mode", "shadow"}, code: 0},
+		{name: "run flags", args: []string{"run", "--config", "x", "--database", "d", "--mode", "shadow", "--admin-socket", "/tmp/fleet.sock"}, code: 0},
 		{name: "runtime error", args: []string{"run", "--config", "bad"}, code: 1, err: "fleetd failed"},
 		{name: "usage", code: 2, err: "usage:"},
 		{name: "wrong command", args: []string{"bad"}, code: 2, err: "usage:"},

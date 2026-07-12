@@ -13,6 +13,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
@@ -41,6 +42,7 @@ type dependencies struct {
 	newScaleSet func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
 	inventory   func(runtimeStore, config.Config) app.Inventory
 	listen      func(string, string) (net.Listener, error)
+	adminListen func(string) (net.Listener, error)
 	cursor      func(context.Context, runtimeStore, int64) (int64, error)
 }
 
@@ -61,7 +63,8 @@ func defaultDependencies() dependencies {
 				Capacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
 				Guards:   macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB)}}
 		},
-		listen: net.Listen,
+		listen:      net.Listen,
+		adminListen: adminapi.Listen,
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
@@ -107,18 +110,31 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		profiles = append(profiles, string(id))
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles, CriticalObservations: []string{"scheduler"}})
-	server, _ := telemetry.NewServer(health, telemetry.ServerConfig{})
+	serverConfig := telemetry.ServerConfig{ControllerVersion: version, ControllerMode: string(opts.Mode)}
+	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
 	if err != nil {
 		return fmt.Errorf("listen health: %w", err)
 	}
 	defer listener.Close()
-	serverDone := make(chan error, 1)
-	go func() { serverDone <- server.Serve(listener) }()
+	adminServer, _ := telemetry.NewServer(health, serverConfig)
+	adminListener, err := d.adminListen(opts.AdminSocket)
+	if err != nil {
+		return fmt.Errorf("listen admin: %w", err)
+	}
+	defer adminListener.Close()
+	type serverResult struct {
+		name string
+		err  error
+	}
+	serverDone := make(chan serverResult, 2)
+	go func() { serverDone <- serverResult{name: "health", err: healthServer.Serve(listener)} }()
+	go func() { serverDone <- serverResult{name: "admin", err: adminServer.Serve(adminListener)} }()
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = server.Shutdown(shutdown)
+		_ = healthServer.Shutdown(shutdown)
+		_ = adminServer.Shutdown(shutdown)
 	}()
 
 	coordinator := app.DemandCoordinator{Store: store}
@@ -166,10 +182,10 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	select {
 	case err := <-serviceDone:
 		return err
-	case err := <-serverDone:
+	case result := <-serverDone:
 		cancelRun()
 		<-serviceDone
-		return serverFailure(err)
+		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
 	}
 }
 
