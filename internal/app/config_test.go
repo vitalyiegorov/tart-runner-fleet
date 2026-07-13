@@ -9,11 +9,14 @@ import (
 
 func TestBuildSchedulerConfigAndBindings(t *testing.T) {
 	cfg := config.Default()
-	cfg.Targets = []config.Target{{Type: "repo", Slug: "o/r", MaxActive: 3}}
+	cfg.Targets = []config.Target{{Type: "repo", Slug: "o/r", MaxActive: 3, SchedulingClass: domain.SchedulingControlPlane}}
 	cfg.GitHub.ScaleSets = []config.ScaleSet{{Profile: "small", ID: 1, MaxCapacity: 4}, {Profile: "builder", ID: 2, MaxCapacity: 1}}
 	schedulerConfig := BuildSchedulerConfig(cfg)
 	if schedulerConfig.LinuxCapacity != (domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}) || schedulerConfig.RepoCaps["o/r"] != 3 {
 		t.Fatalf("scheduler config = %#v", schedulerConfig)
+	}
+	if schedulerConfig.RepoSchedulingClasses["o/r"] != domain.SchedulingControlPlane {
+		t.Fatalf("scheduling classes = %#v", schedulerConfig.RepoSchedulingClasses)
 	}
 	if schedulerConfig.Profiles["small"].Route != "linux-small" || schedulerConfig.Profiles["builder"].Platform != domain.PlatformMacOS {
 		t.Fatalf("profiles = %#v", schedulerConfig.Profiles)

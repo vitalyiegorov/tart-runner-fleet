@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
 
 type Resources struct {
@@ -31,11 +33,19 @@ func (p Profile) normalized() Profile {
 }
 
 type Target struct {
-	Type                string   `json:"type"`
-	Slug                string   `json:"slug"`
-	MaxActive           int      `json:"maxActive"`
-	DefaultLinuxProfile string   `json:"defaultLinuxProfile,omitempty"`
-	RunnerLabels        []string `json:"runnerLabels,omitempty"`
+	Type                string                 `json:"type"`
+	Slug                string                 `json:"slug"`
+	MaxActive           int                    `json:"maxActive"`
+	SchedulingClass     domain.SchedulingClass `json:"schedulingClass,omitempty"`
+	DefaultLinuxProfile string                 `json:"defaultLinuxProfile,omitempty"`
+	RunnerLabels        []string               `json:"runnerLabels,omitempty"`
+}
+
+func (t Target) normalized() Target {
+	if t.SchedulingClass == "" {
+		t.SchedulingClass = domain.SchedulingStandard
+	}
+	return t
 }
 
 type Linux struct {
@@ -134,7 +144,7 @@ func Decode(r io.Reader) (Config, error) {
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized()},
 		GitHub:   w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45), Boot: secondsOr(w.BootTimeoutSeconds, 180)},
-		Guards:   Guards{MinFreeDiskGiB: w.MinFreeDiskGiB}, Targets: w.Targets,
+		Guards:   Guards{MinFreeDiskGiB: w.MinFreeDiskGiB}, Targets: normalizeTargets(w.Targets),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -167,6 +177,14 @@ func normalizeProfiles(in []Profile) []Profile {
 	return out
 }
 
+func normalizeTargets(in []Target) []Target {
+	out := make([]Target, len(in))
+	for i, target := range in {
+		out[i] = target.normalized()
+	}
+	return out
+}
+
 func Default() Config {
 	return Config{
 		PollInterval: 20 * time.Second, ReservationAge: 5 * time.Minute,
@@ -181,7 +199,7 @@ func Default() Config {
 			Maestro: Profile{ID: "maestro", Label: "macos-maestro", Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 2}},
 		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute},
 		Guards:   Guards{MinFreeDiskGiB: 60},
-		Targets:  []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4}},
+		Targets:  []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
 	}
 }
 
@@ -233,6 +251,10 @@ func (c Config) Validate() error {
 	for _, target := range c.Targets {
 		if target.Type != "repo" || strings.Count(target.Slug, "/") != 1 || target.MaxActive <= 0 {
 			return fmt.Errorf("invalid target %q", target.Slug)
+		}
+		schedulingClass := target.normalized().SchedulingClass
+		if schedulingClass != domain.SchedulingStandard && schedulingClass != domain.SchedulingControlPlane {
+			return fmt.Errorf("invalid scheduling class %q for target %s", target.SchedulingClass, target.Slug)
 		}
 		if _, ok := seenTargets[target.Slug]; ok {
 			return fmt.Errorf("duplicate target %s", target.Slug)

@@ -98,6 +98,8 @@ fairness or safety decisions.
 - fail closed when GitHub, Tart, or host observations are stale/unavailable;
 - no Linux/macOS overlap beyond configured, proven resource envelopes;
 - aged global FIFO with fair, capacity-aware backfill;
+- bounded control-plane priority for young work, with aging as an absolute
+  starvation guard;
 - ephemeral runners and two-phase drain before deletion;
 - secrets never persisted or emitted;
 - race detector, replay/contract/chaos tests, and at least 99% statement coverage.
@@ -153,6 +155,15 @@ remains authority long enough to build and verify its successor. CI tests this
 self-hosting capacity invariant on every change; upgrades never replace the
 running controller before the successor has completed Required CI. See the
 two-generation bootstrap procedure in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+The controller target uses `"schedulingClass": "control-plane"`. That class
+receives the next compatible quantum ahead of only *young* standard work across
+Linux and macOS arbitration. Once standard work reaches
+`linuxReservationAgeSeconds`, global FIFO moves it ahead of all young
+control-plane demand. Repository caps, exact resource vectors, and the durable
+round-robin cursor remain in force; this is a bounded repair lane, not an
+unlimited jump-the-queue flag. See
+[`ADR 0004`](docs/adr/0004-bounded-control-plane-priority.md).
 
 ## Documentation
 
