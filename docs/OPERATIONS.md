@@ -134,25 +134,78 @@ incumbent bases unchanged for rollback.
 
 ## Real canary and authority handoff
 
-Use a separate canary database so old authority operations cannot be consumed:
+Every release carries four immutable launchd templates plus
+`render-launchd.sh`. Render them into a generation-specific directory; never
+edit a plist in place. The observe template remains the default and uses the
+existing `com.vitalyiegorov.tart-runner-fleet` label. Shadow and canary use
+separate databases, sockets, health ports, logs, and launchd labels:
 
 ```sh
-fleetd run --mode canary \
-  --canary-scope fleet-repo \
-  --canary-profile small \
-  --config fleet.json \
-  --database fleet-canary.db \
-  --admin-socket fleet-canary.sock \
-  --health-address 127.0.0.1:9877
+set -eu
+RELEASE_DIR="$HOME/Library/Application Support/tart-runner-fleet/releases/$VERSION"
+STATE_DIR="$HOME/Library/Application Support/tart-runner-fleet/state"
+PLIST_DIR="$HOME/Library/Application Support/tart-runner-fleet/launchd/$VERSION"
+mkdir -p "$PLIST_DIR"
+cd "$RELEASE_DIR"
+./render-launchd.sh observe "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/observe.plist"
+./render-launchd.sh shadow "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/shadow.plist"
+./render-launchd.sh canary "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/canary.plist" fleet-repo small
+./render-launchd.sh authority "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/authority.plist"
+plutil -lint "$PLIST_DIR"/*.plist
 ```
 
-Dispatch `.github/workflows/fleet-canary.yml`. Require the complete sequence:
+Bootstrap shadow first. After its evidence is coherent, boot it out before
+bootstrapping canary; only one official scale-set message consumer may own a
+scope/profile at a time:
+
+```sh
+launchctl bootstrap gui/"$(id -u)" "$PLIST_DIR/shadow.plist"
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.shadow
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.shadow
+launchctl bootstrap gui/"$(id -u)" "$PLIST_DIR/canary.plist"
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.canary
+```
+
+Dispatch `.github/workflows/fleet-canary.yml`. Canary ingestion requires the
+dedicated `tart-fleet-canary` job label in addition to the exact scope/profile,
+so an ordinary `linux-small` job in the same repository cannot be mutated.
+Require the complete sequence:
 queued demand, owned Tart clone, readiness, JIT registration, job success,
 fresh completed-job guard, deregistration, stop, deletion, and zero owned VMs.
-Then stop the incumbent, start `fleetd --mode authority` with the production
-database, and watch one Linux plus one macOS job before releasing normal load.
-Rollback is immediate: stop Go admission, drain only Go-owned VMs, restore the
-pinned incumbent launchd unit and its unchanged config, then verify health.
+Then remove canary and perform the fail-safe authority handoff below. The
+authority plist is already fully rendered and linted; the block restores the
+incumbent immediately if launchd cannot bootstrap Go authority:
+
+```sh
+set -eu
+AUTHORITY_PLIST="$PLIST_DIR/authority.plist"
+INCUMBENT_PLIST="$HOME/Library/LaunchAgents/com.github.linux-burst-manager.plist"
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.canary
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet 2>/dev/null || true
+launchctl bootout gui/"$(id -u)"/com.github.linux-burst-manager
+if ! launchctl bootstrap gui/"$(id -u)" "$AUTHORITY_PLIST"; then
+  launchctl bootstrap gui/"$(id -u)" "$INCUMBENT_PLIST"
+  launchctl kickstart -k gui/"$(id -u)"/com.github.linux-burst-manager
+  exit 1
+fi
+launchctl kickstart -k gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
+```
+
+Watch one Linux plus one macOS job before releasing normal load. The exact
+rollback is local and does not depend on GitHub Actions:
+
+```sh
+set -eu
+AUTHORITY_PLIST="$PLIST_DIR/authority.plist"
+INCUMBENT_PLIST="$HOME/Library/LaunchAgents/com.github.linux-burst-manager.plist"
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
+launchctl bootstrap gui/"$(id -u)" "$INCUMBENT_PLIST"
+launchctl kickstart -k gui/"$(id -u)"/com.github.linux-burst-manager
+```
+
+After rollback, drain only Go-owned VMs and retain the failed authority plist,
+database, and logs as one immutable incident bundle. Do not delete or rewrite
+incumbent state.
 
 ## Health
 

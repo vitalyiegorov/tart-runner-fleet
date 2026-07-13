@@ -68,6 +68,14 @@ cp "$temporary/one/fleetd.cdx.json" "$staging/fleetd.cdx.json"
 cp "$temporary/one/fleetctl.cdx.json" "$staging/fleetctl.cdx.json"
 cp "$temporary/one/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json" "$staging/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json"
 cp "$temporary/one/tart-runner-fleet-bootstrap-linux-arm64.cdx.json" "$staging/tart-runner-fleet-bootstrap-linux-arm64.cdx.json"
+for file in \
+  com.vitalyiegorov.tart-runner-fleet.plist \
+  com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+  com.vitalyiegorov.tart-runner-fleet.canary.plist \
+  com.vitalyiegorov.tart-runner-fleet.authority.plist \
+  render-launchd.sh; do
+  cp "launchd/$file" "$staging/$file"
+done
 (cd "$staging" && go version -m fleetd) > "$staging/BUILDINFO.txt"
 printf '%s\n' "$version" > "$staging/RELEASE_VERSION"
 
@@ -79,6 +87,11 @@ for pass in one two; do
     tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64 \
     fleetd.cdx.json fleetctl.cdx.json \
     tart-runner-fleet-bootstrap-darwin-arm64.cdx.json tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+    com.vitalyiegorov.tart-runner-fleet.plist \
+    com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+    com.vitalyiegorov.tart-runner-fleet.canary.plist \
+    com.vitalyiegorov.tart-runner-fleet.authority.plist \
+    render-launchd.sh \
     BUILDINFO.txt RELEASE_VERSION
 done
 cmp "$temporary/$archive.one" "$temporary/$archive.two"
@@ -88,6 +101,11 @@ cp "$temporary/$archive.one" "$staging/$archive"
   tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64 \
   fleetd.cdx.json fleetctl.cdx.json \
   tart-runner-fleet-bootstrap-darwin-arm64.cdx.json tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+  com.vitalyiegorov.tart-runner-fleet.plist \
+  com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+  com.vitalyiegorov.tart-runner-fleet.canary.plist \
+  com.vitalyiegorov.tart-runner-fleet.authority.plist \
+  render-launchd.sh \
   BUILDINFO.txt RELEASE_VERSION > SHA256SUMS)
 rmdir "$output"
 mv "$staging" "$output"

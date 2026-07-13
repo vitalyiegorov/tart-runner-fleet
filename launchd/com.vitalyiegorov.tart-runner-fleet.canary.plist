@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vitalyiegorov.tart-runner-fleet.canary</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RELEASE_DIR__/fleetd</string>
+    <string>run</string>
+    <string>--mode=canary</string>
+    <string>--canary-scope=__CANARY_SCOPE__</string>
+    <string>--canary-profile=__CANARY_PROFILE__</string>
+    <string>--config=__STATE_DIR__/fleet.json</string>
+    <string>--database=__STATE_DIR__/fleet-canary.db</string>
+    <string>--admin-socket=__STATE_DIR__/fleet-canary.sock</string>
+    <string>--health-address=127.0.0.1:9878</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>__STATE_DIR__/fleet-canary.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>__STATE_DIR__/fleet-canary.stderr.log</string>
+</dict>
+</plist>

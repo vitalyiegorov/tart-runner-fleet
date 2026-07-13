@@ -62,6 +62,11 @@ jobs:
             fleetd.cdx.json fleetctl.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
             tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            com.vitalyiegorov.tart-runner-fleet.plist \
+            com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+            com.vitalyiegorov.tart-runner-fleet.canary.plist \
+            com.vitalyiegorov.tart-runner-fleet.authority.plist \
+            render-launchd.sh \
             "$ARCHIVE"; do
             test -f "dist/$file"
           done
@@ -73,7 +78,12 @@ jobs:
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
-            tart-runner-fleet-bootstrap-linux-arm64.cdx.json | LC_ALL=C sort)"
+            tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            com.vitalyiegorov.tart-runner-fleet.plist \
+            com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+            com.vitalyiegorov.tart-runner-fleet.canary.plist \
+            com.vitalyiegorov.tart-runner-fleet.authority.plist \
+            render-launchd.sh | LC_ALL=C sort)"
           ACTUAL_ARCHIVE_CONTENTS="$(tar -tzf "dist/$ARCHIVE" | LC_ALL=C sort)"
           test "$ACTUAL_ARCHIVE_CONTENTS" = "$EXPECTED_ARCHIVE_CONTENTS"
 
@@ -101,6 +111,11 @@ jobs:
               dist/fleetctl.cdx.json \
               dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
               dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+              dist/com.vitalyiegorov.tart-runner-fleet.plist \
+              dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+              dist/com.vitalyiegorov.tart-runner-fleet.canary.plist \
+              dist/com.vitalyiegorov.tart-runner-fleet.authority.plist \
+              dist/render-launchd.sh \
               --clobber
           else
             gh release create "$VERSION" \
@@ -116,6 +131,11 @@ jobs:
               dist/fleetctl.cdx.json \
               dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
               dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+              dist/com.vitalyiegorov.tart-runner-fleet.plist \
+              dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+              dist/com.vitalyiegorov.tart-runner-fleet.canary.plist \
+              dist/com.vitalyiegorov.tart-runner-fleet.authority.plist \
+              dist/render-launchd.sh \
               --target "$HEAD_SHA" \
               --title "$VERSION" \
               --generate-notes
