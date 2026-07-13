@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 )
 
 func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
@@ -26,12 +29,29 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 	_ = health.SetInstances("linux-small", 2, 4, 8192)
 	health.SetOperations(3, 1)
 
-	server, err := NewServer(health, ServerConfig{})
+	server, err := NewServer(health, ServerConfig{ControllerVersion: "v1.2.3", ControllerMode: "shadow"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertResponse(t, server, http.MethodGet, "/healthz", http.StatusOK, "live")
 	assertResponse(t, server, http.MethodGet, "/readyz", http.StatusOK, "ready")
+	statusResponse := request(t, server, http.MethodGet, adminapi.StatusPath)
+	defer statusResponse.Body.Close()
+	var status adminapi.StatusEnvelope
+	if err := json.NewDecoder(statusResponse.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.APIVersion != adminapi.APIVersion || status.Kind != "Status" || status.Revision == 0 ||
+		status.Data.ControllerVersion != "v1.2.3" || status.Data.ControllerMode != "shadow" ||
+		status.Data.HostMode != "linux" || !status.Data.Live.OK || !status.Data.Ready.OK ||
+		len(status.Data.Queues) != 1 || status.Data.Queues[0].Profile != "linux-small" ||
+		len(status.Data.Instances) != 1 || len(status.Data.Observations) != 3 ||
+		status.Data.Operations.Retrying != 3 || status.Data.Operations.Dead != 1 || status.Warnings == nil {
+		t.Fatalf("status=%+v", status)
+	}
+	if got := statusResponse.Header.Get("ETag"); got == "" {
+		t.Fatal("status missing ETag")
+	}
 	response := request(t, server, http.MethodGet, "/metrics")
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
@@ -72,11 +92,32 @@ func TestServerUnhealthyMethodAndUnknownPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertResponse(t, server, http.MethodGet, "/readyz", http.StatusServiceUnavailable, "not_ready")
+	status := request(t, server, http.MethodGet, adminapi.StatusPath)
+	var envelope adminapi.StatusEnvelope
+	if err := json.NewDecoder(status.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	status.Body.Close()
+	if envelope.Data.ControllerVersion != "dev" || envelope.Data.ControllerMode != "unknown" {
+		t.Fatalf("defaults=%+v", envelope.Data)
+	}
+	recorder := httptest.NewRecorder()
+	conditional := httptest.NewRequest(http.MethodGet, "http://localhost"+adminapi.StatusPath, nil)
+	conditional.Header.Set("If-None-Match", status.Header.Get("ETag"))
+	server.httpServer.Handler.ServeHTTP(recorder, conditional)
+	if recorder.Code != http.StatusNotModified {
+		t.Fatalf("conditional status=%d", recorder.Code)
+	}
 
 	response := request(t, server, http.MethodPost, "/healthz")
 	response.Body.Close()
 	if response.StatusCode != http.StatusMethodNotAllowed || response.Header.Get("Allow") != http.MethodGet {
 		t.Fatalf("method response=%d allow=%q", response.StatusCode, response.Header.Get("Allow"))
+	}
+	response = request(t, server, http.MethodPost, adminapi.StatusPath)
+	response.Body.Close()
+	if response.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status method=%d", response.StatusCode)
 	}
 	assertResponse(t, server, http.MethodGet, "/missing", http.StatusNotFound, "404")
 }

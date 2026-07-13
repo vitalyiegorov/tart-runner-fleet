@@ -97,6 +97,7 @@ func testDependencies(t *testing.T) dependencies {
 	d := defaultDependencies()
 	d.inventory = func(runtimeStore, config.Config) app.Inventory { return runtimeInventory{} }
 	d.listen = func(_, _ string) (net.Listener, error) { return newFakeListener(), nil }
+	d.adminListen = func(string) (net.Listener, error) { return newFakeListener(), nil }
 	d.loadKey = func(ctx context.Context, _, _ string) (*credentials.Secret, error) {
 		return (credentials.Keychain{Runner: keyRunner{out: []byte("key")}}).Load(ctx, "s", "a")
 	}
@@ -168,6 +169,7 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 			d.openStore = func(context.Context, string) (runtimeStore, error) { return nil, want }
 		}},
 		{name: "listen", opts: options{Mode: reconcile.Observe, ConfigPath: valid, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) { d.listen = func(string, string) (net.Listener, error) { return nil, want } }},
+		{name: "admin listen", opts: options{Mode: reconcile.Observe, ConfigPath: valid, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) { d.adminListen = func(string) (net.Listener, error) { return nil, want } }},
 		{name: "key", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
 			d.loadKey = func(context.Context, string, string) (*credentials.Secret, error) { return nil, want }
 		}},
@@ -293,11 +295,32 @@ func TestEngineTickerRecordsBlockedAsStale(t *testing.T) {
 	now := time.Now().UTC()
 	stale := staleInventory{now: now}
 	engine := app.Engine{Store: store, Inventory: stale, Config: app.BuildSchedulerConfig(config.Default()), ControllerID: "c", Mode: reconcile.Observe, Now: func() time.Time { return now }}
-	health, _ := telemetryHealthForTest()
-	if err := (engineTicker{engine: engine, health: health}).Tick(context.Background()); err != nil {
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{CriticalObservations: []string{"operations", "scheduler"}})
+	if err := (engineTicker{engine: engine, health: health, operationCounts: func(context.Context) (int, int, error) { return 2, 1, nil }}).Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if health.Snapshot().Observations["scheduler"].Freshness != telemetry.ObservationStale {
+	if health.Snapshot().Observations["scheduler"].Freshness != telemetry.ObservationStale ||
+		health.Snapshot().Observations["operations"].Freshness != telemetry.ObservationFresh ||
+		health.Snapshot().OperationRetries != 2 || health.Snapshot().DeadOperations != 1 {
+		t.Fatalf("snapshot=%#v", health.Snapshot())
+	}
+}
+
+func TestEngineTickerMarksOperationSummaryUnavailable(t *testing.T) {
+	d := testDependencies(t)
+	store, err := d.openStore(context.Background(), filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	engine := app.Engine{Store: store, Inventory: runtimeInventory{}, Config: app.BuildSchedulerConfig(config.Default()), ControllerID: "c", Mode: reconcile.Observe, Now: func() time.Time { return now }}
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{CriticalObservations: []string{"operations", "scheduler"}})
+	ticker := engineTicker{engine: engine, health: health, operationCounts: func(context.Context) (int, int, error) { return 0, 0, errors.New("db unavailable") }}
+	if err := ticker.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if health.Snapshot().Observations["operations"].Freshness != telemetry.ObservationUnavailable {
 		t.Fatalf("snapshot=%#v", health.Snapshot())
 	}
 }

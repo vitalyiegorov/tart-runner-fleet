@@ -137,9 +137,10 @@ func demandLess(a, b domain.Demand) bool {
 
 func partition(demands []domain.Demand) (linux, macos []domain.Demand) {
 	for _, demand := range demands {
-		if demand.Platform == domain.PlatformMacOS {
+		switch demand.Platform {
+		case domain.PlatformMacOS:
 			macos = append(macos, demand)
-		} else if demand.Platform == domain.PlatformLinux {
+		case domain.PlatformLinux:
 			linux = append(linux, demand)
 		}
 	}

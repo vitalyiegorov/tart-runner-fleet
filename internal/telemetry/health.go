@@ -71,6 +71,7 @@ type ObservationMetric struct {
 
 // Snapshot is an immutable point-in-time copy suitable for rendering.
 type Snapshot struct {
+	Revision           uint64
 	Now                time.Time
 	LastLoopTick       time.Time
 	LastSuccessfulTick time.Time
@@ -109,6 +110,7 @@ type Health struct {
 	observations       map[string]ObservationMetric
 	operationRetries   int
 	deadOperations     int
+	revision           uint64
 }
 
 func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
@@ -172,6 +174,7 @@ func uniqueNames(names []string) (map[string]struct{}, bool) {
 func (h *Health) RecordTick(successful bool) {
 	now := h.clock.Now()
 	h.mu.Lock()
+	h.revision++
 	h.lastLoopTick = now
 	if successful {
 		h.lastSuccessfulTick = now
@@ -190,6 +193,7 @@ func (h *Health) RecordObservation(name string, freshness ObservationFreshness) 
 		return errUnknownObservation
 	}
 	h.observations[name] = ObservationMetric{Freshness: freshness, ObservedAt: now}
+	h.revision++
 	return nil
 }
 
@@ -214,6 +218,7 @@ func (h *Health) SetQueue(profile string, count int, oldestEnqueuedAt time.Time)
 		oldestEnqueuedAt = time.Time{}
 	}
 	h.queues[profile] = QueueMetrics{Count: count, OldestEnqueuedAt: oldestEnqueuedAt}
+	h.revision++
 	return nil
 }
 
@@ -227,6 +232,7 @@ func (h *Health) SetInstances(profile string, count, cpu, memoryMiB int) error {
 		return errUnknownProfile
 	}
 	h.instances[profile] = InstanceMetrics{Count: count, CPU: cpu, MemoryMiB: memoryMiB}
+	h.revision++
 	return nil
 }
 
@@ -235,6 +241,7 @@ func (h *Health) SetOperations(retries, dead int) error {
 		return errInvalidMetric
 	}
 	h.mu.Lock()
+	h.revision++
 	h.operationRetries = retries
 	h.deadOperations = dead
 	h.mu.Unlock()
@@ -246,6 +253,7 @@ func (h *Health) SetMode(mode Mode) error {
 		return errInvalidMode
 	}
 	h.mu.Lock()
+	h.revision++
 	h.mode = mode
 	h.mu.Unlock()
 	return nil
@@ -256,7 +264,7 @@ func (h *Health) Snapshot() Snapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return Snapshot{
-		Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
+		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
 		Mode: h.mode, Queues: cloneMap(h.queues), Instances: cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, ObservationTTL: h.criticalObservationTTL,

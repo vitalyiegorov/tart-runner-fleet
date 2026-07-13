@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -10,20 +11,134 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  GOLANGCI_LINT_VERSION: v2.12.2
 
 jobs:
-  verify:
-    runs-on: [self-hosted, linux-tiered, linux-medium]
-    timeout-minutes: 15
+  preflight:
+    name: Preflight
+    runs-on: [self-hosted, linux-tiered, linux-small]
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
-          cache: true
-      - run: go mod verify
-      - run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go test -race -shuffle=on -count=1 ./...
-      - run: ./scripts/check-coverage.sh 99.0
+          cache: false
+      - name: Module, format, and workflow integrity
+        run: make preflight
+
+  quality:
+    name: Lint, CPD, deadcode, and vulnerabilities
+    needs: preflight
+    runs-on: [self-hosted, linux-tiered, linux-medium]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Lint and copy/paste analysis
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+          skip-cache: true
+      - name: Go vet
+        run: make vet
+      - name: Official dead-code analysis
+        run: make deadcode
+      - name: Explicit CPD gate
+        run: make cpd
+      - name: Reachable vulnerability analysis
+        run: make vuln
+
+  unit:
+    name: Unit tests and exact coverage
+    needs: preflight
+    runs-on: [self-hosted, linux-tiered, linux-medium]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Shuffled unit, contract, integration, replay, and chaos tests
+        run: make unit
+      - name: Upload exact coverage evidence
+        if: always() && hashFiles('coverage.out') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 7
+
+  race:
+    name: Race detector
+    needs: preflight
+    runs-on: [self-hosted, linux-tiered, linux-large]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Shuffled race suite
+        run: make race
+
+  build:
+    name: Verified builds
+    needs: [quality, unit, race]
+    runs-on: [self-hosted, linux-tiered, linux-medium]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Native build and CLI smoke test
+        run: |
+          set -euo pipefail
+          make build
+          go run ./cmd/fleetctl version
+      - name: Reproduce complete macOS ARM64 release candidate
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh "v0.0.0-ci.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" dist
+      - name: Upload verified CI binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-release-darwin-arm64-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Required CI
+    needs: [quality, unit, race, build]
+    # Run after upstream success or failure, but terminate with a superseded or
+    # manually cancelled workflow. GitHub preserves always() jobs on cancel.
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, linux-tiered, linux-small]
+    timeout-minutes: 5
+    steps:
+      - name: Require every blocking gate to succeed
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          RACE_RESULT: ${{ needs.race.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          set -euo pipefail
+          test "$QUALITY_RESULT" = success
+          test "$UNIT_RESULT" = success
+          test "$RACE_RESULT" = success
+          test "$BUILD_RESULT" = success

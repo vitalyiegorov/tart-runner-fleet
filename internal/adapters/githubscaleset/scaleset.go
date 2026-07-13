@@ -116,7 +116,14 @@ func (s *ScaleSet) Handle(ctx context.Context, commit func(context.Context, Dema
 		m.Nack()
 		return fmt.Errorf("commit demand message %d: %w", m.Demand.MessageID, err)
 	}
-	return m.Ack(ctx)
+	if err := m.Ack(ctx); err != nil {
+		// The durable commit is idempotent. Clear the local in-flight guard so
+		// GitHub can redeliver the still-remote message and acknowledgement can
+		// be retried without restarting the controller.
+		m.Nack()
+		return err
+	}
+	return nil
 }
 
 func appendEvents(dst []JobEvent, m *scaleset.RunnerScaleSetMessage) []JobEvent {

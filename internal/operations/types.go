@@ -115,7 +115,7 @@ type Operation struct {
 
 func (o Operation) Valid() bool {
 	return o.ID != "" && o.IdempotencyKey != "" && o.EffectKey != "" &&
-		o.Kind != "" && o.ResourceID != "" && o.AvailableAt.IsZero() == false && o.DependenciesValid()
+		o.Kind != "" && o.ResourceID != "" && !o.AvailableAt.IsZero() && o.DependenciesValid()
 }
 
 func (o Operation) DependenciesValid() bool {

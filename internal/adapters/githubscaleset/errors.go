@@ -49,17 +49,17 @@ func ClassifyResponse(resp *http.Response, now time.Time, cause error) error {
 	}
 	kind := Unexpected
 	switch resp.StatusCode {
-	case 401:
+	case http.StatusUnauthorized:
 		kind = Authentication
-	case 403:
+	case http.StatusForbidden:
 		kind = Authorization
-	case 404:
+	case http.StatusNotFound:
 		kind = NotFound
-	case 409:
+	case http.StatusConflict:
 		kind = Conflict
-	case 422:
+	case http.StatusUnprocessableEntity:
 		kind = Validation
-	case 429:
+	case http.StatusTooManyRequests:
 		kind = RateLimited
 	default:
 		if resp.StatusCode >= 500 {

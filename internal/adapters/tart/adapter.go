@@ -73,6 +73,7 @@ func (r ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	if binary == "" {
 		binary = "tart"
 	}
+	// #nosec G204 -- Binary is a trusted adapter dependency; arguments never pass through a shell.
 	command := exec.CommandContext(ctx, binary, args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -86,6 +87,7 @@ func (r ExecRunner) Start(ctx context.Context, args ...string) error {
 	if binary == "" {
 		binary = "tart"
 	}
+	// #nosec G204 -- Binary is a trusted adapter dependency; arguments never pass through a shell.
 	command := exec.CommandContext(context.WithoutCancel(ctx), binary, args...)
 	if err := command.Start(); err != nil {
 		return classify(args, nil, err, ctx.Err())

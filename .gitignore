@@ -4,5 +4,5 @@
 /fleet.db*
 /.idea/
 /.vscode/
+/.tools/
 .DS_Store
-

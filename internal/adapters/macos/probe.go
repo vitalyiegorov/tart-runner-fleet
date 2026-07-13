@@ -39,6 +39,7 @@ type CommandRunner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, binary string, args ...string) ([]byte, error) {
+	// #nosec G204 -- the executable is injected by trusted controller configuration and tests.
 	return exec.CommandContext(ctx, binary, args...).CombinedOutput()
 }
 

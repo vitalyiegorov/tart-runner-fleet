@@ -1,0 +1,42 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - nolintlint
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec]
+      - path: _test\.go
+        linters: [errcheck]
+      - path: cmd/fleetctl/
+        linters: [errcheck]
+      - path: cmd/fleetd/main\.go
+        linters: [errcheck]
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

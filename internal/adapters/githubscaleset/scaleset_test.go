@@ -164,6 +164,29 @@ func TestScaleSetHandleCommitsBeforeDeleteAndNacksFailure(t *testing.T) {
 	m.Nack()
 }
 
+func TestScaleSetHandleRedeliversAfterTransientAckFailure(t *testing.T) {
+	f := &fakeScaleSet{messages: []*scaleset.RunnerScaleSetMessage{{MessageID: 9}}, deleteErr: errors.New("temporary delete failure")}
+	s, _ := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 1, PollTimeout: time.Second, RequestTimeout: time.Second})
+	commits := 0
+	commit := func(context.Context, Demand) error {
+		commits++
+		return nil
+	}
+	if err := s.Handle(context.Background(), commit); !errors.Is(err, f.deleteErr) {
+		t.Fatalf("ack error: %v", err)
+	}
+	if s.LastMessageID() != 0 {
+		t.Fatal("cursor advanced after failed acknowledgement")
+	}
+	f.deleteErr = nil
+	if err := s.Handle(context.Background(), commit); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if commits != 2 || s.LastMessageID() != 9 || len(f.deleted) != 2 {
+		t.Fatalf("commits=%d cursor=%d deletes=%v", commits, s.LastMessageID(), f.deleted)
+	}
+}
+
 func TestScaleSetPreservesMixedEventsWithDeepCopies(t *testing.T) {
 	queued := time.Unix(50, 0)
 	labels := []string{"self-hosted", "arm64"}
