@@ -5,15 +5,30 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/guestbootstrap"
 )
 
-var guestConfig = guestbootstrap.Config{
-	RunnerPath:  "/opt/actions-runner/run.sh",
-	WorkDir:     "/opt/actions-runner",
-	LogPath:     "/opt/actions-runner/_diag/tart-runner-fleet.log",
-	MaxJITBytes: 1 << 20,
+var guestConfig = defaultGuestConfig()
+
+func defaultGuestConfig() guestbootstrap.Config {
+	home, _ := os.UserHomeDir()
+	config, _ := guestConfigForHome(home)
+	return config
+}
+
+func guestConfigForHome(home string) (guestbootstrap.Config, error) {
+	if home == "" || !filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return guestbootstrap.Config{}, guestbootstrap.ErrFilesystem
+	}
+	workDir := filepath.Join(home, "actions-runner")
+	return guestbootstrap.Config{
+		RunnerPath:  filepath.Join(workDir, "run.sh"),
+		WorkDir:     workDir,
+		LogPath:     filepath.Join(workDir, "_diag", "tart-runner-fleet.log"),
+		MaxJITBytes: 1 << 20,
+	}, nil
 }
 
 type runBootstrap func(context.Context, io.Reader, guestbootstrap.Config) error
