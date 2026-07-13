@@ -144,6 +144,23 @@ func TestDegradedUnavailableAndUsageExitCodes(t *testing.T) {
 	}
 }
 
+func TestIssue11ConnectionFlagsWorkBeforeCommand(t *testing.T) {
+	const endpoint = "unix:///tmp/fleetctl-issue-11.sock"
+	var gotEndpoint string
+	deps := dependencies{newClient: func(got string, _ time.Duration) (apiClient, error) {
+		gotEndpoint = got
+		status := healthyStatus()
+		return fakeClient{status: status}, nil
+	}}
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), []string{"--endpoint", endpoint, "status", "--output", "json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if gotEndpoint != endpoint {
+		t.Fatalf("endpoint=%q want=%q", gotEndpoint, endpoint)
+	}
+}
+
 func TestConfigValidationAndLegacyAlias(t *testing.T) {
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "valid.json")
