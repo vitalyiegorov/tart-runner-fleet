@@ -121,6 +121,19 @@ func TestQueuedDemandsMapsOnlyAvailableRecords(t *testing.T) {
 	}
 }
 
+func TestQueuedDemandsFiltersRecordsOutsideTheBindingScope(t *testing.T) {
+	queue := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeDemandStore{records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "other", WorkflowRunID: 9, QueueTime: queue},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "allowed", WorkflowRunID: 9, QueueTime: queue},
+	}}
+	binding := Binding{ScaleSetID: 3, Targets: []string{"owner/allowed"}, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 1 || got[0].Key.JobID != 2 {
+		t.Fatalf("scoped QueuedDemands() = %#v, %v", got, err)
+	}
+}
+
 func TestDemandCoordinatorFailsClosed(t *testing.T) {
 	want := errors.New("down")
 	validBinding := Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}

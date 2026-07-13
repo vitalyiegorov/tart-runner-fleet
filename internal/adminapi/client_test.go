@@ -119,6 +119,54 @@ func TestHTTPClientProbesAndValidatesWireContract(t *testing.T) {
 	}
 }
 
+func TestProbeFailsClosedOnUnavailableTransportAndUnexpectedHTTPStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"status":"live"}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Probe(context.Background(), false); !errors.Is(err, ErrResponse) {
+		t.Fatalf("unexpected status error=%v", err)
+	}
+
+	client.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport unavailable")
+	})
+	if _, err := client.Probe(context.Background(), false); err == nil || err.Error() != "Get \""+server.URL+HealthPath+"\": transport unavailable" {
+		t.Fatalf("transport error=%v", err)
+	}
+}
+
+func TestClientFailsClosedWhenRequestOrResponseBodyIsInvalid(t *testing.T) {
+	client := &Client{
+		baseURL: "://invalid",
+		http:    &http.Client{},
+	}
+	if _, err := client.do(context.Background(), StatusPath, "application/json", false); err == nil || !strings.Contains(err.Error(), "build request") {
+		t.Fatalf("request error=%v", err)
+	}
+
+	client = &Client{
+		baseURL: "http://fleetd",
+		http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       failingReadCloser{},
+			}, nil
+		})},
+	}
+	if _, err := client.Status(context.Background()); err == nil || err.Error() != "read failed" {
+		t.Fatalf("body error=%v", err)
+	}
+}
+
 func TestClientRejectsWrongContentType(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
@@ -240,6 +288,27 @@ func TestDefaultEndpointIsAbsoluteUnixSocket(t *testing.T) {
 		t.Fatalf("path=%q endpoint=%q", path, endpoint)
 	}
 }
+
+func TestDefaultSocketFallsBackToPrivateTemporaryDirectoryWithoutHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	wantPath := filepath.Join(os.TempDir(), "tart-runner-fleet", "state", "fleetd.sock")
+	if path, endpoint := DefaultSocketPath(), DefaultEndpoint(); path != wantPath || endpoint != "unix://"+wantPath {
+		t.Fatalf("path=%q endpoint=%q", path, endpoint)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+func (failingReadCloser) Close() error { return nil }
 
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
