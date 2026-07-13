@@ -78,8 +78,8 @@ func defaultDependencies() dependencies {
 func runDaemon(ctx context.Context, opts options) error { return runWithDependencies(ctx, opts, deps) }
 
 func runWithDependencies(ctx context.Context, opts options, d dependencies) error {
-	if opts.Mode != reconcile.Observe && opts.Mode != reconcile.Shadow {
-		return errors.New("only observe and shadow modes are armed")
+	if !opts.Mode.Valid() {
+		return errors.New("invalid controller mode")
 	}
 	file, err := d.openConfig(opts.ConfigPath)
 	if err != nil {
@@ -93,7 +93,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	if closeErr != nil {
 		return fmt.Errorf("close config: %w", closeErr)
 	}
-	if opts.Mode == reconcile.Shadow {
+	if opts.Mode != reconcile.Observe {
 		if err := cfg.ValidateAuthority(); err != nil {
 			return err
 		}
@@ -114,7 +114,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		profiles = append(profiles, string(id))
 	}
 	criticalObservations := []string{"operations", "scheduler"}
-	if opts.Mode == reconcile.Shadow {
+	if opts.Mode != reconcile.Observe {
 		for _, binding := range bindings {
 			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.ScaleSetID))
 		}
@@ -156,7 +156,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 			_ = source.Close(context.Background())
 		}
 	}()
-	if opts.Mode == reconcile.Shadow {
+	if opts.Mode != reconcile.Observe {
 		secret, err := d.loadKey(ctx, cfg.GitHub.KeychainService, cfg.GitHub.KeychainAccount)
 		if err != nil {
 			return err

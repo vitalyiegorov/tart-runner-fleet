@@ -210,7 +210,7 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 		opts   options
 		mutate func(*dependencies)
 	}{
-		{name: "mode", opts: options{Mode: reconcile.Authority}},
+		{name: "mode", opts: options{Mode: reconcile.Mode("invalid")}},
 		{name: "open config", opts: options{Mode: reconcile.Observe, ConfigPath: "missing"}},
 		{name: "decode", opts: options{Mode: reconcile.Observe, ConfigPath: filepath.Join(t.TempDir(), "bad")}, mutate: func(*dependencies) {}},
 		{name: "shadow config", opts: options{Mode: reconcile.Shadow, ConfigPath: valid}},
@@ -254,8 +254,8 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 }
 
 func TestRunDaemonAndInvalidBinding(t *testing.T) {
-	if err := runDaemon(context.Background(), options{Mode: reconcile.Authority}); err == nil {
-		t.Fatal("authority armed")
+	if err := runDaemon(context.Background(), options{Mode: reconcile.Mode("invalid")}); err == nil {
+		t.Fatal("invalid mode armed")
 	}
 	path := writeConfig(t, false)
 	data, err := os.ReadFile(path)

@@ -42,9 +42,9 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	databasePath := flags.String("database", "fleet.db", "SQLite state path")
 	healthAddress := flags.String("health-address", "127.0.0.1:9876", "local health listener")
 	adminSocket := flags.String("admin-socket", adminapi.DefaultSocketPath(), "private fleetctl Unix socket")
-	mode := flags.String("mode", string(reconcile.Observe), "observe or shadow")
+	mode := flags.String("mode", string(reconcile.Observe), "observe, shadow, canary, or authority")
 	if len(args) == 0 || args[0] != "run" {
-		fmt.Fprintln(stderr, "usage: fleetd version | run [--config path --database path --mode observe|shadow]")
+		fmt.Fprintln(stderr, "usage: fleetd version | run [--config path --database path --mode observe|shadow|canary|authority]")
 		return 2
 	}
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
