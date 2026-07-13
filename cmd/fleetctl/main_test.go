@@ -4,13 +4,20 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/actions/scaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
 )
 
 type fakeClient struct {
@@ -253,7 +260,10 @@ func TestRemoteSecondaryErrorsAndBrokenOutput(t *testing.T) {
 		args   []string
 		client fakeClient
 	}{
+		{name: "status", args: []string{"status"}, client: fakeClient{err: errors.New("status down")}},
+		{name: "live probe", args: []string{"health"}, client: fakeClient{liveErr: errors.New("live down")}},
 		{name: "ready probe", args: []string{"health"}, client: fakeClient{live: adminapi.Check{OK: true}, readyErr: errors.New("ready down")}},
+		{name: "doctor status", args: []string{"doctor"}, client: fakeClient{err: errors.New("status down")}},
 		{name: "doctor metrics", args: []string{"doctor"}, client: fakeClient{status: status, metricsErr: errors.New("metrics down")}},
 	}
 	for _, tt := range tests {
@@ -281,5 +291,305 @@ func TestMainDelegatesExitCode(t *testing.T) {
 	main()
 	if got != 0 {
 		t.Fatalf("exit code = %d", got)
+	}
+}
+
+type fakeProvisioner struct {
+	next       int
+	inspectErr error
+	ensureErr  error
+	plan       githubscaleset.ScaleSetPlan
+}
+
+func (f *fakeProvisioner) Inspect(context.Context, githubscaleset.ScaleSetSpec) (githubscaleset.ScaleSetPlan, error) {
+	if f.inspectErr != nil {
+		return githubscaleset.ScaleSetPlan{}, f.inspectErr
+	}
+	if f.plan.Action != "" {
+		return f.plan, nil
+	}
+	return githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetCreate}, nil
+}
+func (f *fakeProvisioner) Ensure(_ context.Context, spec githubscaleset.ScaleSetSpec) (scaleset.RunnerScaleSet, error) {
+	f.next++
+	if f.ensureErr != nil {
+		return scaleset.RunnerScaleSet{}, f.ensureErr
+	}
+	return scaleset.RunnerScaleSet{ID: f.next, Name: spec.Name}, nil
+}
+
+func fleetProvisionConfig() config.Config {
+	cfg := config.Default()
+	cfg.Targets = []config.Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4}}
+	sets := []config.ScaleSet{{Profile: "small", Name: "repo-small", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-small"}},
+		{Profile: "medium", Name: "repo-medium", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-medium"}},
+		{Profile: "large", Name: "repo-large", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-large"}},
+		{Profile: "builder", Name: "repo-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
+		{Profile: "maestro", Name: "repo-maestro", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-maestro"}}}
+	cfg.GitHub = config.GitHub{SessionOwner: "host", App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
+		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}}, Scopes: []config.GitHubScope{{Name: "repo", Kind: config.ScopeRepository,
+			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"}, ScaleSets: sets}}}
+	return cfg
+}
+
+func encodedFleetConfig(t *testing.T) string {
+	t.Helper()
+	var output bytes.Buffer
+	if err := config.Encode(&output, fleetProvisionConfig()); err != nil {
+		t.Fatal(err)
+	}
+	return output.String()
+}
+
+func TestScaleSetProvisionCommandPlansGuardsAndPersists(t *testing.T) {
+	cfg := fleetProvisionConfig()
+	path := filepath.Join(t.TempDir(), "fleet.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Encode(file, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProvisioner{}
+	deps := defaultDependencies()
+	deps.loadPrivateKey = func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
+		return githubscaleset.NewPrivateKeySecret("pem"), nil
+	}
+	deps.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) { return fake, nil }
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), []string{"scale-sets", "provision", "--config", path}, &stdout, &stderr, deps); code != exitSuccess || !strings.Contains(stdout.String(), "create") {
+		t.Fatalf("plan code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWith(context.Background(), []string{"scale-sets", "provision", "--config", path, "--apply"}, &stdout, &stderr, deps); code != exitUnsafe {
+		t.Fatalf("unguarded apply code=%d err=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	args := []string{"scale-sets", "provision", "--config", path, "--output", "json", "--apply", "--write", "--confirm", "provision-scale-sets", "--reason", "initial migration"}
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess || !strings.Contains(stdout.String(), `"id": 1`) {
+		t.Fatalf("apply code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	persisted, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := config.Decode(persisted)
+	_ = persisted.Close()
+	if err != nil || decoded.GitHub.Scopes[0].ScaleSets[4].ID == 0 {
+		t.Fatalf("persisted config=%#v err=%v", decoded.GitHub.Scopes, err)
+	}
+}
+
+type fakeReadCloser struct {
+	io.Reader
+	err error
+}
+
+func (f fakeReadCloser) Close() error { return f.err }
+
+func TestScaleSetProvisionCommandFailureGuardsAndSecretRedaction(t *testing.T) {
+	valid := encodedFleetConfig(t)
+	newDeps := func() dependencies {
+		deps := defaultDependencies()
+		deps.openConfig = func(string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(valid)), nil }
+		deps.loadPrivateKey = func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
+			return githubscaleset.NewPrivateKeySecret("PRIVATE-KEY-SENTINEL"), nil
+		}
+		deps.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) { return &fakeProvisioner{}, nil }
+		return deps
+	}
+	applyArgs := []string{"scale-sets", "provision", "--config", "fleet.json", "--apply", "--write", "--confirm", "provision-scale-sets", "--reason", "migration"}
+	tests := []struct {
+		name   string
+		args   []string
+		edit   func(*dependencies)
+		writer io.Writer
+		code   int
+		text   string
+	}{
+		{name: "missing subcommand", args: []string{"scale-sets"}, code: exitUsage, text: "usage"},
+		{name: "wrong subcommand", args: []string{"scale-sets", "delete"}, code: exitUsage, text: "usage"},
+		{name: "bad flags", args: []string{"scale-sets", "provision", "--unknown"}, code: exitUsage, text: "flag provided"},
+		{name: "bad output", args: []string{"scale-sets", "provision", "--config", "fleet.json", "--output", "yaml"}, code: exitUsage},
+		{name: "mutation without apply", args: []string{"scale-sets", "provision", "--config", "fleet.json", "--write"}, code: exitUsage, text: "mutation flags"},
+		{name: "open config", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
+			d.openConfig = func(string) (io.ReadCloser, error) { return nil, errors.New("permission denied") }
+		}, code: exitFailure, text: "open config"},
+		{name: "decode config", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
+			d.openConfig = func(string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader("{")), nil }
+		}, code: exitFailure, text: "invalid config"},
+		{name: "close config", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
+			d.openConfig = func(string) (io.ReadCloser, error) {
+				return fakeReadCloser{Reader: strings.NewReader(valid), err: errors.New("close failed")}, nil
+			}
+		}, code: exitFailure, text: "close config"},
+		{name: "conflict", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
+			d.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
+				return &fakeProvisioner{inspectErr: operations.ErrConflict}, nil
+			}
+		}, code: exitUnsafe, text: "provision scale sets"},
+		{name: "uncertain", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
+			d.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
+				return &fakeProvisioner{plan: githubscaleset.ScaleSetPlan{Action: "update"}}, nil
+			}
+		}, code: exitUnsafe, text: "uncertain"},
+		{name: "ordinary provision failure", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
+			d.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
+				return &fakeProvisioner{inspectErr: errors.New("GitHub denied")}, nil
+			}
+		}, code: exitFailure, text: "GitHub denied"},
+		{name: "persist failure", args: applyArgs, edit: func(d *dependencies) {
+			d.writeConfig = func(string, config.Config) error { return errors.New("disk full") }
+		}, code: exitFailure, text: "persist config"},
+		{name: "json output failure", args: []string{"scale-sets", "provision", "--config", "fleet.json", "--output", "json"}, writer: errorWriter{}, code: exitFailure},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deps := newDeps()
+			if tt.edit != nil {
+				tt.edit(&deps)
+			}
+			var stdout, stderr bytes.Buffer
+			writer := tt.writer
+			if writer == nil {
+				writer = &stdout
+			}
+			code := executeWith(context.Background(), tt.args, writer, &stderr, deps)
+			combined := stdout.String() + stderr.String()
+			if code != tt.code || (tt.text != "" && !strings.Contains(combined, tt.text)) {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(combined, "PRIVATE-KEY-SENTINEL") {
+				t.Fatalf("private key leaked: %q", combined)
+			}
+		})
+	}
+}
+
+type fakeLoadedSecret struct {
+	value     string
+	destroyed bool
+}
+
+func (s *fakeLoadedSecret) Reveal() string { return s.value }
+func (s *fakeLoadedSecret) Destroy()       { s.value, s.destroyed = "", true }
+
+func TestPrivateKeyLoaderTransfersAndDestroysKeychainSecret(t *testing.T) {
+	loaded := &fakeLoadedSecret{value: "PRIVATE-KEY-SENTINEL"}
+	loader := privateKeyLoader(func(context.Context, string, string, string) (loadedSecret, error) { return loaded, nil })
+	key, err := loader(context.Background(), "service", "account", "")
+	if err != nil || key == nil || !loaded.destroyed || loaded.value != "" {
+		t.Fatalf("load = %v, %v; secret=%#v", key, err, loaded)
+	}
+	if strings.Contains(fmt.Sprintf("%v %#v %+v", key, key, key), "PRIVATE-KEY-SENTINEL") {
+		t.Fatal("private key leaked through formatting")
+	}
+	key.Destroy()
+	want := errors.New("keychain unavailable")
+	loader = privateKeyLoader(func(context.Context, string, string, string) (loadedSecret, error) { return nil, want })
+	if _, err := loader(context.Background(), "service", "account", ""); !errors.Is(err, want) {
+		t.Fatalf("load error = %v", err)
+	}
+	loader = privateKeyLoader(func(context.Context, string, string, string) (loadedSecret, error) { return nil, nil })
+	if _, err := loader(context.Background(), "service", "account", ""); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("nil secret error = %v", err)
+	}
+	deps := defaultDependencies()
+	if _, err := deps.loadPrivateKey(context.Background(), "", "", ""); err == nil {
+		t.Fatal("default Keychain loader accepted empty reference")
+	}
+	path := filepath.Join(t.TempDir(), "app.pem")
+	if err := os.WriteFile(path, []byte("file-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileKey, err := deps.loadPrivateKey(context.Background(), "", "", path)
+	if err != nil || fileKey == nil {
+		t.Fatalf("default file loader = %v, %v", fileKey, err)
+	}
+	fileKey.Destroy()
+	if _, err := deps.openProvision(githubscaleset.GitHubAppAdminConfig{}); err == nil {
+		t.Fatal("default provisioner accepted empty configuration")
+	}
+}
+
+type fakeAtomicConfigFile struct {
+	bytes.Buffer
+	name                     string
+	chmodErr, writeErr       error
+	syncErr, closeErr        error
+	chmodded, synced, closed bool
+}
+
+func (f *fakeAtomicConfigFile) Name() string { return f.name }
+func (f *fakeAtomicConfigFile) Chmod(os.FileMode) error {
+	f.chmodded = true
+	return f.chmodErr
+}
+func (f *fakeAtomicConfigFile) Write(value []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return f.Buffer.Write(value)
+}
+func (f *fakeAtomicConfigFile) Sync() error {
+	f.synced = true
+	return f.syncErr
+}
+func (f *fakeAtomicConfigFile) Close() error {
+	f.closed = true
+	return f.closeErr
+}
+
+func TestAtomicWriteConfigFailsClosedAtEveryDurabilityStep(t *testing.T) {
+	want := errors.New("injected failure")
+	for _, tt := range []struct {
+		name       string
+		file       *fakeAtomicConfigFile
+		createErr  error
+		renameErr  error
+		wantErr    bool
+		wantRemove bool
+	}{
+		{name: "create", createErr: want, wantErr: true},
+		{name: "chmod", file: &fakeAtomicConfigFile{name: "/tmp/config", chmodErr: want}, wantErr: true, wantRemove: true},
+		{name: "encode", file: &fakeAtomicConfigFile{name: "/tmp/config", writeErr: want}, wantErr: true, wantRemove: true},
+		{name: "sync", file: &fakeAtomicConfigFile{name: "/tmp/config", syncErr: want}, wantErr: true, wantRemove: true},
+		{name: "close", file: &fakeAtomicConfigFile{name: "/tmp/config", closeErr: want}, wantErr: true, wantRemove: true},
+		{name: "rename", file: &fakeAtomicConfigFile{name: "/tmp/config"}, renameErr: want, wantErr: true, wantRemove: true},
+		{name: "success", file: &fakeAtomicConfigFile{name: "/tmp/config"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			removed := false
+			renamed := false
+			ops := atomicConfigOps{
+				createTemp: func(directory, pattern string) (atomicConfigFile, error) {
+					if directory != "/config" || pattern != ".fleet-config-*" {
+						t.Fatalf("createTemp(%q, %q)", directory, pattern)
+					}
+					return tt.file, tt.createErr
+				},
+				remove: func(path string) error { removed = true; return nil },
+				rename: func(old, new string) error {
+					renamed = true
+					if old != "/tmp/config" || new != "/config/fleet.json" {
+						t.Fatalf("rename(%q, %q)", old, new)
+					}
+					return tt.renameErr
+				},
+			}
+			err := atomicWriteConfigWith("/config/fleet.json", config.Default(), ops)
+			if (err != nil) != tt.wantErr || removed != tt.wantRemove {
+				t.Fatalf("error=%v removed=%v", err, removed)
+			}
+			if !tt.wantErr && (!renamed || !tt.file.chmodded || !tt.file.synced || !tt.file.closed) {
+				t.Fatalf("success did not complete durability sequence: %#v", tt.file)
+			}
+		})
 	}
 }

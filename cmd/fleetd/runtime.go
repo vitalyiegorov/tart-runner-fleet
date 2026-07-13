@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
@@ -18,44 +20,65 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
 type runtimeStore interface {
+	operations.Store
 	app.EngineStore
 	app.LiveInstanceStore
+	lifecycle.StateStore
+	lifecycle.DemandReader
 	DemandCursor(context.Context, int64) (int64, error)
 	OperationCounts(context.Context) (int, int, error)
 	Close() error
 }
 
+const canaryDemandLabel = "tart-fleet-canary"
+
 type scaleSetSource interface {
 	app.MessageSource
+	lifecycle.ScaleSetControl
 	Close(context.Context) error
 }
 
 type dependencies struct {
 	openConfig  func(string) (io.ReadCloser, error)
 	openStore   func(context.Context, string) (runtimeStore, error)
-	loadKey     func(context.Context, string, string) (*credentials.Secret, error)
+	loadKey     func(context.Context, string, string, string) (*credentials.Secret, error)
 	newScaleSet func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
 	inventory   func(runtimeStore, config.Config) app.Inventory
 	listen      func(string, string) (net.Listener, error)
 	adminListen func(string) (net.Listener, error)
 	cursor      func(context.Context, runtimeStore, int64) (int64, error)
+	newVM       func(runtimeStore, config.Config, lifecycle.DrainControl) lifecycle.VMControl
+	readiness   func(config.Config) lifecycle.Readiness
+	bootstrap   func(config.Config) lifecycle.Bootstrapper
+	now         func() time.Time
+	after       func(time.Duration) <-chan time.Time
+	leaseOwner  func(config.Config) string
 }
 
 var deps = defaultDependencies()
+
+const (
+	legacyScopeName             = "legacy"
+	authorityLeaseName          = "tart-runner-fleet-authority"
+	authorityLeaseTTL           = 30 * time.Second
+	authorityLeaseRenewInterval = 10 * time.Second
+	deletionConfirmationMaxAge  = 30 * time.Second
+)
 
 func defaultDependencies() dependencies {
 	return dependencies{
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
-		loadKey: func(ctx context.Context, service, account string) (*credentials.Secret, error) {
-			return (credentials.Keychain{}).Load(ctx, service, account)
+		loadKey: func(ctx context.Context, service, account, path string) (*credentials.Secret, error) {
+			return (credentials.GitHubAppKey{}).Load(ctx, service, account, path)
 		},
 		newScaleSet: func(ctx context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 			return githubscaleset.NewGitHubAppScaleSet(ctx, cfg)
@@ -72,14 +95,37 @@ func defaultDependencies() dependencies {
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
+		newVM: func(store runtimeStore, cfg config.Config, control lifecycle.DrainControl) lifecycle.VMControl {
+			return &tart.Adapter{Ownership: store, Confirmation: control, CommandTimeout: cfg.Timeouts.Tart,
+				StartTimeout: cfg.Timeouts.Boot, ConfirmationMaxAge: deletionConfirmationMaxAge}
+		},
+		readiness: func(cfg config.Config) lifecycle.Readiness {
+			return tartReadiness{Runner: tart.ExecRunner{}, Timeout: cfg.Timeouts.Boot,
+				AttemptTimeout: cfg.Timeouts.Tart, RetryInterval: 250 * time.Millisecond, After: time.After}
+		},
+		bootstrap: func(cfg config.Config) lifecycle.Bootstrapper {
+			return lifecycle.StdinBootstrapper{Runner: lifecycle.ExecStdinRunner{Binary: "tart"}, Timeout: cfg.Timeouts.Tart}
+		},
+		now:   time.Now,
+		after: time.After,
+		leaseOwner: func(cfg config.Config) string {
+			owner := cfg.GitHub.SessionOwner
+			if owner == "" {
+				owner = cfg.GitHub.Owner
+			}
+			return fmt.Sprintf("%s/%d", owner, os.Getpid())
+		},
 	}
 }
 
 func runDaemon(ctx context.Context, opts options) error { return runWithDependencies(ctx, opts, deps) }
 
 func runWithDependencies(ctx context.Context, opts options, d dependencies) error {
-	if opts.Mode != reconcile.Observe && opts.Mode != reconcile.Shadow {
-		return errors.New("only observe and shadow modes are armed")
+	if !opts.Mode.Valid() {
+		return errors.New("invalid controller mode")
+	}
+	if opts.Mode == reconcile.Canary && (strings.TrimSpace(opts.CanaryScope) == "" || strings.TrimSpace(opts.CanaryProfile) == "") {
+		return errors.New("canary requires an exact scope and profile")
 	}
 	file, err := d.openConfig(opts.ConfigPath)
 	if err != nil {
@@ -93,7 +139,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	if closeErr != nil {
 		return fmt.Errorf("close config: %w", closeErr)
 	}
-	if opts.Mode == reconcile.Shadow {
+	if opts.Mode != reconcile.Observe {
 		if err := cfg.ValidateAuthority(); err != nil {
 			return err
 		}
@@ -108,15 +154,29 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	if err != nil {
 		return err
 	}
+	bindings, err = selectRuntimeBindings(bindings, opts)
+	if err != nil {
+		return err
+	}
+	var authority *authorityLease
+	controllerLeaseOwner := ""
+	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
+		controllerLeaseOwner = d.leaseOwner(cfg)
+		authority, err = startAuthorityLease(ctx, store, controllerLeaseOwner, d.now, d.after)
+		if err != nil {
+			return fmt.Errorf("acquire controller authority: %w", err)
+		}
+		defer authority.Close()
+	}
 
 	profiles := make([]string, 0, len(schedulerConfig.Profiles))
 	for id := range schedulerConfig.Profiles {
 		profiles = append(profiles, string(id))
 	}
 	criticalObservations := []string{"operations", "scheduler"}
-	if opts.Mode == reconcile.Shadow {
+	if opts.Mode != reconcile.Observe {
 		for _, binding := range bindings {
-			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.ScaleSetID))
+			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.StoreKey))
 		}
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
@@ -156,23 +216,28 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 			_ = source.Close(context.Background())
 		}
 	}()
-	if opts.Mode == reconcile.Shadow {
-		secret, err := d.loadKey(ctx, cfg.GitHub.KeychainService, cfg.GitHub.KeychainAccount)
+	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
+	if opts.Mode != reconcile.Observe {
+		service, account, path := githubCredential(cfg)
+		secret, err := d.loadKey(ctx, service, account, path)
 		if err != nil {
 			return err
 		}
 		privateKey := githubscaleset.NewPrivateKeySecret(secret.Reveal())
 		secret.Destroy()
 		defer privateKey.Destroy()
-		for index, binding := range bindings {
-			cursor, err := d.cursor(ctx, store, binding.ScaleSetID)
+		for _, binding := range bindings {
+			settings, err := sourceSettingsFor(cfg, binding)
 			if err != nil {
 				return err
 			}
-			scale := cfg.GitHub.ScaleSets[index]
-			source, err := d.newScaleSet(ctx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: cfg.GitHub.ConfigURL,
-				ClientID: cfg.GitHub.ClientID, InstallationID: cfg.GitHub.InstallationID, PrivateKey: privateKey,
-				ScaleSetID: scale.ID, Owner: cfg.GitHub.Owner, MaxCapacity: scale.MaxCapacity, InitialCursor: int(cursor),
+			cursor, err := d.cursor(ctx, store, settings.cursorKey)
+			if err != nil {
+				return err
+			}
+			source, err := d.newScaleSet(ctx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: settings.configURL,
+				ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
+				ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
 				RequestTimeout: cfg.Timeouts.GitHub,
 				System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
 			if err != nil {
@@ -180,21 +245,48 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 			}
 			closers = append(closers, source)
 			ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
-				health: health, observation: fmt.Sprintf("github-%d", binding.ScaleSetID)})
+				health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey)})
+			for _, target := range bindingTargets(binding, cfg.Targets) {
+				key := lifecycle.SourceKey{Repo: target, Profile: binding.Profile.ID}
+				if _, duplicate := controls[key]; duplicate {
+					return fmt.Errorf("duplicate GitHub control binding for %s/%s", target, binding.Profile.ID)
+				}
+				controls[key] = lifecycle.SourceBinding{StoreKey: binding.StoreKey, Source: source}
+			}
 		}
 	}
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts}
+	var worker app.WorkRunner
+	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
+		control := &lifecycle.ControlRouter{State: store, Demand: store, Sources: controls, Now: d.now}
+		vm := d.newVM(store, cfg, control)
+		worker = operationRunner{worker: operations.Worker{
+			Store: store, Owner: controllerLeaseOwner, MaxConcurrent: workerConcurrency(opts.Mode, cfg),
+			Executors: map[string]operations.Executor{
+				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
+					Registration: control, Bootstrap: d.bootstrap(cfg), Bases: map[domain.Platform]string{
+						domain.PlatformLinux: cfg.Linux.BaseVM, domain.PlatformMacOS: cfg.MacOS.BaseVM}},
+				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
+					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
+			}, Retry: operations.RetryPolicy{MaxAttempts: 5}, OperationDeadline: lifecycleOperationDeadline(cfg),
+		}}
+	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
 	go func() {
-		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, TickInterval: cfg.PollInterval}).Run(runCtx)
+		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, Worker: worker,
+			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond}).Run(runCtx)
 	}()
 	select {
 	case err := <-serviceDone:
 		return err
+	case err := <-authorityErrors(authority):
+		cancelRun()
+		<-serviceDone
+		return fmt.Errorf("controller authority lost: %w", err)
 	case result := <-serverDone:
 		cancelRun()
 		select {
@@ -204,6 +296,250 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		}
 		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
 	}
+}
+
+func selectRuntimeBindings(bindings []app.Binding, opts options) ([]app.Binding, error) {
+	if opts.Mode != reconcile.Canary {
+		return append([]app.Binding(nil), bindings...), nil
+	}
+	scope := strings.TrimSpace(opts.CanaryScope)
+	profile := domain.ProfileID(strings.TrimSpace(opts.CanaryProfile))
+	if scope == "" || profile == "" {
+		return nil, errors.New("canary requires an exact scope and profile")
+	}
+	selected := make([]app.Binding, 0, 1)
+	for _, binding := range bindings {
+		bindingScope := binding.Scope
+		if bindingScope == "" {
+			bindingScope = legacyScopeName
+		}
+		if bindingScope == scope && binding.Profile.ID == profile {
+			binding.RequiredLabels = append([]string(nil), binding.RequiredLabels...)
+			if !containsString(binding.RequiredLabels, canaryDemandLabel) {
+				binding.RequiredLabels = append(binding.RequiredLabels, canaryDemandLabel)
+			}
+			selected = append(selected, binding)
+		}
+	}
+	if len(selected) != 1 {
+		return nil, fmt.Errorf("canary selector %s/%s resolved %d bindings", scope, profile, len(selected))
+	}
+	return selected, nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+type sourceSettings struct {
+	configURL      string
+	clientID       string
+	installationID int64
+	owner          string
+	scaleSet       config.ScaleSet
+	cursorKey      int64
+}
+
+func sourceSettingsFor(cfg config.Config, binding app.Binding) (sourceSettings, error) {
+	if binding.StoreKey <= 0 || binding.ScaleSetID <= 0 || binding.Profile.ID == "" {
+		return sourceSettings{}, errors.New("invalid runtime binding")
+	}
+	if len(cfg.GitHub.Scopes) == 0 {
+		for _, scaleSet := range cfg.GitHub.ScaleSets {
+			if int64(scaleSet.ID) == binding.ScaleSetID && scaleSet.Profile == string(binding.Profile.ID) {
+				return sourceSettings{configURL: cfg.GitHub.ConfigURL, clientID: cfg.GitHub.ClientID,
+					installationID: cfg.GitHub.InstallationID, owner: cfg.GitHub.Owner, scaleSet: scaleSet, cursorKey: binding.StoreKey}, nil
+			}
+		}
+		return sourceSettings{}, fmt.Errorf("legacy scale set %d/%s is not configured", binding.ScaleSetID, binding.Profile.ID)
+	}
+	for _, scope := range cfg.GitHub.Scopes {
+		if scope.Name != binding.Scope {
+			continue
+		}
+		installationID := int64(0)
+		for _, installation := range cfg.GitHub.Installations {
+			if strings.EqualFold(installation.Name, scope.Installation) {
+				installationID = installation.InstallationID
+				break
+			}
+		}
+		if installationID <= 0 {
+			return sourceSettings{}, fmt.Errorf("scope %q installation is unavailable", scope.Name)
+		}
+		for _, scaleSet := range scope.ScaleSets {
+			if int64(scaleSet.ID) == binding.ScaleSetID && scaleSet.Profile == string(binding.Profile.ID) {
+				return sourceSettings{configURL: scope.ConfigURL, clientID: cfg.GitHub.App.ClientID,
+					installationID: installationID, owner: cfg.GitHub.SessionOwner, scaleSet: scaleSet, cursorKey: binding.StoreKey}, nil
+			}
+		}
+		return sourceSettings{}, fmt.Errorf("scope %q scale set %d/%s is not configured", scope.Name, binding.ScaleSetID, binding.Profile.ID)
+	}
+	return sourceSettings{}, fmt.Errorf("GitHub scope %q is not configured", binding.Scope)
+}
+
+func githubCredential(cfg config.Config) (string, string, string) {
+	if len(cfg.GitHub.Scopes) > 0 {
+		return cfg.GitHub.App.KeychainService, cfg.GitHub.App.KeychainAccount, cfg.GitHub.App.PrivateKeyFile
+	}
+	return cfg.GitHub.KeychainService, cfg.GitHub.KeychainAccount, ""
+}
+
+func bindingTargets(binding app.Binding, configured []config.Target) []string {
+	if len(binding.Targets) > 0 {
+		return append([]string(nil), binding.Targets...)
+	}
+	targets := make([]string, 0, len(configured))
+	for _, target := range configured {
+		targets = append(targets, target.Slug)
+	}
+	return targets
+}
+
+func lifecycleOperationDeadline(cfg config.Config) time.Duration {
+	return cfg.Timeouts.Boot + 4*cfg.Timeouts.Tart + 3*cfg.Timeouts.GitHub
+}
+
+func workerConcurrency(mode reconcile.Mode, cfg config.Config) int {
+	if mode == reconcile.Canary {
+		return 1
+	}
+	return cfg.Linux.MaxInstances
+}
+
+type tartReadiness struct {
+	Runner         tart.Runner
+	Timeout        time.Duration
+	AttemptTimeout time.Duration
+	RetryInterval  time.Duration
+	After          func(time.Duration) <-chan time.Time
+}
+
+func (p tartReadiness) Wait(ctx context.Context, instance operations.Instance) error {
+	if p.Runner == nil || tart.ValidateName(instance.ID) != nil || p.Timeout <= 0 || p.AttemptTimeout < 0 || p.RetryInterval < 0 {
+		return operations.ErrInvalid
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, p.Timeout)
+	defer cancel()
+	attemptTimeout := p.AttemptTimeout
+	if attemptTimeout <= 0 || attemptTimeout > p.Timeout {
+		attemptTimeout = p.Timeout
+	}
+	retryInterval := p.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = 250 * time.Millisecond
+	}
+	after := p.After
+	if after == nil {
+		after = time.After
+	}
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(probeCtx, attemptTimeout)
+		_, err := p.Runner.Run(attemptCtx, "exec", instance.ID, "true")
+		attemptCancel()
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-probeCtx.Done():
+			return probeCtx.Err()
+		case <-after(retryInterval):
+		}
+	}
+}
+
+type authorityLease struct {
+	store  operations.Store
+	lease  operations.Lease
+	now    func() time.Time
+	cancel context.CancelFunc
+	done   chan struct{}
+	errors chan error
+	mu     sync.Mutex
+	once   sync.Once
+}
+
+func startAuthorityLease(ctx context.Context, store operations.Store, owner string, now func() time.Time, after func(time.Duration) <-chan time.Time) (*authorityLease, error) {
+	if store == nil || strings.TrimSpace(owner) == "" {
+		return nil, operations.ErrInvalid
+	}
+	if now == nil {
+		now = time.Now
+	}
+	if after == nil {
+		after = time.After
+	}
+	acquired, err := store.AcquireLease(ctx, authorityLeaseName, owner, now().UTC(), authorityLeaseTTL)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := store.RecoverExpired(ctx, now().UTC()); err != nil {
+		_ = store.ReleaseLease(context.WithoutCancel(ctx), acquired)
+		return nil, err
+	}
+	leaseCtx, cancel := context.WithCancel(ctx)
+	guard := &authorityLease{store: store, lease: acquired, now: now, cancel: cancel, done: make(chan struct{}), errors: make(chan error, 1)}
+	go guard.renew(leaseCtx, after)
+	return guard, nil
+}
+
+func (g *authorityLease) renew(ctx context.Context, after func(time.Duration) <-chan time.Time) {
+	defer close(g.done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-after(authorityLeaseRenewInterval):
+			g.mu.Lock()
+			lease := g.lease
+			g.mu.Unlock()
+			renewCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			renewed, err := g.store.RenewLease(renewCtx, lease, g.now().UTC(), authorityLeaseTTL)
+			cancel()
+			if err != nil {
+				g.errors <- err
+				return
+			}
+			g.mu.Lock()
+			g.lease = renewed
+			g.mu.Unlock()
+		}
+	}
+}
+
+func (g *authorityLease) Close() {
+	if g == nil {
+		return
+	}
+	g.once.Do(func() {
+		g.cancel()
+		<-g.done
+		g.mu.Lock()
+		lease := g.lease
+		g.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = g.store.ReleaseLease(ctx, lease)
+	})
+}
+
+func authorityErrors(lease *authorityLease) <-chan error {
+	if lease == nil {
+		return nil
+	}
+	return lease.errors
+}
+
+type operationRunner struct{ worker operations.Worker }
+
+func (r operationRunner) Work(ctx context.Context) error {
+	_, err := r.worker.RunOnce(ctx)
+	return err
 }
 
 func serverFailure(err error) error {

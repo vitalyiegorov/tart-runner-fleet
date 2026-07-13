@@ -3,8 +3,9 @@
 Private, fail-closed control plane for dynamically scheduling ephemeral GitHub
 Actions runners on a single Apple Silicon host using Tart.
 
-The current shell manager remains production authority while this daemon moves
-through observe, shadow, canary, and controlled cutover phases.
+The daemon supports observe, shadow, an exact one-scope/one-profile canary, and
+full authority. Promotion is an operator action; the incumbent remains an
+immediate rollback until the dedicated real-runner canary is green.
 
 ## Operator experience
 
@@ -31,12 +32,17 @@ fleetctl doctor
 
 # Prometheus exposition for local diagnostics
 fleetctl metrics
+
+# Plan first; creation and config persistence require explicit guards
+fleetctl scale-sets provision --config fleet.json
+fleetctl scale-sets provision --config fleet.json --apply --write \
+  --confirm provision-scale-sets --reason "initial controlled rollout"
 ```
 
 Every network operation has a bounded deadline. Output data goes to stdout,
 diagnostics go to stderr, rows are deterministically ordered, and exit codes
-are stable. Mutation commands are intentionally absent while the controller is
-restricted to observe/shadow mode.
+are stable. Runtime mutation stays in `fleetd`; the only local bootstrap
+mutation is the guarded, drift-checked `scale-sets provision` command.
 
 Run `fleetctl help` for the concise command contract or see
 [`docs/CLI.md`](docs/CLI.md) and [`docs/API.md`](docs/API.md).
@@ -111,9 +117,8 @@ fairness or safety decisions.
 make verify
 ```
 
-The repository requires Go 1.25.12. Production deployment is deliberately
-disabled until shadow-mode decisions match the incumbent manager and all canary
-gates pass.
+The repository requires Go 1.25.12. Canary requires exact `--canary-scope` and
+`--canary-profile` selectors and is internally capped at one lifecycle worker.
 
 Useful focused loops:
 
@@ -148,7 +153,9 @@ contents, archive contents, and SHA-256 manifest, and is retry-safe. It does not
 promote the daemon's launchd authority. Manually dispatched or non-generated
 tag releases independently rebuild each macOS ARM64 binary twice, compare both
 binaries and their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256
-manifests.
+manifests. Releases also contain secret-safe ARM64 guest bootstrap helpers for
+Linux and macOS; install the matching helper at
+`/usr/local/libexec/tart-runner-fleet-bootstrap` in each immutable base VM.
 
 The controller is itself a permanent fleet target. Its three parallel CI jobs
 exactly fill the Linux envelope, while the installed release or pinned incumbent
@@ -184,5 +191,7 @@ unlimited jump-the-queue flag. See
 - **Rollback:** stop admission, drain owned instances, atomically reactivate the
   pinned incumbent release.
 
-The checked-in daemon currently enforces an observe/shadow ceiling. See
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md) for configuration and rollout.
+The daemon enforces a renewable singleton authority lease, restartable durable
+operations, exact scope/profile canary selection, and fail-closed lease-loss
+shutdown. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for provisioning and
+the rollback-preserving rollout.

@@ -20,12 +20,27 @@ type fakeScaleSet struct {
 	deleted                   []int
 	jitSetting                *scaleset.RunnerScaleSetJitRunnerSetting
 	jitID                     int
+	runner                    *scaleset.RunnerReference
+	removedRunner             int64
 	deadlineSeen              bool
 	acquireResult             []int64
 	acquireErr, closeErr      error
 	acquireArgs               [][]int64
 	closed                    int
 	ops                       []string
+}
+
+func (f *fakeScaleSet) GetRunnerByName(context.Context, string) (*scaleset.RunnerReference, error) {
+	return f.runner, f.getErr
+}
+
+func (f *fakeScaleSet) RemoveRunner(_ context.Context, id int64) error {
+	f.removedRunner = id
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.runner = nil
+	return nil
 }
 
 func (f *fakeScaleSet) AcquireJobs(ctx context.Context, ids []int64) ([]int64, error) {
@@ -125,6 +140,67 @@ func TestScaleSetAckCursorRedeliveryAndJIT(t *testing.T) {
 	secret.Destroy()
 	if secret.Reveal() != "" {
 		t.Fatal("secret not destroyed")
+	}
+}
+
+func TestScaleSetRunnerRegistrationAndIdempotentDeregistration(t *testing.T) {
+	fake := &fakeScaleSet{runner: &scaleset.RunnerReference{ID: 7, Name: "runner", RunnerScaleSetID: 9}}
+	scale, err := NewScaleSet(ScaleSetConfig{Messages: fake, JIT: fake, Runners: fake, ScaleSetID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := scale.Registered(context.Background(), "runner")
+	if err != nil || !registered {
+		t.Fatalf("Registered() = %v, %v", registered, err)
+	}
+	if err := scale.Deregister(context.Background(), "runner"); err != nil || fake.removedRunner != 7 {
+		t.Fatalf("Deregister() = %v, removed=%d", err, fake.removedRunner)
+	}
+	registered, err = scale.Registered(context.Background(), "runner")
+	if err != nil || registered {
+		t.Fatalf("Registered(absent) = %v, %v", registered, err)
+	}
+	if err := scale.Deregister(context.Background(), "runner"); err != nil {
+		t.Fatalf("Deregister(absent) = %v", err)
+	}
+}
+
+func TestScaleSetRunnerAdministrationFailsClosed(t *testing.T) {
+	fake := &fakeScaleSet{}
+	withoutRunners, err := NewScaleSet(ScaleSetConfig{Messages: fake, JIT: fake, ScaleSetID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := withoutRunners.Registered(context.Background(), "runner"); err == nil {
+		t.Fatal("registration observation accepted without runner administration")
+	}
+	if err := withoutRunners.Deregister(context.Background(), "runner"); err == nil {
+		t.Fatal("deregistration accepted without runner administration")
+	}
+
+	scale, err := NewScaleSet(ScaleSetConfig{Messages: fake, JIT: fake, Runners: fake, ScaleSetID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scale.Registered(context.Background(), "bad runner name"); err == nil {
+		t.Fatal("invalid runner name accepted")
+	}
+	if err := scale.Deregister(context.Background(), "bad runner name"); err == nil {
+		t.Fatal("invalid runner name accepted for removal")
+	}
+	want := errors.New("github unavailable")
+	fake.getErr = want
+	if _, err := scale.Registered(context.Background(), "runner"); !errors.Is(err, want) {
+		t.Fatalf("Registered() error = %v", err)
+	}
+	if err := scale.Deregister(context.Background(), "runner"); !errors.Is(err, want) {
+		t.Fatalf("Deregister() observation error = %v", err)
+	}
+	fake.getErr = nil
+	fake.runner = &scaleset.RunnerReference{ID: 8, Name: "runner", RunnerScaleSetID: 9}
+	fake.deleteErr = want
+	if err := scale.Deregister(context.Background(), "runner"); !errors.Is(err, want) {
+		t.Fatalf("Deregister() removal error = %v", err)
 	}
 }
 

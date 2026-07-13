@@ -1,10 +1,13 @@
 # Operations
 
-## Current promotion ceiling
+## Promotion contract
 
-`fleetd` accepts `observe` and `shadow`. `canary` and `authority` are hard-coded
-off until a disposable real-VM lifecycle canary and rollback drill pass. The
-incumbent shell manager remains production authority.
+`fleetd` supports `observe`, `shadow`, `canary`, and `authority`. Canary and
+authority acquire a renewable singleton lease, recover expired outbox leases,
+and stop on lease loss. Canary additionally requires exact scope/profile flags
+and runs at most one lifecycle operation concurrently. Promotion is never
+implicit: keep the incumbent installed until a real queued job has completed,
+deregistered, stopped, and deleted through the Go controller.
 
 ## Self-hosting and bootstrap
 
@@ -65,19 +68,144 @@ need to parse, and do not treat this migration as authority promotion.
 ## Shadow
 
 Shadow additionally opens one official GitHub Actions Scale Set message session
-per profile. It commits sanitized job events and the message cursor atomically
+per configured scope/profile. It commits sanitized job events and the scoped
+message cursor atomically
 before acknowledgement, computes plans, and writes effects to neither GitHub nor
 Tart. Do not point another controller at the same scale-set sessions.
 
-GitHub App metadata belongs in JSON; the PEM private key belongs in a Keychain
-generic-password item. Create that item through Keychain Access so the PEM never
-appears in shell history or a process argument. Use service
-`tart-runner-fleet-github-app` and account `controller` (or configure different
-names), paste the PEM as the item password, then delete the source file safely.
+GitHub App metadata belongs in JSON. Prefer a Keychain generic-password item
+when its access control permits unattended launchd reads. Create that item
+through Keychain Access so the PEM never appears in shell history or a process
+argument. Use service `tart-runner-fleet-github-app` and account `controller`
+(or configure different names), paste the PEM as the item password, then delete
+the source file safely.
 
-The `github` configuration requires `configUrl`, `owner`, `clientId`,
-`installationId`, `keychainService`, `keychainAccount`, and exactly one
-`scaleSets` entry for every enabled runner profile.
+If macOS Keychain access requires an interactive prompt in the launchd session,
+configure `github.app.privateKeyFile` instead. The file must be a regular,
+non-symlink file owned by the launchd user with exact mode `0600`; the loader
+opens it with `O_NOFOLLOW`, bounds its size, and never logs or serializes its
+contents. Keep it below the fleet state directory's mode-`0700` parent. Example:
+
+```json
+{
+  "github": {
+    "app": {
+      "clientId": "Iv23...",
+      "privateKeyFile": "/Users/runner/Library/Application Support/tart-runner-fleet/secrets/github-app.pem"
+    }
+  }
+}
+```
+
+When `privateKeyFile` and Keychain metadata are both present, the file is the
+authoritative source. This deterministic precedence prevents stale Keychain
+metadata from reopening an interactive prompt. Removing `privateKeyFile`
+restores the existing Keychain loader unchanged.
+
+The multi-scope `github` configuration contains one non-secret App client ID,
+one private-key credential reference, named installation IDs, and registration
+scopes. Use a repository scope for each personal repository and an organization
+scope for organization repositories. Every target belongs to exactly one scope;
+every scope has exactly one scale set for each enabled profile. Numeric scale-set
+IDs may collide across installations because durable state uses a scoped key.
+
+Provisioning is explicit, drift-failing, and plan-first:
+
+```sh
+fleetctl config validate fleet.json
+fleetctl scale-sets provision --config fleet.json
+fleetctl scale-sets provision --config fleet.json --apply --write \
+  --confirm provision-scale-sets \
+  --reason "initial GitHub Actions scale-set bootstrap"
+```
+
+The command inspects every scope before creating anything, reuses only an exact
+name/labels/group match, rejects drift, and atomically writes returned IDs with
+mode `0600`. It never prints the App key or JIT material.
+
+## Immutable guest bases
+
+Each Linux and macOS base must contain an unpacked GitHub Actions runner at
+`$HOME/actions-runner/run.sh` and the matching released helper installed as
+`/usr/local/libexec/tart-runner-fleet-bootstrap`. The host sends the bounded JIT
+configuration over `tart exec -i` standard input; it never appears in argv,
+logs, SQLite, or the parent environment. Build new `*-go` bases and retain the
+incumbent bases unchanged for rollback.
+
+## Real canary and authority handoff
+
+Every release carries four immutable launchd templates plus
+`render-launchd.sh`. Render them into a generation-specific directory; never
+edit a plist in place. The observe template remains the default and uses the
+existing `com.vitalyiegorov.tart-runner-fleet` label. Shadow and canary use
+separate databases, sockets, health ports, logs, and launchd labels:
+
+```sh
+set -eu
+RELEASE_DIR="$HOME/Library/Application Support/tart-runner-fleet/releases/$VERSION"
+STATE_DIR="$HOME/Library/Application Support/tart-runner-fleet/state"
+PLIST_DIR="$HOME/Library/Application Support/tart-runner-fleet/launchd/$VERSION"
+mkdir -p "$PLIST_DIR"
+cd "$RELEASE_DIR"
+./render-launchd.sh observe "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/observe.plist"
+./render-launchd.sh shadow "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/shadow.plist"
+./render-launchd.sh canary "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/canary.plist" fleet-repo small
+./render-launchd.sh authority "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/authority.plist"
+plutil -lint "$PLIST_DIR"/*.plist
+```
+
+Bootstrap shadow first. After its evidence is coherent, boot it out before
+bootstrapping canary; only one official scale-set message consumer may own a
+scope/profile at a time:
+
+```sh
+launchctl bootstrap gui/"$(id -u)" "$PLIST_DIR/shadow.plist"
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.shadow
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.shadow
+launchctl bootstrap gui/"$(id -u)" "$PLIST_DIR/canary.plist"
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.canary
+```
+
+Dispatch `.github/workflows/fleet-canary.yml`. Canary ingestion requires the
+dedicated `tart-fleet-canary` job label in addition to the exact scope/profile,
+so an ordinary `linux-small` job in the same repository cannot be mutated.
+Require the complete sequence:
+queued demand, owned Tart clone, readiness, JIT registration, job success,
+fresh completed-job guard, deregistration, stop, deletion, and zero owned VMs.
+Then remove canary and perform the fail-safe authority handoff below. The
+authority plist is already fully rendered and linted; the block restores the
+incumbent immediately if launchd cannot bootstrap Go authority:
+
+```sh
+set -eu
+AUTHORITY_PLIST="$PLIST_DIR/authority.plist"
+INCUMBENT_PLIST="$HOME/Library/LaunchAgents/com.github.linux-burst-manager.plist"
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.canary
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet 2>/dev/null || true
+launchctl bootout gui/"$(id -u)"/com.github.linux-burst-manager
+if ! launchctl bootstrap gui/"$(id -u)" "$AUTHORITY_PLIST"; then
+  launchctl bootstrap gui/"$(id -u)" "$INCUMBENT_PLIST"
+  launchctl kickstart -k gui/"$(id -u)"/com.github.linux-burst-manager
+  exit 1
+fi
+launchctl kickstart -k gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
+```
+
+Watch one Linux plus one macOS job before releasing normal load. The exact
+rollback is local and does not depend on GitHub Actions:
+
+```sh
+set -eu
+AUTHORITY_PLIST="$PLIST_DIR/authority.plist"
+INCUMBENT_PLIST="$HOME/Library/LaunchAgents/com.github.linux-burst-manager.plist"
+launchctl bootout gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
+launchctl bootstrap gui/"$(id -u)" "$INCUMBENT_PLIST"
+launchctl kickstart -k gui/"$(id -u)"/com.github.linux-burst-manager
+```
+
+After rollback, drain only Go-owned VMs and retain the failed authority plist,
+database, and logs as one immutable incident bundle. Do not delete or rewrite
+incumbent state.
 
 ## Health
 

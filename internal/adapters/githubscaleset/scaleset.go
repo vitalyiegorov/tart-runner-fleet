@@ -20,10 +20,15 @@ type officialMessages interface {
 type officialJIT interface {
 	GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
 }
+type officialRunners interface {
+	GetRunnerByName(context.Context, string) (*scaleset.RunnerReference, error)
+	RemoveRunner(context.Context, int64) error
+}
 
 type ScaleSetConfig struct {
 	Messages       officialMessages
 	JIT            officialJIT
+	Runners        officialRunners
 	ScaleSetID     int
 	MaxCapacity    int
 	PollTimeout    time.Duration
@@ -34,6 +39,7 @@ type ScaleSetConfig struct {
 type ScaleSet struct {
 	messages                    officialMessages
 	jit                         officialJIT
+	runners                     officialRunners
 	id, capacity                int
 	pollTimeout, requestTimeout time.Duration
 	mu                          sync.Mutex
@@ -51,7 +57,7 @@ func NewScaleSet(c ScaleSetConfig) (*ScaleSet, error) {
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 15 * time.Second
 	}
-	return &ScaleSet{messages: c.Messages, jit: c.JIT, id: c.ScaleSetID, capacity: c.MaxCapacity, pollTimeout: c.PollTimeout, requestTimeout: c.RequestTimeout, cursor: c.InitialCursor}, nil
+	return &ScaleSet{messages: c.Messages, jit: c.JIT, runners: c.Runners, id: c.ScaleSetID, capacity: c.MaxCapacity, pollTimeout: c.PollTimeout, requestTimeout: c.RequestTimeout, cursor: c.InitialCursor}, nil
 }
 
 func (s *ScaleSet) LastMessageID() int { s.mu.Lock(); defer s.mu.Unlock(); return s.cursor }
@@ -220,4 +226,36 @@ func (s *ScaleSet) GenerateJIT(ctx context.Context, name, workFolder string) (*J
 	encoded := config.EncodedJITConfig
 	config.EncodedJITConfig = ""
 	return NewJITSecret(encoded), nil
+}
+
+func (s *ScaleSet) Registered(ctx context.Context, name string) (bool, error) {
+	if s.runners == nil || !validScaleSetToken.MatchString(name) {
+		return false, errors.New("runner administration is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.requestTimeout)
+	defer cancel()
+	runner, err := s.runners.GetRunnerByName(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("observe scale-set runner: %w", err)
+	}
+	return runner != nil, nil
+}
+
+func (s *ScaleSet) Deregister(ctx context.Context, name string) error {
+	if s.runners == nil || !validScaleSetToken.MatchString(name) {
+		return errors.New("runner administration is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.requestTimeout)
+	defer cancel()
+	runner, err := s.runners.GetRunnerByName(ctx, name)
+	if err != nil {
+		return fmt.Errorf("observe scale-set runner before removal: %w", err)
+	}
+	if runner == nil {
+		return nil
+	}
+	if err := s.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil {
+		return fmt.Errorf("remove scale-set runner: %w", err)
+	}
+	return nil
 }

@@ -9,12 +9,17 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
 )
 
 const (
@@ -37,13 +42,52 @@ type apiClient interface {
 }
 
 type dependencies struct {
-	newClient func(string, time.Duration) (apiClient, error)
+	newClient      func(string, time.Duration) (apiClient, error)
+	openConfig     func(string) (io.ReadCloser, error)
+	loadPrivateKey func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
+	openProvision  func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
+	writeConfig    func(string, config.Config) error
+}
+
+type loadedSecret interface {
+	Reveal() string
+	Destroy()
+}
+
+type secretLoader func(context.Context, string, string, string) (loadedSecret, error)
+
+func privateKeyLoader(load secretLoader) func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	return func(ctx context.Context, service, account, path string) (*githubscaleset.PrivateKeySecret, error) {
+		secret, err := load(ctx, service, account, path)
+		if err != nil {
+			return nil, err
+		}
+		if secret == nil {
+			return nil, operations.ErrInvalid
+		}
+		key := githubscaleset.NewPrivateKeySecret(secret.Reveal())
+		secret.Destroy()
+		return key, nil
+	}
 }
 
 func defaultDependencies() dependencies {
-	return dependencies{newClient: func(endpoint string, timeout time.Duration) (apiClient, error) {
-		return adminapi.NewClient(endpoint, timeout)
-	}}
+	appKey := credentials.GitHubAppKey{}
+	return dependencies{
+		newClient: func(endpoint string, timeout time.Duration) (apiClient, error) {
+			return adminapi.NewClient(endpoint, timeout)
+		},
+		openConfig: func(path string) (io.ReadCloser, error) {
+			return os.Open(path) // #nosec G304 -- explicit operator-selected config path.
+		},
+		loadPrivateKey: privateKeyLoader(func(ctx context.Context, service, account, path string) (loadedSecret, error) {
+			return appKey.Load(ctx, service, account, path)
+		}),
+		openProvision: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
+			return githubscaleset.NewProvisioner(cfg)
+		},
+		writeConfig: atomicWriteConfig,
+	}
 }
 
 func main() {
@@ -77,6 +121,8 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		return exitSuccess
 	case "config":
 		return runConfig(args[1:], stdout, stderr)
+	case "scale-sets":
+		return runScaleSets(ctx, args[1:], stdout, stderr, deps)
 	case "validate-config":
 		return runConfig(append([]string{"validate"}, args[1:]...), stdout, stderr)
 	case "status", "queues", "instances", "operations", "observations", "health", "doctor", "metrics":
@@ -89,6 +135,128 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		writeHelp(stderr)
 		return exitUsage
 	}
+}
+
+func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	if len(args) == 0 || args[0] != "provision" {
+		fmt.Fprintln(stderr, "usage: fleetctl scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text]")
+		return exitUsage
+	}
+	flags := flag.NewFlagSet("fleetctl scale-sets provision", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	path := flags.String("config", "", "fleet configuration path")
+	output := flags.String("output", "table", "output format: table or json")
+	apply := flags.Bool("apply", false, "create missing scale sets after a complete drift-free plan")
+	write := flags.Bool("write", false, "atomically persist returned IDs to the configuration")
+	confirm := flags.String("confirm", "", "exact mutation confirmation")
+	reason := flags.String("reason", "", "operator reason recorded outside secret material")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *path == "" || (*output != "table" && *output != "json") {
+		return exitUsage
+	}
+	if *apply && (!*write || *confirm != "provision-scale-sets" || strings.TrimSpace(*reason) == "") {
+		fmt.Fprintln(stderr, "unsafe apply: require --write --confirm provision-scale-sets and a non-empty --reason")
+		return exitUnsafe
+	}
+	if !*apply && (*write || *confirm != "" || *reason != "") {
+		fmt.Fprintln(stderr, "mutation flags require --apply")
+		return exitUsage
+	}
+	file, err := deps.openConfig(*path)
+	if err != nil {
+		fmt.Fprintf(stderr, "open config: %v\n", err)
+		return exitFailure
+	}
+	cfg, decodeErr := config.Decode(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		fmt.Fprintf(stderr, "invalid config: %v\n", decodeErr)
+		return exitFailure
+	}
+	if closeErr != nil {
+		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
+		return exitFailure
+	}
+	result, err := provision.Run(ctx, provision.Request{Config: cfg, Apply: *apply, LoadKey: deps.loadPrivateKey, Open: deps.openProvision, Version: version})
+	if err != nil {
+		fmt.Fprintf(stderr, "provision scale sets: %v\n", err)
+		if errors.Is(err, operations.ErrConflict) || errors.Is(err, operations.ErrUncertain) {
+			return exitUnsafe
+		}
+		return exitFailure
+	}
+	if *apply {
+		if err := deps.writeConfig(*path, result.Config); err != nil {
+			fmt.Fprintf(stderr, "persist config: %v\n", err)
+			return exitFailure
+		}
+	}
+	if *output == "json" {
+		if err := writeJSON(stdout, result.Changes); err != nil {
+			return exitFailure
+		}
+	} else {
+		for _, change := range result.Changes {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%s\n", change.Scope, change.Profile, change.Name, change.ID, change.Action)
+		}
+	}
+	return exitSuccess
+}
+
+func atomicWriteConfig(path string, cfg config.Config) error {
+	return atomicWriteConfigWith(path, cfg, atomicConfigOps{
+		createTemp: func(directory, pattern string) (atomicConfigFile, error) { return os.CreateTemp(directory, pattern) },
+		remove:     os.Remove,
+		rename:     os.Rename,
+	})
+}
+
+type atomicConfigFile interface {
+	io.Writer
+	Name() string
+	Chmod(os.FileMode) error
+	Sync() error
+	Close() error
+}
+
+type atomicConfigOps struct {
+	createTemp func(string, string) (atomicConfigFile, error)
+	remove     func(string) error
+	rename     func(string, string) error
+}
+
+func atomicWriteConfigWith(path string, cfg config.Config, ops atomicConfigOps) error {
+	directory := filepath.Dir(path)
+	temporary, err := ops.createTemp(directory, ".fleet-config-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	remove := true
+	defer func() {
+		if remove {
+			_ = ops.remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := config.Encode(temporary, cfg); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := ops.rename(temporaryPath, path); err != nil {
+		return err
+	}
+	remove = false
+	return nil
 }
 
 func splitLeadingConnectionArgs(args []string) (connectionArgs, remaining []string) {
@@ -339,6 +507,11 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleetctl metrics
   fleetctl config validate <path>
   fleetctl version | api-version
+
+GUARDED BOOTSTRAP
+  fleetctl scale-sets provision --config path
+  fleetctl scale-sets provision --config path --apply --write \
+    --confirm provision-scale-sets --reason "operator reason"
 
 CONNECTION
   fleetctl [--endpoint unix:///path/to/fleetd.sock] <remote-command>

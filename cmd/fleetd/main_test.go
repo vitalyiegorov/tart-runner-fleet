@@ -12,7 +12,9 @@ import (
 func TestExecute(t *testing.T) {
 	original := run
 	t.Cleanup(func() { run = original })
+	var received options
 	run = func(_ context.Context, opts options) error {
+		received = opts
 		if opts.ConfigPath == "bad" {
 			return errors.New("no secret")
 		}
@@ -27,6 +29,8 @@ func TestExecute(t *testing.T) {
 		{name: "version", args: []string{"version"}, code: 0, out: "dev"},
 		{name: "run defaults", args: []string{"run"}, code: 0},
 		{name: "run flags", args: []string{"run", "--config", "x", "--database", "d", "--mode", "shadow", "--admin-socket", "/tmp/fleet.sock"}, code: 0},
+		{name: "canary requires selector", args: []string{"run", "--mode", "canary"}, code: 2, err: "canary requires"},
+		{name: "canary selector", args: []string{"run", "--mode", "canary", "--canary-scope", "personal-repo", "--canary-profile", "small"}, code: 0},
 		{name: "runtime error", args: []string{"run", "--config", "bad"}, code: 1, err: "fleetd failed"},
 		{name: "usage", code: 2, err: "usage:"},
 		{name: "wrong command", args: []string{"bad"}, code: 2, err: "usage:"},
@@ -38,6 +42,9 @@ func TestExecute(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code := execute(context.Background(), tt.args, &stdout, &stderr); code != tt.code || !strings.Contains(stdout.String(), tt.out) || !strings.Contains(stderr.String(), tt.err) {
 				t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if tt.name == "canary selector" && (received.CanaryScope != "personal-repo" || received.CanaryProfile != "small") {
+				t.Fatalf("canary selector not forwarded: %#v", received)
 			}
 		})
 	}

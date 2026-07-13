@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -80,6 +81,75 @@ func TestMigrateTransitionClaimCompleteAndRestart(t *testing.T) {
 	persisted, err := reopened.Instance(ctx, "vm")
 	if err != nil || persisted.State != operations.StateCloning {
 		t.Fatalf("restart lost state: %#v %v", persisted, err)
+	}
+}
+
+func TestAdvanceLifecycleStateUsesStateAndVersionCAS(t *testing.T) {
+	store := testStore(t)
+	now := time.Unix(100, 0).UTC()
+	instance := operations.Instance{ID: "advance", State: operations.StatePlanned, Version: 0,
+		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}, CreatedAt: now}
+	if err := store.CreateInstance(context.Background(), instance); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := store.Advance(context.Background(), lifecycle.StateChange{InstanceID: instance.ID, ExpectedState: operations.StatePlanned,
+		ExpectedVersion: instance.Version, NextState: operations.StateCloning})
+	if err != nil || advanced.State != operations.StateCloning || advanced.Version != instance.Version+1 {
+		t.Fatalf("Advance() = %#v, %v", advanced, err)
+	}
+	if _, err := store.Advance(context.Background(), lifecycle.StateChange{InstanceID: instance.ID, ExpectedState: operations.StatePlanned,
+		ExpectedVersion: instance.Version, NextState: operations.StateCloning}); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("stale Advance error = %v", err)
+	}
+	failed, err := store.Advance(context.Background(), lifecycle.StateChange{InstanceID: instance.ID, ExpectedState: operations.StateCloning,
+		ExpectedVersion: advanced.Version, NextState: operations.StateFailed, FailureCode: "bootstrap"})
+	if err != nil || failed.State != operations.StateFailed || failed.LastError != "bootstrap" {
+		t.Fatalf("failure Advance() = %#v, %v", failed, err)
+	}
+	if _, err := store.Advance(context.Background(), lifecycle.StateChange{}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid Advance error = %v", err)
+	}
+}
+
+func TestAdvanceRollsBackEveryDurabilityStageFailure(t *testing.T) {
+	for _, point := range []string{"advance.instance", "advance.history", "advance.result", "advance.commit"} {
+		t.Run(point, func(t *testing.T) {
+			store := testStore(t)
+			instance := operations.Instance{ID: "advance-failure", State: operations.StatePlanned,
+				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+			if err := store.CreateInstance(context.Background(), instance); err != nil {
+				t.Fatal(err)
+			}
+			store.injectFault = func(candidate string) error {
+				if candidate == point {
+					return errors.New("injected")
+				}
+				return nil
+			}
+			if _, err := store.Advance(context.Background(), lifecycle.StateChange{InstanceID: instance.ID,
+				ExpectedState: operations.StatePlanned, ExpectedVersion: 0, NextState: operations.StateCloning}); err == nil {
+				t.Fatal("advance stage failure was ignored")
+			}
+			store.injectFault = nil
+			got, err := store.Instance(context.Background(), instance.ID)
+			if err != nil || got.State != operations.StatePlanned || got.Version != 0 {
+				t.Fatalf("failed advance partially committed: %#v, %v", got, err)
+			}
+			var history int
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM transition_history WHERE instance_id=?`, instance.ID).Scan(&history); err != nil || history != 0 {
+				t.Fatalf("failed advance persisted history: %d, %v", history, err)
+			}
+		})
+	}
+}
+
+func TestOperationCountsFailsClosedWhenDatabaseUnavailable(t *testing.T) {
+	store := testStore(t)
+	if err := store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.OperationCounts(context.Background()); err == nil {
+		t.Fatal("closed database operation summary succeeded")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -194,5 +195,213 @@ func TestDemandInboxCorruptProjectionFailsClosed(t *testing.T) {
 	}
 	if _, err := scanDemand(scanError{sql.ErrNoRows}); !errors.Is(err, operations.ErrNotFound) {
 		t.Fatalf("demand not found mapping: %v", err)
+	}
+}
+
+func TestProjectDemandEventDrivesRunnerLifecycleAndQueuesDrain(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	events := []operations.DemandEvent{{Kind: operations.DemandJobAvailable, RunnerRequestID: 71, Owner: "owner", Repository: "repo", WorkflowRunID: 22, QueueTime: now}}
+	if _, err := store.ApplyDemandBatch(ctx, 99, 1, events); err != nil {
+		t.Fatal(err)
+	}
+	instance := operations.Instance{ID: "trf-small-project", Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+		Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1}, Demand: domain.DemandKey{Repo: "owner/repo", RunID: 22, Attempt: 1, JobID: 71},
+		State: operations.StateRegistering, Ownership: operations.Ownership{ControllerID: "c", ResourceID: "d", OperationID: "spawn"}, CreatedAt: now}
+	if err := store.CreateInstance(ctx, instance); err != nil {
+		t.Fatal(err)
+	}
+	for index, kind := range []operations.DemandEventKind{operations.DemandJobAssigned, operations.DemandJobStarted, operations.DemandJobCompleted} {
+		event := events[0]
+		event.Kind = kind
+		if _, err := store.ApplyDemandBatch(ctx, 99, int64(index+2), []operations.DemandEvent{event}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ProjectDemandEvent(ctx, 99, event); err != nil {
+			t.Fatalf("project %s: %v", kind, err)
+		}
+	}
+	got, err := store.Instance(ctx, instance.ID)
+	if err != nil || got.State != operations.StateDraining {
+		t.Fatalf("projected instance = %#v, %v", got, err)
+	}
+	claimed, err := store.Claim(ctx, "worker", 2, time.Now().UTC().Add(time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].Kind != "deregister" || claimed[0].ResourceID != instance.ID {
+		t.Fatalf("drain operation = %#v, %v", claimed, err)
+	}
+	if err := store.ProjectDemandEvent(ctx, 99, events[0]); err != nil {
+		t.Fatalf("available projection = %v", err)
+	}
+}
+
+func TestProjectDemandRankCoversMonotonicLifecycleAndIdempotency(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    operations.DemandEventKind
+		state     operations.State
+		wantState operations.State
+	}{
+		{name: "assigned catches up registering", status: operations.DemandJobAssigned, state: operations.StateRegistering, wantState: operations.StateAssigned},
+		{name: "assigned advances idle", status: operations.DemandJobAssigned, state: operations.StateOnlineIdle, wantState: operations.StateAssigned},
+		{name: "assigned is idempotent", status: operations.DemandJobAssigned, state: operations.StateRunning, wantState: operations.StateRunning},
+		{name: "started catches up registering", status: operations.DemandJobStarted, state: operations.StateRegistering, wantState: operations.StateRunning},
+		{name: "started catches up idle", status: operations.DemandJobStarted, state: operations.StateOnlineIdle, wantState: operations.StateRunning},
+		{name: "started advances assigned", status: operations.DemandJobStarted, state: operations.StateAssigned, wantState: operations.StateRunning},
+		{name: "started is idempotent", status: operations.DemandJobStarted, state: operations.StateDraining, wantState: operations.StateDraining},
+		{name: "completed catches up registering", status: operations.DemandJobCompleted, state: operations.StateRegistering, wantState: operations.StateDraining},
+		{name: "completed drains idle", status: operations.DemandJobCompleted, state: operations.StateOnlineIdle, wantState: operations.StateDraining},
+		{name: "completed drains assigned", status: operations.DemandJobCompleted, state: operations.StateAssigned, wantState: operations.StateDraining},
+		{name: "completed drains running", status: operations.DemandJobCompleted, state: operations.StateRunning, wantState: operations.StateDraining},
+		{name: "completed is idempotent", status: operations.DemandJobCompleted, state: operations.StateStopping, wantState: operations.StateStopping},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := testStore(t)
+			instance := operations.Instance{ID: "vm", State: test.state,
+				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+			if err := store.CreateInstance(context.Background(), instance); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.projectDemandRank(context.Background(), instance, test.status); err != nil {
+				t.Fatalf("project demand rank: %v", err)
+			}
+			got, err := store.Instance(context.Background(), instance.ID)
+			if err != nil || got.State != test.wantState {
+				t.Fatalf("instance state = %s, %v; want %s", got.State, err, test.wantState)
+			}
+			if test.wantState == operations.StateDraining && test.state != operations.StateStopping && test.state != operations.StateDraining {
+				claimed, claimErr := store.Claim(context.Background(), "worker", 1, time.Now().UTC().Add(time.Minute), time.Minute)
+				if claimErr != nil || len(claimed) != 1 || claimed[0].Kind != "deregister" {
+					t.Fatalf("drain operation = %#v, %v", claimed, claimErr)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectDemandRankFailsClosedForImpossibleStatesAndStorageErrors(t *testing.T) {
+	for _, status := range []operations.DemandEventKind{
+		operations.DemandJobAssigned,
+		operations.DemandJobStarted,
+		operations.DemandJobCompleted,
+	} {
+		t.Run(string(status)+" uncertain", func(t *testing.T) {
+			store := testStore(t)
+			instance := operations.Instance{ID: "planned", State: operations.StatePlanned,
+				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+			if err := store.CreateInstance(context.Background(), instance); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.projectDemandRank(context.Background(), instance, status); !errors.Is(err, operations.ErrUncertain) {
+				t.Fatalf("impossible state error = %v", err)
+			}
+		})
+		t.Run(string(status)+" advance failure", func(t *testing.T) {
+			store := testStore(t)
+			instance := operations.Instance{ID: "registering", State: operations.StateRegistering,
+				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+			if err := store.CreateInstance(context.Background(), instance); err != nil {
+				t.Fatal(err)
+			}
+			store.injectFault = func(point string) error {
+				if point == "advance.begin" {
+					return errors.New("injected")
+				}
+				return nil
+			}
+			if err := store.projectDemandRank(context.Background(), instance, status); err == nil {
+				t.Fatal("storage failure was ignored")
+			}
+		})
+	}
+	store := testStore(t)
+	instance := operations.Instance{ID: "invalid-status", State: operations.StateOnlineIdle,
+		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+	if err := store.projectDemandRank(context.Background(), instance, operations.DemandEventKind("unknown")); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid status error = %v", err)
+	}
+}
+
+func TestProjectDemandEventUsesDurableRecordAndUniqueOwnedInstance(t *testing.T) {
+	ctx := context.Background()
+	newStoreWithDemand := func(t *testing.T, kind operations.DemandEventKind) (*Store, operations.DemandEvent) {
+		t.Helper()
+		store := testStore(t)
+		event := demandEvent(kind, 91)
+		if _, err := store.ApplyDemandBatch(ctx, 7, 1, []operations.DemandEvent{event}); err != nil {
+			t.Fatal(err)
+		}
+		return store, event
+	}
+	newInstance := func(id string, state operations.State) operations.Instance {
+		return operations.Instance{ID: id, Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+			Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1},
+			Demand:    domain.DemandKey{Repo: "owner/repo", RunID: 77, Attempt: 1, JobID: 91}, State: state,
+			Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+	}
+
+	if err := testStore(t).ProjectDemandEvent(ctx, 0, operations.DemandEvent{}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid projection error = %v", err)
+	}
+	availableStore := testStore(t)
+	if err := availableStore.ProjectDemandEvent(ctx, 1, demandEvent(operations.DemandJobAvailable, 1)); err != nil {
+		t.Fatalf("available event should not mutate lifecycle: %v", err)
+	}
+	missingStore := testStore(t)
+	if err := missingStore.ProjectDemandEvent(ctx, 1, demandEvent(operations.DemandJobStarted, 1)); !errors.Is(err, operations.ErrNotFound) {
+		t.Fatalf("missing durable demand error = %v", err)
+	}
+
+	completedStore, completed := newStoreWithDemand(t, operations.DemandJobCompleted)
+	if err := completedStore.ProjectDemandEvent(ctx, 7, completed); err != nil {
+		t.Fatalf("completion without a live VM should be idempotent: %v", err)
+	}
+	startedStore, started := newStoreWithDemand(t, operations.DemandJobStarted)
+	if err := startedStore.ProjectDemandEvent(ctx, 7, started); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("active demand without VM error = %v", err)
+	}
+
+	duplicateStore, duplicate := newStoreWithDemand(t, operations.DemandJobAssigned)
+	for _, id := range []string{"one", "two"} {
+		if err := duplicateStore.CreateInstance(ctx, newInstance(id, operations.StateOnlineIdle)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := duplicateStore.ProjectDemandEvent(ctx, 7, duplicate); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("duplicate ownership error = %v", err)
+	}
+
+	queryStore, queryEvent := newStoreWithDemand(t, operations.DemandJobAssigned)
+	queryStore.injectFault = func(point string) error {
+		if point == "instances.live.query" {
+			return errors.New("injected")
+		}
+		return nil
+	}
+	if err := queryStore.ProjectDemandEvent(ctx, 7, queryEvent); err == nil {
+		t.Fatal("live inventory failure was ignored")
+	}
+}
+
+func TestDemandRecordValidationLookupAndCorruption(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	if _, err := store.DemandRecord(ctx, 0, 1); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid scale set error = %v", err)
+	}
+	if _, err := store.DemandRecord(ctx, 1, 0); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid request error = %v", err)
+	}
+	if _, err := store.DemandRecord(ctx, 1, 1); !errors.Is(err, operations.ErrNotFound) {
+		t.Fatalf("missing record error = %v", err)
+	}
+	event := demandEvent(operations.DemandJobAssigned, 1)
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 1)
+	if err != nil || record.Status != operations.DemandJobAssigned {
+		t.Fatalf("demand record = %#v, %v", record, err)
 	}
 }

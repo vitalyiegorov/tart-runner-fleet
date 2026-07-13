@@ -13,11 +13,19 @@ import (
 )
 
 type fakeDemandStore struct {
-	batches []operations.DemandEvent
-	records []operations.DemandRecord
-	cursor  int64
-	applied bool
-	err     error
+	batches    []operations.DemandEvent
+	records    []operations.DemandRecord
+	scaleSetID int64
+	cursor     int64
+	applied    bool
+	err        error
+	projected  []operations.DemandEvent
+	projectErr error
+}
+
+func (f *fakeDemandStore) ProjectDemandEvent(_ context.Context, _ int64, event operations.DemandEvent) error {
+	f.projected = append(f.projected, event)
+	return f.projectErr
 }
 
 func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
@@ -25,6 +33,7 @@ func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messag
 		return false, f.err
 	}
 	f.cursor = messageID
+	f.scaleSetID = scaleSetID
 	f.batches = append([]operations.DemandEvent(nil), events...)
 	return f.applied, nil
 }
@@ -112,6 +121,19 @@ func TestQueuedDemandsMapsOnlyAvailableRecords(t *testing.T) {
 	}
 }
 
+func TestQueuedDemandsFiltersRecordsOutsideTheBindingScope(t *testing.T) {
+	queue := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	store := &fakeDemandStore{records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "other", WorkflowRunID: 9, QueueTime: queue},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "allowed", WorkflowRunID: 9, QueueTime: queue},
+	}}
+	binding := Binding{ScaleSetID: 3, Targets: []string{"owner/allowed"}, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 1 || got[0].Key.JobID != 2 {
+		t.Fatalf("scoped QueuedDemands() = %#v, %v", got, err)
+	}
+}
+
 func TestDemandCoordinatorFailsClosed(t *testing.T) {
 	want := errors.New("down")
 	validBinding := Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
@@ -143,5 +165,67 @@ func TestDemandCoordinatorFailsClosed(t *testing.T) {
 	badRecords := &fakeDemandStore{records: []operations.DemandRecord{{Status: operations.DemandJobAvailable, RunnerRequestID: 1}}}
 	if _, err := (DemandCoordinator{Store: badRecords}).QueuedDemands(context.Background(), validBinding); err == nil {
 		t.Fatal("incomplete durable demand accepted")
+	}
+}
+
+func TestDemandCoordinatorFiltersScopeTargetsAndUsesDurableStoreKey(t *testing.T) {
+	store := &fakeDemandStore{applied: true}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 8, Events: []githubscaleset.JobEvent{
+		{Kind: githubscaleset.JobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "allowed", WorkflowRunID: 9, QueueTime: time.Now()},
+		{Kind: githubscaleset.JobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "other", WorkflowRunID: 10, QueueTime: time.Now()},
+	}}}
+	binding := Binding{StoreKey: 99, ScaleSetID: 3, Scope: "scope", Targets: []string{"owner/allowed"}, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err != nil {
+		t.Fatal(err)
+	}
+	if store.scaleSetID != 99 || len(store.batches) != 1 || store.batches[0].Repository != "allowed" || len(store.projected) != 1 {
+		t.Fatalf("stored = id %d events %#v", store.scaleSetID, store.batches)
+	}
+}
+
+func TestCanaryDemandIsolationRequiresDedicatedLabelAtIngestionAndRead(t *testing.T) {
+	queue := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	binding := Binding{
+		StoreKey: 99, ScaleSetID: 3, Scope: "fleet-repo", Targets: []string{"owner/repo"},
+		RequiredLabels: []string{"tart-fleet-canary"},
+		Profile:        domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux},
+	}
+	ordinary := githubscaleset.JobEvent{Kind: githubscaleset.JobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo",
+		WorkflowRunID: 9, QueueTime: queue, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}}
+	canary := ordinary
+	canary.RunnerRequestID = 2
+	canary.WorkflowRunID = 10
+	canary.Labels = append(append([]string(nil), ordinary.Labels...), "tart-fleet-canary")
+
+	store := &fakeDemandStore{applied: true}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 8, Events: []githubscaleset.JobEvent{ordinary, canary}}}
+	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.batches) != 1 || store.batches[0].RunnerRequestID != canary.RunnerRequestID {
+		t.Fatalf("canary ingest admitted ordinary same-profile demand: %#v", store.batches)
+	}
+
+	store.records = []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 9,
+			QueueTime: queue, Labels: append([]string(nil), ordinary.Labels...)},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "repo", WorkflowRunID: 10,
+			QueueTime: queue, Labels: append([]string(nil), canary.Labels...)},
+	}
+	queued, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(queued) != 1 || queued[0].Key.JobID != canary.RunnerRequestID {
+		t.Fatalf("canary queue isolation = %#v, %v", queued, err)
+	}
+}
+
+func TestDemandProjectionFailurePreventsAcknowledgement(t *testing.T) {
+	want := errors.New("projection")
+	store := &fakeDemandStore{applied: true, projectErr: want}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 3, Events: []githubscaleset.JobEvent{{Kind: githubscaleset.JobAssigned,
+		RunnerRequestID: 4, Owner: "o", Repository: "r"}}}}
+	binding := Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	changed, err := (DemandCoordinator{Store: store, Projector: store}).IngestOnceResult(context.Background(), binding, source)
+	if !changed || !errors.Is(err, want) || source.committed {
+		t.Fatalf("projection result = changed %v err %v committed %v", changed, err, source.committed)
 	}
 }

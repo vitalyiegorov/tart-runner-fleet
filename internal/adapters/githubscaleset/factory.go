@@ -85,7 +85,8 @@ func NewGitHubAppScaleSet(ctx context.Context, c GitHubAppScaleSetConfig) (*Scal
 	if err != nil {
 		return nil, err
 	}
-	s, err := NewScaleSet(ScaleSetConfig{Messages: messages, JIT: jit, ScaleSetID: c.ScaleSetID, MaxCapacity: c.MaxCapacity, InitialCursor: c.InitialCursor, PollTimeout: c.PollTimeout, RequestTimeout: c.RequestTimeout})
+	runners, _ := jit.(officialRunners)
+	s, err := NewScaleSet(ScaleSetConfig{Messages: messages, JIT: jit, Runners: runners, ScaleSetID: c.ScaleSetID, MaxCapacity: c.MaxCapacity, InitialCursor: c.InitialCursor, PollTimeout: c.PollTimeout, RequestTimeout: c.RequestTimeout})
 	if err != nil {
 		if closer, ok := messages.(interface{ Close(context.Context) error }); ok {
 			_ = closer.Close(ctx)

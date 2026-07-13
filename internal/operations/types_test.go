@@ -6,7 +6,48 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
+
+func TestInstanceSchedulingMetadataRequiresAnAtomicCompleteIdentity(t *testing.T) {
+	if !(Instance{}).SchedulingMetadataValid() {
+		t.Fatal("legacy instance without scheduling metadata rejected")
+	}
+
+	valid := Instance{
+		Repo:      "owner/repo",
+		Platform:  domain.PlatformLinux,
+		Profile:   "linux-small",
+		Route:     "linux-tiered-small",
+		Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1},
+		Demand:    domain.DemandKey{Repo: "owner/repo", RunID: 10, Attempt: 2, JobID: 30},
+	}
+	if !valid.SchedulingMetadataValid() {
+		t.Fatal("complete scheduling identity rejected")
+	}
+
+	mutations := map[string]func(*Instance){
+		"repository":      func(instance *Instance) { instance.Repo = "" },
+		"platform":        func(instance *Instance) { instance.Platform = "other" },
+		"profile":         func(instance *Instance) { instance.Profile = "" },
+		"route":           func(instance *Instance) { instance.Route = "" },
+		"cpu":             func(instance *Instance) { instance.Resources.CPU = 0 },
+		"memory":          func(instance *Instance) { instance.Resources.MemoryMB = 0 },
+		"slots":           func(instance *Instance) { instance.Resources.Slots = 0 },
+		"demand identity": func(instance *Instance) { instance.Demand.JobID = 0 },
+		"demand repo":     func(instance *Instance) { instance.Demand.Repo = "other/repo" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			instance := valid
+			mutate(&instance)
+			if instance.SchedulingMetadataValid() {
+				t.Fatal("partial or contradictory scheduling identity accepted")
+			}
+		})
+	}
+}
 
 func TestStateOwnershipOperationAndConfirmationValidation(t *testing.T) {
 	for _, state := range []State{StatePlanned, StateCloning, StateBooting, StateReachable, StateRegistering, StateOnlineIdle, StateAssigned, StateRunning, StateDraining, StateDeregistering, StateStopping, StateDeleted, StateFailed} {
@@ -135,6 +176,11 @@ func TestPlanDependencyValidationAndDigest(t *testing.T) {
 		if shared.hasDependencyCycleOrSelf() {
 			t.Fatal("shared dependency reported as a cycle")
 		}
+	}
+	duplicate := plan
+	duplicate.Operations = []Operation{op("a", "external", "external")}
+	if !duplicate.hasDependencyCycleOrSelf() {
+		t.Fatal("duplicate dependency was not rejected by graph validation")
 	}
 }
 
