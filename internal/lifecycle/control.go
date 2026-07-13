@@ -51,6 +51,14 @@ func (r ControlRouter) Registered(ctx context.Context, name string) (bool, error
 	return binding.Source.Registered(ctx, name)
 }
 
+func (r ControlRouter) ResetRegistration(ctx context.Context, name string) error {
+	_, binding, err := r.resolve(ctx, name)
+	if err != nil {
+		return err
+	}
+	return binding.Source.Deregister(ctx, name)
+}
+
 func (r ControlRouter) AcquireAndGenerateJIT(ctx context.Context, requestID int64, name, workFolder string) (*githubscaleset.JITSecret, error) {
 	instance, binding, err := r.resolve(ctx, name)
 	if err != nil {

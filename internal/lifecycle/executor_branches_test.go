@@ -136,6 +136,10 @@ func TestProvisionExecutorEveryStageFailsWithBoundedCode(t *testing.T) {
 		{"observe", operations.StateReachable, StageRegister, func(_ *ProvisionExecutor, _ *fakeVM, registration *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {
 			registration.registeredErr = errors.New("raw")
 		}},
+		{"reset ghost registration", operations.StateReachable, StageRegister, func(_ *ProvisionExecutor, _ *fakeVM, registration *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {
+			registration.registered = true
+			registration.resetErr = errors.New("raw")
+		}},
 		{"acquire", operations.StateReachable, StageAcquire, func(_ *ProvisionExecutor, _ *fakeVM, registration *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {
 			registration.acquireErr = errors.New("raw")
 		}},
