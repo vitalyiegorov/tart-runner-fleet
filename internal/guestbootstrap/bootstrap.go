@@ -151,7 +151,7 @@ func childEnvironment(jit string) []string {
 func runnerToolchainPath(goos string) string {
 	portable := "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	if goos == "darwin" {
-		return "/opt/homebrew/bin:" + portable
+		return "/Users/admin/.rbenv/shims:/opt/homebrew/bin:" + portable
 	}
 	return portable
 }
