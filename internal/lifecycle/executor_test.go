@@ -79,6 +79,7 @@ func (r fakeReady) Wait(_ context.Context, instance operations.Instance) error {
 type fakeRegistration struct {
 	calls         *[]string
 	registered    bool
+	delayedChecks int
 	secret        *githubscaleset.JITSecret
 	registeredErr error
 	acquireErr    error
@@ -86,6 +87,10 @@ type fakeRegistration struct {
 
 func (r *fakeRegistration) Registered(_ context.Context, name string) (bool, error) {
 	*r.calls = append(*r.calls, "registered:"+name)
+	if r.delayedChecks > 0 {
+		r.delayedChecks--
+		return false, r.registeredErr
+	}
 	return r.registered, r.registeredErr
 }
 func (r *fakeRegistration) AcquireAndGenerateJIT(_ context.Context, requestID int64, name, workFolder string) (*githubscaleset.JITSecret, error) {
@@ -167,6 +172,66 @@ func TestProvisionExecutorResumesWithoutSecondJITOrVMEffect(t *testing.T) {
 	if err := executor.Execute(context.Background(), operation); err != nil || len(calls) != 1 {
 		t.Fatalf("terminal replay calls=%#v err=%v", calls, err)
 	}
+}
+
+func TestProvisionExecutorWaitsForDelayedRegistration(t *testing.T) {
+	calls := []string{}
+	registration := &fakeRegistration{calls: &calls, delayedChecks: 3, secret: githubscaleset.NewJITSecret("jit")}
+	state := &memoryState{instance: lifecycleInstance(operations.StatePlanned)}
+	executor := ProvisionExecutor{
+		State: state, VM: fakeVM{calls: &calls}, Ready: fakeReady{calls: &calls}, Registration: registration,
+		Bootstrap: fakeBootstrap{calls: &calls, registration: registration}, Bases: map[domain.Platform]string{domain.PlatformLinux: "linux-base"},
+		RegistrationTimeout: time.Second, RegistrationPollInterval: time.Millisecond,
+		After: func(time.Duration) <-chan time.Time {
+			ready := make(chan time.Time, 1)
+			ready <- time.Unix(1, 0)
+			return ready
+		},
+	}
+	if err := executor.Execute(context.Background(), operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID}); err != nil {
+		t.Fatal(err)
+	}
+	registeredChecks := 0
+	for _, call := range calls {
+		if call == "registered:"+state.instance.ID {
+			registeredChecks++
+		}
+	}
+	if registeredChecks != 4 || state.instance.State != operations.StateOnlineIdle {
+		t.Fatalf("registration checks=%d state=%s calls=%v", registeredChecks, state.instance.State, calls)
+	}
+}
+
+func TestProvisionExecutorRegistrationWaitIsBoundedAndCancellationSafe(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) {
+		calls := []string{}
+		registration := &fakeRegistration{calls: &calls}
+		state := &memoryState{instance: lifecycleInstance(operations.StateRegistering)}
+		executor := ProvisionExecutor{State: state, Registration: registration,
+			RegistrationTimeout: 2 * time.Millisecond, RegistrationPollInterval: time.Millisecond}
+		err := executor.Execute(context.Background(), operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID})
+		if err == nil || err.Error() != safeError(StageRegister).Error() || state.instance.State != operations.StateFailed {
+			t.Fatalf("timeout error=%v state=%s calls=%v", err, state.instance.State, calls)
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		calls := []string{}
+		registration := &fakeRegistration{calls: &calls}
+		state := &memoryState{instance: lifecycleInstance(operations.StateRegistering)}
+		ctx, cancel := context.WithCancel(context.Background())
+		executor := ProvisionExecutor{State: state, Registration: registration,
+			RegistrationTimeout: time.Second, RegistrationPollInterval: time.Millisecond,
+			After: func(time.Duration) <-chan time.Time {
+				cancel()
+				return make(chan time.Time)
+			},
+		}
+		err := executor.Execute(ctx, operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID})
+		if !errors.Is(err, context.Canceled) || state.instance.State != operations.StateRegistering || len(state.changes) != 0 {
+			t.Fatalf("cancellation error=%v state=%s changes=%v", err, state.instance.State, state.changes)
+		}
+	})
 }
 
 func TestProvisionFailureIsSanitizedAndDurablyFailed(t *testing.T) {
