@@ -170,9 +170,10 @@ func exactScaleSet(actual, desired scaleset.RunnerScaleSet) bool {
 			if labels[i].Type == "" {
 				labels[i].Type = "System"
 			}
-			if labels[i].Type != "System" || !validScaleSetToken.MatchString(labels[i].Name) {
+			if !strings.EqualFold(labels[i].Type, "System") || !validScaleSetToken.MatchString(labels[i].Name) {
 				return false
 			}
+			labels[i].Type = "System"
 		}
 		slices.SortFunc(labels, func(a, b scaleset.Label) int { return strings.Compare(a.Name, b.Name) })
 		return true

@@ -101,6 +101,26 @@ func TestProvisionerInspectIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestProvisionerReusesGitHubLowercaseSystemLabels(t *testing.T) {
+	spec := ScaleSetSpec{Name: "trf-builder", Labels: []string{"self-hosted", "macOS", "ARM64", "macos-builder"}}
+	fake := &fakeScaleSetAdmin{existing: &scaleset.RunnerScaleSet{
+		ID: 1, Name: spec.Name, RunnerGroupID: defaultRunnerGroupID,
+		Labels: []scaleset.Label{
+			{Name: "self-hosted", Type: "system"},
+			{Name: "macOS", Type: "system"},
+			{Name: "ARM64", Type: "system"},
+			{Name: "macos-builder", Type: "system"},
+			{Name: spec.Name, Type: "system"},
+		},
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+	}}
+
+	plan, err := (Provisioner{Client: fake}).Inspect(context.Background(), spec)
+	if err != nil || plan.Action != ScaleSetReuse || plan.ID != 1 {
+		t.Fatalf("Inspect(lowercase system labels) = %#v, %v", plan, err)
+	}
+}
+
 func TestProvisionerResolvesNamedGroupAndFailsClosedOnDrift(t *testing.T) {
 	fake := &fakeScaleSetAdmin{group: &scaleset.RunnerGroup{ID: 7, Name: "fleet"}}
 	provisioner := Provisioner{Client: fake}
