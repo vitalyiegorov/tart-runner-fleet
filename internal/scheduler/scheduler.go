@@ -13,10 +13,11 @@ import (
 )
 
 type Config struct {
-	LinuxCapacity domain.Resources
-	FairnessAge   time.Duration
-	RepoCaps      map[string]int
-	Profiles      map[domain.ProfileID]domain.Profile
+	LinuxCapacity         domain.Resources
+	FairnessAge           time.Duration
+	RepoCaps              map[string]int
+	RepoSchedulingClasses map[string]domain.SchedulingClass
+	Profiles              map[domain.ProfileID]domain.Profile
 }
 
 type State struct {
@@ -85,7 +86,7 @@ func PlanTick(in Input) Plan {
 	}
 
 	linux, macos := partition(demands)
-	switch chosenPlatform(in.Now, in.Config.FairnessAge, demands) {
+	switch chosenPlatform(in, demands) {
 	case domain.PlatformMacOS:
 		if mode == domain.HostLinux {
 			plan = planMacHandoff(in, plan, macos)
@@ -102,12 +103,8 @@ func PlanTick(in Input) Plan {
 	return finish(plan)
 }
 
-func chosenPlatform(now time.Time, fairnessAge time.Duration, demands []domain.Demand) domain.Platform {
-	aged, _ := splitAged(now, fairnessAge, demands)
-	if len(aged) > 0 {
-		return aged[0].Platform
-	}
-	return demands[0].Platform
+func chosenPlatform(in Input, demands []domain.Demand) domain.Platform {
+	return priorityOrder(in, demands)[0].Platform
 }
 
 func normalizedDemands(in Input) []domain.Demand {
@@ -197,7 +194,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		return plan
 	}
 
-	ordered := fairOrder(young, in.Prior.DRRCursor)
+	ordered := youngPriorityOrder(young, in.Prior.DRRCursor, in.Config.RepoSchedulingClasses)
 	selected := exactSelect(ordered, free, baseCounts, in.Config)
 	for _, candidate := range selected {
 		plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
@@ -308,7 +305,7 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 		}
 	}
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, candidates)
-	ordered := append(aged, fairOrder(young, in.Prior.DRRCursor)...)
+	ordered := append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config.RepoSchedulingClasses)...)
 	counts := cloneCounts(baseCounts)
 	for _, demand := range alreadySelected {
 		counts[demand.Key.Repo]++
@@ -330,6 +327,27 @@ func splitAged(now time.Time, age time.Duration, demands []domain.Demand) (aged,
 		}
 	}
 	return aged, young
+}
+
+func priorityOrder(in Input, demands []domain.Demand) []domain.Demand {
+	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
+	return append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config.RepoSchedulingClasses)...)
+}
+
+// youngPriorityOrder implements two bounded lanes. Control-plane work can
+// bypass only young standard work; aged global FIFO is assembled by
+// priorityOrder before either lane and therefore remains absolute.
+func youngPriorityOrder(demands []domain.Demand, cursor string, classes map[string]domain.SchedulingClass) []domain.Demand {
+	controlPlane := make([]domain.Demand, 0, len(demands))
+	standard := make([]domain.Demand, 0, len(demands))
+	for _, demand := range demands {
+		if classes[demand.Key.Repo] == domain.SchedulingControlPlane {
+			controlPlane = append(controlPlane, demand)
+		} else {
+			standard = append(standard, demand)
+		}
+	}
+	return append(fairOrder(controlPlane, cursor), fairOrder(standard, cursor)...)
 }
 
 func fairOrder(demands []domain.Demand, cursor string) []domain.Demand {
@@ -527,7 +545,7 @@ func removeInstance(instances []domain.Instance, id string) []domain.Instance {
 }
 
 func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
-	profile := chosenMacProfile(in.Now, in.Config.FairnessAge, demands)
+	profile := chosenMacProfile(in, demands)
 	var drains []Operation
 	allSwitchable := true
 	for _, instance := range sortedInstances(in.Instances.Value) {
@@ -547,12 +565,8 @@ func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
 	return plan
 }
 
-func chosenMacProfile(now time.Time, fairnessAge time.Duration, demands []domain.Demand) domain.ProfileID {
-	aged, _ := splitAged(now, fairnessAge, demands)
-	if len(aged) > 0 {
-		return aged[0].Profile
-	}
-	return demands[0].Profile
+func chosenMacProfile(in Input, demands []domain.Demand) domain.ProfileID {
+	return priorityOrder(in, demands)[0].Profile
 }
 
 func demandsForProfile(demands []domain.Demand, profile domain.ProfileID) []domain.Demand {
@@ -593,7 +607,7 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 	if available <= 0 {
 		return plan
 	}
-	ordered := fairOrder(demands, in.Prior.DRRCursor)
+	ordered := priorityOrder(in, demands)
 	selected := make([]domain.Demand, 0, available)
 	for _, demand := range ordered {
 		if len(selected) >= available || !free.CanFit(profile.Resources) {

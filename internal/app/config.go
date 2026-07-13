@@ -23,11 +23,17 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		}
 	}
 	caps := make(map[string]int, len(cfg.Targets))
+	classes := make(map[string]domain.SchedulingClass, len(cfg.Targets))
 	for _, target := range cfg.Targets {
 		caps[target.Slug] = target.MaxActive
+		class := target.SchedulingClass
+		if class == "" {
+			class = domain.SchedulingStandard
+		}
+		classes[target.Slug] = class
 	}
 	return scheduler.Config{LinuxCapacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
-		FairnessAge: cfg.ReservationAge, RepoCaps: caps, Profiles: profiles}
+		FairnessAge: cfg.ReservationAge, RepoCaps: caps, RepoSchedulingClasses: classes, Profiles: profiles}
 }
 
 func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Binding, error) {

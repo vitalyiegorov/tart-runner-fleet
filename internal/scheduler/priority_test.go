@@ -41,6 +41,7 @@ func TestControlPlaneLaneLeavesFeasibleFirstWaveCapacityForStandardWork(t *testi
 	standard := demand("a/application", 3, 2*time.Minute, "small")
 	in := input([]domain.Demand{standard, controlTwo, controlOne}, nil, State{})
 	in.Config.LinuxCapacity = domain.Resources{CPU: 3, MemoryMB: 6_144, Slots: 3}
+	in.Config.RepoCaps[controlOne.Key.Repo] = 3
 	in.Host = domain.Fresh(domain.Host{Available: in.Config.LinuxCapacity}, testNow)
 	setRepoSchedulingClass(t, &in.Config, controlOne.Key.Repo, controlPlaneClass)
 
@@ -93,5 +94,19 @@ func TestControlPlaneMacProfileSelectionIsDeterministic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("priority plan depends on observation order: %#v / %#v", first, second)
+	}
+}
+
+func TestAgedStandardDemandOverridesControlPlaneWithinMacProfile(t *testing.T) {
+	agedStandard := demand("a/application", 1, 10*time.Minute, "maestro")
+	youngControl := demand("z/control-plane", 2, time.Minute, "maestro")
+	in := input([]domain.Demand{youngControl, agedStandard}, nil, State{})
+	profile := in.Config.Profiles["maestro"]
+	profile.MaxActive = 1
+	in.Config.Profiles["maestro"] = profile
+	setRepoSchedulingClass(t, &in.Config, youngControl.Key.Repo, controlPlaneClass)
+
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{agedStandard.Key}) {
+		t.Fatalf("aged mac override = %#v, want %#v", got, agedStandard.Key)
 	}
 }

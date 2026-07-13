@@ -92,6 +92,16 @@ const (
 type Route string
 type ProfileID string
 
+// SchedulingClass separates fleet-repair work from ordinary application work
+// without exposing an unbounded numeric priority. Aging remains the absolute
+// starvation guard in the scheduler.
+type SchedulingClass string
+
+const (
+	SchedulingStandard     SchedulingClass = "standard"
+	SchedulingControlPlane SchedulingClass = "control-plane"
+)
+
 type Profile struct {
 	ID        ProfileID
 	Platform  Platform
