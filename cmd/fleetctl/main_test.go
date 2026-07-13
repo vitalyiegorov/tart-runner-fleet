@@ -10,7 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/actions/scaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
 )
 
 type fakeClient struct {
@@ -281,5 +285,67 @@ func TestMainDelegatesExitCode(t *testing.T) {
 	main()
 	if got != 0 {
 		t.Fatalf("exit code = %d", got)
+	}
+}
+
+type fakeProvisioner struct{ next int }
+
+func (*fakeProvisioner) Inspect(context.Context, githubscaleset.ScaleSetSpec) (githubscaleset.ScaleSetPlan, error) {
+	return githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetCreate}, nil
+}
+func (f *fakeProvisioner) Ensure(_ context.Context, spec githubscaleset.ScaleSetSpec) (scaleset.RunnerScaleSet, error) {
+	f.next++
+	return scaleset.RunnerScaleSet{ID: f.next, Name: spec.Name}, nil
+}
+
+func TestScaleSetProvisionCommandPlansGuardsAndPersists(t *testing.T) {
+	cfg := config.Default()
+	cfg.Targets = []config.Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4}}
+	sets := []config.ScaleSet{{Profile: "small", Name: "repo-small", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-small"}},
+		{Profile: "medium", Name: "repo-medium", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-medium"}},
+		{Profile: "large", Name: "repo-large", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-large"}},
+		{Profile: "builder", Name: "repo-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
+		{Profile: "maestro", Name: "repo-maestro", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-maestro"}}}
+	cfg.GitHub = config.GitHub{SessionOwner: "host", App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
+		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}}, Scopes: []config.GitHubScope{{Name: "repo", Kind: config.ScopeRepository,
+			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"}, ScaleSets: sets}}}
+	path := filepath.Join(t.TempDir(), "fleet.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Encode(file, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeProvisioner{}
+	deps := dependencies{loadPrivateKey: func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+		return githubscaleset.NewPrivateKeySecret("pem"), nil
+	}, openProvision: func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) { return fake, nil }}
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), []string{"scale-sets", "provision", "--config", path}, &stdout, &stderr, deps); code != exitSuccess || !strings.Contains(stdout.String(), "create") {
+		t.Fatalf("plan code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWith(context.Background(), []string{"scale-sets", "provision", "--config", path, "--apply"}, &stdout, &stderr, deps); code != exitUnsafe {
+		t.Fatalf("unguarded apply code=%d err=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	args := []string{"scale-sets", "provision", "--config", path, "--output", "json", "--apply", "--write", "--confirm", "provision-scale-sets", "--reason", "initial migration"}
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess || !strings.Contains(stdout.String(), `"id": 1`) {
+		t.Fatalf("apply code=%d out=%q err=%q", code, stdout.String(), stderr.String())
+	}
+	persisted, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := config.Decode(persisted)
+	_ = persisted.Close()
+	if err != nil || decoded.GitHub.Scopes[0].ScaleSets[4].ID == 0 {
+		t.Fatalf("persisted config=%#v err=%v", decoded.GitHub.Scopes, err)
 	}
 }

@@ -13,11 +13,19 @@ import (
 )
 
 type fakeDemandStore struct {
-	batches []operations.DemandEvent
-	records []operations.DemandRecord
-	cursor  int64
-	applied bool
-	err     error
+	batches    []operations.DemandEvent
+	records    []operations.DemandRecord
+	scaleSetID int64
+	cursor     int64
+	applied    bool
+	err        error
+	projected  []operations.DemandEvent
+	projectErr error
+}
+
+func (f *fakeDemandStore) ProjectDemandEvent(_ context.Context, _ int64, event operations.DemandEvent) error {
+	f.projected = append(f.projected, event)
+	return f.projectErr
 }
 
 func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
@@ -25,6 +33,7 @@ func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messag
 		return false, f.err
 	}
 	f.cursor = messageID
+	f.scaleSetID = scaleSetID
 	f.batches = append([]operations.DemandEvent(nil), events...)
 	return f.applied, nil
 }
@@ -143,5 +152,32 @@ func TestDemandCoordinatorFailsClosed(t *testing.T) {
 	badRecords := &fakeDemandStore{records: []operations.DemandRecord{{Status: operations.DemandJobAvailable, RunnerRequestID: 1}}}
 	if _, err := (DemandCoordinator{Store: badRecords}).QueuedDemands(context.Background(), validBinding); err == nil {
 		t.Fatal("incomplete durable demand accepted")
+	}
+}
+
+func TestDemandCoordinatorFiltersScopeTargetsAndUsesDurableStoreKey(t *testing.T) {
+	store := &fakeDemandStore{applied: true}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 8, Events: []githubscaleset.JobEvent{
+		{Kind: githubscaleset.JobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "allowed", WorkflowRunID: 9, QueueTime: time.Now()},
+		{Kind: githubscaleset.JobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "other", WorkflowRunID: 10, QueueTime: time.Now()},
+	}}}
+	binding := Binding{StoreKey: 99, ScaleSetID: 3, Scope: "scope", Targets: []string{"owner/allowed"}, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err != nil {
+		t.Fatal(err)
+	}
+	if store.scaleSetID != 99 || len(store.batches) != 1 || store.batches[0].Repository != "allowed" || len(store.projected) != 1 {
+		t.Fatalf("stored = id %d events %#v", store.scaleSetID, store.batches)
+	}
+}
+
+func TestDemandProjectionFailurePreventsAcknowledgement(t *testing.T) {
+	want := errors.New("projection")
+	store := &fakeDemandStore{applied: true, projectErr: want}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 3, Events: []githubscaleset.JobEvent{{Kind: githubscaleset.JobAssigned,
+		RunnerRequestID: 4, Owner: "o", Repository: "r"}}}}
+	binding := Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	changed, err := (DemandCoordinator{Store: store, Projector: store}).IngestOnceResult(context.Background(), binding, source)
+	if !changed || !errors.Is(err, want) || source.committed {
+		t.Fatalf("projection result = changed %v err %v committed %v", changed, err, source.committed)
 	}
 }

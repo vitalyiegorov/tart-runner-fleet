@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -194,5 +195,42 @@ func TestDemandInboxCorruptProjectionFailsClosed(t *testing.T) {
 	}
 	if _, err := scanDemand(scanError{sql.ErrNoRows}); !errors.Is(err, operations.ErrNotFound) {
 		t.Fatalf("demand not found mapping: %v", err)
+	}
+}
+
+func TestProjectDemandEventDrivesRunnerLifecycleAndQueuesDrain(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	events := []operations.DemandEvent{{Kind: operations.DemandJobAvailable, RunnerRequestID: 71, Owner: "owner", Repository: "repo", WorkflowRunID: 22, QueueTime: now}}
+	if _, err := store.ApplyDemandBatch(ctx, 99, 1, events); err != nil {
+		t.Fatal(err)
+	}
+	instance := operations.Instance{ID: "trf-small-project", Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+		Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1}, Demand: domain.DemandKey{Repo: "owner/repo", RunID: 22, Attempt: 1, JobID: 71},
+		State: operations.StateRegistering, Ownership: operations.Ownership{ControllerID: "c", ResourceID: "d", OperationID: "spawn"}, CreatedAt: now}
+	if err := store.CreateInstance(ctx, instance); err != nil {
+		t.Fatal(err)
+	}
+	for index, kind := range []operations.DemandEventKind{operations.DemandJobAssigned, operations.DemandJobStarted, operations.DemandJobCompleted} {
+		event := events[0]
+		event.Kind = kind
+		if _, err := store.ApplyDemandBatch(ctx, 99, int64(index+2), []operations.DemandEvent{event}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ProjectDemandEvent(ctx, 99, event); err != nil {
+			t.Fatalf("project %s: %v", kind, err)
+		}
+	}
+	got, err := store.Instance(ctx, instance.ID)
+	if err != nil || got.State != operations.StateDraining {
+		t.Fatalf("projected instance = %#v, %v", got, err)
+	}
+	claimed, err := store.Claim(ctx, "worker", 2, time.Now().UTC().Add(time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].Kind != "deregister" || claimed[0].ResourceID != instance.ID {
+		t.Fatalf("drain operation = %#v, %v", claimed, err)
+	}
+	if err := store.ProjectDemandEvent(ctx, 99, events[0]); err != nil {
+		t.Fatalf("available projection = %v", err)
 	}
 }
