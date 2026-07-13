@@ -138,14 +138,23 @@ func zero(value []byte) {
 func childEnvironment(jit string) []string {
 	jitPrefix := JITEnvironment + "="
 	pathPrefix := "PATH="
+	langPrefix := "LANG="
+	lcAllPrefix := "LC_ALL="
 	parent := os.Environ()
-	environment := make([]string, 0, len(parent)+2)
+	environment := make([]string, 0, len(parent)+4)
 	for _, value := range parent {
-		if !strings.HasPrefix(value, jitPrefix) && !strings.HasPrefix(value, pathPrefix) {
+		if !strings.HasPrefix(value, jitPrefix) && !strings.HasPrefix(value, pathPrefix) &&
+			!strings.HasPrefix(value, langPrefix) && !strings.HasPrefix(value, lcAllPrefix) {
 			environment = append(environment, value)
 		}
 	}
-	return append(environment, jitPrefix+jit, pathPrefix+runnerToolchainPath(runtime.GOOS))
+	locale := runnerLocale(runtime.GOOS)
+	return append(environment,
+		jitPrefix+jit,
+		pathPrefix+runnerToolchainPath(runtime.GOOS),
+		langPrefix+locale,
+		lcAllPrefix+locale,
+	)
 }
 
 func runnerToolchainPath(goos string) string {
@@ -154,6 +163,13 @@ func runnerToolchainPath(goos string) string {
 		return "/Users/admin/.rbenv/shims:/opt/homebrew/bin:" + portable
 	}
 	return portable
+}
+
+func runnerLocale(goos string) string {
+	if goos == "darwin" {
+		return "en_US.UTF-8"
+	}
+	return "C.UTF-8"
 }
 
 func secureLog(workDir, path string) (*os.File, error) {
