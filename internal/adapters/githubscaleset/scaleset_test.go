@@ -302,6 +302,40 @@ func TestScaleSetPreservesMixedEventsWithDeepCopies(t *testing.T) {
 	}
 }
 
+// Regression: the public scale-set API can report a job already assigned to
+// the scale set without a runnerRequestId. That is a capacity signal, not a
+// malformed event: the controller must derive stable local identity and start
+// one preassigned runner instead of permanently nacking the broker message.
+func TestScaleSetNormalizesPreassignedJobWithoutRunnerRequestID(t *testing.T) {
+	assignedAt := time.Unix(75, 0).UTC()
+	base := scaleset.JobMessageBase{OwnerName: "owner", RepositoryName: "repo", WorkflowRunID: 77,
+		JobID: "328810ee-dcb6-52e5-9204-89672c6a2919", EventName: "workflow_dispatch",
+		RequestLabels: []string{"self-hosted", "linux-small"}, ScaleSetAssignTime: assignedAt}
+	f := &fakeScaleSet{messages: []*scaleset.RunnerScaleSetMessage{{MessageID: 13,
+		Statistics:          &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobAssignedMessages: []*scaleset.JobAssigned{{JobMessageBase: base}},
+	}}}
+	s, _ := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 1})
+	m, err := s.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Demand.Events) != 1 {
+		t.Fatalf("events = %#v", m.Demand.Events)
+	}
+	event := m.Demand.Events[0]
+	if event.Kind != JobAvailable || event.RunnerRequestID <= 0 || event.QueueTime != assignedAt {
+		t.Fatalf("preassigned event = %#v", event)
+	}
+
+	// Redelivery and later lifecycle messages for the same workflow job must
+	// derive exactly the same positive identity.
+	started := eventFromBase(JobStarted, base)
+	if started.RunnerRequestID != event.RunnerRequestID {
+		t.Fatalf("identity changed: assigned=%d started=%d", event.RunnerRequestID, started.RunnerRequestID)
+	}
+}
+
 func TestAcquirePartialOrderingCloseAndErrors(t *testing.T) {
 	f := &fakeScaleSet{acquireResult: []int64{1}}
 	s, _ := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 1})
