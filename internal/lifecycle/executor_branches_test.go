@@ -39,7 +39,8 @@ func provisionFixture(stateValue operations.State) (ProvisionExecutor, *memorySt
 	ready := &fakeReady{calls: &calls}
 	bootstrap := &fakeBootstrap{calls: &calls, registration: registration}
 	executor := ProvisionExecutor{State: state, VM: vm, Ready: ready, Registration: registration, Bootstrap: bootstrap,
-		Bases: map[domain.Platform]string{domain.PlatformLinux: "linux-base"}}
+		Bases:               map[domain.Platform]string{domain.PlatformLinux: "linux-base"},
+		RegistrationTimeout: time.Millisecond, RegistrationPollInterval: time.Millisecond}
 	return executor, state, vm, registration, ready, bootstrap
 }
 

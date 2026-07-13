@@ -99,13 +99,16 @@ type DrainControl interface {
 // operation remains incomplete until the runner is online; after a crash, the
 // durable instance state selects the first effect that still needs observing.
 type ProvisionExecutor struct {
-	State        StateStore
-	VM           VMControl
-	Ready        Readiness
-	Registration Registration
-	Bootstrap    Bootstrapper
-	Bases        map[domain.Platform]string
-	WorkFolder   string
+	State                    StateStore
+	VM                       VMControl
+	Ready                    Readiness
+	Registration             Registration
+	Bootstrap                Bootstrapper
+	Bases                    map[domain.Platform]string
+	WorkFolder               string
+	RegistrationTimeout      time.Duration
+	RegistrationPollInterval time.Duration
+	After                    func(time.Duration) <-chan time.Time
 }
 
 func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Operation) error {
@@ -182,8 +185,13 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			if e.Registration == nil {
 				return e.fail(ctx, instance, StageRegister)
 			}
-			registered, observeErr := e.Registration.Registered(ctx, instance.ID)
-			if observeErr != nil || !registered {
+			if observeErr := e.waitRegistered(ctx, instance.ID); observeErr != nil {
+				// A controller shutdown or operation deadline leaves the durable
+				// instance resumable in registering. The worker can safely retry it
+				// after restart without generating another JIT configuration.
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return e.fail(ctx, instance, StageRegister)
 			}
 			instance, err = e.advance(ctx, instance, operations.StateOnlineIdle)
@@ -195,6 +203,46 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 		}
 	}
 	return safeError(StagePersist)
+}
+
+func (e ProvisionExecutor) waitRegistered(ctx context.Context, name string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, e.registrationTimeout())
+	defer cancel()
+	for {
+		registered, err := e.Registration.Registered(waitCtx, name)
+		if err != nil {
+			return err
+		}
+		if registered {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		case <-e.after(e.registrationPollInterval()):
+		}
+	}
+}
+
+func (e ProvisionExecutor) registrationTimeout() time.Duration {
+	if e.RegistrationTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return e.RegistrationTimeout
+}
+
+func (e ProvisionExecutor) registrationPollInterval() time.Duration {
+	if e.RegistrationPollInterval <= 0 {
+		return 250 * time.Millisecond
+	}
+	return e.RegistrationPollInterval
+}
+
+func (e ProvisionExecutor) after(delay time.Duration) <-chan time.Time {
+	if e.After == nil {
+		return time.After(delay)
+	}
+	return e.After(delay)
 }
 
 func (e ProvisionExecutor) workFolder() string {
