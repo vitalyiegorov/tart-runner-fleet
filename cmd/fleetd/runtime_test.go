@@ -91,6 +91,33 @@ func (s *contextIgnoringCloseSource) Close(context.Context) error {
 	return nil
 }
 
+type trackedCloseSource struct {
+	fakeSource
+	active  *atomic.Int32
+	maximum *atomic.Int32
+	started chan<- struct{}
+	release <-chan struct{}
+	err     error
+}
+
+func (s *trackedCloseSource) Close(ctx context.Context) error {
+	active := s.active.Add(1)
+	defer s.active.Add(-1)
+	for {
+		maximum := s.maximum.Load()
+		if active <= maximum || s.maximum.CompareAndSwap(maximum, active) {
+			break
+		}
+	}
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return s.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func TestScaleSetSourcesCloseConcurrentlyWithinShutdownBudget(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -144,6 +171,58 @@ func TestScaleSetSourcesReturnWhenCloseIgnoresCancellation(t *testing.T) {
 		t.Fatal("scale-set session cleanup exceeded its context budget")
 	}
 	close(release)
+}
+
+// Regression: closing every Actions scale-set session at once can overload the
+// broker and leave every session active even though fleetd exits on deadline.
+// Cleanup must use a small bounded worker set and report incomplete deletion.
+func TestScaleSetSourcesBoundConcurrencyAndReportFailures(t *testing.T) {
+	const sourceCount = 6
+	var active atomic.Int32
+	var maximum atomic.Int32
+	started := make(chan struct{}, sourceCount)
+	release := make(chan struct{})
+	sources := make([]scaleSetSource, 0, sourceCount)
+	for range sourceCount {
+		sources = append(sources, &trackedCloseSource{
+			active: &active, maximum: &maximum, started: started, release: release,
+		})
+	}
+	done := make(chan error, 1)
+	go func() { done <- closeScaleSetSources(context.Background(), sources) }()
+
+	for range scaleSetCloseConcurrency {
+		select {
+		case <-started:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("bounded scale-set cleanup did not fill its worker set")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("scale-set cleanup exceeded its concurrency bound")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := maximum.Load(); got != scaleSetCloseConcurrency {
+		t.Fatalf("maximum concurrent closes=%d", got)
+	}
+
+	failure := errors.New("secret broker response must not escape")
+	if err := closeScaleSetSources(context.Background(), []scaleSetSource{
+		&trackedCloseSource{active: &active, maximum: &maximum, started: started, release: closedChannel(), err: failure},
+	}); err == nil || !strings.Contains(err.Error(), "scale-set session cleanup failed") || strings.Contains(err.Error(), failure.Error()) {
+		t.Fatalf("cleanup error=%v", err)
+	}
+}
+
+func closedChannel() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
 }
 
 type recordingTartRunner struct {
