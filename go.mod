@@ -4,7 +4,7 @@ go 1.25.3
 
 require (
 	github.com/actions/scaleset v0.4.0
-	modernc.org/sqlite v1.39.1
+	modernc.org/sqlite v1.53.0
 )
 
 require (
