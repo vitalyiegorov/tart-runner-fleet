@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -77,6 +78,27 @@ func TestBootstrapPassesJITOnlyInChildEnvironmentAndReleases(t *testing.T) {
 	dir, err := os.Stat(filepath.Dir(config.LogPath))
 	if err != nil || dir.Mode().Perm() != 0o700 {
 		t.Fatalf("log dir mode=%v err=%v", dir.Mode().Perm(), err)
+	}
+}
+
+func TestChildEnvironmentProvidesDeterministicRunnerToolchainPath(t *testing.T) {
+	t.Setenv("PATH", "/guest-agent-only")
+	environment := childEnvironment("jit")
+	want := "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	if runtime.GOOS == "darwin" {
+		want = "/opt/homebrew/bin:" + want
+	}
+	if got := environmentValue(environment, "PATH"); got != want {
+		t.Fatalf("runner PATH=%q want=%q", got, want)
+	}
+	if countEnvironment(environment, "PATH") != 1 {
+		t.Fatal("duplicate PATH environment")
+	}
+	if got := runnerToolchainPath("linux"); got != "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
+		t.Fatalf("linux runner PATH=%q", got)
+	}
+	if got := runnerToolchainPath("darwin"); got != "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
+		t.Fatalf("darwin runner PATH=%q", got)
 	}
 }
 
