@@ -356,6 +356,61 @@ func TestDrainExternalFailureRemainsResumableAcrossAttempts(t *testing.T) {
 	}
 }
 
+func TestDrainWaitsForEventuallyConsistentRunnerDeletion(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	calls := []string{}
+	unsafe := operations.DeletionConfirmation{Fresh: true, RunnerInactive: false, JobsInactive: true, ObservedAt: now}
+	safe := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
+	control := &fakeDrainControl{calls: &calls, safe: true, confirmations: []operations.DeletionConfirmation{unsafe, unsafe, safe, safe}}
+	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+	executor := DrainExecutor{
+		State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute,
+		ConfirmationTimeout: time.Second, ConfirmationPollInterval: time.Millisecond,
+		After: func(time.Duration) <-chan time.Time {
+			ready := make(chan time.Time, 1)
+			ready <- now
+			return ready
+		},
+	}
+	if err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID}); err != nil {
+		t.Fatal(err)
+	}
+	confirmations := 0
+	for _, call := range calls {
+		if call == "confirm:"+state.instance.ID {
+			confirmations++
+		}
+	}
+	if confirmations != 4 || state.instance.State != operations.StateDeleted {
+		t.Fatalf("confirmations=%d state=%s calls=%v", confirmations, state.instance.State, calls)
+	}
+}
+
+func TestDrainDeletionWaitCancellationIsResumable(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	calls := []string{}
+	control := &fakeDrainControl{calls: &calls, safe: true}
+	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+	ctx, cancel := context.WithCancel(context.Background())
+	executor := DrainExecutor{
+		State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute,
+		ConfirmationTimeout: time.Second, ConfirmationPollInterval: time.Millisecond,
+		After: func(time.Duration) <-chan time.Time {
+			cancel()
+			return make(chan time.Time)
+		},
+	}
+	err := executor.Execute(ctx, operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+	if !errors.Is(err, context.Canceled) || state.instance.State != operations.StateDraining || len(state.changes) != 0 {
+		t.Fatalf("cancellation error=%v state=%s changes=%v calls=%v", err, state.instance.State, state.changes, calls)
+	}
+	for _, call := range calls {
+		if strings.HasPrefix(call, "stop:") || strings.HasPrefix(call, "delete:") {
+			t.Fatalf("destructive call after cancellation: %v", calls)
+		}
+	}
+}
+
 type captureStdin struct {
 	args  []string
 	stdin string
