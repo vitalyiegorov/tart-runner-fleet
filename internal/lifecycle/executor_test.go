@@ -147,7 +147,7 @@ func TestProvisionExecutorRunsOwnedLifecycleInOrder(t *testing.T) {
 	if !reflect.DeepEqual(calls, wantCalls) {
 		t.Fatalf("calls=%#v", calls)
 	}
-	wantStates := []operations.State{operations.StateCloning, operations.StateBooting, operations.StateReachable, operations.StateRegistering, operations.StateOnlineIdle}
+	wantStates := []operations.State{operations.StateCloning, operations.StateBooting, operations.StateReachable, operations.StateRegistering, operations.StateAssigned}
 	if got := changedStates(state.changes); !reflect.DeepEqual(got, wantStates) {
 		t.Fatalf("states=%#v", got)
 	}
@@ -183,11 +183,23 @@ func TestProvisionExecutorResumesWithoutSecondJITOrVMEffect(t *testing.T) {
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(calls, []string{"registered:trf-small-1"}) || state.instance.State != operations.StateOnlineIdle {
+	if !reflect.DeepEqual(calls, []string{"registered:trf-small-1"}) || state.instance.State != operations.StateAssigned {
 		t.Fatalf("resume calls=%#v state=%s", calls, state.instance.State)
 	}
 	if err := executor.Execute(context.Background(), operation); err != nil || len(calls) != 1 {
 		t.Fatalf("terminal replay calls=%#v err=%v", calls, err)
+	}
+}
+
+func TestProvisionExecutorRepairsLegacyOnlineIdleJobBinding(t *testing.T) {
+	state := &memoryState{instance: lifecycleInstance(operations.StateOnlineIdle)}
+	executor := ProvisionExecutor{State: state}
+
+	if err := executor.Execute(context.Background(), operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if state.instance.State != operations.StateAssigned || !reflect.DeepEqual(changedStates(state.changes), []operations.State{operations.StateAssigned}) {
+		t.Fatalf("legacy recovery state=%s changes=%v", state.instance.State, changedStates(state.changes))
 	}
 }
 
@@ -214,7 +226,7 @@ func TestProvisionExecutorWaitsForDelayedRegistration(t *testing.T) {
 			registeredChecks++
 		}
 	}
-	if registeredChecks != 4 || state.instance.State != operations.StateOnlineIdle {
+	if registeredChecks != 4 || state.instance.State != operations.StateAssigned {
 		t.Fatalf("registration checks=%d state=%s calls=%v", registeredChecks, state.instance.State, calls)
 	}
 }
@@ -280,7 +292,7 @@ func TestProvisionExternalFailureRemainsResumableAcrossAttempts(t *testing.T) {
 		t.Fatalf("first attempt error=%v state=%s", err, state.instance.State)
 	}
 	vm.cloneErr = nil
-	if err := executor.Execute(context.Background(), operation); err != nil || state.instance.State != operations.StateOnlineIdle {
+	if err := executor.Execute(context.Background(), operation); err != nil || state.instance.State != operations.StateAssigned {
 		t.Fatalf("recovery error=%v state=%s calls=%v", err, state.instance.State, calls)
 	}
 }

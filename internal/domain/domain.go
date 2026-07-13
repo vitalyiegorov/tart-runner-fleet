@@ -168,7 +168,7 @@ func (s InstanceState) CanTransitionTo(next InstanceState) bool {
 	case InstanceReachable:
 		return next == InstanceRegistering
 	case InstanceRegistering:
-		return next == InstanceOnlineIdle
+		return next == InstanceOnlineIdle || next == InstanceAssigned
 	case InstanceOnlineIdle:
 		return next == InstanceAssigned || next == InstanceDraining
 	case InstanceAssigned:
