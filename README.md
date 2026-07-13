@@ -97,9 +97,10 @@ fairness or safety decisions.
 - explicit host-mode and instance state machines;
 - fail closed when GitHub, Tart, or host observations are stale/unavailable;
 - no Linux/macOS overlap beyond configured, proven resource envelopes;
-- aged global FIFO with fair, capacity-aware backfill;
-- bounded control-plane priority for young work, with aging as an absolute
-  starvation guard;
+- aged global FIFO with bounded control-plane priority for young work, with
+  aging as an absolute starvation guard;
+- a durable one-shot smallest-tier backfill budget during blocked macOS
+  handoff;
 - ephemeral runners and two-phase drain before deletion;
 - secrets never persisted or emitted;
 - race detector, replay/contract/chaos tests, and at least 99% statement coverage.

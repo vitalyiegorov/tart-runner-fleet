@@ -13,7 +13,7 @@ legacy heuristic.
 | four medium, two large, mixed weighted packing | exact allocator, resource-vector, and four-slot property tests |
 | oversized head does not starve fitting work | exact-selection and infeasible-head incident replay |
 | live VM count and over-cap turnover | current-live-resource and lifecycle overlap property tests |
-| macOS start/drain/wait and direct handoff | symmetric same-plan Linux/macOS dependent handoff tests |
+| macOS start/drain/wait and direct handoff | symmetric same-plan Linux/macOS dependent handoff tests; issue 13 durable one-shot aged-small drain backfill replay |
 | builder priority | intentionally replaced by global aged FIFO and DRR; mixed-platform no-starvation replay |
 | Maestro max two and cross-repo second slot | Maestro cap/fair-spread tests |
 | API uncertainty | typed Fresh/Stale/Unavailable fail-closed tests |
@@ -27,4 +27,3 @@ workflow becomes in-progress, full pagination, hard deadlines, redelivery,
 commit-before-ack, durable cursor/inbox replay, dependency cycles, crash recovery,
 lease fencing, panic recovery, stale ownership, malicious names, SQLite failure
 injection, deterministic fuzz/property tests, and race detection.
-
