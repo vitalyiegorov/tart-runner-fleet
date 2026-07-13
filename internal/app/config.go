@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
@@ -37,13 +39,43 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 }
 
 func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Binding, error) {
+	if len(cfg.GitHub.Scopes) > 0 {
+		bindings := make([]Binding, 0)
+		seenKeys := map[int64]string{}
+		for _, scope := range cfg.GitHub.Scopes {
+			for _, scaleSet := range scope.ScaleSets {
+				profile, ok := schedulerConfig.Profiles[domain.ProfileID(scaleSet.Profile)]
+				if !ok || scaleSet.ID <= 0 {
+					return nil, fmt.Errorf("invalid scale set profile %q in scope %q", scaleSet.Profile, scope.Name)
+				}
+				key := scopedStoreKey(scope.Name, scaleSet.ID)
+				identity := fmt.Sprintf("%s/%d", scope.Name, scaleSet.ID)
+				if prior, duplicate := seenKeys[key]; duplicate {
+					return nil, fmt.Errorf("durable scale-set identity collision %s and %s", prior, identity)
+				}
+				seenKeys[key] = identity
+				bindings = append(bindings, Binding{StoreKey: key, ScaleSetID: int64(scaleSet.ID), Scope: scope.Name,
+					Targets: append([]string(nil), scope.Targets...), Profile: profile})
+			}
+		}
+		return bindings, nil
+	}
 	bindings := make([]Binding, 0, len(cfg.GitHub.ScaleSets))
 	for _, scaleSet := range cfg.GitHub.ScaleSets {
 		profile, ok := schedulerConfig.Profiles[domain.ProfileID(scaleSet.Profile)]
 		if !ok || scaleSet.ID <= 0 {
 			return nil, fmt.Errorf("invalid scale set profile %q", scaleSet.Profile)
 		}
-		bindings = append(bindings, Binding{ScaleSetID: int64(scaleSet.ID), Profile: profile})
+		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID), Profile: profile})
 	}
 	return bindings, nil
+}
+
+func scopedStoreKey(scope string, scaleSetID int) int64 {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", scope, scaleSetID)))
+	key := int64(binary.BigEndian.Uint64(digest[:8]) & uint64(^uint64(0)>>1))
+	if key == 0 {
+		return 1
+	}
+	return key
 }

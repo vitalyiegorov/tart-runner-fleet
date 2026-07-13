@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	_ "modernc.org/sqlite"
 )
@@ -419,6 +420,44 @@ func (s *Store) CreateInstance(ctx context.Context, instance operations.Instance
 
 func (s *Store) Instance(ctx context.Context, id string) (operations.Instance, error) {
 	return scanInstance(s.db.QueryRowContext(ctx, `SELECT id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at FROM instances WHERE id=?`, id))
+}
+
+// Advance atomically persists one externally observed lifecycle edge without
+// enqueuing another effect. The owning outbox operation remains claimed until
+// its executor reaches a terminal lifecycle state and completes it.
+func (s *Store) Advance(ctx context.Context, change lifecycle.StateChange) (operations.Instance, error) {
+	if change.InstanceID == "" || !operations.ValidState(change.ExpectedState) || !operations.ValidState(change.NextState) ||
+		!change.ExpectedState.CanTransitionTo(change.NextState) || len(change.FailureCode) > 64 ||
+		(change.NextState == operations.StateFailed) != (change.FailureCode != "") {
+		return operations.Instance{}, operations.ErrInvalid
+	}
+	tx, err := s.beginTx(ctx, "advance.begin")
+	if err != nil {
+		return operations.Instance{}, fmt.Errorf("begin lifecycle advance: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	result, err := s.txExec(ctx, tx, "advance.instance", `UPDATE instances SET state=?,version=version+1,last_error=?,updated_at=? WHERE id=? AND state=? AND version=?`,
+		change.NextState, change.FailureCode, now.UnixNano(), change.InstanceID, change.ExpectedState, change.ExpectedVersion)
+	if err != nil {
+		return operations.Instance{}, fmt.Errorf("advance lifecycle instance: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return operations.Instance{}, operations.ErrConflict
+	}
+	if _, err := s.txExec(ctx, tx, "advance.history", `INSERT INTO transition_history(instance_id,from_state,to_state,version,operation_id,created_at) VALUES(?,?,?,?,NULL,?)`,
+		change.InstanceID, change.ExpectedState, change.NextState, change.ExpectedVersion+1, now.UnixNano()); err != nil {
+		return operations.Instance{}, fmt.Errorf("record lifecycle advance: %w", err)
+	}
+	instance, err := scanInstance(s.txRow(ctx, tx, "advance.result", `SELECT id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at FROM instances WHERE id=?`, change.InstanceID))
+	if err != nil {
+		return operations.Instance{}, err
+	}
+	if err := s.commit(tx, "advance.commit"); err != nil {
+		return operations.Instance{}, fmt.Errorf("commit lifecycle advance: %w", err)
+	}
+	return instance, nil
 }
 
 func (s *Store) LiveInstances(ctx context.Context) ([]operations.Instance, error) {

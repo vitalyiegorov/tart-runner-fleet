@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -187,6 +188,117 @@ func (s *Store) DemandCursor(ctx context.Context, scaleSetID int64) (int64, erro
 func (s *Store) demandRecord(ctx context.Context, tx *sql.Tx, scaleSetID, requestID int64) (operations.DemandRecord, error) {
 	return scanDemand(s.txRow(ctx, tx, "inbox.demand.load", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,event_name,labels,queue_time,runner_id,runner_name,result,updated_at
 		FROM runner_demands WHERE scale_set_id=? AND runner_request_id=?`, scaleSetID, requestID))
+}
+
+func (s *Store) DemandRecord(ctx context.Context, scaleSetID, requestID int64) (operations.DemandRecord, error) {
+	if scaleSetID <= 0 || requestID <= 0 {
+		return operations.DemandRecord{}, operations.ErrInvalid
+	}
+	return scanDemand(s.db.QueryRowContext(ctx, `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,event_name,labels,queue_time,runner_id,runner_name,result,updated_at
+		FROM runner_demands WHERE scale_set_id=? AND runner_request_id=?`, scaleSetID, requestID))
+}
+
+// ProjectDemandEvent advances the owned VM from the highest durable demand
+// rank, not merely from the delivered event. This makes redelivery monotonic.
+func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event operations.DemandEvent) error {
+	if scaleSetID <= 0 || !event.Valid() {
+		return operations.ErrInvalid
+	}
+	if event.Kind == operations.DemandJobAvailable {
+		return nil
+	}
+	record, err := s.DemandRecord(ctx, scaleSetID, event.RunnerRequestID)
+	if err != nil {
+		return err
+	}
+	repo := record.Owner + "/" + record.Repository
+	instances, err := s.LiveInstances(ctx)
+	if err != nil {
+		return err
+	}
+	var instance operations.Instance
+	for _, candidate := range instances {
+		if candidate.Repo == repo && candidate.Demand.JobID == record.RunnerRequestID {
+			if instance.ID != "" {
+				return operations.ErrConflict
+			}
+			instance = candidate
+		}
+	}
+	if instance.ID == "" {
+		if record.Status == operations.DemandJobCompleted {
+			return nil
+		}
+		return operations.ErrUncertain
+	}
+	return s.projectDemandRank(ctx, instance, record.Status)
+}
+
+func (s *Store) projectDemandRank(ctx context.Context, instance operations.Instance, status operations.DemandEventKind) error {
+	advance := func(next operations.State) error {
+		updated, err := s.Advance(ctx, lifecycle.StateChange{InstanceID: instance.ID, ExpectedState: instance.State,
+			ExpectedVersion: instance.Version, NextState: next})
+		if err == nil {
+			instance = updated
+		}
+		return err
+	}
+	for range 5 {
+		switch status {
+		case operations.DemandJobAssigned:
+			switch instance.State {
+			case operations.StateRegistering:
+				if err := advance(operations.StateOnlineIdle); err != nil {
+					return err
+				}
+			case operations.StateOnlineIdle:
+				return advance(operations.StateAssigned)
+			case operations.StateAssigned, operations.StateRunning, operations.StateDraining, operations.StateDeregistering, operations.StateStopping, operations.StateDeleted:
+				return nil
+			default:
+				return operations.ErrUncertain
+			}
+		case operations.DemandJobStarted:
+			switch instance.State {
+			case operations.StateRegistering:
+				if err := advance(operations.StateOnlineIdle); err != nil {
+					return err
+				}
+			case operations.StateOnlineIdle:
+				if err := advance(operations.StateAssigned); err != nil {
+					return err
+				}
+			case operations.StateAssigned:
+				return advance(operations.StateRunning)
+			case operations.StateRunning, operations.StateDraining, operations.StateDeregistering, operations.StateStopping, operations.StateDeleted:
+				return nil
+			default:
+				return operations.ErrUncertain
+			}
+		case operations.DemandJobCompleted:
+			switch instance.State {
+			case operations.StateRegistering:
+				if err := advance(operations.StateOnlineIdle); err != nil {
+					return err
+				}
+			case operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning:
+				now := time.Now().UTC()
+				id := "event-drain-" + instance.ID
+				_, _, err := s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
+					ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: 1,
+					Operation: operations.Operation{ID: id, IdempotencyKey: id, EffectKey: "deregister:" + instance.ID,
+						Kind: "deregister", ResourceID: instance.ID, Payload: json.RawMessage(`{}`), AvailableAt: now}})
+				return err
+			case operations.StateDraining, operations.StateDeregistering, operations.StateStopping, operations.StateDeleted:
+				return nil
+			default:
+				return operations.ErrUncertain
+			}
+		default:
+			return operations.ErrInvalid
+		}
+	}
+	return operations.ErrUncertain
 }
 
 func scanDemand(row rowScanner) (operations.DemandRecord, error) {
