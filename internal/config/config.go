@@ -84,6 +84,7 @@ type GitHubApp struct {
 	ClientID        string `json:"clientId"`
 	KeychainService string `json:"keychainService"`
 	KeychainAccount string `json:"keychainAccount"`
+	PrivateKeyFile  string `json:"privateKeyFile,omitempty"`
 }
 
 type GitHubInstallation struct {
@@ -458,8 +459,8 @@ func (g GitHub) legacyConfigured() bool {
 func (c Config) validateMultiScopeAuthority() error {
 	github := c.GitHub
 	if strings.TrimSpace(github.SessionOwner) == "" || strings.TrimSpace(github.App.ClientID) == "" ||
-		strings.TrimSpace(github.App.KeychainService) == "" || strings.TrimSpace(github.App.KeychainAccount) == "" {
-		return errors.New("complete multi-scope GitHub App, session owner, and Keychain configuration is required")
+		!github.App.hasCredentialSource() {
+		return errors.New("complete multi-scope GitHub App, session owner, and private-key credential configuration is required")
 	}
 	if len(github.Installations) == 0 || len(github.Scopes) == 0 {
 		return errors.New("multi-scope GitHub authority requires installations and scopes")
@@ -524,6 +525,13 @@ func (c Config) validateMultiScopeAuthority() error {
 		}
 	}
 	return nil
+}
+
+func (a GitHubApp) hasCredentialSource() bool {
+	if strings.TrimSpace(a.PrivateKeyFile) != "" {
+		return true
+	}
+	return strings.TrimSpace(a.KeychainService) != "" && strings.TrimSpace(a.KeychainAccount) != ""
 }
 
 func (c Config) authorityProfiles() map[string]string {

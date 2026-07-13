@@ -73,14 +73,37 @@ message cursor atomically
 before acknowledgement, computes plans, and writes effects to neither GitHub nor
 Tart. Do not point another controller at the same scale-set sessions.
 
-GitHub App metadata belongs in JSON; the PEM private key belongs in a Keychain
-generic-password item. Create that item through Keychain Access so the PEM never
-appears in shell history or a process argument. Use service
-`tart-runner-fleet-github-app` and account `controller` (or configure different
-names), paste the PEM as the item password, then delete the source file safely.
+GitHub App metadata belongs in JSON. Prefer a Keychain generic-password item
+when its access control permits unattended launchd reads. Create that item
+through Keychain Access so the PEM never appears in shell history or a process
+argument. Use service `tart-runner-fleet-github-app` and account `controller`
+(or configure different names), paste the PEM as the item password, then delete
+the source file safely.
+
+If macOS Keychain access requires an interactive prompt in the launchd session,
+configure `github.app.privateKeyFile` instead. The file must be a regular,
+non-symlink file owned by the launchd user with exact mode `0600`; the loader
+opens it with `O_NOFOLLOW`, bounds its size, and never logs or serializes its
+contents. Keep it below the fleet state directory's mode-`0700` parent. Example:
+
+```json
+{
+  "github": {
+    "app": {
+      "clientId": "Iv23...",
+      "privateKeyFile": "/Users/runner/Library/Application Support/tart-runner-fleet/secrets/github-app.pem"
+    }
+  }
+}
+```
+
+When `privateKeyFile` and Keychain metadata are both present, the file is the
+authoritative source. This deterministic precedence prevents stale Keychain
+metadata from reopening an interactive prompt. Removing `privateKeyFile`
+restores the existing Keychain loader unchanged.
 
 The multi-scope `github` configuration contains one non-secret App client ID,
-Keychain service/account names, named installation IDs, and registration
+one private-key credential reference, named installation IDs, and registration
 scopes. Use a repository scope for each personal repository and an organization
 scope for organization repositories. Every target belongs to exactly one scope;
 every scope has exactly one scale set for each enabled profile. Numeric scale-set

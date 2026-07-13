@@ -209,6 +209,17 @@ func TestValidateAuthorityAcceptsPrivateKeyFileAndGivesItSafePrecedence(t *testi
 	if err := cfg.ValidateAuthority(); err == nil {
 		t.Fatal("ValidateAuthority accepted an incomplete Keychain reference without a file")
 	}
+
+	cfg = multiScopeAuthorityConfig()
+	cfg.GitHub.App.PrivateKeyFile = "/Users/runner/.config/tart-runner-fleet/app.pem"
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(strings.NewReader(encoded.String()))
+	if err != nil || decoded.GitHub.App.PrivateKeyFile != cfg.GitHub.App.PrivateKeyFile {
+		t.Fatalf("privateKeyFile round trip = %q, %v", decoded.GitHub.App.PrivateKeyFile, err)
+	}
 }
 
 func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {

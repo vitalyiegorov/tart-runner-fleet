@@ -46,7 +46,7 @@ type scaleSetSource interface {
 type dependencies struct {
 	openConfig  func(string) (io.ReadCloser, error)
 	openStore   func(context.Context, string) (runtimeStore, error)
-	loadKey     func(context.Context, string, string) (*credentials.Secret, error)
+	loadKey     func(context.Context, string, string, string) (*credentials.Secret, error)
 	newScaleSet func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
 	inventory   func(runtimeStore, config.Config) app.Inventory
 	listen      func(string, string) (net.Listener, error)
@@ -75,8 +75,8 @@ func defaultDependencies() dependencies {
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
-		loadKey: func(ctx context.Context, service, account string) (*credentials.Secret, error) {
-			return (credentials.Keychain{}).Load(ctx, service, account)
+		loadKey: func(ctx context.Context, service, account, path string) (*credentials.Secret, error) {
+			return (credentials.GitHubAppKey{}).Load(ctx, service, account, path)
 		},
 		newScaleSet: func(ctx context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 			return githubscaleset.NewGitHubAppScaleSet(ctx, cfg)
@@ -216,8 +216,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	}()
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if opts.Mode != reconcile.Observe {
-		service, account := githubKeychain(cfg)
-		secret, err := d.loadKey(ctx, service, account)
+		service, account, path := githubCredential(cfg)
+		secret, err := d.loadKey(ctx, service, account, path)
 		if err != nil {
 			return err
 		}
@@ -368,11 +368,11 @@ func sourceSettingsFor(cfg config.Config, binding app.Binding) (sourceSettings, 
 	return sourceSettings{}, fmt.Errorf("GitHub scope %q is not configured", binding.Scope)
 }
 
-func githubKeychain(cfg config.Config) (string, string) {
+func githubCredential(cfg config.Config) (string, string, string) {
 	if len(cfg.GitHub.Scopes) > 0 {
-		return cfg.GitHub.App.KeychainService, cfg.GitHub.App.KeychainAccount
+		return cfg.GitHub.App.KeychainService, cfg.GitHub.App.KeychainAccount, cfg.GitHub.App.PrivateKeyFile
 	}
-	return cfg.GitHub.KeychainService, cfg.GitHub.KeychainAccount
+	return cfg.GitHub.KeychainService, cfg.GitHub.KeychainAccount, ""
 }
 
 func bindingTargets(binding app.Binding, configured []config.Target) []string {

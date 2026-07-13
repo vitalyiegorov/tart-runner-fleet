@@ -44,7 +44,7 @@ type apiClient interface {
 type dependencies struct {
 	newClient      func(string, time.Duration) (apiClient, error)
 	openConfig     func(string) (io.ReadCloser, error)
-	loadPrivateKey func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error)
+	loadPrivateKey func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
 	openProvision  func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
 	writeConfig    func(string, config.Config) error
 }
@@ -54,11 +54,11 @@ type loadedSecret interface {
 	Destroy()
 }
 
-type secretLoader func(context.Context, string, string) (loadedSecret, error)
+type secretLoader func(context.Context, string, string, string) (loadedSecret, error)
 
-func privateKeyLoader(load secretLoader) func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
-	return func(ctx context.Context, service, account string) (*githubscaleset.PrivateKeySecret, error) {
-		secret, err := load(ctx, service, account)
+func privateKeyLoader(load secretLoader) func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	return func(ctx context.Context, service, account, path string) (*githubscaleset.PrivateKeySecret, error) {
+		secret, err := load(ctx, service, account, path)
 		if err != nil {
 			return nil, err
 		}
@@ -72,7 +72,7 @@ func privateKeyLoader(load secretLoader) func(context.Context, string, string) (
 }
 
 func defaultDependencies() dependencies {
-	keychain := credentials.Keychain{}
+	appKey := credentials.GitHubAppKey{}
 	return dependencies{
 		newClient: func(endpoint string, timeout time.Duration) (apiClient, error) {
 			return adminapi.NewClient(endpoint, timeout)
@@ -80,8 +80,8 @@ func defaultDependencies() dependencies {
 		openConfig: func(path string) (io.ReadCloser, error) {
 			return os.Open(path) // #nosec G304 -- explicit operator-selected config path.
 		},
-		loadPrivateKey: privateKeyLoader(func(ctx context.Context, service, account string) (loadedSecret, error) {
-			return keychain.Load(ctx, service, account)
+		loadPrivateKey: privateKeyLoader(func(ctx context.Context, service, account, path string) (loadedSecret, error) {
+			return appKey.Load(ctx, service, account, path)
 		}),
 		openProvision: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
 			return githubscaleset.NewProvisioner(cfg)

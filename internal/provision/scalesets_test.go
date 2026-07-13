@@ -59,7 +59,7 @@ func provisionConfig() config.Config {
 
 func TestRunPlansBeforeApplyingAndPersistsReturnedIDs(t *testing.T) {
 	client := &fakeClient{plans: map[string]githubscaleset.ScaleSetPlan{"repo-small": {Action: githubscaleset.ScaleSetReuse, ID: 55}}}
-	request := Request{Config: provisionConfig(), Apply: true, LoadKey: func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	request := Request{Config: provisionConfig(), Apply: true, LoadKey: func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
 		return githubscaleset.NewPrivateKeySecret("pem"), nil
 	}, Open: func(githubscaleset.GitHubAppAdminConfig) (Client, error) { return client, nil }}
 	result, err := Run(context.Background(), request)
@@ -73,7 +73,7 @@ func TestRunPlansBeforeApplyingAndPersistsReturnedIDs(t *testing.T) {
 
 func TestRunPlanOnlyAndDriftFailBeforeCreate(t *testing.T) {
 	client := &fakeClient{plans: map[string]githubscaleset.ScaleSetPlan{}}
-	base := Request{Config: provisionConfig(), LoadKey: func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	base := Request{Config: provisionConfig(), LoadKey: func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
 		return githubscaleset.NewPrivateKeySecret("pem"), nil
 	}, Open: func(githubscaleset.GitHubAppAdminConfig) (Client, error) { return client, nil }}
 	if result, err := Run(context.Background(), base); err != nil || len(result.Changes) != 5 || len(client.created) != 0 {
@@ -91,8 +91,24 @@ func TestRunPlanOnlyAndDriftFailBeforeCreate(t *testing.T) {
 	}
 }
 
+func TestRunPassesConfiguredPrivateKeyFileToCredentialLoader(t *testing.T) {
+	cfg := provisionConfig()
+	cfg.GitHub.App.PrivateKeyFile = "/Users/runner/.config/tart-runner-fleet/app.pem"
+	var gotService, gotAccount, gotPath string
+	request := Request{Config: cfg, LoadKey: func(_ context.Context, service, account, path string) (*githubscaleset.PrivateKeySecret, error) {
+		gotService, gotAccount, gotPath = service, account, path
+		return githubscaleset.NewPrivateKeySecret("pem"), nil
+	}, Open: func(githubscaleset.GitHubAppAdminConfig) (Client, error) { return &fakeClient{}, nil }}
+	if _, err := Run(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if gotService != "service" || gotAccount != "account" || gotPath != cfg.GitHub.App.PrivateKeyFile {
+		t.Fatalf("credential reference = %q/%q/%q", gotService, gotAccount, gotPath)
+	}
+}
+
 func validRequest(client Client) Request {
-	return Request{Config: provisionConfig(), LoadKey: func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	return Request{Config: provisionConfig(), LoadKey: func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
 		return githubscaleset.NewPrivateKeySecret("PRIVATE-KEY-SENTINEL"), nil
 	}, Open: func(githubscaleset.GitHubAppAdminConfig) (Client, error) { return client, nil }}
 }
@@ -108,12 +124,14 @@ func TestRunRejectsInvalidConfigurationAndKeyFailures(t *testing.T) {
 		{name: "no scopes", edit: func(r *Request) { r.Config.GitHub.Scopes = nil }, want: operations.ErrInvalid},
 		{name: "invalid authority", edit: func(r *Request) { r.Config.GitHub.App.ClientID = "" }, want: operations.ErrInvalid},
 		{name: "load error", edit: func(r *Request) {
-			r.LoadKey = func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+			r.LoadKey = func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
 				return nil, errors.New("keychain unavailable")
 			}
 		}, want: errors.New("keychain unavailable")},
 		{name: "nil key", edit: func(r *Request) {
-			r.LoadKey = func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) { return nil, nil }
+			r.LoadKey = func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
+				return nil, nil
+			}
 		}, want: operations.ErrInvalid},
 	}
 	for _, tt := range tests {

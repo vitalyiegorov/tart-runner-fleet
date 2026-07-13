@@ -356,7 +356,7 @@ func TestScaleSetProvisionCommandPlansGuardsAndPersists(t *testing.T) {
 	}
 	fake := &fakeProvisioner{}
 	deps := defaultDependencies()
-	deps.loadPrivateKey = func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	deps.loadPrivateKey = func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
 		return githubscaleset.NewPrivateKeySecret("pem"), nil
 	}
 	deps.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) { return fake, nil }
@@ -398,7 +398,7 @@ func TestScaleSetProvisionCommandFailureGuardsAndSecretRedaction(t *testing.T) {
 	newDeps := func() dependencies {
 		deps := defaultDependencies()
 		deps.openConfig = func(string) (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(valid)), nil }
-		deps.loadPrivateKey = func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+		deps.loadPrivateKey = func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
 			return githubscaleset.NewPrivateKeySecret("PRIVATE-KEY-SENTINEL"), nil
 		}
 		deps.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) { return &fakeProvisioner{}, nil }
@@ -482,8 +482,8 @@ func (s *fakeLoadedSecret) Destroy()       { s.value, s.destroyed = "", true }
 
 func TestPrivateKeyLoaderTransfersAndDestroysKeychainSecret(t *testing.T) {
 	loaded := &fakeLoadedSecret{value: "PRIVATE-KEY-SENTINEL"}
-	loader := privateKeyLoader(func(context.Context, string, string) (loadedSecret, error) { return loaded, nil })
-	key, err := loader(context.Background(), "service", "account")
+	loader := privateKeyLoader(func(context.Context, string, string, string) (loadedSecret, error) { return loaded, nil })
+	key, err := loader(context.Background(), "service", "account", "")
 	if err != nil || key == nil || !loaded.destroyed || loaded.value != "" {
 		t.Fatalf("load = %v, %v; secret=%#v", key, err, loaded)
 	}
@@ -492,18 +492,27 @@ func TestPrivateKeyLoaderTransfersAndDestroysKeychainSecret(t *testing.T) {
 	}
 	key.Destroy()
 	want := errors.New("keychain unavailable")
-	loader = privateKeyLoader(func(context.Context, string, string) (loadedSecret, error) { return nil, want })
-	if _, err := loader(context.Background(), "service", "account"); !errors.Is(err, want) {
+	loader = privateKeyLoader(func(context.Context, string, string, string) (loadedSecret, error) { return nil, want })
+	if _, err := loader(context.Background(), "service", "account", ""); !errors.Is(err, want) {
 		t.Fatalf("load error = %v", err)
 	}
-	loader = privateKeyLoader(func(context.Context, string, string) (loadedSecret, error) { return nil, nil })
-	if _, err := loader(context.Background(), "service", "account"); !errors.Is(err, operations.ErrInvalid) {
+	loader = privateKeyLoader(func(context.Context, string, string, string) (loadedSecret, error) { return nil, nil })
+	if _, err := loader(context.Background(), "service", "account", ""); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("nil secret error = %v", err)
 	}
 	deps := defaultDependencies()
-	if _, err := deps.loadPrivateKey(context.Background(), "", ""); err == nil {
+	if _, err := deps.loadPrivateKey(context.Background(), "", "", ""); err == nil {
 		t.Fatal("default Keychain loader accepted empty reference")
 	}
+	path := filepath.Join(t.TempDir(), "app.pem")
+	if err := os.WriteFile(path, []byte("file-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileKey, err := deps.loadPrivateKey(context.Background(), "", "", path)
+	if err != nil || fileKey == nil {
+		t.Fatalf("default file loader = %v, %v", fileKey, err)
+	}
+	fileKey.Destroy()
 	if _, err := deps.openProvision(githubscaleset.GitHubAppAdminConfig{}); err == nil {
 		t.Fatal("default provisioner accepted empty configuration")
 	}

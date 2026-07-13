@@ -87,3 +87,31 @@ func TestGitHubAppKeyFallsBackToKeychain(t *testing.T) {
 		t.Fatal("Keychain fallback did not run")
 	}
 }
+
+func TestPrivateKeyFileBoundsAndCancellation(t *testing.T) {
+	dir := t.TempDir()
+	large := filepath.Join(dir, "large.pem")
+	if err := os.WriteFile(large, []byte(strings.Repeat("x", maxPrivateKeyBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (PrivateKeyFile{}).Load(context.Background(), large); err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("large Load() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (PrivateKeyFile{}).Load(ctx, large); err == nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("cancelled Load() error = %v", err)
+	}
+
+	closed, err := os.Open(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (PrivateKeyFile{Open: func(string) (*os.File, error) { return closed, nil }}).Load(context.Background(), large); err == nil || !strings.Contains(err.Error(), "inspect") {
+		t.Fatalf("closed Load() error = %v", err)
+	}
+}

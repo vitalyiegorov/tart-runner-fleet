@@ -153,7 +153,7 @@ func testDependencies(t *testing.T) dependencies {
 	d.inventory = func(runtimeStore, config.Config) app.Inventory { return runtimeInventory{} }
 	d.listen = func(_, _ string) (net.Listener, error) { return newFakeListener(), nil }
 	d.adminListen = func(string) (net.Listener, error) { return newFakeListener(), nil }
-	d.loadKey = func(ctx context.Context, _, _ string) (*credentials.Secret, error) {
+	d.loadKey = func(ctx context.Context, _, _, _ string) (*credentials.Secret, error) {
 		return (credentials.Keychain{Runner: keyRunner{out: []byte("key")}}).Load(ctx, "s", "a")
 	}
 	return d
@@ -356,7 +356,7 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 		{name: "listen", opts: options{Mode: reconcile.Observe, ConfigPath: valid, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) { d.listen = func(string, string) (net.Listener, error) { return nil, want } }},
 		{name: "admin listen", opts: options{Mode: reconcile.Observe, ConfigPath: valid, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) { d.adminListen = func(string) (net.Listener, error) { return nil, want } }},
 		{name: "key", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
-			d.loadKey = func(context.Context, string, string) (*credentials.Secret, error) { return nil, want }
+			d.loadKey = func(context.Context, string, string, string) (*credentials.Secret, error) { return nil, want }
 		}},
 		{name: "scale", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
 			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
@@ -485,9 +485,18 @@ func TestDefaultDependenciesAndHelpers(t *testing.T) {
 	if d.inventory(store, config.Default()) == nil {
 		t.Fatal("nil inventory")
 	}
-	if _, err := d.loadKey(ctx, "tart-runner-fleet-test-missing", "none"); err == nil {
+	if _, err := d.loadKey(ctx, "tart-runner-fleet-test-missing", "none", ""); err == nil {
 		t.Fatal("missing key found")
 	}
+	path := filepath.Join(t.TempDir(), "app.pem")
+	if err := os.WriteFile(path, []byte("file-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileKey, err := d.loadKey(ctx, "", "", path)
+	if err != nil || fileKey == nil {
+		t.Fatalf("default file loader = %v, %v", fileKey, err)
+	}
+	fileKey.Destroy()
 	if _, err := d.newScaleSet(ctx, githubscaleset.GitHubAppScaleSetConfig{}); err == nil {
 		t.Fatal("invalid scale set opened")
 	}
@@ -496,6 +505,22 @@ func TestDefaultDependenciesAndHelpers(t *testing.T) {
 	}
 	if err := (boundIngester{}).Ingest(ctx); err == nil {
 		t.Fatal("invalid ingester")
+	}
+}
+
+func TestGitHubCredentialSelectsMultiScopeFileAndLegacyKeychain(t *testing.T) {
+	cfg := config.Default()
+	cfg.GitHub = config.GitHub{Scopes: []config.GitHubScope{{Name: "scope"}}, App: config.GitHubApp{
+		KeychainService: "service", KeychainAccount: "account", PrivateKeyFile: "/secure/app.pem",
+	}}
+	service, account, path := githubCredential(cfg)
+	if service != "service" || account != "account" || path != "/secure/app.pem" {
+		t.Fatalf("multi-scope credential = %q/%q/%q", service, account, path)
+	}
+	cfg.GitHub = config.GitHub{KeychainService: "legacy-service", KeychainAccount: "legacy-account"}
+	service, account, path = githubCredential(cfg)
+	if service != "legacy-service" || account != "legacy-account" || path != "" {
+		t.Fatalf("legacy credential = %q/%q/%q", service, account, path)
 	}
 }
 

@@ -21,7 +21,7 @@ type Client interface {
 type Request struct {
 	Config  config.Config
 	Apply   bool
-	LoadKey func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error)
+	LoadKey func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
 	Open    func(githubscaleset.GitHubAppAdminConfig) (Client, error)
 	Version string
 }
@@ -55,7 +55,8 @@ func Run(ctx context.Context, request Request) (Result, error) {
 	if len(result.Config.GitHub.Scopes) == 0 || result.Config.ValidateAuthority() != nil {
 		return Result{}, operations.ErrInvalid
 	}
-	key, err := request.LoadKey(ctx, result.Config.GitHub.App.KeychainService, result.Config.GitHub.App.KeychainAccount)
+	key, err := request.LoadKey(ctx, result.Config.GitHub.App.KeychainService, result.Config.GitHub.App.KeychainAccount,
+		result.Config.GitHub.App.PrivateKeyFile)
 	if err != nil {
 		return Result{}, fmt.Errorf("load GitHub App key: %w", err)
 	}
