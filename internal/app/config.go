@@ -73,7 +73,7 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 
 func scopedStoreKey(scope string, scaleSetID int) int64 {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", scope, scaleSetID)))
-	key := int64(binary.BigEndian.Uint64(digest[:8]) & uint64(^uint64(0)>>1))
+	key := int64(binary.BigEndian.Uint64(digest[:8]) & (^uint64(0) >> 1))
 	if key == 0 {
 		return 1
 	}
