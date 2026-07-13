@@ -72,6 +72,67 @@ func TestControllerShadowPersistsDecisionWithoutEffects(t *testing.T) {
 	}
 }
 
+// Regression: an idle shadow tick normalizes the durable scheduler snapshot on
+// its first pass. Replaying the same deterministic scheduler plan must then be
+// a no-op. Rewriting it with a new timestamp/version reuses the same plan ID
+// with a different digest, which the durable store correctly rejects.
+func TestControllerSkipsIdenticalNoOpPlanReplay(t *testing.T) {
+	store := &fakeStore{state: operations.SchedulerState{
+		Data:              json.RawMessage(`{}`),
+		Reservations:      json.RawMessage(`[]`),
+		DeficitRoundRobin: json.RawMessage(`{}`),
+	}}
+	controller := Controller{Store: store, ControllerID: "controller", Mode: Shadow}
+	plan := readyPlan()
+
+	applied, err := controller.Commit(context.Background(), plan, "", controllerNow)
+	if err != nil || !applied || len(store.applied) != 1 {
+		t.Fatalf("first Commit() = %v, %v, plans=%d", applied, err, len(store.applied))
+	}
+	store.state = store.applied[0].Scheduler
+
+	applied, err = controller.Commit(context.Background(), plan, "", controllerNow.Add(time.Second))
+	if err != nil || applied || len(store.applied) != 1 {
+		t.Fatalf("replay Commit() = %v, %v, plans=%d", applied, err, len(store.applied))
+	}
+}
+
+func TestSchedulerStateMatchRequiresEveryDurableFieldAndValidJSON(t *testing.T) {
+	next := scheduler.State{DRRCursor: "owner/repo"}
+	stateJSON, _ := json.Marshal(next)
+	reservationJSON, _ := json.Marshal(next.Reservation)
+	drrJSON, _ := json.Marshal(map[string]string{"cursor": next.DRRCursor})
+	current := operations.SchedulerState{Data: stateJSON, Reservations: reservationJSON, DeficitRoundRobin: drrJSON, ObservationCursor: "cursor"}
+
+	if matched, err := schedulerStateMatches(current, next, "cursor"); err != nil || !matched {
+		t.Fatalf("exact state match = %v, %v", matched, err)
+	}
+	for _, tt := range []struct {
+		name string
+		edit func(*operations.SchedulerState)
+	}{
+		{name: "state", edit: func(value *operations.SchedulerState) { value.Data = json.RawMessage(`{}`) }},
+		{name: "reservations", edit: func(value *operations.SchedulerState) { value.Reservations = json.RawMessage(`[]`) }},
+		{name: "deficit round robin", edit: func(value *operations.SchedulerState) { value.DeficitRoundRobin = json.RawMessage(`{}`) }},
+		{name: "cursor", edit: func(value *operations.SchedulerState) { value.ObservationCursor = "old" }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := current
+			tt.edit(&changed)
+			if matched, err := schedulerStateMatches(changed, next, "cursor"); err != nil || matched {
+				t.Fatalf("changed state match = %v, %v", matched, err)
+			}
+		})
+	}
+	for _, invalid := range []json.RawMessage{json.RawMessage(`{"cursor":`), json.RawMessage(`{} {}`)} {
+		changed := current
+		changed.DeficitRoundRobin = invalid
+		if matched, err := schedulerStateMatches(changed, next, "cursor"); err == nil || matched {
+			t.Fatalf("invalid state match = %v, %v", matched, err)
+		}
+	}
+}
+
 func TestControllerAuthorityTranslatesSpawnAndDependentDrain(t *testing.T) {
 	ownership := operations.Ownership{ControllerID: "controller", ResourceID: "old", OperationID: "birth"}
 	store := &fakeStore{state: operations.SchedulerState{Version: 2}, instances: map[string]operations.Instance{
