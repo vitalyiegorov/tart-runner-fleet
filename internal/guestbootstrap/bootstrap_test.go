@@ -86,7 +86,7 @@ func TestChildEnvironmentProvidesDeterministicRunnerToolchainPath(t *testing.T) 
 	environment := childEnvironment("jit")
 	want := "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	if runtime.GOOS == "darwin" {
-		want = "/opt/homebrew/bin:" + want
+		want = "/Users/admin/.rbenv/shims:/opt/homebrew/bin:" + want
 	}
 	if got := environmentValue(environment, "PATH"); got != want {
 		t.Fatalf("runner PATH=%q want=%q", got, want)
@@ -97,7 +97,7 @@ func TestChildEnvironmentProvidesDeterministicRunnerToolchainPath(t *testing.T) 
 	if got := runnerToolchainPath("linux"); got != "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
 		t.Fatalf("linux runner PATH=%q", got)
 	}
-	if got := runnerToolchainPath("darwin"); got != "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
+	if got := runnerToolchainPath("darwin"); got != "/Users/admin/.rbenv/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
 		t.Fatalf("darwin runner PATH=%q", got)
 	}
 }
