@@ -2,7 +2,11 @@ name: Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    tags:
+      - 'v*.*.*'
+      # Automatically published main releases already contain the exact
+      # verified CI artifact and must not recursively rebuild themselves.
+      - '!v*.*.*+main.*'
   workflow_dispatch:
     inputs:
       version:

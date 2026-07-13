@@ -51,16 +51,17 @@ cp "$temporary/one/fleetctl" "$staging/fleetctl"
 cp "$temporary/one/fleetd.cdx.json" "$staging/fleetd.cdx.json"
 cp "$temporary/one/fleetctl.cdx.json" "$staging/fleetctl.cdx.json"
 (cd "$staging" && go version -m fleetd) > "$staging/BUILDINFO.txt"
+printf '%s\n' "$version" > "$staging/RELEASE_VERSION"
 
 archive="tart-runner-fleet-$version-darwin-arm64.tar.gz"
 for pass in one two; do
   tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     -czf "$temporary/$archive.$pass" -C "$staging" \
-    fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json BUILDINFO.txt
+    fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json BUILDINFO.txt RELEASE_VERSION
 done
 cmp "$temporary/$archive.one" "$temporary/$archive.two"
 cp "$temporary/$archive.one" "$staging/$archive"
-(cd "$staging" && shasum -a 256 "$archive" fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json BUILDINFO.txt > SHA256SUMS)
+(cd "$staging" && shasum -a 256 "$archive" fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json BUILDINFO.txt RELEASE_VERSION > SHA256SUMS)
 rmdir "$output"
 mv "$staging" "$output"
 staging=""

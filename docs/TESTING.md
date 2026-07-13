@@ -20,6 +20,13 @@ versions, rebuilds both macOS ARM64 binaries twice, compares their bytes, and
 does the same for deterministic CycloneDX 1.6 SBOMs before producing SHA-256
 manifests and an immutable archive.
 
+After a trusted `main` push completes Required CI, a separate least-privilege
+publisher downloads that exact run's verified artifact. It validates the commit,
+run-derived production SemVer, version manifest, allowlisted files, archive
+members, and every SHA-256 digest before creating a normal GitHub Release.
+Publication is serialized and idempotent; retries can repair partial asset
+uploads only when the existing tag still resolves to the same commit.
+
 The CI DAG fans quality (2 CPU/4 GiB), unit coverage (2 CPU/4 GiB), and race
 (4 CPU/8 GiB) out after a small preflight. Together they exactly match the
 host's 8 CPU/16 GiB Linux envelope. No job uses a GitHub-hosted macOS runner.

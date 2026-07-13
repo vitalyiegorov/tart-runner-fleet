@@ -1,0 +1,104 @@
+name: Main Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: main-production-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish verified main release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: [self-hosted, linux-tiered, linux-small]
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+    steps:
+      - name: Download the verified main artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: ci-release-darwin-arm64-${{ github.event.workflow_run.head_sha }}
+          path: dist
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify release identity, contents, and checksums
+        run: |
+          set -euo pipefail
+          case "$HEAD_SHA" in
+            *[!0-9a-f]*|'') echo "invalid main commit SHA" >&2; exit 2 ;;
+          esac
+          case "$RUN_NUMBER" in
+            *[!0-9]*|'') echo "invalid CI run number" >&2; exit 2 ;;
+          esac
+
+          SHORT_SHA="$(printf '%.12s' "$HEAD_SHA")"
+          VERSION="v0.1.${RUN_NUMBER}+main.${SHORT_SHA}"
+          ARCHIVE="tart-runner-fleet-${VERSION}-darwin-arm64.tar.gz"
+
+          test "$(cat dist/RELEASE_VERSION)" = "$VERSION"
+          for file in \
+            BUILDINFO.txt RELEASE_VERSION SHA256SUMS \
+            fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json "$ARCHIVE"; do
+            test -f "dist/$file"
+          done
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+
+          EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n' \
+            BUILDINFO.txt RELEASE_VERSION fleetctl fleetctl.cdx.json \
+            fleetd fleetd.cdx.json | LC_ALL=C sort)"
+          ACTUAL_ARCHIVE_CONTENTS="$(tar -tzf "dist/$ARCHIVE" | LC_ALL=C sort)"
+          test "$ACTUAL_ARCHIVE_CONTENTS" = "$EXPECTED_ARCHIVE_CONTENTS"
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Publish immutable production release
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            TAG_SHA="$(gh api "repos/$GH_REPO/commits/$VERSION" --jq .sha)"
+            test "$TAG_SHA" = "$HEAD_SHA"
+            # A retry may resume a partially completed upload. The validated
+            # artifact is immutable for this CI run, so replacement is safe.
+            gh release upload "$VERSION" \
+              "dist/$ARCHIVE" \
+              dist/SHA256SUMS \
+              dist/BUILDINFO.txt \
+              dist/RELEASE_VERSION \
+              dist/fleetd \
+              dist/fleetctl \
+              dist/fleetd.cdx.json \
+              dist/fleetctl.cdx.json \
+              --clobber
+          else
+            gh release create "$VERSION" \
+              "dist/$ARCHIVE" \
+              dist/SHA256SUMS \
+              dist/BUILDINFO.txt \
+              dist/RELEASE_VERSION \
+              dist/fleetd \
+              dist/fleetctl \
+              dist/fleetd.cdx.json \
+              dist/fleetctl.cdx.json \
+              --target "$HEAD_SHA" \
+              --title "$VERSION" \
+              --generate-notes
+          fi

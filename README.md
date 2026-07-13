@@ -137,8 +137,15 @@ All Go analysis tools are pinned through Go 1.25 tool directives, every action
 uses an immutable commit SHA, and Go 1.25.12 is the minimum toolchain because it
 contains the required standard-library vulnerability fixes. Nightly CI repeats
 replay/contract/integration/chaos tests and fuzzes the deterministic scheduler.
-Tagged releases rebuild each macOS ARM64 binary twice, compare both binaries and
-their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256 manifests.
+Every successful `main` CI run publishes its already-verified artifact as a
+normal immutable GitHub Release named
+`v0.1.<CI-run-number>+main.<commit-prefix>`. The privileged publisher runs only
+after trusted `push` CI succeeds, verifies the artifact version, allowlisted
+contents, archive contents, and SHA-256 manifest, and is retry-safe. It does not
+promote the daemon's launchd authority. Manually dispatched or non-generated
+tag releases independently rebuild each macOS ARM64 binary twice, compare both
+binaries and their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256
+manifests.
 
 The controller is itself a permanent fleet target. Its three parallel CI jobs
 exactly fill the Linux envelope, while the installed release or pinned incumbent
