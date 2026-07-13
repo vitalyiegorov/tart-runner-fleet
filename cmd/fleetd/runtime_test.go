@@ -616,7 +616,7 @@ func TestCanaryBindingSelectionIsExactAndLegacyCompatible(t *testing.T) {
 	if err != nil || len(selected) != 1 || selected[0].StoreKey != 11 {
 		t.Fatalf("selected=%#v err=%v", selected, err)
 	}
-	if !reflect.DeepEqual(selected[0].RequiredLabels, []string{"tart-fleet-canary"}) {
+	if len(selected[0].RequiredLabels) != 1 || selected[0].RequiredLabels[0] != canaryDemandLabel {
 		t.Fatalf("canary binding does not require dedicated demand label: %#v", selected[0])
 	}
 	if _, err := selectRuntimeBindings(bindings, options{Mode: reconcile.Canary, CanaryScope: "missing", CanaryProfile: "small"}); err == nil {

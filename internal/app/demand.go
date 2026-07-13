@@ -24,11 +24,12 @@ type MessageSource interface {
 }
 
 type Binding struct {
-	StoreKey   int64
-	ScaleSetID int64
-	Scope      string
-	Targets    []string
-	Profile    domain.Profile
+	StoreKey       int64
+	ScaleSetID     int64
+	Scope          string
+	Targets        []string
+	RequiredLabels []string
+	Profile        domain.Profile
 }
 
 func (b Binding) valid() bool {
@@ -55,6 +56,22 @@ func (b Binding) accepts(repo string) bool {
 	return false
 }
 
+func (b Binding) acceptsLabels(labels []string) bool {
+	for _, required := range b.RequiredLabels {
+		found := false
+		for _, label := range labels {
+			if label == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 type DemandCoordinator struct {
 	Store     DemandStore
 	Projector DemandProjector
@@ -77,7 +94,7 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 	err := source.Handle(ctx, func(ctx context.Context, demand githubscaleset.Demand) error {
 		events := make([]operations.DemandEvent, 0, len(demand.Events))
 		for _, event := range demand.Events {
-			if !binding.accepts(event.Owner + "/" + event.Repository) {
+			if !binding.accepts(event.Owner+"/"+event.Repository) || !binding.acceptsLabels(event.Labels) {
 				continue
 			}
 			events = append(events, convertEvent(event))
@@ -123,7 +140,7 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 		if record.Status != operations.DemandJobAvailable {
 			continue
 		}
-		if !binding.accepts(record.Owner + "/" + record.Repository) {
+		if !binding.accepts(record.Owner+"/"+record.Repository) || !binding.acceptsLabels(record.Labels) {
 			continue
 		}
 		if record.RunnerRequestID <= 0 || record.WorkflowRunID <= 0 || record.Owner == "" || record.Repository == "" || record.QueueTime.IsZero() {

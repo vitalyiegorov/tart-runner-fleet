@@ -37,6 +37,8 @@ type runtimeStore interface {
 	Close() error
 }
 
+const canaryDemandLabel = "tart-fleet-canary"
+
 type scaleSetSource interface {
 	app.MessageSource
 	lifecycle.ScaleSetControl
@@ -312,6 +314,10 @@ func selectRuntimeBindings(bindings []app.Binding, opts options) ([]app.Binding,
 			bindingScope = legacyScopeName
 		}
 		if bindingScope == scope && binding.Profile.ID == profile {
+			binding.RequiredLabels = append([]string(nil), binding.RequiredLabels...)
+			if !containsString(binding.RequiredLabels, canaryDemandLabel) {
+				binding.RequiredLabels = append(binding.RequiredLabels, canaryDemandLabel)
+			}
 			selected = append(selected, binding)
 		}
 	}
@@ -319,6 +325,15 @@ func selectRuntimeBindings(bindings []app.Binding, opts options) ([]app.Binding,
 		return nil, fmt.Errorf("canary selector %s/%s resolved %d bindings", scope, profile, len(selected))
 	}
 	return selected, nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 type sourceSettings struct {
