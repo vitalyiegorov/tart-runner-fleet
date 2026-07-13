@@ -144,3 +144,27 @@ func TestLaunchdTemplateCanResolveRequiredOperatorTools(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthorityCanaryIsManualDedicatedAndBounded(t *testing.T) {
+	workflow, err := os.ReadFile("../../.github/workflows/fleet-canary.yml") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"workflow_dispatch:",
+		"cancel-in-progress: false",
+		"[self-hosted, linux-tiered, linux-small, tart-fleet-canary]",
+		"timeout-minutes: 5",
+		`test "$RUNNER_ENVIRONMENT" = self-hosted`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("authority canary is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"pull_request:", "push:", "schedule:"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("authority canary must remain manual, found %q", forbidden)
+		}
+	}
+}
