@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -135,15 +136,24 @@ func zero(value []byte) {
 }
 
 func childEnvironment(jit string) []string {
-	prefix := JITEnvironment + "="
+	jitPrefix := JITEnvironment + "="
+	pathPrefix := "PATH="
 	parent := os.Environ()
-	environment := make([]string, 0, len(parent)+1)
+	environment := make([]string, 0, len(parent)+2)
 	for _, value := range parent {
-		if !strings.HasPrefix(value, prefix) {
+		if !strings.HasPrefix(value, jitPrefix) && !strings.HasPrefix(value, pathPrefix) {
 			environment = append(environment, value)
 		}
 	}
-	return append(environment, prefix+jit)
+	return append(environment, jitPrefix+jit, pathPrefix+runnerToolchainPath(runtime.GOOS))
+}
+
+func runnerToolchainPath(goos string) string {
+	portable := "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	if goos == "darwin" {
+		return "/opt/homebrew/bin:" + portable
+	}
+	return portable
 }
 
 func secureLog(workDir, path string) (*os.File, error) {
