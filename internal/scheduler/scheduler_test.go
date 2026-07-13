@@ -373,6 +373,222 @@ func TestMacHandoffDrainsIdleLinuxAndSpawnsSameTick(t *testing.T) {
 	}
 }
 
+func TestBlockedMacHandoffBackfillsOnlyOneAgedSmallestTier(t *testing.T) {
+	macJob := demand("a/repo", 1, 20*time.Minute, "builder")
+	agedLarge := demand("b/repo", 2, 15*time.Minute, "large")
+	agedSmall := demand("b/repo", 3, 10*time.Minute, "small")
+	secondSmall := demand("c/repo", 4, 9*time.Minute, "small")
+	youngSmall := demand("c/repo", 5, time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+
+	plan := PlanTick(input([]domain.Demand{youngSmall, secondSmall, agedSmall, agedLarge, macJob}, []domain.Instance{holder}, State{}))
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{agedSmall.Key}) {
+		t.Fatalf("bounded drain backfill = %#v, want %#v", got, agedSmall.Key)
+	}
+	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.Demand != macJob.Key || !plan.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("durable mac handoff = %#v", plan.Next.MacHandoff)
+	}
+	for _, operation := range plan.Operations {
+		if operation.Kind == OperationSpawn && operation.Profile == "builder" {
+			t.Fatalf("macOS overlapped Linux drain: %#v", plan)
+		}
+	}
+}
+
+func TestBlockedMacHandoffBackfillIsMonotonicAcrossTicks(t *testing.T) {
+	macJob := demand("a/repo", 1, 20*time.Minute, "builder")
+	firstSmall := demand("b/repo", 2, 10*time.Minute, "small")
+	laterSmall := demand("c/repo", 3, 9*time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+
+	first := PlanTick(input([]domain.Demand{macJob, firstSmall}, []domain.Instance{holder}, State{}))
+	secondInput := input([]domain.Demand{macJob, firstSmall, laterSmall}, []domain.Instance{holder}, first.Next)
+	second := PlanTick(secondInput)
+	if got := spawnedKeys(second); len(got) != 0 {
+		t.Fatalf("repeated handoff backfill = %#v", got)
+	}
+	if second.Next.MacHandoff == nil || !second.Next.MacHandoff.BackfillAdmitted || second.Next.MacHandoff.Since != first.Next.MacHandoff.Since {
+		t.Fatalf("handoff budget reset: first=%#v second=%#v", first.Next.MacHandoff, second.Next.MacHandoff)
+	}
+
+	cleared := PlanTick(input([]domain.Demand{macJob, laterSmall}, nil, second.Next))
+	if got := spawnedKeys(cleared); !reflect.DeepEqual(got, []domain.DemandKey{macJob.Key}) || cleared.Next.MacHandoff != nil {
+		t.Fatalf("completed handoff = %#v", cleared)
+	}
+}
+
+func TestMacHandoffSurvivesTemporaryOlderLinuxSelection(t *testing.T) {
+	macJob := demand("mac/repo", 1, 20*time.Minute, "builder")
+	olderLinux := demand("linux/repo", 2, 30*time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "holder/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+	prior := State{MacHandoff: &MacHandoff{Demand: macJob.Key, Profile: macJob.Profile, Since: testNow.Add(-time.Minute), BackfillAdmitted: true}}
+
+	linuxTick := PlanTick(input([]domain.Demand{macJob, olderLinux}, []domain.Instance{holder}, prior))
+	if linuxTick.Next.MacHandoff == nil || !reflect.DeepEqual(linuxTick.Next.MacHandoff, prior.MacHandoff) {
+		t.Fatalf("temporary Linux selection lost handoff: %#v", linuxTick.Next.MacHandoff)
+	}
+	macTick := PlanTick(input([]domain.Demand{macJob}, []domain.Instance{holder}, linuxTick.Next))
+	if got := spawnedKeys(macTick); len(got) != 0 || macTick.Next.MacHandoff == nil || !macTick.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("preserved handoff admitted a second backfill: %#v", macTick)
+	}
+}
+
+func TestBlockedMacHandoffBackfillsYoungControlPlaneNotYoungStandard(t *testing.T) {
+	macJob := demand("mac/repo", 1, 10*time.Minute, "builder")
+	standard := demand("standard/repo", 2, time.Minute, "small")
+	control := demand("control/repo", 3, time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "holder/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+
+	standardInput := input([]domain.Demand{macJob, standard}, []domain.Instance{holder}, State{})
+	if got := spawnedKeys(PlanTick(standardInput)); len(got) != 0 {
+		t.Fatalf("young standard drain work admitted: %#v", got)
+	}
+	controlInput := input([]domain.Demand{macJob, control}, []domain.Instance{holder}, State{})
+	controlInput.Config.RepoSchedulingClasses = map[string]domain.SchedulingClass{control.Key.Repo: domain.SchedulingControlPlane}
+	if got := spawnedKeys(PlanTick(controlInput)); !reflect.DeepEqual(got, []domain.DemandKey{control.Key}) {
+		t.Fatalf("young control-plane drain work = %#v", got)
+	}
+}
+
+func TestMacHandoffHeadUsesAuthoritativePriorityAcrossPermutations(t *testing.T) {
+	standard := demand("standard/repo", 1, 2*time.Minute, "builder")
+	control := demand("control/repo", 2, time.Minute, "builder")
+	holder := domain.Instance{ID: "holder", Repo: "holder/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+
+	var want *MacHandoff
+	for _, demands := range [][]domain.Demand{{standard, control}, {control, standard}} {
+		in := input(demands, []domain.Instance{holder}, State{})
+		in.Config.RepoSchedulingClasses = map[string]domain.SchedulingClass{control.Key.Repo: domain.SchedulingControlPlane}
+		got := PlanTick(in).Next.MacHandoff
+		if got == nil || got.Demand != control.Key || got.Profile != control.Profile {
+			t.Fatalf("priority head = %#v, want %s/%s", got, control.Key.String(), control.Profile)
+		}
+		if want != nil && !reflect.DeepEqual(got, want) {
+			t.Fatalf("permutation changed handoff: first=%#v next=%#v", want, got)
+		}
+		want = got
+	}
+}
+
+func TestMacHandoffStateHelpersRejectMissingAndMismatchedHeads(t *testing.T) {
+	first := demand("a/repo", 1, time.Minute, "builder")
+	second := demand("b/repo", 2, time.Minute, "builder")
+	prior := &MacHandoff{Demand: first.Key, Profile: first.Profile, Since: testNow, BackfillAdmitted: true}
+	if got := retainedMacHandoff(nil, []domain.Demand{first}); got != nil {
+		t.Fatalf("nil handoff retained: %#v", got)
+	}
+	if got := retainedMacHandoff(prior, []domain.Demand{second}); got != nil {
+		t.Fatalf("missing handoff retained: %#v", got)
+	}
+	if got := stableMacHandoffOrder(nil, []domain.Demand{first, second}); !reflect.DeepEqual(got, []domain.Demand{first, second}) {
+		t.Fatalf("nil handoff reordered demands: %#v", got)
+	}
+	if got := stableMacHandoffOrder(prior, []domain.Demand{first, second}); !reflect.DeepEqual(got, []domain.Demand{first, second}) {
+		t.Fatalf("head handoff reordered demands: %#v", got)
+	}
+	if got := stableMacHandoffOrder(prior, []domain.Demand{second, first}); !reflect.DeepEqual(got, []domain.Demand{first, second}) {
+		t.Fatalf("tracked handoff was not promoted: %#v", got)
+	}
+	missing := &MacHandoff{Demand: demand("c/repo", 3, time.Minute, "builder").Key, Profile: "builder"}
+	if got := stableMacHandoffOrder(missing, []domain.Demand{first, second}); !reflect.DeepEqual(got, []domain.Demand{first, second}) {
+		t.Fatalf("missing handoff reordered demands: %#v", got)
+	}
+}
+
+func TestBlockedMacHandoffBackfillRequiresObservedHostCapacity(t *testing.T) {
+	macJob := demand("a/repo", 1, 20*time.Minute, "builder")
+	small := demand("b/repo", 2, 10*time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+	in := input([]domain.Demand{macJob, small}, []domain.Instance{holder}, State{})
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 0, MemoryMB: 0, Slots: 0}}, testNow)
+	if plan := PlanTick(in); len(spawnedKeys(plan)) != 0 || plan.Next.MacHandoff == nil || plan.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("host-exhausted drain backfill = %#v", plan)
+	}
+}
+
+func TestMacHandoffBudgetResetsOnlyForDifferentSelectedDemand(t *testing.T) {
+	oldMac := demand("a/repo", 1, 20*time.Minute, "builder")
+	newMac := demand("a/repo", 2, 19*time.Minute, "builder")
+	small := demand("b/repo", 3, 10*time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+	prior := State{MacHandoff: &MacHandoff{Demand: oldMac.Key, Profile: oldMac.Profile, Since: testNow.Add(-time.Minute), BackfillAdmitted: true}}
+
+	plan := PlanTick(input([]domain.Demand{newMac, small}, []domain.Instance{holder}, prior))
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{small.Key}) {
+		t.Fatalf("replacement handoff backfill = %#v", got)
+	}
+	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.Demand != newMac.Key || plan.Next.MacHandoff.Since != testNow {
+		t.Fatalf("replacement handoff state = %#v", plan.Next.MacHandoff)
+	}
+}
+
+func TestBlockedMacHandoffDoesNotBackfillYoungOrRepoCappedWork(t *testing.T) {
+	macJob := demand("a/repo", 1, 20*time.Minute, "builder")
+	young := demand("b/repo", 2, time.Minute, "small")
+	holder := domain.Instance{ID: "holder", Repo: "b/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
+
+	if plan := PlanTick(input([]domain.Demand{macJob, young}, []domain.Instance{holder}, State{})); len(spawnedKeys(plan)) != 0 {
+		t.Fatalf("young drain work admitted: %#v", plan)
+	}
+	aged := young
+	aged.CreatedAt = testNow.Add(-10 * time.Minute)
+	in := input([]domain.Demand{macJob, aged}, []domain.Instance{holder}, State{})
+	in.Config.RepoCaps[aged.Key.Repo] = 1
+	if plan := PlanTick(in); len(spawnedKeys(plan)) != 0 {
+		t.Fatalf("repo-capped drain work admitted: %#v", plan)
+	}
+}
+
+func TestSmallestLinuxResourcesIsDeterministic(t *testing.T) {
+	profiles := testConfig().Profiles
+	want := profiles["small"].Resources
+	for index := 0; index < 20; index++ {
+		if got, ok := smallestLinuxResources(profiles); !ok || got != want {
+			t.Fatalf("smallest resources = %#v, %t; want %#v", got, ok, want)
+		}
+	}
+	if _, ok := smallestLinuxResources(map[domain.ProfileID]domain.Profile{"builder": profiles["builder"]}); ok {
+		t.Fatal("mac-only profiles produced a Linux backfill tier")
+	}
+	if got := boundedDrainBackfill(Input{Config: Config{}}, nil); got != nil {
+		t.Fatalf("backfill without a Linux profile = %#v", got)
+	}
+}
+
+func TestProfileLessUsesTheCompleteDeterministicTuple(t *testing.T) {
+	profile := func(id domain.ProfileID, cpu, memory, slots int) domain.Profile {
+		return domain.Profile{ID: id, Resources: domain.Resources{CPU: cpu, MemoryMB: memory, Slots: slots}}
+	}
+	tests := []struct {
+		name string
+		a    domain.Profile
+		b    domain.Profile
+		want bool
+	}{
+		{name: "cpu", a: profile("z", 1, 9, 9), b: profile("a", 2, 1, 1), want: true},
+		{name: "memory", a: profile("z", 1, 1, 9), b: profile("a", 1, 2, 1), want: true},
+		{name: "memory greater", a: profile("a", 1, 2, 1), b: profile("z", 1, 1, 9), want: false},
+		{name: "slots", a: profile("z", 1, 1, 1), b: profile("a", 1, 1, 2), want: true},
+		{name: "slots greater", a: profile("a", 1, 1, 2), b: profile("z", 1, 1, 1), want: false},
+		{name: "id", a: profile("a", 1, 1, 1), b: profile("b", 1, 1, 1), want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := profileLess(test.a, test.b); got != test.want {
+				t.Fatalf("profileLess(%#v, %#v) = %t, want %t", test.a, test.b, got, test.want)
+			}
+		})
+	}
+}
+
 func TestMacProfileBusySwitchWaitsAndActiveProfileCaps(t *testing.T) {
 	maestro := demand("a/repo", 1, time.Minute, "maestro")
 	busyBuilder := domain.Instance{ID: "builder", Repo: "b/repo", Platform: domain.PlatformMacOS, Profile: "builder", State: domain.InstanceRunning}

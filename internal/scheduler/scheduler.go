@@ -25,6 +25,18 @@ type State struct {
 	// head to reserve a vector. Backfill may use only the vector remainder.
 	Reservation *domain.Reservation
 	DRRCursor   string
+	MacHandoff  *MacHandoff
+}
+
+// MacHandoff durably bounds residual-capacity admission while Linux prevents
+// a selected macOS demand from starting. BackfillAdmitted is monotonic for one
+// selected demand: repeated ticks and newly arriving Linux work cannot create
+// an unbounded backfill stream ahead of macOS.
+type MacHandoff struct {
+	Demand           domain.DemandKey
+	Profile          domain.ProfileID
+	Since            time.Time
+	BackfillAdmitted bool
 }
 
 type Input struct {
@@ -82,18 +94,22 @@ func PlanTick(in Input) Plan {
 	plan := Plan{Status: PlanReady, Next: in.Prior}
 	if len(demands) == 0 {
 		plan.Next.Reservation = nil
+		plan.Next.MacHandoff = nil
 		return finish(plan)
 	}
 
-	linux, macos := partition(demands)
-	switch chosenPlatform(in, demands) {
+	ordered := priorityOrder(in, demands)
+	linux, macos := partition(ordered)
+	switch ordered[0].Platform {
 	case domain.PlatformMacOS:
 		if mode == domain.HostLinux {
-			plan = planMacHandoff(in, plan, macos)
+			plan = planMacHandoff(in, plan, linux, macos)
 		} else {
+			plan.Next.MacHandoff = nil
 			plan = planMacOS(in, plan, macos)
 		}
 	case domain.PlatformLinux:
+		plan.Next.MacHandoff = retainedMacHandoff(in.Prior.MacHandoff, macos)
 		if mode == domain.HostMacOS {
 			plan = planLinuxHandoff(in, plan, linux)
 		} else {
@@ -101,10 +117,6 @@ func PlanTick(in Input) Plan {
 		}
 	}
 	return finish(plan)
-}
-
-func chosenPlatform(in Input, demands []domain.Demand) domain.Platform {
-	return priorityOrder(in, demands)[0].Platform
 }
 
 func normalizedDemands(in Input) []domain.Demand {
@@ -482,7 +494,9 @@ func spawnedDemands(operations []Operation) []domain.Demand {
 	return result
 }
 
-func planMacHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
+func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
+	macDemands = stableMacHandoffOrder(in.Prior.MacHandoff, macDemands)
+	handoff := macHandoffFor(in.Prior.MacHandoff, macDemands[0], in.Now)
 	var drains []Operation
 	allIdle := true
 	for _, instance := range sortedInstances(in.Instances.Value) {
@@ -497,9 +511,112 @@ func planMacHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
 	}
 	plan.Operations = append(plan.Operations, drains...)
 	if allIdle {
-		plan = appendMacSpawns(in, plan, demands, operationIDs(drains))
+		plan.Next.MacHandoff = nil
+		plan = appendMacSpawns(in, plan, macDemands, operationIDs(drains))
+		return plan
+	}
+	plan.Next.MacHandoff = &handoff
+	if !handoff.BackfillAdmitted {
+		backfill := boundedDrainBackfill(in, linuxDemands)
+		plan.Operations = append(plan.Operations, backfill...)
+		if len(backfill) > 0 {
+			plan.Next.MacHandoff.BackfillAdmitted = true
+		}
 	}
 	return plan
+}
+
+func macHandoffFor(prior *MacHandoff, demand domain.Demand, now time.Time) MacHandoff {
+	if prior != nil && prior.Demand == demand.Key && prior.Profile == demand.Profile {
+		return *prior
+	}
+	return MacHandoff{Demand: demand.Key, Profile: demand.Profile, Since: now}
+}
+
+func retainedMacHandoff(prior *MacHandoff, demands []domain.Demand) *MacHandoff {
+	if prior == nil {
+		return nil
+	}
+	for _, demand := range demands {
+		if demand.Key == prior.Demand && demand.Profile == prior.Profile {
+			copy := *prior
+			return &copy
+		}
+	}
+	return nil
+}
+
+func stableMacHandoffOrder(prior *MacHandoff, demands []domain.Demand) []domain.Demand {
+	if prior == nil {
+		return demands
+	}
+	for index, demand := range demands {
+		if demand.Key != prior.Demand || demand.Profile != prior.Profile || index == 0 {
+			continue
+		}
+		ordered := append([]domain.Demand(nil), demand)
+		ordered = append(ordered, demands[:index]...)
+		ordered = append(ordered, demands[index+1:]...)
+		return ordered
+	}
+	return demands
+}
+
+// boundedDrainBackfill uses residual Linux capacity while an already-running
+// Linux job prevents a selected macOS handoff. Only one aged job from the
+// smallest configured Linux tier may start, so fresh or heavyweight work
+// cannot form an unbounded stream ahead of macOS. Mac spawning remains
+// impossible until a later tick observes zero live Linux instances.
+func boundedDrainBackfill(in Input, demands []domain.Demand) []Operation {
+	ceiling, ok := smallestLinuxResources(in.Config.Profiles)
+	if !ok {
+		return nil
+	}
+	eligible := make([]domain.Demand, 0, len(demands))
+	for _, demand := range demands {
+		profile := in.Config.Profiles[demand.Profile]
+		aged := in.Config.FairnessAge > 0 && !demand.CreatedAt.IsZero() && in.Now.Sub(demand.CreatedAt) >= in.Config.FairnessAge
+		controlPlane := in.Config.RepoSchedulingClasses[demand.Key.Repo] == domain.SchedulingControlPlane
+		if (aged || controlPlane) && profile.Platform == domain.PlatformLinux && profile.Resources == ceiling {
+			eligible = append(eligible, demand)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+	free := linuxFree(in)
+	free.Slots = min(free.Slots, 1)
+	selected := exactSelect(priorityOrder(in, eligible), free, activeRepoCounts(in.Instances.Value), in.Config)
+	if len(selected) == 0 {
+		return nil
+	}
+	return []Operation{spawnOperation(selected[0], nil)}
+}
+
+func smallestLinuxResources(profiles map[domain.ProfileID]domain.Profile) (domain.Resources, bool) {
+	var smallest domain.Profile
+	found := false
+	for _, profile := range profiles {
+		if profile.Platform != domain.PlatformLinux || (found && !profileLess(profile, smallest)) {
+			continue
+		}
+		smallest = profile
+		found = true
+	}
+	return smallest.Resources, found
+}
+
+func profileLess(a, b domain.Profile) bool {
+	if a.Resources.CPU != b.Resources.CPU {
+		return a.Resources.CPU < b.Resources.CPU
+	}
+	if a.Resources.MemoryMB != b.Resources.MemoryMB {
+		return a.Resources.MemoryMB < b.Resources.MemoryMB
+	}
+	if a.Resources.Slots != b.Resources.Slots {
+		return a.Resources.Slots < b.Resources.Slots
+	}
+	return a.ID < b.ID
 }
 
 func planLinuxHandoff(in Input, plan Plan, demands []domain.Demand) Plan {

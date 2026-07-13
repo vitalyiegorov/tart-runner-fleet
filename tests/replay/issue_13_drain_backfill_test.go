@@ -14,9 +14,6 @@ import (
 // legitimate Linux job is still running, and a small required gate fits in the
 // residual Linux envelope. The gate must make progress without spawning macOS
 // or exceeding the host vector.
-//
-// This test is intentionally red until macOS handoff planning admits bounded
-// Linux backfill while a non-idle Linux drain holder prevents the handoff.
 func TestIssue13BlockedMacDrainBackfillsSmallRequiredGate(t *testing.T) {
 	now := time.Date(2026, 7, 13, 8, 21, 0, 0, time.UTC)
 	profiles := map[domain.ProfileID]domain.Profile{
@@ -40,12 +37,12 @@ func TestIssue13BlockedMacDrainBackfillsSmallRequiredGate(t *testing.T) {
 		Profiles:      profiles,
 	}
 	mac := domain.Demand{
-		Key: domain.DemandKey{Repo: "budgie-at/budgie", RunID: 13, Attempt: 1, JobID: 1},
+		Key:       domain.DemandKey{Repo: "budgie-at/budgie", RunID: 13, Attempt: 1, JobID: 1},
 		CreatedAt: now.Add(-30 * time.Minute), Profile: "builder", Route: "macos-builder",
 		Platform: domain.PlatformMacOS, Event: domain.EventPullRequest, RunStatus: domain.RunQueued,
 	}
 	gate := domain.Demand{
-		Key: domain.DemandKey{Repo: "vitalyiegorov/tart-runner-fleet", RunID: 12, Attempt: 1, JobID: 2},
+		Key:       domain.DemandKey{Repo: "vitalyiegorov/tart-runner-fleet", RunID: 12, Attempt: 1, JobID: 2},
 		CreatedAt: now.Add(-19 * time.Minute), Profile: "small", Route: "linux-small",
 		Platform: domain.PlatformLinux, Event: domain.EventPullRequest, RunStatus: domain.RunQueued,
 	}
@@ -84,6 +81,19 @@ func TestIssue13BlockedMacDrainBackfillsSmallRequiredGate(t *testing.T) {
 	for _, operation := range spawned {
 		if profiles[operation.Profile].Platform == domain.PlatformMacOS {
 			t.Fatalf("issue #13 introduced Linux/macOS overlap: %#v", first)
+		}
+	}
+	if first.Next.MacHandoff == nil || !first.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("issue #13 did not persist its one-shot backfill budget: %#v", first.Next.MacHandoff)
+	}
+	replayed := scheduler.PlanTick(scheduler.Input{
+		Now: now.Add(time.Minute), Config: config,
+		Demands: domain.Fresh([]domain.Demand{mac, gate}, now.Add(time.Minute)), Instances: domain.Fresh([]domain.Instance{holder}, now.Add(time.Minute)),
+		Host: domain.Fresh(domain.Host{Available: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 3}}, now.Add(time.Minute)), Prior: first.Next,
+	})
+	for _, operation := range replayed.Operations {
+		if operation.Kind == scheduler.OperationSpawn {
+			t.Fatalf("issue #13 admitted repeated backfill on a later tick: %#v", replayed)
 		}
 	}
 }
