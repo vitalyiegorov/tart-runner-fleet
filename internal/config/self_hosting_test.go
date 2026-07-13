@@ -158,10 +158,10 @@ func TestLaunchdTemplateCanResolveRequiredOperatorTools(t *testing.T) {
 func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 	const prefix = "../../launchd/com.vitalyiegorov.tart-runner-fleet"
 	templates := map[string][]string{
-		"observe":   {"--mode=observe", "com.vitalyiegorov.tart-runner-fleet"},
-		"shadow":    {"--mode=shadow", "com.vitalyiegorov.tart-runner-fleet.shadow", "fleet-shadow.db", "fleet-shadow.sock"},
-		"canary":    {"--mode=canary", "com.vitalyiegorov.tart-runner-fleet.canary", "--canary-scope=__CANARY_SCOPE__", "--canary-profile=__CANARY_PROFILE__", "fleet-canary.db", "fleet-canary.sock"},
-		"authority": {"--mode=authority", "com.vitalyiegorov.tart-runner-fleet.authority"},
+		"observe":   {"--mode=observe", "com.vitalyiegorov.tart-runner-fleet", "<key>ExitTimeOut</key>", "<integer>30</integer>"},
+		"shadow":    {"--mode=shadow", "com.vitalyiegorov.tart-runner-fleet.shadow", "fleet-shadow.db", "fleet-shadow.sock", "<key>ExitTimeOut</key>", "<integer>30</integer>"},
+		"canary":    {"--mode=canary", "com.vitalyiegorov.tart-runner-fleet.canary", "--canary-scope=__CANARY_SCOPE__", "--canary-profile=__CANARY_PROFILE__", "fleet-canary.db", "fleet-canary.sock", "<key>ExitTimeOut</key>", "<integer>30</integer>"},
+		"authority": {"--mode=authority", "com.vitalyiegorov.tart-runner-fleet.authority", "<key>ExitTimeOut</key>", "<integer>30</integer>"},
 	}
 	for mode, required := range templates {
 		path := prefix + "." + mode + ".plist"

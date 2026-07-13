@@ -63,6 +63,50 @@ func (*fakeSource) AcquireAndGenerateJIT(context.Context, int64, string, string)
 }
 func (*fakeSource) Deregister(context.Context, string) error { return nil }
 
+type blockingCloseSource struct {
+	fakeSource
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *blockingCloseSource) Close(ctx context.Context) error {
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestScaleSetSourcesCloseConcurrentlyWithinShutdownBudget(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	sources := []scaleSetSource{
+		&blockingCloseSource{started: started, release: release},
+		&blockingCloseSource{started: started, release: release},
+	}
+	done := make(chan struct{})
+	go func() {
+		closeScaleSetSources(context.Background(), sources)
+		close(done)
+	}()
+
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("scale-set session cleanup ran sequentially")
+		}
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scale-set session cleanup did not complete")
+	}
+}
+
 type recordingTartRunner struct {
 	mu    sync.Mutex
 	calls [][]string
