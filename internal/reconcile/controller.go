@@ -1,11 +1,14 @@
 package reconcile
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -44,11 +47,75 @@ func (c Controller) Commit(ctx context.Context, plan scheduler.Plan, observation
 	if err != nil {
 		return false, err
 	}
+	if len(plan.Operations) == 0 {
+		current, err := schedulerStateMatches(prior, plan.Next, observationCursor)
+		if err != nil {
+			return false, err
+		}
+		if current {
+			return false, nil
+		}
+	}
 	durable, err := c.translate(ctx, plan, prior, observationCursor, now)
 	if err != nil {
 		return false, err
 	}
 	return c.Store.ApplyPlan(ctx, durable)
+}
+
+func schedulerStateMatches(prior operations.SchedulerState, next scheduler.State, observationCursor string) (bool, error) {
+	nextState, _ := json.Marshal(next)
+	nextReservations, _ := json.Marshal(next.Reservation)
+	nextDRR, _ := json.Marshal(map[string]string{"cursor": next.DRRCursor})
+	for _, comparison := range []struct {
+		name     string
+		current  json.RawMessage
+		fallback string
+		expected json.RawMessage
+	}{
+		{name: "state", current: prior.Data, fallback: `{}`, expected: nextState},
+		{name: "reservations", current: prior.Reservations, fallback: `[]`, expected: nextReservations},
+		{name: "deficit round robin", current: prior.DeficitRoundRobin, fallback: `{}`, expected: nextDRR},
+	} {
+		equal, err := jsonEquivalent(comparison.current, comparison.fallback, comparison.expected)
+		if err != nil {
+			return false, fmt.Errorf("decode scheduler %s: %w", comparison.name, err)
+		}
+		if !equal {
+			return false, nil
+		}
+	}
+	return prior.ObservationCursor == observationCursor, nil
+}
+
+func jsonEquivalent(current json.RawMessage, fallback string, expected json.RawMessage) (bool, error) {
+	if len(current) == 0 {
+		current = json.RawMessage(fallback)
+	}
+	normalize := func(value json.RawMessage) ([]byte, error) {
+		decoder := json.NewDecoder(bytes.NewReader(value))
+		decoder.UseNumber()
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
+			return nil, err
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return nil, errors.New("multiple JSON values")
+			}
+			return nil, err
+		}
+		return json.Marshal(decoded)
+	}
+	left, err := normalize(current)
+	if err != nil {
+		return false, err
+	}
+	right, err := normalize(expected)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(left, right), nil
 }
 
 func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior operations.SchedulerState, cursor string, now time.Time) (operations.Plan, error) {

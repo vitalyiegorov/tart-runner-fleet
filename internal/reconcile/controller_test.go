@@ -97,6 +97,42 @@ func TestControllerSkipsIdenticalNoOpPlanReplay(t *testing.T) {
 	}
 }
 
+func TestSchedulerStateMatchRequiresEveryDurableFieldAndValidJSON(t *testing.T) {
+	next := scheduler.State{DRRCursor: "owner/repo"}
+	stateJSON, _ := json.Marshal(next)
+	reservationJSON, _ := json.Marshal(next.Reservation)
+	drrJSON, _ := json.Marshal(map[string]string{"cursor": next.DRRCursor})
+	current := operations.SchedulerState{Data: stateJSON, Reservations: reservationJSON, DeficitRoundRobin: drrJSON, ObservationCursor: "cursor"}
+
+	if matched, err := schedulerStateMatches(current, next, "cursor"); err != nil || !matched {
+		t.Fatalf("exact state match = %v, %v", matched, err)
+	}
+	for _, tt := range []struct {
+		name string
+		edit func(*operations.SchedulerState)
+	}{
+		{name: "state", edit: func(value *operations.SchedulerState) { value.Data = json.RawMessage(`{}`) }},
+		{name: "reservations", edit: func(value *operations.SchedulerState) { value.Reservations = json.RawMessage(`[]`) }},
+		{name: "deficit round robin", edit: func(value *operations.SchedulerState) { value.DeficitRoundRobin = json.RawMessage(`{}`) }},
+		{name: "cursor", edit: func(value *operations.SchedulerState) { value.ObservationCursor = "old" }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := current
+			tt.edit(&changed)
+			if matched, err := schedulerStateMatches(changed, next, "cursor"); err != nil || matched {
+				t.Fatalf("changed state match = %v, %v", matched, err)
+			}
+		})
+	}
+	for _, invalid := range []json.RawMessage{json.RawMessage(`{"cursor":`), json.RawMessage(`{} {}`)} {
+		changed := current
+		changed.DeficitRoundRobin = invalid
+		if matched, err := schedulerStateMatches(changed, next, "cursor"); err == nil || matched {
+			t.Fatalf("invalid state match = %v, %v", matched, err)
+		}
+	}
+}
+
 func TestControllerAuthorityTranslatesSpawnAndDependentDrain(t *testing.T) {
 	ownership := operations.Ownership{ControllerID: "controller", ResourceID: "old", OperationID: "birth"}
 	store := &fakeStore{state: operations.SchedulerState{Version: 2}, instances: map[string]operations.Instance{
