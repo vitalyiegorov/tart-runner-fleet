@@ -110,6 +110,19 @@ func TestDemandInboxMixedLifecycleOutOfOrderAndCursorMonotonic(t *testing.T) {
 	}
 }
 
+func TestDemandInboxRejectsSyntheticIdentityCollision(t *testing.T) {
+	store := testStore(t)
+	first := demandEvent(operations.DemandJobAvailable, 1<<62|9)
+	if _, err := store.ApplyDemandBatch(context.Background(), 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.JobID = "different-job-uuid"
+	if applied, err := store.ApplyDemandBatch(context.Background(), 1, 2, []operations.DemandEvent{second}); applied || !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("collision = applied %v err %v", applied, err)
+	}
+}
+
 func TestDemandInboxValidationAndEmptySnapshot(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()

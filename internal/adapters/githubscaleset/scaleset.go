@@ -2,13 +2,25 @@ package githubscaleset
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/actions/scaleset"
 )
+
+// GitHub occasionally emits lifecycle messages for a job already assigned to
+// the scale set without runnerRequestId. Reserve the upper quarter of positive
+// int64 space for deterministic local identities derived from the immutable
+// workflow job identity. GitHub-generated request IDs in this namespace fail
+// closed instead of silently taking the preassigned registration path.
+const preassignedRequestIDFloor int64 = 1 << 62
+
+func IsPreassignedRequestID(id int64) bool { return id >= preassignedRequestIDFloor }
 
 // These two interfaces are the complete preview-library surface used here.
 // Churn in github.com/actions/scaleset is therefore confined to this file.
@@ -164,7 +176,45 @@ func appendEvents(dst []JobEvent, m *scaleset.RunnerScaleSetMessage) []JobEvent 
 }
 
 func eventFromBase(kind JobEventKind, v scaleset.JobMessageBase) JobEvent {
-	return JobEvent{Kind: kind, RunnerRequestID: v.RunnerRequestID, Owner: v.OwnerName, Repository: v.RepositoryName, WorkflowRunID: v.WorkflowRunID, JobID: v.JobID, EventName: v.EventName, Labels: append([]string(nil), v.RequestLabels...), QueueTime: v.QueueTime}
+	queueTime := v.QueueTime
+	if queueTime.IsZero() {
+		queueTime = firstTime(v.ScaleSetAssignTime, v.RunnerAssignTime, v.FinishTime)
+	}
+	event := JobEvent{Kind: kind, RunnerRequestID: v.RunnerRequestID, Owner: v.OwnerName, Repository: v.RepositoryName,
+		WorkflowRunID: v.WorkflowRunID, JobID: v.JobID, EventName: v.EventName,
+		Labels: append([]string(nil), v.RequestLabels...), QueueTime: queueTime}
+	if event.RunnerRequestID > 0 && IsPreassignedRequestID(event.RunnerRequestID) {
+		// The reserved namespace can only be generated locally.
+		event.RunnerRequestID = 0
+	}
+	if event.RunnerRequestID == 0 && kind != JobAvailable {
+		event.RunnerRequestID = preassignedRequestID(v)
+		if event.RunnerRequestID > 0 && kind == JobAssigned {
+			// Assignment to the scale set is the actionable capacity signal.
+			// Registration must generate JIT directly; no AcquireJobs call is
+			// valid because GitHub omitted runnerRequestId.
+			event.Kind = JobAvailable
+		}
+	}
+	return event
+}
+
+func preassignedRequestID(v scaleset.JobMessageBase) int64 {
+	if v.OwnerName == "" || v.RepositoryName == "" || v.WorkflowRunID <= 0 || v.JobID == "" {
+		return 0
+	}
+	identity := v.OwnerName + "\x00" + v.RepositoryName + "\x00" + strconv.FormatInt(v.WorkflowRunID, 10) + "\x00" + v.JobID
+	sum := sha256.Sum256([]byte(identity))
+	return preassignedRequestIDFloor | int64(binary.BigEndian.Uint64(sum[:8])&uint64(preassignedRequestIDFloor-1))
+}
+
+func firstTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value.UTC()
+		}
+	}
+	return time.Time{}
 }
 
 func (s *ScaleSet) AcquireJobs(ctx context.Context, requestIDs []int64) (AcquireResult, error) {

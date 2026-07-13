@@ -70,6 +70,9 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		record = operations.DemandRecord{ScaleSetID: scaleSetID, RunnerRequestID: event.RunnerRequestID}
 	} else if err != nil {
 		return err
+	} else if record.JobID != "" && event.JobID != "" && record.JobID != event.JobID {
+		// A deterministic synthetic-ID collision must never merge two jobs.
+		return operations.ErrConflict
 	}
 	mergeDemandEvent(&record, event, now)
 	labels, _ := json.Marshal(record.Labels)
