@@ -57,7 +57,7 @@ fleetctl doctor
 ```
 
 The default socket is
-`$HOME/Library/Caches/tart-runner-fleet/fleetd.sock` on macOS. Pass the same
+`$HOME/Library/Application Support/tart-runner-fleet/state/fleetd.sock` on macOS. Pass the same
 explicit location to both programs when desired:
 
 ```sh

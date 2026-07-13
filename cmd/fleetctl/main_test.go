@@ -161,6 +161,28 @@ func TestIssue11ConnectionFlagsWorkBeforeCommand(t *testing.T) {
 	}
 }
 
+func TestSplitLeadingConnectionArgs(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           []string
+		wantConnection []string
+		wantRemaining  []string
+	}{
+		{name: "none", args: []string{"status"}, wantRemaining: []string{"status"}},
+		{name: "separate values", args: []string{"--endpoint", "unix:///tmp/fleet.sock", "--timeout", "7s", "doctor"}, wantConnection: []string{"--endpoint", "unix:///tmp/fleet.sock", "--timeout", "7s"}, wantRemaining: []string{"doctor"}},
+		{name: "equals values", args: []string{"--endpoint=unix:///tmp/fleet.sock", "--timeout=7s", "health"}, wantConnection: []string{"--endpoint=unix:///tmp/fleet.sock", "--timeout=7s"}, wantRemaining: []string{"health"}},
+		{name: "missing value", args: []string{"--endpoint"}, wantConnection: []string{"--endpoint"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotConnection, gotRemaining := splitLeadingConnectionArgs(tt.args)
+			if strings.Join(gotConnection, "|") != strings.Join(tt.wantConnection, "|") || strings.Join(gotRemaining, "|") != strings.Join(tt.wantRemaining, "|") {
+				t.Fatalf("connection=%v remaining=%v", gotConnection, gotRemaining)
+			}
+		})
+	}
+}
+
 func TestConfigValidationAndLegacyAlias(t *testing.T) {
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "valid.json")
