@@ -83,16 +83,28 @@ func TestBootstrapPassesJITOnlyInChildEnvironmentAndReleases(t *testing.T) {
 
 func TestChildEnvironmentProvidesDeterministicRunnerToolchainPath(t *testing.T) {
 	t.Setenv("PATH", "/guest-agent-only")
+	t.Setenv("LANG", "ASCII-8BIT")
+	t.Setenv("LC_ALL", "C")
 	environment := childEnvironment("jit")
 	want := "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	wantLocale := "C.UTF-8"
 	if runtime.GOOS == "darwin" {
 		want = "/Users/admin/.rbenv/shims:/opt/homebrew/bin:" + want
+		wantLocale = "en_US.UTF-8"
 	}
 	if got := environmentValue(environment, "PATH"); got != want {
 		t.Fatalf("runner PATH=%q want=%q", got, want)
 	}
 	if countEnvironment(environment, "PATH") != 1 {
 		t.Fatal("duplicate PATH environment")
+	}
+	for _, name := range []string{"LANG", "LC_ALL"} {
+		if got := environmentValue(environment, name); got != wantLocale {
+			t.Fatalf("runner %s=%q want=%q", name, got, wantLocale)
+		}
+		if countEnvironment(environment, name) != 1 {
+			t.Fatalf("duplicate %s environment", name)
+		}
 	}
 	if got := runnerToolchainPath("linux"); got != "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" {
 		t.Fatalf("linux runner PATH=%q", got)
