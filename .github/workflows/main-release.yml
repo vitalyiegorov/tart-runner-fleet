@@ -56,14 +56,17 @@ jobs:
           test "$(cat dist/RELEASE_VERSION)" = "$VERSION"
           for file in \
             BUILDINFO.txt RELEASE_VERSION SHA256SUMS \
-            fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json "$ARCHIVE"; do
+            fleetd fleetctl tart-runner-fleet-bootstrap \
+            fleetd.cdx.json fleetctl.cdx.json tart-runner-fleet-bootstrap.cdx.json \
+            "$ARCHIVE"; do
             test -f "dist/$file"
           done
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
           EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n' \
             BUILDINFO.txt RELEASE_VERSION fleetctl fleetctl.cdx.json \
-            fleetd fleetd.cdx.json | LC_ALL=C sort)"
+            fleetd fleetd.cdx.json tart-runner-fleet-bootstrap \
+            tart-runner-fleet-bootstrap.cdx.json | LC_ALL=C sort)"
           ACTUAL_ARCHIVE_CONTENTS="$(tar -tzf "dist/$ARCHIVE" | LC_ALL=C sort)"
           test "$ACTUAL_ARCHIVE_CONTENTS" = "$EXPECTED_ARCHIVE_CONTENTS"
 
@@ -85,8 +88,10 @@ jobs:
               dist/RELEASE_VERSION \
               dist/fleetd \
               dist/fleetctl \
+              dist/tart-runner-fleet-bootstrap \
               dist/fleetd.cdx.json \
               dist/fleetctl.cdx.json \
+              dist/tart-runner-fleet-bootstrap.cdx.json \
               --clobber
           else
             gh release create "$VERSION" \
@@ -96,8 +101,10 @@ jobs:
               dist/RELEASE_VERSION \
               dist/fleetd \
               dist/fleetctl \
+              dist/tart-runner-fleet-bootstrap \
               dist/fleetd.cdx.json \
               dist/fleetctl.cdx.json \
+              dist/tart-runner-fleet-bootstrap.cdx.json \
               --target "$HEAD_SHA" \
               --title "$VERSION" \
               --generate-notes

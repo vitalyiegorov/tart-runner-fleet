@@ -36,20 +36,28 @@ for pass in one two; do
     go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/fleetd" ./cmd/fleetd
   CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
     go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/fleetctl" ./cmd/fleetctl
+  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+    go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap" ./cmd/tart-runner-fleet-bootstrap
   ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
     -version "$version" -output "$pass_dir/fleetd.cdx.json" "$pass_dir/fleetd"
   ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
     -version "$version" -output "$pass_dir/fleetctl.cdx.json" "$pass_dir/fleetctl"
+  ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
+    -version "$version" -output "$pass_dir/tart-runner-fleet-bootstrap.cdx.json" "$pass_dir/tart-runner-fleet-bootstrap"
 done
 cmp "$temporary/one/fleetd" "$temporary/two/fleetd"
 cmp "$temporary/one/fleetctl" "$temporary/two/fleetctl"
+cmp "$temporary/one/tart-runner-fleet-bootstrap" "$temporary/two/tart-runner-fleet-bootstrap"
 cmp "$temporary/one/fleetd.cdx.json" "$temporary/two/fleetd.cdx.json"
 cmp "$temporary/one/fleetctl.cdx.json" "$temporary/two/fleetctl.cdx.json"
+cmp "$temporary/one/tart-runner-fleet-bootstrap.cdx.json" "$temporary/two/tart-runner-fleet-bootstrap.cdx.json"
 
 cp "$temporary/one/fleetd" "$staging/fleetd"
 cp "$temporary/one/fleetctl" "$staging/fleetctl"
+cp "$temporary/one/tart-runner-fleet-bootstrap" "$staging/tart-runner-fleet-bootstrap"
 cp "$temporary/one/fleetd.cdx.json" "$staging/fleetd.cdx.json"
 cp "$temporary/one/fleetctl.cdx.json" "$staging/fleetctl.cdx.json"
+cp "$temporary/one/tart-runner-fleet-bootstrap.cdx.json" "$staging/tart-runner-fleet-bootstrap.cdx.json"
 (cd "$staging" && go version -m fleetd) > "$staging/BUILDINFO.txt"
 printf '%s\n' "$version" > "$staging/RELEASE_VERSION"
 
@@ -57,11 +65,16 @@ archive="tart-runner-fleet-$version-darwin-arm64.tar.gz"
 for pass in one two; do
   tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     -czf "$temporary/$archive.$pass" -C "$staging" \
-    fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json BUILDINFO.txt RELEASE_VERSION
+    fleetd fleetctl tart-runner-fleet-bootstrap \
+    fleetd.cdx.json fleetctl.cdx.json tart-runner-fleet-bootstrap.cdx.json \
+    BUILDINFO.txt RELEASE_VERSION
 done
 cmp "$temporary/$archive.one" "$temporary/$archive.two"
 cp "$temporary/$archive.one" "$staging/$archive"
-(cd "$staging" && shasum -a 256 "$archive" fleetd fleetctl fleetd.cdx.json fleetctl.cdx.json BUILDINFO.txt RELEASE_VERSION > SHA256SUMS)
+(cd "$staging" && shasum -a 256 \
+  "$archive" fleetd fleetctl tart-runner-fleet-bootstrap \
+  fleetd.cdx.json fleetctl.cdx.json tart-runner-fleet-bootstrap.cdx.json \
+  BUILDINFO.txt RELEASE_VERSION > SHA256SUMS)
 rmdir "$output"
 mv "$staging" "$output"
 staging=""
