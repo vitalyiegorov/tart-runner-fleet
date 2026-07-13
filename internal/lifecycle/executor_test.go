@@ -248,6 +248,26 @@ func TestProvisionFailureIsSanitizedAndDurablyFailed(t *testing.T) {
 	}
 }
 
+func TestProvisionExternalFailureRemainsResumableAcrossAttempts(t *testing.T) {
+	calls := []string{}
+	secret := githubscaleset.NewJITSecret("jit-value")
+	registration := &fakeRegistration{calls: &calls, secret: secret}
+	vm := &fakeVM{calls: &calls, cloneErr: errors.New("transient clone failure")}
+	state := &memoryState{instance: lifecycleInstance(operations.StatePlanned)}
+	executor := ProvisionExecutor{
+		State: state, VM: vm, Ready: fakeReady{calls: &calls}, Registration: registration,
+		Bootstrap: fakeBootstrap{calls: &calls, registration: registration}, Bases: map[domain.Platform]string{domain.PlatformLinux: "linux-base"},
+	}
+	operation := operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID}
+	if err := executor.Execute(context.Background(), operation); err == nil || state.instance.State != operations.StatePlanned {
+		t.Fatalf("first attempt error=%v state=%s", err, state.instance.State)
+	}
+	vm.cloneErr = nil
+	if err := executor.Execute(context.Background(), operation); err != nil || state.instance.State != operations.StateOnlineIdle {
+		t.Fatalf("recovery error=%v state=%s calls=%v", err, state.instance.State, calls)
+	}
+}
+
 type fakeDrainControl struct {
 	calls         *[]string
 	safe          bool
@@ -316,6 +336,23 @@ func TestDrainExecutorFailsClosedBeforeStopOrDelete(t *testing.T) {
 		if strings.HasPrefix(call, "stop:") || strings.HasPrefix(call, "delete:") {
 			t.Fatalf("destructive call after uncertain confirmation: %v", calls)
 		}
+	}
+}
+
+func TestDrainExternalFailureRemainsResumableAcrossAttempts(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	calls := []string{}
+	safe := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
+	control := &fakeDrainControl{calls: &calls, safe: true, deregisterErr: errors.New("transient GitHub failure"), confirmations: []operations.DeletionConfirmation{safe, safe}}
+	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+	executor := DrainExecutor{State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute}
+	operation := operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID}
+	if err := executor.Execute(context.Background(), operation); err == nil || state.instance.State != operations.StateDraining {
+		t.Fatalf("first attempt error=%v state=%s", err, state.instance.State)
+	}
+	control.deregisterErr = nil
+	if err := executor.Execute(context.Background(), operation); err != nil || state.instance.State != operations.StateDeleted {
+		t.Fatalf("recovery error=%v state=%s calls=%v", err, state.instance.State, calls)
 	}
 }
 
