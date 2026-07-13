@@ -152,6 +152,55 @@ func TestRunObserveAndShadow(t *testing.T) {
 	}
 }
 
+// Regression: the released controller accepts the mutation modes in the
+// domain model, but the production runtime rejects them before loading its
+// validated authority configuration. That makes the documented
+// observe -> shadow -> canary -> authority migration impossible.
+func TestRunCanaryAndAuthorityAreArmed(t *testing.T) {
+	for _, mode := range []reconcile.Mode{reconcile.Canary, reconcile.Authority} {
+		t.Run(string(mode), func(t *testing.T) {
+			d := testDependencies(t)
+			ready := make(chan struct{})
+			var readyOnce sync.Once
+			d.inventory = func(runtimeStore, config.Config) app.Inventory {
+				return notifyingInventory{ready: ready, once: &readyOnce}
+			}
+			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+				return &fakeSource{}, nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- runWithDependencies(ctx, options{
+					ConfigPath:    writeConfig(t, true),
+					DatabasePath:  filepath.Join(t.TempDir(), "fleet.db"),
+					HealthAddress: "127.0.0.1:0",
+					Mode:          mode,
+				}, d)
+			}()
+
+			select {
+			case <-ready:
+				cancel()
+			case err := <-done:
+				cancel()
+				t.Fatalf("%s rejected before runtime startup: %v", mode, err)
+			case <-time.After(5 * time.Second):
+				cancel()
+				t.Fatalf("%s runtime did not become ready", mode)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s runtime did not stop", mode)
+			}
+		})
+	}
+}
+
 func TestRunValidationAndDependencyErrors(t *testing.T) {
 	valid := writeConfig(t, false)
 	shadow := writeConfig(t, true)
