@@ -189,6 +189,28 @@ func TestValidateAuthorityAcceptsMultipleInstallationsAndRegistrationScopes(t *t
 	}
 }
 
+func TestValidateAuthorityAcceptsPrivateKeyFileAndGivesItSafePrecedence(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	cfg.GitHub.App.PrivateKeyFile = "/Users/runner/.config/tart-runner-fleet/app.pem"
+	cfg.GitHub.App.KeychainService = ""
+	cfg.GitHub.App.KeychainAccount = ""
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("ValidateAuthority(file only) = %v", err)
+	}
+
+	// A configured file is authoritative, so stale Keychain metadata cannot
+	// force an unattended process back into an interactive Keychain prompt.
+	cfg.GitHub.App.KeychainService = "stale-service"
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("ValidateAuthority(file precedence) = %v", err)
+	}
+
+	cfg.GitHub.App.PrivateKeyFile = ""
+	if err := cfg.ValidateAuthority(); err == nil {
+		t.Fatal("ValidateAuthority accepted an incomplete Keychain reference without a file")
+	}
+}
+
 func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
 	raw := `{
       "baseVm":"linux-runner-base", "vmPrefix":"gha-linux-burst",
