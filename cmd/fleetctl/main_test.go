@@ -144,6 +144,45 @@ func TestDegradedUnavailableAndUsageExitCodes(t *testing.T) {
 	}
 }
 
+func TestIssue11ConnectionFlagsWorkBeforeCommand(t *testing.T) {
+	const endpoint = "unix:///tmp/fleetctl-issue-11.sock"
+	var gotEndpoint string
+	deps := dependencies{newClient: func(got string, _ time.Duration) (apiClient, error) {
+		gotEndpoint = got
+		status := healthyStatus()
+		return fakeClient{status: status}, nil
+	}}
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), []string{"--endpoint", endpoint, "status", "--output", "json"}, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if gotEndpoint != endpoint {
+		t.Fatalf("endpoint=%q want=%q", gotEndpoint, endpoint)
+	}
+}
+
+func TestSplitLeadingConnectionArgs(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           []string
+		wantConnection []string
+		wantRemaining  []string
+	}{
+		{name: "none", args: []string{"status"}, wantRemaining: []string{"status"}},
+		{name: "separate values", args: []string{"--endpoint", "unix:///tmp/fleet.sock", "--timeout", "7s", "doctor"}, wantConnection: []string{"--endpoint", "unix:///tmp/fleet.sock", "--timeout", "7s"}, wantRemaining: []string{"doctor"}},
+		{name: "equals values", args: []string{"--endpoint=unix:///tmp/fleet.sock", "--timeout=7s", "health"}, wantConnection: []string{"--endpoint=unix:///tmp/fleet.sock", "--timeout=7s"}, wantRemaining: []string{"health"}},
+		{name: "missing value", args: []string{"--endpoint"}, wantConnection: []string{"--endpoint"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotConnection, gotRemaining := splitLeadingConnectionArgs(tt.args)
+			if strings.Join(gotConnection, "|") != strings.Join(tt.wantConnection, "|") || strings.Join(gotRemaining, "|") != strings.Join(tt.wantRemaining, "|") {
+				t.Fatalf("connection=%v remaining=%v", gotConnection, gotRemaining)
+			}
+		})
+	}
+}
+
 func TestConfigValidationAndLegacyAlias(t *testing.T) {
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "valid.json")

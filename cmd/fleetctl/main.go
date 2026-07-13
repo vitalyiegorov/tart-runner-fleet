@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,6 +57,7 @@ func execute(args []string, stdout, stderr io.Writer) int {
 }
 
 func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	connectionArgs, args := splitLeadingConnectionArgs(args)
 	if len(args) == 0 {
 		writeHelp(stderr)
 		return exitUsage
@@ -78,12 +80,36 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 	case "validate-config":
 		return runConfig(append([]string{"validate"}, args[1:]...), stdout, stderr)
 	case "status", "queues", "instances", "operations", "observations", "health", "doctor", "metrics":
-		return runRemote(ctx, args[0], args[1:], stdout, stderr, deps)
+		remoteArgs := make([]string, 0, len(connectionArgs)+len(args)-1)
+		remoteArgs = append(remoteArgs, connectionArgs...)
+		remoteArgs = append(remoteArgs, args[1:]...)
+		return runRemote(ctx, args[0], remoteArgs, stdout, stderr, deps)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		writeHelp(stderr)
 		return exitUsage
 	}
+}
+
+func splitLeadingConnectionArgs(args []string) (connectionArgs, remaining []string) {
+	for len(args) > 0 {
+		switch {
+		case args[0] == "--endpoint" || args[0] == "--timeout":
+			connectionArgs = append(connectionArgs, args[0])
+			args = args[1:]
+			if len(args) == 0 {
+				return connectionArgs, nil
+			}
+			connectionArgs = append(connectionArgs, args[0])
+			args = args[1:]
+		case strings.HasPrefix(args[0], "--endpoint=") || strings.HasPrefix(args[0], "--timeout="):
+			connectionArgs = append(connectionArgs, args[0])
+			args = args[1:]
+		default:
+			return connectionArgs, args
+		}
+	}
+	return connectionArgs, args
 }
 
 type remoteOptions struct {
@@ -315,8 +341,10 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleetctl version | api-version
 
 CONNECTION
-  --endpoint unix:///path/to/fleetd.sock   private local socket (default)
-  --timeout 5s                            bounded request deadline
+  fleetctl [--endpoint unix:///path/to/fleetd.sock] <remote-command>
+  fleetctl <remote-command> [--endpoint unix:///path/to/fleetd.sock]
+  --timeout 5s may appear in either position; the default endpoint uses the
+  private tart-runner-fleet state directory.
 
 EXIT CODES
   0 success  1 failure  2 usage  3 not-found  4 unavailable  5 degraded  6 unsafe

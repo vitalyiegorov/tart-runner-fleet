@@ -24,7 +24,9 @@ The old `validate-config PATH` spelling remains a compatibility alias.
 
 ## Common flags
 
-- `--endpoint unix:///absolute/path/fleetd.sock`: local admin endpoint.
+- `--endpoint unix:///absolute/path/fleetd.sock`: local admin endpoint. Connection
+  flags may be placed before or after a remote command; the default uses the
+  private platform configuration state directory.
 - `--timeout 5s`: bounded request timeout; maximum 30 seconds.
 - `--output table|json` or `-o`: human table or stable machine JSON.
 - `--require-ready`: make `status` return exit 5 when readiness is false.

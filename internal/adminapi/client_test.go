@@ -231,7 +231,12 @@ func TestListenValidationAndStaleSocketRecovery(t *testing.T) {
 }
 
 func TestDefaultEndpointIsAbsoluteUnixSocket(t *testing.T) {
-	if path, endpoint := DefaultSocketPath(), DefaultEndpoint(); !filepath.IsAbs(path) || endpoint != "unix://"+path {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(configDir, "tart-runner-fleet", "state", "fleetd.sock")
+	if path, endpoint := DefaultSocketPath(), DefaultEndpoint(); path != wantPath || endpoint != "unix://"+wantPath {
 		t.Fatalf("path=%q endpoint=%q", path, endpoint)
 	}
 }

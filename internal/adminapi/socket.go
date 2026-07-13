@@ -14,11 +14,11 @@ const maxSocketPathBytes = 100
 var ErrInvalidSocket = errors.New("adminapi: invalid socket path")
 
 func DefaultSocketPath() string {
-	base, err := os.UserCacheDir()
+	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "tart-runner-fleet", "fleetd.sock")
+	return filepath.Join(base, "tart-runner-fleet", "state", "fleetd.sock")
 }
 
 func DefaultEndpoint() string { return "unix://" + DefaultSocketPath() }
