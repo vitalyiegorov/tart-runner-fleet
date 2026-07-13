@@ -24,6 +24,7 @@ import (
 )
 
 type runtimeStore interface {
+	operations.Store
 	app.EngineStore
 	app.LiveInstanceStore
 	DemandCursor(context.Context, int64) (int64, error)
@@ -186,11 +187,19 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts}
+	var worker app.WorkRunner
+	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
+		worker = operationRunner{worker: operations.Worker{
+			Store: store, Owner: "tart-runner-fleet", MaxConcurrent: cfg.Linux.MaxInstances,
+			Executors: map[string]operations.Executor{}, Retry: operations.RetryPolicy{MaxAttempts: 5},
+		}}
+	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
 	go func() {
-		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, TickInterval: cfg.PollInterval}).Run(runCtx)
+		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, Worker: worker,
+			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond}).Run(runCtx)
 	}()
 	select {
 	case err := <-serviceDone:
@@ -204,6 +213,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		}
 		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
 	}
+}
+
+type operationRunner struct{ worker operations.Worker }
+
+func (r operationRunner) Work(ctx context.Context) error {
+	_, err := r.worker.RunOnce(ctx)
+	return err
 }
 
 func serverFailure(err error) error {
