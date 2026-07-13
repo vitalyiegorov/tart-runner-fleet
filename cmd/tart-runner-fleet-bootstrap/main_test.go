@@ -29,3 +29,18 @@ func TestExecuteIsQuietOnSuccessAndSanitizesFailure(t *testing.T) {
 		t.Fatalf("usage code=%d stderr=%q", code, stderr.String())
 	}
 }
+
+func TestGuestConfigUsesTheExecutingGuestUsersRunner(t *testing.T) {
+	config, err := guestConfigForHome("/home/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.WorkDir != "/home/admin/actions-runner" ||
+		config.RunnerPath != "/home/admin/actions-runner/run.sh" ||
+		config.LogPath != "/home/admin/actions-runner/_diag/tart-runner-fleet.log" {
+		t.Fatalf("guest config = %#v", config)
+	}
+	if _, err := guestConfigForHome(""); err == nil {
+		t.Fatal("empty guest home accepted")
+	}
+}
