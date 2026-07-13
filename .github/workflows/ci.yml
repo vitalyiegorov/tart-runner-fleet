@@ -11,7 +11,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede review builds, but never discard a main commit that must become
+  # an immutable production release.
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
 
 env:
   GOTOOLCHAIN: local
@@ -112,7 +114,13 @@ jobs:
       - name: Reproduce complete macOS ARM64 release candidate
         run: |
           set -euo pipefail
-          ./scripts/build-release.sh "v0.0.0-ci.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}" dist
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
+            SHORT_SHA="$(printf '%.12s' "$GITHUB_SHA")"
+            VERSION="v0.1.${GITHUB_RUN_NUMBER}+main.${SHORT_SHA}"
+          else
+            VERSION="v0.0.0-ci.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          fi
+          ./scripts/build-release.sh "$VERSION" dist
       - name: Upload verified CI binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
