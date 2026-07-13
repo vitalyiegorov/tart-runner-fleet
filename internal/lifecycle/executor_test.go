@@ -44,9 +44,9 @@ func (s *memoryState) Advance(_ context.Context, change StateChange) (operations
 }
 
 type fakeVM struct {
-	calls                         *[]string
-	cloneErr, startErr, stopErr   error
-	deleteErr                     error
+	calls                       *[]string
+	cloneErr, startErr, stopErr error
+	deleteErr                   error
 }
 
 func (v fakeVM) Clone(_ context.Context, request tart.Request) error {
@@ -66,30 +66,34 @@ func (v fakeVM) Delete(_ context.Context, name string, _ operations.Ownership) e
 	return v.deleteErr
 }
 
-type fakeReady struct{ calls *[]string }
+type fakeReady struct {
+	calls *[]string
+	err   error
+}
 
 func (r fakeReady) Wait(_ context.Context, instance operations.Instance) error {
 	*r.calls = append(*r.calls, "ready:"+instance.ID)
-	return nil
+	return r.err
 }
 
 type fakeRegistration struct {
-	calls      *[]string
-	registered bool
-	secret     *githubscaleset.JITSecret
-	err        error
+	calls         *[]string
+	registered    bool
+	secret        *githubscaleset.JITSecret
+	registeredErr error
+	acquireErr    error
 }
 
 func (r *fakeRegistration) Registered(_ context.Context, name string) (bool, error) {
 	*r.calls = append(*r.calls, "registered:"+name)
-	return r.registered, r.err
+	return r.registered, r.registeredErr
 }
 func (r *fakeRegistration) AcquireAndGenerateJIT(_ context.Context, requestID int64, name, workFolder string) (*githubscaleset.JITSecret, error) {
 	*r.calls = append(*r.calls, "acquire:"+name+":"+workFolder)
 	if requestID <= 0 {
 		return nil, operations.ErrInvalid
 	}
-	return r.secret, r.err
+	return r.secret, r.acquireErr
 }
 
 type fakeBootstrap struct {
@@ -113,7 +117,7 @@ func lifecycleInstance(state operations.State) operations.Instance {
 	return operations.Instance{
 		ID: "trf-small-1", Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
 		Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1},
-		Demand: domain.DemandKey{Repo: "owner/repo", RunID: 11, Attempt: 1, JobID: 41}, State: state, Version: 3,
+		Demand:    domain.DemandKey{Repo: "owner/repo", RunID: 11, Attempt: 1, JobID: 41}, State: state, Version: 3,
 		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "owner/repo/11/1/41", OperationID: "spawn"},
 	}
 }
@@ -180,15 +184,17 @@ func TestProvisionFailureIsSanitizedAndDurablyFailed(t *testing.T) {
 }
 
 type fakeDrainControl struct {
-	calls        *[]string
-	safe         bool
+	calls         *[]string
+	safe          bool
+	guardErr      error
 	deregisterErr error
 	confirmations []operations.DeletionConfirmation
+	confirmErr    error
 }
 
 func (d *fakeDrainControl) SafeToDeregister(_ context.Context, instance operations.Instance) (bool, error) {
 	*d.calls = append(*d.calls, "guard:"+instance.ID)
-	return d.safe, nil
+	return d.safe, d.guardErr
 }
 func (d *fakeDrainControl) Deregister(_ context.Context, instance operations.Instance) error {
 	*d.calls = append(*d.calls, "deregister:"+instance.ID)
@@ -196,6 +202,9 @@ func (d *fakeDrainControl) Deregister(_ context.Context, instance operations.Ins
 }
 func (d *fakeDrainControl) ConfirmDeletion(_ context.Context, instance string) (operations.DeletionConfirmation, error) {
 	*d.calls = append(*d.calls, "confirm:"+instance)
+	if d.confirmErr != nil {
+		return operations.DeletionConfirmation{}, d.confirmErr
+	}
 	if len(d.confirmations) == 0 {
 		return operations.DeletionConfirmation{}, nil
 	}
