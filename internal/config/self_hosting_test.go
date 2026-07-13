@@ -87,7 +87,7 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(manualRelease), `!v*.*.*+main.*`) {
+	if !strings.Contains(string(manualRelease), `!v*.*.*\+main.*`) {
 		t.Error("the manual tag workflow must ignore automatically generated main release tags")
 	}
 

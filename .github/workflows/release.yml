@@ -6,7 +6,7 @@ on:
       - 'v*.*.*'
       # Automatically published main releases already contain the exact
       # verified CI artifact and must not recursively rebuild themselves.
-      - '!v*.*.*+main.*'
+      - '!v*.*.*\+main.*'
   workflow_dispatch:
     inputs:
       version:
