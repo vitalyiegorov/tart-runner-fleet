@@ -177,7 +177,7 @@ func TestProvisionExecutorObservedRegistrationCustomFolderAndPersistFailure(t *t
 		t.Fatalf("observed registration state=%s err=%v", state.instance.State, err)
 	}
 
-	executor, state, _, registration, _, _ = provisionFixture(operations.StateReachable)
+	executor, _, _, registration, _, _ = provisionFixture(operations.StateReachable)
 	executor.WorkFolder = "custom-work"
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
