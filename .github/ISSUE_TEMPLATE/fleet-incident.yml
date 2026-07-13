@@ -1,0 +1,61 @@
+name: Fleet incident
+description: Capture a CI or runner-fleet incident as reproducible safety evidence.
+title: "[Fleet incident] "
+body:
+  - type: textarea
+    id: impact-timeline
+    attributes:
+      label: Observed impact and timeline
+      description: State who or what was affected and include timestamps with time zones.
+      placeholder: "2026-07-13 10:00 UTC — queued jobs stopped receiving runners..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected-invariant
+    attributes:
+      label: Expected invariant
+      description: Describe the safety, liveness, fairness, or latency guarantee that should have held.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Link sanitized logs, run and job IDs, metrics, plans, and runner observations. Never include credentials or JIT configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      description: Record the minimal event sequence, frequency, and whether a deterministic replay exists.
+    validations:
+      required: true
+  - type: textarea
+    id: regression-test
+    attributes:
+      label: Regression test
+      description: Link the draft PR and include the targeted command plus the intentional red assertion.
+      placeholder: "Draft PR: ...\nCommand: go test ...\nRed assertion: ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: authority-mode
+    attributes:
+      label: Safety and authority mode
+      description: Select the controller mode at the time of the incident.
+      options:
+        - Observe
+        - Shadow
+        - Canary
+        - Authority
+        - Unknown
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety-confirmation
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: No authority promotion, incumbent shutdown, or destructive cleanup is implied by this issue.
+          required: true

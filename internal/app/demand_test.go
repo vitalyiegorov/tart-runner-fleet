@@ -16,6 +16,7 @@ type fakeDemandStore struct {
 	batches []operations.DemandEvent
 	records []operations.DemandRecord
 	cursor  int64
+	applied bool
 	err     error
 }
 
@@ -25,16 +26,17 @@ func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messag
 	}
 	f.cursor = messageID
 	f.batches = append([]operations.DemandEvent(nil), events...)
-	return true, nil
+	return f.applied, nil
 }
 func (f *fakeDemandStore) ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error) {
 	return append([]operations.DemandRecord(nil), f.records...), f.err
 }
 
 type fakeMessages struct {
-	demand    githubscaleset.Demand
-	err       error
-	committed bool
+	demand         githubscaleset.Demand
+	err            error
+	afterCommitErr error
+	committed      bool
 }
 
 func (f *fakeMessages) Handle(ctx context.Context, commit func(context.Context, githubscaleset.Demand) error) error {
@@ -45,7 +47,7 @@ func (f *fakeMessages) Handle(ctx context.Context, commit func(context.Context, 
 		return err
 	}
 	f.committed = true
-	return nil
+	return f.afterCommitErr
 }
 
 func TestIngestCommitsSanitizedConcreteEvents(t *testing.T) {
@@ -54,7 +56,7 @@ func TestIngestCommitsSanitizedConcreteEvents(t *testing.T) {
 		Kind: githubscaleset.JobAvailable, RunnerRequestID: 11, Owner: "owner", Repository: "repo", WorkflowRunID: 22,
 		JobID: "uuid", EventName: "pull_request", Labels: []string{"self-hosted", "linux-small"}, QueueTime: queue,
 	}}}}
-	store := &fakeDemandStore{}
+	store := &fakeDemandStore{applied: true}
 	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
 	if err := (DemandCoordinator{Store: store}).IngestOnce(context.Background(), binding, source); err != nil {
 		t.Fatal(err)
@@ -69,6 +71,23 @@ func TestIngestCommitsSanitizedConcreteEvents(t *testing.T) {
 	source.demand.Events[0].Labels[0] = "mutated"
 	if store.batches[0].Labels[0] != "self-hosted" {
 		t.Fatal("stored conversion aliases source")
+	}
+}
+
+func TestIngestResultPreservesDurableChangeAcrossAcknowledgementFailure(t *testing.T) {
+	want := errors.New("ack failed")
+	store := &fakeDemandStore{applied: true}
+	source := &fakeMessages{afterCommitErr: want, demand: githubscaleset.Demand{MessageID: 7}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	changed, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source)
+	if !changed || !errors.Is(err, want) {
+		t.Fatalf("IngestOnceResult() = %v, %v; want durable change plus acknowledgement error", changed, err)
+	}
+	store.applied = false
+	source.afterCommitErr = nil
+	changed, err = (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source)
+	if changed || err != nil {
+		t.Fatalf("duplicate IngestOnceResult() = %v, %v", changed, err)
 	}
 }
 
