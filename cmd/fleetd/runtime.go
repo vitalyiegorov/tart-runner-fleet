@@ -70,6 +70,7 @@ const (
 	authorityLeaseTTL           = 30 * time.Second
 	authorityLeaseRenewInterval = 10 * time.Second
 	deletionConfirmationMaxAge  = 30 * time.Second
+	scaleSetCloseTimeout        = 20 * time.Second
 )
 
 func defaultDependencies() dependencies {
@@ -212,9 +213,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	defer func() {
-		for _, source := range closers {
-			_ = source.Close(context.Background())
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), scaleSetCloseTimeout)
+		defer cancel()
+		closeScaleSetSources(ctx, closers)
 	}()
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if opts.Mode != reconcile.Observe {
@@ -295,6 +296,30 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 			return fmt.Errorf("%s %w: service shutdown timed out", result.name, serverFailure(result.err))
 		}
 		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
+	}
+}
+
+func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) {
+	var wg sync.WaitGroup
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		source := source
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = source.Close(ctx)
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 }
 
