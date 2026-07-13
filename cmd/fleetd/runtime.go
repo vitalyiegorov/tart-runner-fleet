@@ -70,6 +70,7 @@ const (
 	authorityLeaseTTL           = 30 * time.Second
 	authorityLeaseRenewInterval = 10 * time.Second
 	deletionConfirmationMaxAge  = 30 * time.Second
+	scaleSetCloseTimeout        = 20 * time.Second
 )
 
 func defaultDependencies() dependencies {
@@ -212,9 +213,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	defer func() {
-		for _, source := range closers {
-			_ = source.Close(context.Background())
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), scaleSetCloseTimeout)
+		defer cancel()
+		closeScaleSetSources(ctx, closers)
 	}()
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if opts.Mode != reconcile.Observe {
@@ -296,6 +297,21 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		}
 		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
 	}
+}
+
+func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) {
+	var wg sync.WaitGroup
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = source.Close(ctx)
+		}()
+	}
+	wg.Wait()
 }
 
 func selectRuntimeBindings(bindings []app.Binding, opts options) ([]app.Binding, error) {
