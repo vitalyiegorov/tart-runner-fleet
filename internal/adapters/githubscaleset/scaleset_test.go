@@ -165,6 +165,45 @@ func TestScaleSetRunnerRegistrationAndIdempotentDeregistration(t *testing.T) {
 	}
 }
 
+func TestScaleSetRunnerAdministrationFailsClosed(t *testing.T) {
+	fake := &fakeScaleSet{}
+	withoutRunners, err := NewScaleSet(ScaleSetConfig{Messages: fake, JIT: fake, ScaleSetID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := withoutRunners.Registered(context.Background(), "runner"); err == nil {
+		t.Fatal("registration observation accepted without runner administration")
+	}
+	if err := withoutRunners.Deregister(context.Background(), "runner"); err == nil {
+		t.Fatal("deregistration accepted without runner administration")
+	}
+
+	scale, err := NewScaleSet(ScaleSetConfig{Messages: fake, JIT: fake, Runners: fake, ScaleSetID: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scale.Registered(context.Background(), "bad runner name"); err == nil {
+		t.Fatal("invalid runner name accepted")
+	}
+	if err := scale.Deregister(context.Background(), "bad runner name"); err == nil {
+		t.Fatal("invalid runner name accepted for removal")
+	}
+	want := errors.New("github unavailable")
+	fake.getErr = want
+	if _, err := scale.Registered(context.Background(), "runner"); !errors.Is(err, want) {
+		t.Fatalf("Registered() error = %v", err)
+	}
+	if err := scale.Deregister(context.Background(), "runner"); !errors.Is(err, want) {
+		t.Fatalf("Deregister() observation error = %v", err)
+	}
+	fake.getErr = nil
+	fake.runner = &scaleset.RunnerReference{ID: 8, Name: "runner", RunnerScaleSetID: 9}
+	fake.deleteErr = want
+	if err := scale.Deregister(context.Background(), "runner"); !errors.Is(err, want) {
+		t.Fatalf("Deregister() removal error = %v", err)
+	}
+}
+
 func TestScaleSetHandleCommitsBeforeDeleteAndNacksFailure(t *testing.T) {
 	f := &fakeScaleSet{messages: []*scaleset.RunnerScaleSetMessage{{MessageID: 8}}}
 	s, _ := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 1, PollTimeout: time.Second, RequestTimeout: time.Second})

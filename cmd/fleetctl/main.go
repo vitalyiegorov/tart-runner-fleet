@@ -43,27 +43,50 @@ type apiClient interface {
 
 type dependencies struct {
 	newClient      func(string, time.Duration) (apiClient, error)
+	openConfig     func(string) (io.ReadCloser, error)
 	loadPrivateKey func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error)
 	openProvision  func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
+	writeConfig    func(string, config.Config) error
+}
+
+type loadedSecret interface {
+	Reveal() string
+	Destroy()
+}
+
+type secretLoader func(context.Context, string, string) (loadedSecret, error)
+
+func privateKeyLoader(load secretLoader) func(context.Context, string, string) (*githubscaleset.PrivateKeySecret, error) {
+	return func(ctx context.Context, service, account string) (*githubscaleset.PrivateKeySecret, error) {
+		secret, err := load(ctx, service, account)
+		if err != nil {
+			return nil, err
+		}
+		if secret == nil {
+			return nil, operations.ErrInvalid
+		}
+		key := githubscaleset.NewPrivateKeySecret(secret.Reveal())
+		secret.Destroy()
+		return key, nil
+	}
 }
 
 func defaultDependencies() dependencies {
+	keychain := credentials.Keychain{}
 	return dependencies{
 		newClient: func(endpoint string, timeout time.Duration) (apiClient, error) {
 			return adminapi.NewClient(endpoint, timeout)
 		},
-		loadPrivateKey: func(ctx context.Context, service, account string) (*githubscaleset.PrivateKeySecret, error) {
-			secret, err := (credentials.Keychain{}).Load(ctx, service, account)
-			if err != nil {
-				return nil, err
-			}
-			key := githubscaleset.NewPrivateKeySecret(secret.Reveal())
-			secret.Destroy()
-			return key, nil
+		openConfig: func(path string) (io.ReadCloser, error) {
+			return os.Open(path) // #nosec G304 -- explicit operator-selected config path.
 		},
+		loadPrivateKey: privateKeyLoader(func(ctx context.Context, service, account string) (loadedSecret, error) {
+			return keychain.Load(ctx, service, account)
+		}),
 		openProvision: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
 			return githubscaleset.NewProvisioner(cfg)
 		},
+		writeConfig: atomicWriteConfig,
 	}
 }
 
@@ -138,7 +161,7 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		fmt.Fprintln(stderr, "mutation flags require --apply")
 		return exitUsage
 	}
-	file, err := os.Open(*path) // #nosec G304 -- explicit operator-selected config path.
+	file, err := deps.openConfig(*path)
 	if err != nil {
 		fmt.Fprintf(stderr, "open config: %v\n", err)
 		return exitFailure
@@ -162,7 +185,7 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		return exitFailure
 	}
 	if *apply {
-		if err := atomicWriteConfig(*path, result.Config); err != nil {
+		if err := deps.writeConfig(*path, result.Config); err != nil {
 			fmt.Fprintf(stderr, "persist config: %v\n", err)
 			return exitFailure
 		}
@@ -180,8 +203,30 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 }
 
 func atomicWriteConfig(path string, cfg config.Config) error {
+	return atomicWriteConfigWith(path, cfg, atomicConfigOps{
+		createTemp: func(directory, pattern string) (atomicConfigFile, error) { return os.CreateTemp(directory, pattern) },
+		remove:     os.Remove,
+		rename:     os.Rename,
+	})
+}
+
+type atomicConfigFile interface {
+	io.Writer
+	Name() string
+	Chmod(os.FileMode) error
+	Sync() error
+	Close() error
+}
+
+type atomicConfigOps struct {
+	createTemp func(string, string) (atomicConfigFile, error)
+	remove     func(string) error
+	rename     func(string, string) error
+}
+
+func atomicWriteConfigWith(path string, cfg config.Config, ops atomicConfigOps) error {
 	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".fleet-config-*")
+	temporary, err := ops.createTemp(directory, ".fleet-config-*")
 	if err != nil {
 		return err
 	}
@@ -189,7 +234,7 @@ func atomicWriteConfig(path string, cfg config.Config) error {
 	remove := true
 	defer func() {
 		if remove {
-			_ = os.Remove(temporaryPath)
+			_ = ops.remove(temporaryPath)
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
@@ -207,7 +252,7 @@ func atomicWriteConfig(path string, cfg config.Config) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := ops.rename(temporaryPath, path); err != nil {
 		return err
 	}
 	remove = false

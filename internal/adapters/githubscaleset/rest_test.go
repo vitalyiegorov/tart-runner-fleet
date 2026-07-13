@@ -25,6 +25,10 @@ func response(status int, body, link string) *http.Response {
 	return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(body))}
 }
 
+type closeErrorBody struct{ io.Reader }
+
+func (closeErrorBody) Close() error { return errors.New("close response") }
+
 func TestObserverPaginatesIndexesAndPreservesQueuedSibling(t *testing.T) {
 	seen := map[string]int{}
 	deadline := false
@@ -185,5 +189,20 @@ func TestObserverWrapsJobsRunnersAndPaginationErrors(t *testing.T) {
 				t.Fatal("expected wrapped endpoint error")
 			}
 		})
+	}
+}
+
+func TestObserverRejectsResponseThatCannotBeClosed(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: closeErrorBody{Reader: strings.NewReader(`{"workflow_runs":[]}`)}}, nil
+	})
+	observer, err := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: doer,
+		Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := observer.Refresh(context.Background(), nil)
+	if observation.Err == nil || !strings.Contains(observation.Err.Error(), "close GitHub response") {
+		t.Fatalf("Refresh() error = %v", observation.Err)
 	}
 }
