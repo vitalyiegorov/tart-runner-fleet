@@ -99,3 +99,22 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 		t.Error("release artifacts must carry a machine-readable version manifest")
 	}
 }
+
+func TestLaunchdTemplateCanResolveRequiredOperatorTools(t *testing.T) {
+	plist, err := os.ReadFile("../../launchd/com.vitalyiegorov.tart-runner-fleet.plist") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(plist)
+	for _, required := range []string{
+		"<key>EnvironmentVariables</key>",
+		"<key>PATH</key>",
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin:/bin:/usr/sbin:/sbin",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("launchd template must contain %q so fleetd can resolve tart on Intel and Apple Silicon hosts", required)
+		}
+	}
+}

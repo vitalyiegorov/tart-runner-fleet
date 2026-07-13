@@ -13,6 +13,11 @@
     <string>--database=__STATE_DIR__/fleet.db</string>
     <string>--admin-socket=__STATE_DIR__/fleetd.sock</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -24,6 +29,8 @@
   <integer>10</integer>
   <key>ProcessType</key>
   <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>StandardOutPath</key>
   <string>__STATE_DIR__/fleet.stdout.log</string>
   <key>StandardErrorPath</key>
