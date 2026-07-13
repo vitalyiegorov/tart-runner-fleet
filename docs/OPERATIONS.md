@@ -1,10 +1,13 @@
 # Operations
 
-## Current promotion ceiling
+## Promotion contract
 
-`fleetd` accepts `observe` and `shadow`. `canary` and `authority` are hard-coded
-off until a disposable real-VM lifecycle canary and rollback drill pass. The
-incumbent shell manager remains production authority.
+`fleetd` supports `observe`, `shadow`, `canary`, and `authority`. Canary and
+authority acquire a renewable singleton lease, recover expired outbox leases,
+and stop on lease loss. Canary additionally requires exact scope/profile flags
+and runs at most one lifecycle operation concurrently. Promotion is never
+implicit: keep the incumbent installed until a real queued job has completed,
+deregistered, stopped, and deleted through the Go controller.
 
 ## Self-hosting and bootstrap
 
@@ -65,7 +68,8 @@ need to parse, and do not treat this migration as authority promotion.
 ## Shadow
 
 Shadow additionally opens one official GitHub Actions Scale Set message session
-per profile. It commits sanitized job events and the message cursor atomically
+per configured scope/profile. It commits sanitized job events and the scoped
+message cursor atomically
 before acknowledgement, computes plans, and writes effects to neither GitHub nor
 Tart. Do not point another controller at the same scale-set sessions.
 
@@ -75,9 +79,57 @@ appears in shell history or a process argument. Use service
 `tart-runner-fleet-github-app` and account `controller` (or configure different
 names), paste the PEM as the item password, then delete the source file safely.
 
-The `github` configuration requires `configUrl`, `owner`, `clientId`,
-`installationId`, `keychainService`, `keychainAccount`, and exactly one
-`scaleSets` entry for every enabled runner profile.
+The multi-scope `github` configuration contains one non-secret App client ID,
+Keychain service/account names, named installation IDs, and registration
+scopes. Use a repository scope for each personal repository and an organization
+scope for organization repositories. Every target belongs to exactly one scope;
+every scope has exactly one scale set for each enabled profile. Numeric scale-set
+IDs may collide across installations because durable state uses a scoped key.
+
+Provisioning is explicit, drift-failing, and plan-first:
+
+```sh
+fleetctl config validate fleet.json
+fleetctl scale-sets provision --config fleet.json
+fleetctl scale-sets provision --config fleet.json --apply --write \
+  --confirm provision-scale-sets \
+  --reason "initial GitHub Actions scale-set bootstrap"
+```
+
+The command inspects every scope before creating anything, reuses only an exact
+name/labels/group match, rejects drift, and atomically writes returned IDs with
+mode `0600`. It never prints the App key or JIT material.
+
+## Immutable guest bases
+
+Each Linux and macOS base must contain an unpacked GitHub Actions runner at
+`$HOME/actions-runner/run.sh` and the matching released helper installed as
+`/usr/local/libexec/tart-runner-fleet-bootstrap`. The host sends the bounded JIT
+configuration over `tart exec -i` standard input; it never appears in argv,
+logs, SQLite, or the parent environment. Build new `*-go` bases and retain the
+incumbent bases unchanged for rollback.
+
+## Real canary and authority handoff
+
+Use a separate canary database so old authority operations cannot be consumed:
+
+```sh
+fleetd run --mode canary \
+  --canary-scope fleet-repo \
+  --canary-profile small \
+  --config fleet.json \
+  --database fleet-canary.db \
+  --admin-socket fleet-canary.sock \
+  --health-address 127.0.0.1:9877
+```
+
+Dispatch `.github/workflows/fleet-canary.yml`. Require the complete sequence:
+queued demand, owned Tart clone, readiness, JIT registration, job success,
+fresh completed-job guard, deregistration, stop, deletion, and zero owned VMs.
+Then stop the incumbent, start `fleetd --mode authority` with the production
+database, and watch one Linux plus one macOS job before releasing normal load.
+Rollback is immediate: stop Go admission, drain only Go-owned VMs, restore the
+pinned incumbent launchd unit and its unchanged config, then verify health.
 
 ## Health
 
