@@ -278,6 +278,16 @@ func TestSecureDirectoryRejectsEscapeAndInsecureExistingComponent(t *testing.T) 
 	}
 }
 
+func TestSecureDirectoryPropagatesDirectoryCreationFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureDirectory(root, filepath.Join(root, "new")); err == nil {
+		t.Fatal("directory creation failure was ignored")
+	}
+}
+
 func TestExecLauncherStartsDetachedProcess(t *testing.T) {
 	root := t.TempDir()
 	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)

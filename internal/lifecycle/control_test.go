@@ -85,3 +85,86 @@ func TestControlRouterFailsClosedForUnknownOrActiveDemand(t *testing.T) {
 		t.Fatalf("wrong request = %v", err)
 	}
 }
+
+func TestControlRouterPropagatesUnavailableStateAndScopedObservations(t *testing.T) {
+	ctx := context.Background()
+	instance := lifecycleInstance(operations.StateDraining)
+	state := &memoryState{instance: instance}
+	source := &fakeScaleControl{}
+	binding := SourceBinding{StoreKey: 7, Source: source}
+	router := ControlRouter{
+		State:   state,
+		Sources: map[SourceKey]SourceBinding{{Repo: instance.Repo, Profile: instance.Profile}: binding},
+	}
+
+	for name, probe := range map[string]func() error{
+		"registration": func() error { _, err := (ControlRouter{}).Registered(ctx, instance.ID); return err },
+		"acquire": func() error {
+			_, err := router.AcquireAndGenerateJIT(ctx, instance.Demand.JobID, "", "_work")
+			return err
+		},
+		"confirmation": func() error { _, err := router.ConfirmDeletion(ctx, ""); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := probe(); !errors.Is(err, operations.ErrInvalid) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+	missing := ControlRouter{State: missingState{}}
+	if _, _, err := missing.resolve(ctx, instance.ID); !errors.Is(err, operations.ErrNotFound) {
+		t.Fatalf("missing instance error = %v", err)
+	}
+
+	unknown := instance
+	unknown.Profile = "unknown"
+	if safe, err := router.SafeToDeregister(ctx, unknown); safe || !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("unknown drain binding = %v, %v", safe, err)
+	}
+	if err := router.Deregister(ctx, unknown); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("unknown deregistration binding = %v", err)
+	}
+
+	if safe, err := router.SafeToDeregister(ctx, instance); safe || !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("missing demand observation = %v, %v", safe, err)
+	}
+	if _, err := router.ConfirmDeletion(ctx, instance.ID); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("missing confirmation demand = %v", err)
+	}
+
+	observationErr := errors.New("observation unavailable")
+	router.Demand = fakeDemandReader{err: observationErr}
+	if safe, err := router.SafeToDeregister(ctx, instance); safe || !errors.Is(err, observationErr) {
+		t.Fatalf("failed demand observation = %v, %v", safe, err)
+	}
+	if _, err := router.ConfirmDeletion(ctx, instance.ID); !errors.Is(err, observationErr) {
+		t.Fatalf("failed confirmation demand = %v", err)
+	}
+
+	router.Demand = fakeDemandReader{record: operations.DemandRecord{Status: operations.DemandJobCompleted}}
+	source.err = observationErr
+	if _, err := router.ConfirmDeletion(ctx, instance.ID); !errors.Is(err, observationErr) {
+		t.Fatalf("failed runner observation = %v", err)
+	}
+}
+
+func TestControlRouterUsesCurrentUTCTimeWhenClockIsNotInjected(t *testing.T) {
+	instance := lifecycleInstance(operations.StateDraining)
+	source := &fakeScaleControl{}
+	router := ControlRouter{
+		State:  &memoryState{instance: instance},
+		Demand: fakeDemandReader{record: operations.DemandRecord{Status: operations.DemandJobCompleted}},
+		Sources: map[SourceKey]SourceBinding{
+			{Repo: instance.Repo, Profile: instance.Profile}: {StoreKey: 1, Source: source},
+		},
+	}
+	before := time.Now().UTC()
+	confirmation, err := router.ConfirmDeletion(context.Background(), instance.ID)
+	after := time.Now().UTC()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmation.ObservedAt.Before(before) || confirmation.ObservedAt.After(after) || confirmation.ObservedAt.Location() != time.UTC {
+		t.Fatalf("observation time = %v, interval = [%v, %v]", confirmation.ObservedAt, before, after)
+	}
+}
