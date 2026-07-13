@@ -72,6 +72,31 @@ func TestControllerShadowPersistsDecisionWithoutEffects(t *testing.T) {
 	}
 }
 
+// Regression: an idle shadow tick normalizes the durable scheduler snapshot on
+// its first pass. Replaying the same deterministic scheduler plan must then be
+// a no-op. Rewriting it with a new timestamp/version reuses the same plan ID
+// with a different digest, which the durable store correctly rejects.
+func TestControllerSkipsIdenticalNoOpPlanReplay(t *testing.T) {
+	store := &fakeStore{state: operations.SchedulerState{
+		Data:              json.RawMessage(`{}`),
+		Reservations:      json.RawMessage(`[]`),
+		DeficitRoundRobin: json.RawMessage(`{}`),
+	}}
+	controller := Controller{Store: store, ControllerID: "controller", Mode: Shadow}
+	plan := readyPlan()
+
+	applied, err := controller.Commit(context.Background(), plan, "", controllerNow)
+	if err != nil || !applied || len(store.applied) != 1 {
+		t.Fatalf("first Commit() = %v, %v, plans=%d", applied, err, len(store.applied))
+	}
+	store.state = store.applied[0].Scheduler
+
+	applied, err = controller.Commit(context.Background(), plan, "", controllerNow.Add(time.Second))
+	if err != nil || applied || len(store.applied) != 1 {
+		t.Fatalf("replay Commit() = %v, %v, plans=%d", applied, err, len(store.applied))
+	}
+}
+
 func TestControllerAuthorityTranslatesSpawnAndDependentDrain(t *testing.T) {
 	ownership := operations.Ownership{ControllerID: "controller", ResourceID: "old", OperationID: "birth"}
 	store := &fakeStore{state: operations.SchedulerState{Version: 2}, instances: map[string]operations.Instance{
