@@ -86,13 +86,17 @@ func TestProvisionExecutorValidationCancellationAndTerminals(t *testing.T) {
 	if err := canceled.Execute(ctx, valid); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled error=%v", err)
 	}
-	for _, terminal := range []operations.State{operations.StateAssigned, operations.StateRunning, operations.StateFailed} {
+	for _, terminal := range []operations.State{operations.StateAssigned, operations.StateRunning} {
 		t.Run(string(terminal), func(t *testing.T) {
 			executor, _, _, _, _, _ := provisionFixture(terminal)
 			if err := executor.Execute(context.Background(), valid); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+	executor, _, _, _, _, _ = provisionFixture(operations.StateFailed)
+	if err := executor.Execute(context.Background(), valid); err == nil || err.Error() != safeError(StagePersist).Error() {
+		t.Fatalf("failed provision completed: %v", err)
 	}
 	executor, _, _, _, _, _ = provisionFixture(operations.StateDeregistering)
 	if err := executor.Execute(context.Background(), valid); !errors.Is(err, operations.ErrConflict) {
@@ -230,11 +234,13 @@ func TestDrainExecutorValidationCancellationAndTerminals(t *testing.T) {
 	if err := executor.Execute(ctx, valid); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel error=%v", err)
 	}
-	for _, terminal := range []operations.State{operations.StateDeleted, operations.StateFailed} {
-		executor, _, _, _ = drainFixture(terminal)
-		if err := executor.Execute(context.Background(), valid); err != nil {
-			t.Fatal(err)
-		}
+	executor, _, _, _ = drainFixture(operations.StateDeleted)
+	if err := executor.Execute(context.Background(), valid); err != nil {
+		t.Fatal(err)
+	}
+	executor, _, _, _ = drainFixture(operations.StateFailed)
+	if err := executor.Execute(context.Background(), valid); err == nil || err.Error() != safeError(StagePersist).Error() {
+		t.Fatalf("failed drain completed and could release a dependent spawn: %v", err)
 	}
 	executor, _, _, _ = drainFixture(operations.StateRunning)
 	if err := executor.Execute(context.Background(), valid); !errors.Is(err, operations.ErrConflict) {

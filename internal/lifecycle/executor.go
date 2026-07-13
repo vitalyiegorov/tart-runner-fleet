@@ -124,8 +124,12 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			return err
 		}
 		switch instance.State {
-		case operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning, operations.StateFailed:
+		case operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning:
 			return nil
+		case operations.StateFailed:
+			// A failed lifecycle must never complete its outbox effect: doing so
+			// would release dependent operations as if provisioning succeeded.
+			return safeError(StagePersist)
 		case operations.StatePlanned:
 			base := e.Bases[instance.Platform]
 			if e.VM == nil || tart.ValidateName(base) != nil {
@@ -240,8 +244,12 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 			return err
 		}
 		switch instance.State {
-		case operations.StateDeleted, operations.StateFailed:
+		case operations.StateDeleted:
 			return nil
+		case operations.StateFailed:
+			// In particular, never release a cross-platform spawn that depends
+			// on this drain while the failed VM may still exist.
+			return safeError(StagePersist)
 		case operations.StateDraining:
 			if e.Control == nil {
 				return e.fail(ctx, instance, StageGuard)
