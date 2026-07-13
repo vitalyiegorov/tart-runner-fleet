@@ -37,27 +37,37 @@ for pass in one two; do
   CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
     go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/fleetctl" ./cmd/fleetctl
   CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
-    go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap" ./cmd/tart-runner-fleet-bootstrap
+    go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap-darwin-arm64" ./cmd/tart-runner-fleet-bootstrap
+  CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+    go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap-linux-arm64" ./cmd/tart-runner-fleet-bootstrap
   ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
     -version "$version" -output "$pass_dir/fleetd.cdx.json" "$pass_dir/fleetd"
   ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
     -version "$version" -output "$pass_dir/fleetctl.cdx.json" "$pass_dir/fleetctl"
-  ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
-    -version "$version" -output "$pass_dir/tart-runner-fleet-bootstrap.cdx.json" "$pass_dir/tart-runner-fleet-bootstrap"
+  for platform in darwin-arm64 linux-arm64; do
+    ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
+      -version "$version" \
+      -output "$pass_dir/tart-runner-fleet-bootstrap-$platform.cdx.json" \
+      "$pass_dir/tart-runner-fleet-bootstrap-$platform"
+  done
 done
 cmp "$temporary/one/fleetd" "$temporary/two/fleetd"
 cmp "$temporary/one/fleetctl" "$temporary/two/fleetctl"
-cmp "$temporary/one/tart-runner-fleet-bootstrap" "$temporary/two/tart-runner-fleet-bootstrap"
+cmp "$temporary/one/tart-runner-fleet-bootstrap-darwin-arm64" "$temporary/two/tart-runner-fleet-bootstrap-darwin-arm64"
+cmp "$temporary/one/tart-runner-fleet-bootstrap-linux-arm64" "$temporary/two/tart-runner-fleet-bootstrap-linux-arm64"
 cmp "$temporary/one/fleetd.cdx.json" "$temporary/two/fleetd.cdx.json"
 cmp "$temporary/one/fleetctl.cdx.json" "$temporary/two/fleetctl.cdx.json"
-cmp "$temporary/one/tart-runner-fleet-bootstrap.cdx.json" "$temporary/two/tart-runner-fleet-bootstrap.cdx.json"
+cmp "$temporary/one/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json" "$temporary/two/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json"
+cmp "$temporary/one/tart-runner-fleet-bootstrap-linux-arm64.cdx.json" "$temporary/two/tart-runner-fleet-bootstrap-linux-arm64.cdx.json"
 
 cp "$temporary/one/fleetd" "$staging/fleetd"
 cp "$temporary/one/fleetctl" "$staging/fleetctl"
-cp "$temporary/one/tart-runner-fleet-bootstrap" "$staging/tart-runner-fleet-bootstrap"
+cp "$temporary/one/tart-runner-fleet-bootstrap-darwin-arm64" "$staging/tart-runner-fleet-bootstrap-darwin-arm64"
+cp "$temporary/one/tart-runner-fleet-bootstrap-linux-arm64" "$staging/tart-runner-fleet-bootstrap-linux-arm64"
 cp "$temporary/one/fleetd.cdx.json" "$staging/fleetd.cdx.json"
 cp "$temporary/one/fleetctl.cdx.json" "$staging/fleetctl.cdx.json"
-cp "$temporary/one/tart-runner-fleet-bootstrap.cdx.json" "$staging/tart-runner-fleet-bootstrap.cdx.json"
+cp "$temporary/one/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json" "$staging/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json"
+cp "$temporary/one/tart-runner-fleet-bootstrap-linux-arm64.cdx.json" "$staging/tart-runner-fleet-bootstrap-linux-arm64.cdx.json"
 (cd "$staging" && go version -m fleetd) > "$staging/BUILDINFO.txt"
 printf '%s\n' "$version" > "$staging/RELEASE_VERSION"
 
@@ -65,15 +75,19 @@ archive="tart-runner-fleet-$version-darwin-arm64.tar.gz"
 for pass in one two; do
   tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
     -czf "$temporary/$archive.$pass" -C "$staging" \
-    fleetd fleetctl tart-runner-fleet-bootstrap \
-    fleetd.cdx.json fleetctl.cdx.json tart-runner-fleet-bootstrap.cdx.json \
+    fleetd fleetctl \
+    tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64 \
+    fleetd.cdx.json fleetctl.cdx.json \
+    tart-runner-fleet-bootstrap-darwin-arm64.cdx.json tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
     BUILDINFO.txt RELEASE_VERSION
 done
 cmp "$temporary/$archive.one" "$temporary/$archive.two"
 cp "$temporary/$archive.one" "$staging/$archive"
 (cd "$staging" && shasum -a 256 \
-  "$archive" fleetd fleetctl tart-runner-fleet-bootstrap \
-  fleetd.cdx.json fleetctl.cdx.json tart-runner-fleet-bootstrap.cdx.json \
+  "$archive" fleetd fleetctl \
+  tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64 \
+  fleetd.cdx.json fleetctl.cdx.json \
+  tart-runner-fleet-bootstrap-darwin-arm64.cdx.json tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
   BUILDINFO.txt RELEASE_VERSION > SHA256SUMS)
 rmdir "$output"
 mv "$staging" "$output"
