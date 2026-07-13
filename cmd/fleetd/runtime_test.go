@@ -85,6 +85,16 @@ type contextIgnoringCloseSource struct {
 	release <-chan struct{}
 }
 
+type failingCloseSource struct {
+	fakeSource
+	err error
+}
+
+func (s *failingCloseSource) Close(context.Context) error {
+	s.closed.Add(1)
+	return s.err
+}
+
 func (s *contextIgnoringCloseSource) Close(context.Context) error {
 	s.started <- struct{}{}
 	<-s.release
@@ -152,12 +162,11 @@ func TestScaleSetSourcesReturnWhenCloseIgnoresCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		closeScaleSetSources(ctx, []scaleSetSource{
+		done <- closeScaleSetSources(ctx, []scaleSetSource{
 			&contextIgnoringCloseSource{started: started, release: release},
 		})
-		close(done)
 	}()
 
 	select {
@@ -166,7 +175,10 @@ func TestScaleSetSourcesReturnWhenCloseIgnoresCancellation(t *testing.T) {
 		t.Fatal("scale-set session cleanup did not start")
 	}
 	select {
-	case <-done:
+	case err := <-done:
+		if !errors.Is(err, errScaleSetClose) {
+			t.Fatalf("cleanup error=%v", err)
+		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("scale-set session cleanup exceeded its context budget")
 	}
@@ -366,6 +378,38 @@ func TestRunObserveAndShadow(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunReportsRedactedScaleSetCleanupFailure(t *testing.T) {
+	d := testDependencies(t)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	d.inventory = func(runtimeStore, config.Config) app.Inventory {
+		return notifyingInventory{ready: ready, once: &readyOnce}
+	}
+	brokerFailure := errors.New("private broker response")
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		return &failingCloseSource{err: brokerFailure}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{
+			ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Shadow,
+		}, d)
+	}()
+	select {
+	case <-ready:
+		cancel()
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("runtime did not become ready")
+	}
+	err := <-done
+	if !errors.Is(err, errScaleSetClose) || strings.Contains(err.Error(), brokerFailure.Error()) {
+		t.Fatalf("cleanup error=%v", err)
 	}
 }
 
