@@ -173,7 +173,7 @@ func TestProvisionExecutorObservedRegistrationCustomFolderAndPersistFailure(t *t
 	operation := operations.Operation{Kind: OperationProvision, ResourceID: "trf-small-1"}
 	executor, state, _, registration, _, _ := provisionFixture(operations.StateReachable)
 	registration.registered = true
-	if err := executor.Execute(context.Background(), operation); err != nil || state.instance.State != operations.StateOnlineIdle {
+	if err := executor.Execute(context.Background(), operation); err != nil || state.instance.State != operations.StateAssigned {
 		t.Fatalf("observed registration state=%s err=%v", state.instance.State, err)
 	}
 

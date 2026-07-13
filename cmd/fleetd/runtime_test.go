@@ -1155,7 +1155,7 @@ type bootstrapProbe struct{}
 
 func (bootstrapProbe) Bootstrap(context.Context, string, *githubscaleset.JITSecret) error { return nil }
 
-func TestRuntimeExecutorsDriveProvisionToOnline(t *testing.T) {
+func TestRuntimeExecutorsDriveProvisionToAssigned(t *testing.T) {
 	d := testDependencies(t)
 	vm := &lifecycleVM{}
 	d.newVM = func(runtimeStore, config.Config, lifecycle.DrainControl) lifecycle.VMControl { return vm }
@@ -1208,7 +1208,7 @@ func TestRuntimeExecutorsDriveProvisionToOnline(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		instance, err := opened.Instance(context.Background(), "trf-small-runtime")
-		if err == nil && instance.State == operations.StateOnlineIdle {
+		if err == nil && instance.State == operations.StateAssigned {
 			cancel()
 			if err := <-done; err != nil {
 				t.Fatal(err)
@@ -1222,5 +1222,5 @@ func TestRuntimeExecutorsDriveProvisionToOnline(t *testing.T) {
 	}
 	cancel()
 	<-done
-	t.Fatal("provision operation did not reach online")
+	t.Fatal("provision operation did not reach assigned")
 }

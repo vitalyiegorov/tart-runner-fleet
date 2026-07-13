@@ -127,8 +127,14 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			return err
 		}
 		switch instance.State {
-		case operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning:
+		case operations.StateAssigned, operations.StateRunning:
 			return nil
+		case operations.StateOnlineIdle:
+			// Every provision operation owns one concrete GitHub job demand. A
+			// registered JIT runner is therefore already reserved, never warm
+			// idle capacity. Repair legacy persisted online_idle instances before
+			// the scheduler can mistake them for drainable handoff capacity.
+			instance, err = e.advance(ctx, instance, operations.StateAssigned)
 		case operations.StateFailed:
 			// A failed lifecycle must never complete its outbox effect: doing so
 			// would release dependent operations as if provisioning succeeded.
@@ -194,7 +200,7 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 				}
 				return e.fail(ctx, instance, StageRegister)
 			}
-			instance, err = e.advance(ctx, instance, operations.StateOnlineIdle)
+			instance, err = e.advance(ctx, instance, operations.StateAssigned)
 		default:
 			return operations.ErrConflict
 		}

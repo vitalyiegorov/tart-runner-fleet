@@ -74,6 +74,7 @@ func TestExplicitInstanceLifecycleTransitionMatrixIsExhaustive(t *testing.T) {
 		{InstanceBooting, InstanceReachable}:      true,
 		{InstanceReachable, InstanceRegistering}:  true,
 		{InstanceRegistering, InstanceOnlineIdle}: true,
+		{InstanceRegistering, InstanceAssigned}:   true,
 		{InstanceOnlineIdle, InstanceAssigned}:    true,
 		{InstanceAssigned, InstanceRunning}:       true,
 		{InstanceAssigned, InstanceOnlineIdle}:    true,
