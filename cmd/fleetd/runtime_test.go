@@ -18,6 +18,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
@@ -199,6 +200,83 @@ func TestRunCanaryAndAuthorityAreArmed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Regression: mutation modes currently persist scheduler operations but never
+// run the durable worker. An unknown operation is intentionally used here: a
+// live worker must claim it and fail it closed as dead instead of leaving it
+// pending forever.
+func TestRunAuthorityStartsDurableOperationWorker(t *testing.T) {
+	d := testDependencies(t)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	d.inventory = func(runtimeStore, config.Config) app.Inventory {
+		return notifyingInventory{ready: ready, once: &readyOnce}
+	}
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}
+	baseOpen := d.openStore
+	var opened runtimeStore
+	d.openStore = func(ctx context.Context, path string) (runtimeStore, error) {
+		store, err := baseOpen(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		_, err = store.ApplyPlan(ctx, operations.Plan{
+			ID: "worker-regression", ExpectedSchedulerVersion: 0, CreatedAt: now,
+			Scheduler: operations.SchedulerState{Version: 1},
+			Operations: []operations.Operation{{
+				ID: "unsupported-operation", IdempotencyKey: "unsupported-operation", EffectKey: "unsupported:resource",
+				Kind: "unsupported", ResourceID: "resource", AvailableAt: now,
+			}},
+		})
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		opened = store
+		return store, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{
+			ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Authority,
+		}, d)
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped before worker probe: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("runtime did not become ready")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, dead, err := opened.OperationCounts(context.Background())
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		if dead == 1 {
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("durable operation remained pending because no worker was running")
 }
 
 func TestRunValidationAndDependencyErrors(t *testing.T) {
