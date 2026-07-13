@@ -156,6 +156,23 @@ func TestProvisionExecutorRunsOwnedLifecycleInOrder(t *testing.T) {
 	}
 }
 
+func TestProvisionedJobSpecificJITBecomesAssigned(t *testing.T) {
+	calls := []string{}
+	registration := &fakeRegistration{calls: &calls, secret: githubscaleset.NewJITSecret("jit-value")}
+	state := &memoryState{instance: lifecycleInstance(operations.StatePlanned)}
+	executor := ProvisionExecutor{
+		State: state, VM: fakeVM{calls: &calls}, Ready: fakeReady{calls: &calls}, Registration: registration,
+		Bootstrap: fakeBootstrap{calls: &calls, registration: registration}, Bases: map[domain.Platform]string{domain.PlatformLinux: "linux-base"},
+	}
+
+	if err := executor.Execute(context.Background(), operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if state.instance.State != operations.StateAssigned {
+		t.Fatalf("job-specific JIT state=%s, want %s", state.instance.State, operations.StateAssigned)
+	}
+}
+
 func TestProvisionExecutorResumesWithoutSecondJITOrVMEffect(t *testing.T) {
 	calls := []string{}
 	registration := &fakeRegistration{calls: &calls, registered: true, secret: githubscaleset.NewJITSecret("unused")}
