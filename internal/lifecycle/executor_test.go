@@ -210,7 +210,7 @@ func TestProvisionExecutorRegistrationWaitIsBoundedAndCancellationSafe(t *testin
 		executor := ProvisionExecutor{State: state, Registration: registration,
 			RegistrationTimeout: 2 * time.Millisecond, RegistrationPollInterval: time.Millisecond}
 		err := executor.Execute(context.Background(), operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID})
-		if err == nil || err.Error() != safeError(StageRegister).Error() || state.instance.State != operations.StateFailed {
+		if err == nil || err.Error() != safeError(StageRegister).Error() || state.instance.State != operations.StateRegistering || len(state.changes) != 0 {
 			t.Fatalf("timeout error=%v state=%s calls=%v", err, state.instance.State, calls)
 		}
 	})
@@ -234,7 +234,7 @@ func TestProvisionExecutorRegistrationWaitIsBoundedAndCancellationSafe(t *testin
 	})
 }
 
-func TestProvisionFailureIsSanitizedAndDurablyFailed(t *testing.T) {
+func TestProvisionFailureIsSanitizedAndLeavesStageResumable(t *testing.T) {
 	calls := []string{}
 	state := &memoryState{instance: lifecycleInstance(operations.StatePlanned)}
 	executor := ProvisionExecutor{State: state, VM: fakeVM{calls: &calls, cloneErr: errors.New("top-secret backend detail")},
@@ -243,7 +243,7 @@ func TestProvisionFailureIsSanitizedAndDurablyFailed(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "top-secret") {
 		t.Fatalf("unsafe error=%v", err)
 	}
-	if state.instance.State != operations.StateFailed || state.instance.LastError != string(StageClone) {
+	if state.instance.State != operations.StatePlanned || state.instance.LastError != "" || len(state.changes) != 0 {
 		t.Fatalf("failed state=%#v", state.instance)
 	}
 }
@@ -327,9 +327,10 @@ func TestDrainExecutorFailsClosedBeforeStopOrDelete(t *testing.T) {
 	calls := []string{}
 	control := &fakeDrainControl{calls: &calls, safe: true, confirmations: []operations.DeletionConfirmation{{Fresh: false}}}
 	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
-	executor := DrainExecutor{State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute}
+	executor := DrainExecutor{State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute,
+		ConfirmationTimeout: 2 * time.Millisecond, ConfirmationPollInterval: time.Millisecond}
 	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
-	if err == nil || state.instance.State != operations.StateFailed || state.instance.LastError != string(StageConfirm) {
+	if err == nil || state.instance.State != operations.StateDraining || state.instance.LastError != "" || len(state.changes) != 0 {
 		t.Fatalf("error=%v state=%#v", err, state.instance)
 	}
 	for _, call := range calls {
@@ -387,27 +388,31 @@ func TestDrainWaitsForEventuallyConsistentRunnerDeletion(t *testing.T) {
 }
 
 func TestDrainDeletionWaitCancellationIsResumable(t *testing.T) {
-	now := time.Unix(1000, 0).UTC()
-	calls := []string{}
-	control := &fakeDrainControl{calls: &calls, safe: true}
-	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
-	ctx, cancel := context.WithCancel(context.Background())
-	executor := DrainExecutor{
-		State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute,
-		ConfirmationTimeout: time.Second, ConfirmationPollInterval: time.Millisecond,
-		After: func(time.Duration) <-chan time.Time {
-			cancel()
-			return make(chan time.Time)
-		},
-	}
-	err := executor.Execute(ctx, operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
-	if !errors.Is(err, context.Canceled) || state.instance.State != operations.StateDraining || len(state.changes) != 0 {
-		t.Fatalf("cancellation error=%v state=%s changes=%v calls=%v", err, state.instance.State, state.changes, calls)
-	}
-	for _, call := range calls {
-		if strings.HasPrefix(call, "stop:") || strings.HasPrefix(call, "delete:") {
-			t.Fatalf("destructive call after cancellation: %v", calls)
-		}
+	for _, durableState := range []operations.State{operations.StateDraining, operations.StateStopping} {
+		t.Run(string(durableState), func(t *testing.T) {
+			now := time.Unix(1000, 0).UTC()
+			calls := []string{}
+			control := &fakeDrainControl{calls: &calls, safe: true}
+			state := &memoryState{instance: lifecycleInstance(durableState)}
+			ctx, cancel := context.WithCancel(context.Background())
+			executor := DrainExecutor{
+				State: state, VM: fakeVM{calls: &calls}, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute,
+				ConfirmationTimeout: time.Second, ConfirmationPollInterval: time.Millisecond,
+				After: func(time.Duration) <-chan time.Time {
+					cancel()
+					return make(chan time.Time)
+				},
+			}
+			err := executor.Execute(ctx, operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+			if !errors.Is(err, context.Canceled) || state.instance.State != durableState || len(state.changes) != 0 {
+				t.Fatalf("cancellation error=%v state=%s changes=%v calls=%v", err, state.instance.State, state.changes, calls)
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "stop:") || strings.HasPrefix(call, "delete:") {
+					t.Fatalf("destructive call after cancellation: %v", calls)
+				}
+			}
+		})
 	}
 }
 

@@ -44,12 +44,12 @@ func provisionFixture(stateValue operations.State) (ProvisionExecutor, *memorySt
 	return executor, state, vm, registration, ready, bootstrap
 }
 
-func expectStage(t *testing.T, err error, stage Stage, state *memoryState) {
+func expectStage(t *testing.T, err error, stage Stage, state *memoryState, expectedState operations.State) {
 	t.Helper()
 	if err == nil || err.Error() != safeError(stage).Error() {
 		t.Fatalf("error=%v want stage=%s", err, stage)
 	}
-	if state.instance.State != operations.StateFailed || state.instance.LastError != string(stage) {
+	if state.instance.State != expectedState || state.instance.LastError != "" || len(state.changes) != 0 {
 		t.Fatalf("state=%#v", state.instance)
 	}
 }
@@ -161,7 +161,7 @@ func TestProvisionExecutorEveryStageFailsWithBoundedCode(t *testing.T) {
 			executor, state, vm, registration, ready, bootstrap := provisionFixture(test.state)
 			test.mutate(&executor, vm, registration, ready, bootstrap)
 			err := executor.Execute(context.Background(), operation)
-			expectStage(t, err, test.stage, state)
+			expectStage(t, err, test.stage, state, test.state)
 			if strings.Contains(err.Error(), "raw") {
 				t.Fatalf("raw error leaked: %v", err)
 			}
@@ -205,7 +205,8 @@ func drainFixture(stateValue operations.State) (DrainExecutor, *memoryState, *fa
 	state := &memoryState{instance: lifecycleInstance(stateValue)}
 	vm := &fakeVM{calls: &calls}
 	control := &fakeDrainControl{calls: &calls, safe: true, confirmations: []operations.DeletionConfirmation{safe, safe}}
-	return DrainExecutor{State: state, VM: vm, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute}, state, vm, control
+	return DrainExecutor{State: state, VM: vm, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute,
+		ConfirmationTimeout: time.Millisecond, ConfirmationPollInterval: time.Millisecond}, state, vm, control
 }
 
 func TestDrainExecutorValidationCancellationAndTerminals(t *testing.T) {
@@ -275,7 +276,7 @@ func TestDrainExecutorEveryStageFailsClosed(t *testing.T) {
 			executor, state, vm, control := drainFixture(test.state)
 			test.mutate(&executor, vm, control)
 			err := executor.Execute(context.Background(), operation)
-			expectStage(t, err, test.stage, state)
+			expectStage(t, err, test.stage, state, test.state)
 			if strings.Contains(err.Error(), "raw") {
 				t.Fatalf("raw error leaked: %v", err)
 			}
@@ -302,8 +303,14 @@ func TestDrainExecutorDefaultsPersistenceAndHelpers(t *testing.T) {
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
 	}
-	if (DrainExecutor{}).confirmed(context.Background(), "vm") {
-		t.Fatal("nil control confirmed deletion")
+	if got := (ProvisionExecutor{}).registrationPollInterval(); got != 250*time.Millisecond {
+		t.Fatalf("default registration poll interval=%s", got)
+	}
+	if got := (DrainExecutor{}).confirmationPollInterval(); got != 250*time.Millisecond {
+		t.Fatalf("default confirmation poll interval=%s", got)
+	}
+	if err := (DrainExecutor{}).waitConfirmed(context.Background(), "vm"); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("nil control confirmation error=%v", err)
 	}
 	failed := lifecycleInstance(operations.StateFailed)
 	before := len(state.changes)

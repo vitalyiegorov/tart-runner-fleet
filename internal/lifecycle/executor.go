@@ -256,11 +256,7 @@ func (e ProvisionExecutor) advance(ctx context.Context, instance operations.Inst
 	return e.State.Advance(ctx, StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version, NextState: next})
 }
 
-func (e ProvisionExecutor) fail(ctx context.Context, instance operations.Instance, stage Stage) error {
-	if instance.State != operations.StateDeleted && instance.State != operations.StateFailed {
-		_, _ = e.State.Advance(ctx, StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version,
-			NextState: operations.StateFailed, FailureCode: string(stage)})
-	}
+func (e ProvisionExecutor) fail(_ context.Context, _ operations.Instance, stage Stage) error {
 	return safeError(stage)
 }
 
@@ -269,11 +265,14 @@ func (e ProvisionExecutor) fail(ctx context.Context, instance operations.Instanc
 // dependencies: a cross-platform spawn cannot start after mere deregistration
 // while the old VM still exists.
 type DrainExecutor struct {
-	State              StateStore
-	VM                 VMControl
-	Control            DrainControl
-	ConfirmationMaxAge time.Duration
-	Now                func() time.Time
+	State                    StateStore
+	VM                       VMControl
+	Control                  DrainControl
+	ConfirmationMaxAge       time.Duration
+	ConfirmationTimeout      time.Duration
+	ConfirmationPollInterval time.Duration
+	Now                      func() time.Time
+	After                    func(time.Duration) <-chan time.Time
 }
 
 func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operation) error {
@@ -309,7 +308,10 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 			if err := e.Control.Deregister(ctx, instance); err != nil {
 				return e.fail(ctx, instance, StageDeregister)
 			}
-			if !e.confirmed(ctx, instance.ID) {
+			if confirmErr := e.waitConfirmed(ctx, instance.ID); confirmErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return e.fail(ctx, instance, StageConfirm)
 			}
 			instance, err = e.advance(ctx, instance, operations.StateDeregistering)
@@ -322,7 +324,13 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 			}
 			instance, err = e.advance(ctx, instance, operations.StateStopping)
 		case operations.StateStopping:
-			if e.VM == nil || !e.confirmed(ctx, instance.ID) {
+			if e.VM == nil {
+				return e.fail(ctx, instance, StageConfirm)
+			}
+			if confirmErr := e.waitConfirmed(ctx, instance.ID); confirmErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				return e.fail(ctx, instance, StageConfirm)
 			}
 			if err := e.VM.Delete(ctx, instance.ID, instance.Ownership); err != nil {
@@ -339,23 +347,33 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 	return safeError(StagePersist)
 }
 
-func (e DrainExecutor) confirmed(ctx context.Context, id string) bool {
+func (e DrainExecutor) waitConfirmed(ctx context.Context, id string) error {
 	if e.Control == nil {
-		return false
+		return operations.ErrInvalid
 	}
-	confirmation, err := e.Control.ConfirmDeletion(ctx, id)
-	return err == nil && confirmation.Safe(e.now(), e.confirmationMaxAge())
+	waitCtx, cancel := context.WithTimeout(ctx, e.confirmationTimeout())
+	defer cancel()
+	for {
+		confirmation, err := e.Control.ConfirmDeletion(waitCtx, id)
+		if err != nil {
+			return err
+		}
+		if confirmation.Safe(e.now(), e.confirmationMaxAge()) {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		case <-e.after(e.confirmationPollInterval()):
+		}
+	}
 }
 
 func (e DrainExecutor) advance(ctx context.Context, instance operations.Instance, next operations.State) (operations.Instance, error) {
 	return e.State.Advance(ctx, StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version, NextState: next})
 }
 
-func (e DrainExecutor) fail(ctx context.Context, instance operations.Instance, stage Stage) error {
-	if instance.State != operations.StateDeleted && instance.State != operations.StateFailed {
-		_, _ = e.State.Advance(ctx, StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version,
-			NextState: operations.StateFailed, FailureCode: string(stage)})
-	}
+func (e DrainExecutor) fail(_ context.Context, _ operations.Instance, stage Stage) error {
 	return safeError(stage)
 }
 
@@ -371,6 +389,27 @@ func (e DrainExecutor) confirmationMaxAge() time.Duration {
 		return 30 * time.Second
 	}
 	return e.ConfirmationMaxAge
+}
+
+func (e DrainExecutor) confirmationTimeout() time.Duration {
+	if e.ConfirmationTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return e.ConfirmationTimeout
+}
+
+func (e DrainExecutor) confirmationPollInterval() time.Duration {
+	if e.ConfirmationPollInterval <= 0 {
+		return 250 * time.Millisecond
+	}
+	return e.ConfirmationPollInterval
+}
+
+func (e DrainExecutor) after(delay time.Duration) <-chan time.Time {
+	if e.After == nil {
+		return time.After(delay)
+	}
+	return e.After(delay)
 }
 
 func validateOwned(instance operations.Instance, resourceID string) error {
