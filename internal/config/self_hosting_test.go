@@ -98,6 +98,25 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	if !strings.Contains(string(buildScript), "RELEASE_VERSION") {
 		t.Error("release artifacts must carry a machine-readable version manifest")
 	}
+	for _, required := range []string{
+		"./cmd/tart-runner-fleet-bootstrap",
+		"tart-runner-fleet-bootstrap.cdx.json",
+		"tart-runner-fleet-bootstrap",
+	} {
+		if !strings.Contains(string(buildScript), required) {
+			t.Errorf("release artifacts must include the secret-safe guest bootstrap helper %q", required)
+		}
+	}
+
+	mainRelease, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"tart-runner-fleet-bootstrap", "tart-runner-fleet-bootstrap.cdx.json"} {
+		if !strings.Contains(string(mainRelease), required) {
+			t.Errorf("main release verification must require bootstrap asset %q", required)
+		}
+	}
 }
 
 func TestLaunchdTemplateCanResolveRequiredOperatorTools(t *testing.T) {
