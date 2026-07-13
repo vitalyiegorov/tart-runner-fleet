@@ -71,7 +71,10 @@ const (
 	authorityLeaseRenewInterval = 10 * time.Second
 	deletionConfirmationMaxAge  = 30 * time.Second
 	scaleSetCloseTimeout        = 20 * time.Second
+	scaleSetCloseConcurrency    = 4
 )
+
+var errScaleSetClose = errors.New("scale-set session cleanup failed")
 
 func defaultDependencies() dependencies {
 	return dependencies{
@@ -121,7 +124,7 @@ func defaultDependencies() dependencies {
 
 func runDaemon(ctx context.Context, opts options) error { return runWithDependencies(ctx, opts, deps) }
 
-func runWithDependencies(ctx context.Context, opts options, d dependencies) error {
+func runWithDependencies(ctx context.Context, opts options, d dependencies) (retErr error) {
 	if !opts.Mode.Valid() {
 		return errors.New("invalid controller mode")
 	}
@@ -212,11 +215,6 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	coordinator := app.DemandCoordinator{Store: store}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), scaleSetCloseTimeout)
-		defer cancel()
-		closeScaleSetSources(ctx, closers)
-	}()
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if opts.Mode != reconcile.Observe {
 		service, account, path := githubCredential(cfg)
@@ -227,6 +225,17 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 		privateKey := githubscaleset.NewPrivateKeySecret(secret.Reveal())
 		secret.Destroy()
 		defer privateKey.Destroy()
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), scaleSetCloseTimeout)
+			defer cancel()
+			if closeErr := closeScaleSetSources(closeCtx, closers); closeErr != nil {
+				if retErr == nil {
+					retErr = closeErr
+				} else {
+					retErr = errors.Join(retErr, closeErr)
+				}
+			}
+		}()
 		for _, binding := range bindings {
 			settings, err := sourceSettingsFor(cfg, binding)
 			if err != nil {
@@ -299,19 +308,42 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) erro
 	}
 }
 
-func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) {
-	var wg sync.WaitGroup
+func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) error {
+	active := make([]scaleSetSource, 0, len(sources))
 	for _, source := range sources {
-		if source == nil {
-			continue
+		if source != nil {
+			active = append(active, source)
 		}
-		source := source
+	}
+	if len(active) == 0 {
+		return nil
+	}
+
+	jobs := make(chan scaleSetSource)
+	failures := make(chan struct{}, len(active))
+	workers := min(scaleSetCloseConcurrency, len(active))
+	var wg sync.WaitGroup
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = source.Close(ctx)
+			for source := range jobs {
+				if err := source.Close(ctx); err != nil {
+					failures <- struct{}{}
+				}
+			}
 		}()
 	}
+	go func() {
+		defer close(jobs)
+		for _, source := range active {
+			select {
+			case jobs <- source:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -319,7 +351,12 @@ func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) {
 	}()
 	select {
 	case <-done:
+		if failed := len(failures); failed > 0 {
+			return fmt.Errorf("%w: %d source(s)", errScaleSetClose, failed)
+		}
+		return nil
 	case <-ctx.Done():
+		return fmt.Errorf("%w: deadline exceeded", errScaleSetClose)
 	}
 }
 
