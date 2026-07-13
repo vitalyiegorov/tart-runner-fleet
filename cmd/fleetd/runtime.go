@@ -222,7 +222,12 @@ type boundIngester struct {
 }
 
 func (b boundIngester) Ingest(ctx context.Context) error {
-	err := b.coordinator.IngestOnce(ctx, b.binding, b.source)
+	_, err := b.IngestChanged(ctx)
+	return err
+}
+
+func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
+	changed, err := b.coordinator.IngestOnceResult(ctx, b.binding, b.source)
 	if b.health != nil && b.observation != "" {
 		freshness := telemetry.ObservationFresh
 		if err != nil {
@@ -230,7 +235,7 @@ func (b boundIngester) Ingest(ctx context.Context) error {
 		}
 		_ = b.health.RecordObservation(b.observation, freshness)
 	}
-	return err
+	return changed, err
 }
 
 type engineTicker struct {
