@@ -79,6 +79,18 @@ func (s *blockingCloseSource) Close(ctx context.Context) error {
 	}
 }
 
+type contextIgnoringCloseSource struct {
+	fakeSource
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *contextIgnoringCloseSource) Close(context.Context) error {
+	s.started <- struct{}{}
+	<-s.release
+	return nil
+}
+
 func TestScaleSetSourcesCloseConcurrentlyWithinShutdownBudget(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -105,6 +117,33 @@ func TestScaleSetSourcesCloseConcurrentlyWithinShutdownBudget(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("scale-set session cleanup did not complete")
 	}
+}
+
+func TestScaleSetSourcesReturnWhenCloseIgnoresCancellation(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		closeScaleSetSources(ctx, []scaleSetSource{
+			&contextIgnoringCloseSource{started: started, release: release},
+		})
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("scale-set session cleanup did not start")
+	}
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("scale-set session cleanup exceeded its context budget")
+	}
+	close(release)
 }
 
 type recordingTartRunner struct {

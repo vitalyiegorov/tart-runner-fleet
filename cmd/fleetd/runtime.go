@@ -305,13 +305,22 @@ func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) {
 		if source == nil {
 			continue
 		}
+		source := source
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			_ = source.Close(ctx)
 		}()
 	}
-	wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 func selectRuntimeBindings(bindings []app.Binding, opts options) ([]app.Binding, error) {
