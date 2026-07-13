@@ -46,6 +46,22 @@ fleetd run \
   --health-address 127.0.0.1:9876
 ```
 
+### Scheduling-class configuration migration
+
+Releases that predate `schedulingClass` use strict JSON decoding and reject the
+new field. Upgrade without weakening rollback:
+
+1. keep the running generation and its configuration unchanged;
+2. install and independently verify the new immutable release candidate;
+3. copy the current configuration to a versioned candidate file and set only
+   the controller target to `"schedulingClass": "control-plane"`;
+4. validate that file with the new candidate's `fleetctl config validate`;
+5. start or restart only the observe candidate with the versioned file;
+6. retain the previous binary and previous configuration as one rollback unit.
+
+Do not add the field to a configuration that an older launchd generation may
+need to parse, and do not treat this migration as authority promotion.
+
 ## Shadow
 
 Shadow additionally opens one official GitHub Actions Scale Set message session
