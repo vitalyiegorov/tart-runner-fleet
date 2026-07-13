@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,10 +15,12 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
@@ -53,7 +56,30 @@ func (*fakeSource) Handle(ctx context.Context, _ func(context.Context, githubsca
 	<-ctx.Done()
 	return ctx.Err()
 }
-func (f *fakeSource) Close(context.Context) error { f.closed.Add(1); return nil }
+func (f *fakeSource) Close(context.Context) error                    { f.closed.Add(1); return nil }
+func (*fakeSource) Registered(context.Context, string) (bool, error) { return true, nil }
+func (*fakeSource) AcquireAndGenerateJIT(context.Context, int64, string, string) (*githubscaleset.JITSecret, error) {
+	return githubscaleset.NewJITSecret("jit"), nil
+}
+func (*fakeSource) Deregister(context.Context, string) error { return nil }
+
+type recordingTartRunner struct {
+	mu    sync.Mutex
+	calls [][]string
+	fails int
+}
+
+func (r *recordingTartRunner) Run(_ context.Context, args ...string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if r.fails > 0 {
+		r.fails--
+		return nil, errors.New("not ready")
+	}
+	return nil, nil
+}
+func (*recordingTartRunner) Start(context.Context, ...string) error { return nil }
 
 type fakeListener struct {
 	done chan struct{}
@@ -88,6 +114,34 @@ func writeConfig(t *testing.T, shadow bool) string {
 	raw := `{"baseVm":"linux","vmPrefix":"gha","pollSeconds":1,"maxLinuxWhenMacosIdle":4,"maxLinuxCpu":8,"maxLinuxMemoryMb":16384,"linuxReservationAgeSeconds":300,"minFreeDiskGb":1,"linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048},{"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096},{"id":"large","label":"linux-large","cpu":4,"memoryMb":8192}],"macosBurst":{"enabled":true,"baseVm":"mac","vmPrefix":"gha-mac","builder":{"id":"builder","label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},"maestro":{"id":"maestro","label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2}},"targets":[{"type":"repo","slug":"owner/repo","maxActive":4}]` + github + `}`
 	path := filepath.Join(t.TempDir(), "fleet.json")
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeMultiScopeConfig(t *testing.T) string {
+	t.Helper()
+	cfg := config.Default()
+	cfg.GitHub = config.GitHub{
+		SessionOwner:  "fleet-session",
+		App:           config.GitHubApp{ClientID: "client", KeychainService: "fleet", KeychainAccount: "app"},
+		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 101}},
+		Scopes: []config.GitHubScope{{Name: "personal-repo", Kind: config.ScopeRepository,
+			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"},
+			ScaleSets: []config.ScaleSet{
+				{Profile: "small", Name: "repo-small", ID: 11, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-small"}},
+				{Profile: "medium", Name: "repo-medium", ID: 12, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-medium"}},
+				{Profile: "large", Name: "repo-large", ID: 13, MaxCapacity: 2, Labels: []string{"self-hosted", "linux-large"}},
+				{Profile: "builder", Name: "repo-builder", ID: 14, MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
+				{Profile: "maestro", Name: "repo-maestro", ID: 15, MaxCapacity: 2, Labels: []string{"self-hosted", "macos-maestro"}},
+			}}},
+	}
+	var encoded bytes.Buffer
+	if err := config.Encode(&encoded, cfg); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "fleet.json")
+	if err := os.WriteFile(path, encoded.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -172,12 +226,16 @@ func TestRunCanaryAndAuthorityAreArmed(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() {
-				done <- runWithDependencies(ctx, options{
+				opts := options{
 					ConfigPath:    writeConfig(t, true),
 					DatabasePath:  filepath.Join(t.TempDir(), "fleet.db"),
 					HealthAddress: "127.0.0.1:0",
 					Mode:          mode,
-				}, d)
+				}
+				if mode == reconcile.Canary {
+					opts.CanaryScope, opts.CanaryProfile = legacyScopeName, "small"
+				}
+				done <- runWithDependencies(ctx, opts, d)
 			}()
 
 			select {
@@ -328,6 +386,44 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 				t.Fatal("unexpected success")
 			}
 		})
+	}
+}
+
+func TestRunRejectsUnselectedCanaryAndHeldAuthority(t *testing.T) {
+	d := testDependencies(t)
+	if err := runWithDependencies(context.Background(), options{Mode: reconcile.Canary}, d); err == nil {
+		t.Fatal("selector-free canary accepted")
+	}
+	if err := runWithDependencies(context.Background(), options{Mode: reconcile.Canary, CanaryScope: "missing", CanaryProfile: "small",
+		ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "canary.db")}, d); err == nil {
+		t.Fatal("unresolved canary selector accepted")
+	}
+
+	database := filepath.Join(t.TempDir(), "held.db")
+	store, err := d.openStore(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	lease, err := store.AcquireLease(context.Background(), authorityLeaseName, "other-controller", now, authorityLeaseTTL)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = runWithDependencies(context.Background(), options{Mode: reconcile.Authority, ConfigPath: writeConfig(t, true), DatabasePath: database}, d)
+	if !errors.Is(err, operations.ErrLeaseHeld) {
+		t.Fatalf("held authority err=%v", err)
+	}
+	cleanup, err := d.openStore(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup.Close()
+	if err := cleanup.ReleaseLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -483,4 +579,414 @@ func (s staleInventory) Observe(context.Context) (domain.Observation[[]domain.In
 
 func telemetryHealthForTest() (*telemetry.Health, error) {
 	return telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{CriticalObservations: []string{"scheduler"}})
+}
+
+func TestCanaryBindingSelectionIsExactAndLegacyCompatible(t *testing.T) {
+	bindings := []app.Binding{
+		{StoreKey: 11, ScaleSetID: 7, Scope: "personal-repo", Profile: domain.Profile{ID: "small"}},
+		{StoreKey: 12, ScaleSetID: 8, Scope: "personal-repo", Profile: domain.Profile{ID: "medium"}},
+		{StoreKey: 13, ScaleSetID: 7, Scope: "organization", Profile: domain.Profile{ID: "small"}},
+	}
+	selected, err := selectRuntimeBindings(bindings, options{Mode: reconcile.Canary, CanaryScope: "personal-repo", CanaryProfile: "small"})
+	if err != nil || len(selected) != 1 || selected[0].StoreKey != 11 {
+		t.Fatalf("selected=%#v err=%v", selected, err)
+	}
+	if _, err := selectRuntimeBindings(bindings, options{Mode: reconcile.Canary, CanaryScope: "missing", CanaryProfile: "small"}); err == nil {
+		t.Fatal("missing canary binding accepted")
+	}
+	legacy := []app.Binding{{StoreKey: 7, ScaleSetID: 7, Profile: domain.Profile{ID: "small"}}}
+	selected, err = selectRuntimeBindings(legacy, options{Mode: reconcile.Canary, CanaryScope: legacyScopeName, CanaryProfile: "small"})
+	if err != nil || len(selected) != 1 {
+		t.Fatalf("legacy selected=%#v err=%v", selected, err)
+	}
+}
+
+func TestSourceSettingsUseScopedInstallationAndDurableCursorKey(t *testing.T) {
+	cfg := config.Default()
+	cfg.GitHub = config.GitHub{
+		SessionOwner:  "fleet-session",
+		App:           config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
+		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 101}, {Name: "org", InstallationID: 202}},
+		Scopes: []config.GitHubScope{
+			{Name: "personal-repo", Kind: config.ScopeRepository, ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"}},
+			{Name: "organization", Kind: config.ScopeOrganization, ConfigURL: "https://github.com/budgie-at", Installation: "org", Targets: []string{"budgie-at/budgie"}},
+		},
+	}
+	binding := app.Binding{StoreKey: 9988, ScaleSetID: 42, Scope: "organization", Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "small"}}
+	scale := config.ScaleSet{Profile: "small", ID: 42, MaxCapacity: 4}
+	cfg.GitHub.Scopes[1].ScaleSets = []config.ScaleSet{scale}
+	settings, err := sourceSettingsFor(cfg, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.configURL != "https://github.com/budgie-at" || settings.installationID != 202 || settings.owner != "fleet-session" ||
+		settings.scaleSet.ID != scale.ID || settings.scaleSet.Profile != scale.Profile || settings.cursorKey != binding.StoreKey {
+		t.Fatalf("settings=%#v", settings)
+	}
+}
+
+func TestSourceSettingsRejectIncompleteOrMismatchedBindings(t *testing.T) {
+	legacy := config.Default()
+	legacy.GitHub = config.GitHub{ConfigURL: "https://github.com/owner", ClientID: "client", InstallationID: 1, Owner: "owner",
+		ScaleSets: []config.ScaleSet{{Profile: "small", ID: 7}}}
+	if _, err := sourceSettingsFor(legacy, app.Binding{}); err == nil {
+		t.Fatal("incomplete binding accepted")
+	}
+	if _, err := sourceSettingsFor(legacy, app.Binding{StoreKey: 7, ScaleSetID: 8, Profile: domain.Profile{ID: "small"}}); err == nil {
+		t.Fatal("unknown legacy scale set accepted")
+	}
+	multi := legacy
+	multi.GitHub = config.GitHub{SessionOwner: "owner", App: config.GitHubApp{ClientID: "client"},
+		Installations: []config.GitHubInstallation{{Name: "known", InstallationID: 11}},
+		Scopes:        []config.GitHubScope{{Name: "scope", Installation: "missing", ScaleSets: []config.ScaleSet{{Profile: "small", ID: 7}}}}}
+	binding := app.Binding{StoreKey: 77, ScaleSetID: 7, Scope: "scope", Profile: domain.Profile{ID: "small"}}
+	if _, err := sourceSettingsFor(multi, binding); err == nil {
+		t.Fatal("unknown installation accepted")
+	}
+	multi.GitHub.Scopes[0].Installation = "known"
+	binding.ScaleSetID = 8
+	if _, err := sourceSettingsFor(multi, binding); err == nil {
+		t.Fatal("unknown scoped scale set accepted")
+	}
+	binding.Scope = "unknown"
+	if _, err := sourceSettingsFor(multi, binding); err == nil {
+		t.Fatal("unknown scope accepted")
+	}
+}
+
+func TestRunMultiScopeUsesCorrectInstallationAndStoreKeys(t *testing.T) {
+	d := testDependencies(t)
+	ready := make(chan struct{})
+	var once sync.Once
+	d.inventory = func(runtimeStore, config.Config) app.Inventory { return notifyingInventory{ready: ready, once: &once} }
+	var mu sync.Mutex
+	var opened []githubscaleset.GitHubAppScaleSetConfig
+	var cursorKeys []int64
+	d.newScaleSet = func(_ context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		mu.Lock()
+		opened = append(opened, cfg)
+		mu.Unlock()
+		return &fakeSource{}, nil
+	}
+	d.cursor = func(_ context.Context, _ runtimeStore, key int64) (int64, error) {
+		mu.Lock()
+		cursorKeys = append(cursorKeys, key)
+		mu.Unlock()
+		return 0, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{ConfigPath: writeMultiScopeConfig(t), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Shadow}, d)
+	}()
+	select {
+	case <-ready:
+		cancel()
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("runtime not ready")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(opened) != 5 || len(cursorKeys) != 5 {
+		t.Fatalf("sources=%d cursors=%#v", len(opened), cursorKeys)
+	}
+	for index, source := range opened {
+		if source.GitHubConfigURL != "https://github.com/owner/repo" || source.InstallationID != 101 || source.Owner != "fleet-session" {
+			t.Fatalf("source[%d]=%#v", index, source)
+		}
+		if cursorKeys[index] == int64(source.ScaleSetID) || cursorKeys[index] <= 0 {
+			t.Fatalf("cursor key %d reused server ID %d", cursorKeys[index], source.ScaleSetID)
+		}
+	}
+}
+
+func TestTartReadinessUsesFixedBoundedArgumentVector(t *testing.T) {
+	recorder := &recordingTartRunner{fails: 1}
+	probe := tartReadiness{Runner: recorder, Timeout: time.Second, AttemptTimeout: 100 * time.Millisecond, RetryInterval: time.Millisecond}
+	instance := operations.Instance{ID: "trf-small-ready"}
+	if err := probe.Wait(context.Background(), instance); err != nil {
+		t.Fatal(err)
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.calls) != 2 {
+		t.Fatalf("calls=%#v", recorder.calls)
+	}
+	for _, call := range recorder.calls {
+		if strings.Join(call, " ") != "exec trf-small-ready true" {
+			t.Fatalf("unsafe readiness command: %#v", call)
+		}
+	}
+	if err := (tartReadiness{Runner: &recordingTartRunner{}, Timeout: time.Second}).Wait(context.Background(), operations.Instance{ID: "bad name"}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid name err=%v", err)
+	}
+}
+
+func TestTartReadinessDefaultsRemainBounded(t *testing.T) {
+	recorder := &recordingTartRunner{fails: 100}
+	probe := tartReadiness{Runner: recorder, Timeout: 2 * time.Millisecond}
+	if err := probe.Wait(context.Background(), operations.Instance{ID: "trf-timeout"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout err=%v", err)
+	}
+	if _, err := selectRuntimeBindings(nil, options{Mode: reconcile.Canary}); err == nil {
+		t.Fatal("empty canary selector accepted")
+	}
+}
+
+func TestAuthorityLeaseRecoversExpiredWorkAndFencesAnotherController(t *testing.T) {
+	d := testDependencies(t)
+	store, err := d.openStore(context.Background(), filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	base := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	_, err = store.ApplyPlan(context.Background(), operations.Plan{ID: "lease-recovery", ExpectedSchedulerVersion: 0, CreatedAt: base,
+		Scheduler: operations.SchedulerState{Version: 1}, Operations: []operations.Operation{{ID: "expired", IdempotencyKey: "expired", EffectKey: "x:1", Kind: "x", ResourceID: "1", AvailableAt: base}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.Claim(context.Background(), "dead-owner", 1, base, time.Second)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claimed=%#v err=%v", claimed, err)
+	}
+	now := func() time.Time { return base.Add(2 * time.Second) }
+	guard, err := startAuthorityLease(context.Background(), store, "controller-a", now, func(time.Duration) <-chan time.Time { return make(chan time.Time) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AcquireLease(context.Background(), authorityLeaseName, "controller-b", now(), authorityLeaseTTL); !errors.Is(err, operations.ErrLeaseHeld) {
+		guard.Close()
+		t.Fatalf("second controller was not fenced: %v", err)
+	}
+	recovered, err := store.Claim(context.Background(), "controller-a", 1, now(), time.Second)
+	if err != nil || len(recovered) != 1 || recovered[0].ID != "expired" {
+		guard.Close()
+		t.Fatalf("recovered=%#v err=%v", recovered, err)
+	}
+	guard.Close()
+	lease, err := store.AcquireLease(context.Background(), authorityLeaseName, "controller-b", now(), authorityLeaseTTL)
+	if err != nil {
+		t.Fatalf("released authority remained fenced: %v", err)
+	}
+	if err := store.ReleaseLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type recoverFailStore struct{ operations.Store }
+
+func (recoverFailStore) RecoverExpired(context.Context, time.Time) (int64, error) {
+	return 0, errors.New("recover failed")
+}
+
+func TestAuthorityLeaseDefaultsRecoveryFailureRenewalAndLoss(t *testing.T) {
+	d := testDependencies(t)
+	store, err := d.openStore(context.Background(), filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := startAuthorityLease(context.Background(), nil, "owner", nil, nil); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("nil store err=%v", err)
+	}
+	if _, err := startAuthorityLease(context.Background(), store, "", nil, nil); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("empty owner err=%v", err)
+	}
+	guard, err := startAuthorityLease(context.Background(), store, "defaults", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard.Close()
+	guard.Close()
+	(*authorityLease)(nil).Close()
+
+	base := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	if _, err := startAuthorityLease(context.Background(), recoverFailStore{Store: store}, "recovery", func() time.Time { return base }, nil); err == nil {
+		t.Fatal("recovery failure ignored")
+	}
+
+	var clock atomic.Int64
+	clock.Store(base.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	ticks := make(chan time.Time, 2)
+	guard, err = startAuthorityLease(context.Background(), store, "renewing", now, func(time.Duration) <-chan time.Time { return ticks })
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Store(base.Add(time.Second).UnixNano())
+	ticks <- time.Time{}
+	deadline := time.Now().Add(time.Second)
+	for {
+		guard.mu.Lock()
+		expiry := guard.lease.ExpiresAt
+		current := guard.lease
+		guard.mu.Unlock()
+		if expiry.Equal(base.Add(time.Second + authorityLeaseTTL)) {
+			if err := store.ReleaseLease(context.Background(), current); err != nil {
+				guard.Close()
+				t.Fatal(err)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			guard.Close()
+			t.Fatal("authority lease did not renew")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	clock.Store(base.Add(2 * time.Second).UnixNano())
+	ticks <- time.Time{}
+	select {
+	case err := <-guard.errors:
+		if !errors.Is(err, operations.ErrLeaseLost) {
+			t.Fatalf("renewal err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lease loss was not reported")
+	}
+	guard.Close()
+}
+
+type renewFailRuntimeStore struct{ runtimeStore }
+
+func (renewFailRuntimeStore) RenewLease(context.Context, operations.Lease, time.Time, time.Duration) (operations.Lease, error) {
+	return operations.Lease{}, errors.New("renew failed")
+}
+
+func TestRunStopsWhenAuthorityLeaseIsLost(t *testing.T) {
+	d := testDependencies(t)
+	baseOpen := d.openStore
+	d.openStore = func(ctx context.Context, path string) (runtimeStore, error) {
+		store, err := baseOpen(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		return renewFailRuntimeStore{runtimeStore: store}, nil
+	}
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}
+	d.after = func(time.Duration) <-chan time.Time {
+		ready := make(chan time.Time, 1)
+		ready <- time.Now()
+		return ready
+	}
+	err := runWithDependencies(context.Background(), options{ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+		HealthAddress: "127.0.0.1:0", Mode: reconcile.Authority}, d)
+	if err == nil || !strings.Contains(err.Error(), "authority lost") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestCanaryWorkerConcurrencyIsOne(t *testing.T) {
+	cfg := config.Default()
+	if got := workerConcurrency(reconcile.Canary, cfg); got != 1 {
+		t.Fatalf("canary concurrency=%d", got)
+	}
+	if got := workerConcurrency(reconcile.Authority, cfg); got != cfg.Linux.MaxInstances {
+		t.Fatalf("authority concurrency=%d", got)
+	}
+}
+
+type lifecycleVM struct {
+	clone atomic.Int32
+	start atomic.Int32
+}
+
+func (v *lifecycleVM) Clone(context.Context, tart.Request) error {
+	v.clone.Add(1)
+	return nil
+}
+func (v *lifecycleVM) Start(context.Context, string, operations.Ownership) error {
+	v.start.Add(1)
+	return nil
+}
+func (*lifecycleVM) Stop(context.Context, string, operations.Ownership) error   { return nil }
+func (*lifecycleVM) Delete(context.Context, string, operations.Ownership) error { return nil }
+
+type readyProbe struct{}
+
+func (readyProbe) Wait(context.Context, operations.Instance) error { return nil }
+
+type bootstrapProbe struct{}
+
+func (bootstrapProbe) Bootstrap(context.Context, string, *githubscaleset.JITSecret) error { return nil }
+
+func TestRuntimeExecutorsDriveProvisionToOnline(t *testing.T) {
+	d := testDependencies(t)
+	vm := &lifecycleVM{}
+	d.newVM = func(runtimeStore, config.Config, lifecycle.DrainControl) lifecycle.VMControl { return vm }
+	d.readiness = func(config.Config) lifecycle.Readiness { return readyProbe{} }
+	d.bootstrap = func(config.Config) lifecycle.Bootstrapper { return bootstrapProbe{} }
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}
+	baseOpen := d.openStore
+	var opened runtimeStore
+	d.openStore = func(ctx context.Context, path string) (runtimeStore, error) {
+		store, err := baseOpen(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		ownership := operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "provision-op"}
+		instance := operations.Instance{ID: "trf-small-runtime", Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+			Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1}, Demand: domain.DemandKey{Repo: "owner/repo", RunID: 1, JobID: 2, Attempt: 1},
+			State: operations.StatePlanned, Ownership: ownership, CreatedAt: now, UpdatedAt: now}
+		_, err = store.ApplyPlan(ctx, operations.Plan{ID: "runtime-provision-plan", ExpectedSchedulerVersion: 0, CreatedAt: now,
+			Scheduler: operations.SchedulerState{Version: 1}, Instances: []operations.InstanceIntent{{ExpectedVersion: -1, Instance: instance}},
+			Operations: []operations.Operation{{ID: "provision-op", IdempotencyKey: "provision-op", EffectKey: "clone:" + instance.ID,
+				Kind: lifecycle.OperationProvision, ResourceID: instance.ID, AvailableAt: now}}})
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		opened = store
+		return store, nil
+	}
+
+	ready := make(chan struct{})
+	var once sync.Once
+	d.inventory = func(runtimeStore, config.Config) app.Inventory { return notifyingInventory{ready: ready, once: &once} }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"), HealthAddress: "127.0.0.1:0", Mode: reconcile.Authority}, d)
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("runtime not ready")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		instance, err := opened.Instance(context.Background(), "trf-small-runtime")
+		if err == nil && instance.State == operations.StateOnlineIdle {
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if vm.clone.Load() != 1 || vm.start.Load() != 1 {
+				t.Fatalf("clone=%d start=%d", vm.clone.Load(), vm.start.Load())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("provision operation did not reach online")
 }
