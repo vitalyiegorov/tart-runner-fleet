@@ -16,6 +16,14 @@ type ingestFunc func(context.Context) error
 
 func (f ingestFunc) Ingest(ctx context.Context) error { return f(ctx) }
 
+type changeIngestFunc func(context.Context) (bool, error)
+
+func (f changeIngestFunc) Ingest(ctx context.Context) error {
+	_, err := f(ctx)
+	return err
+}
+func (f changeIngestFunc) IngestChanged(ctx context.Context) (bool, error) { return f(ctx) }
+
 type workFunc func(context.Context) error
 
 func (f workFunc) Work(ctx context.Context) error { return f(ctx) }
@@ -145,4 +153,62 @@ func TestServiceIngestAndWorkerErrorPaths(t *testing.T) {
 	if got := <-failures; got != "operations" {
 		t.Fatalf("worker failure=%q", got)
 	}
+}
+
+func TestServiceEventLoopCancellationAndCoalescingEdges(t *testing.T) {
+	changed, err := ingest(context.Background(), changeIngestFunc(func(context.Context) (bool, error) { return true, nil }))
+	if !changed || err != nil {
+		t.Fatalf("change-aware ingest = %v, %v", changed, err)
+	}
+	if !(Service{}).wait(context.Background(), 0) {
+		t.Fatal("zero-delay wait did not continue")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	service := Service{Ticker: tickFunc(func(context.Context) error {
+		cancel()
+		return errors.New("stopped")
+	})}
+	service.schedulerLoop(ctx, make(chan struct{}))
+
+	ctx, cancel = context.WithCancel(context.Background())
+	blocked := make(chan time.Time)
+	waiting := make(chan struct{})
+	service = Service{Ticker: tickFunc(func(context.Context) error { return errors.New("retry") }),
+		ErrorBackoff: time.Hour, After: func(time.Duration) <-chan time.Time {
+			close(waiting)
+			return blocked
+		}}
+	done := make(chan struct{})
+	go func() { service.schedulerLoop(ctx, make(chan struct{})); close(done) }()
+	<-waiting
+	cancel()
+	<-done
+
+	ctx, cancel = context.WithCancel(context.Background())
+	wake := make(chan struct{}, 1)
+	wake <- struct{}{}
+	service = Service{}
+	service.ingestLoop(ctx, changeIngestFunc(func(context.Context) (bool, error) {
+		cancel()
+		return true, nil
+	}), wake)
+
+	ctx, cancel = context.WithCancel(context.Background())
+	service.ingestLoop(ctx, changeIngestFunc(func(context.Context) (bool, error) {
+		cancel()
+		return false, context.Canceled
+	}), make(chan struct{}, 1))
+
+	ctx, cancel = context.WithCancel(context.Background())
+	service.loop(ctx, func(context.Context) error {
+		cancel()
+		return errors.New("stopped")
+	}, "worker", func() time.Duration { return time.Hour })
+
+	ctx, cancel = context.WithCancel(context.Background())
+	service.loop(ctx, func(context.Context) error {
+		cancel()
+		return nil
+	}, "worker", func() time.Duration { return 0 })
 }

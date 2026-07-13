@@ -32,17 +32,29 @@ func (b Binding) valid() bool {
 type DemandCoordinator struct{ Store DemandStore }
 
 func (c DemandCoordinator) IngestOnce(ctx context.Context, binding Binding, source MessageSource) error {
+	_, err := c.IngestOnceResult(ctx, binding, source)
+	return err
+}
+
+// IngestOnceResult reports whether the source durably committed previously
+// unseen demand before it returned. The boolean remains true when a later
+// acknowledgement fails, allowing reconciliation to wake for already-durable
+// work while message redelivery is retried independently.
+func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding, source MessageSource) (bool, error) {
 	if c.Store == nil || source == nil || !binding.valid() {
-		return operations.ErrInvalid
+		return false, operations.ErrInvalid
 	}
-	return source.Handle(ctx, func(ctx context.Context, demand githubscaleset.Demand) error {
+	changed := false
+	err := source.Handle(ctx, func(ctx context.Context, demand githubscaleset.Demand) error {
 		events := make([]operations.DemandEvent, 0, len(demand.Events))
 		for _, event := range demand.Events {
 			events = append(events, convertEvent(event))
 		}
-		_, err := c.Store.ApplyDemandBatch(ctx, binding.ScaleSetID, int64(demand.MessageID), events)
+		applied, err := c.Store.ApplyDemandBatch(ctx, binding.ScaleSetID, int64(demand.MessageID), events)
+		changed = changed || applied
 		return err
 	})
+	return changed, err
 }
 
 func convertEvent(event githubscaleset.JobEvent) operations.DemandEvent {
