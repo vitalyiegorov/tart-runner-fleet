@@ -100,8 +100,10 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	}
 	for _, required := range []string{
 		"./cmd/tart-runner-fleet-bootstrap",
-		"tart-runner-fleet-bootstrap.cdx.json",
-		"tart-runner-fleet-bootstrap",
+		"tart-runner-fleet-bootstrap-darwin-arm64.cdx.json",
+		"tart-runner-fleet-bootstrap-linux-arm64.cdx.json",
+		"tart-runner-fleet-bootstrap-darwin-arm64",
+		"tart-runner-fleet-bootstrap-linux-arm64",
 	} {
 		if !strings.Contains(string(buildScript), required) {
 			t.Errorf("release artifacts must include the secret-safe guest bootstrap helper %q", required)
@@ -112,7 +114,12 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"tart-runner-fleet-bootstrap", "tart-runner-fleet-bootstrap.cdx.json"} {
+	for _, required := range []string{
+		"tart-runner-fleet-bootstrap-darwin-arm64",
+		"tart-runner-fleet-bootstrap-linux-arm64",
+		"tart-runner-fleet-bootstrap-darwin-arm64.cdx.json",
+		"tart-runner-fleet-bootstrap-linux-arm64.cdx.json",
+	} {
 		if !strings.Contains(string(mainRelease), required) {
 			t.Errorf("main release verification must require bootstrap asset %q", required)
 		}
