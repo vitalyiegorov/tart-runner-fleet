@@ -334,6 +334,21 @@ func TestScaleSetNormalizesPreassignedJobWithoutRunnerRequestID(t *testing.T) {
 	if started.RunnerRequestID != event.RunnerRequestID {
 		t.Fatalf("identity changed: assigned=%d started=%d", event.RunnerRequestID, started.RunnerRequestID)
 	}
+	other := base
+	other.JobID = "different-job"
+	if otherEvent := eventFromBase(JobAssigned, other); otherEvent.RunnerRequestID == event.RunnerRequestID {
+		t.Fatal("different jobs share a synthetic identity")
+	}
+	reserved := base
+	reserved.RunnerRequestID = preassignedRequestIDFloor
+	if got := eventFromBase(JobAvailable, reserved); got.RunnerRequestID != 0 {
+		t.Fatalf("server request ID in reserved namespace accepted: %d", got.RunnerRequestID)
+	}
+	incomplete := base
+	incomplete.JobID = ""
+	if got := eventFromBase(JobAssigned, incomplete); got.RunnerRequestID != 0 {
+		t.Fatalf("incomplete identity synthesized: %d", got.RunnerRequestID)
+	}
 }
 
 func TestAcquirePartialOrderingCloseAndErrors(t *testing.T) {

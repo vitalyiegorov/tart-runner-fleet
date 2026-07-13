@@ -15,6 +15,10 @@ type ScaleSetControl interface {
 	Deregister(context.Context, string) error
 }
 
+type directJITControl interface {
+	GenerateJIT(context.Context, string, string) (*githubscaleset.JITSecret, error)
+}
+
 type DemandReader interface {
 	DemandRecord(context.Context, int64, int64) (operations.DemandRecord, error)
 }
@@ -54,6 +58,13 @@ func (r ControlRouter) AcquireAndGenerateJIT(ctx context.Context, requestID int6
 	}
 	if requestID <= 0 || requestID != instance.Demand.JobID {
 		return nil, operations.ErrConflict
+	}
+	if githubscaleset.IsPreassignedRequestID(requestID) {
+		direct, ok := binding.Source.(directJITControl)
+		if !ok {
+			return nil, operations.ErrInvalid
+		}
+		return direct.GenerateJIT(ctx, name, workFolder)
 	}
 	return binding.Source.AcquireAndGenerateJIT(ctx, requestID, name, workFolder)
 }

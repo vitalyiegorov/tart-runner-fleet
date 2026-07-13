@@ -14,6 +14,7 @@ import (
 type fakeScaleControl struct {
 	registered bool
 	acquired   int64
+	generated  int
 	deregister int
 	err        error
 }
@@ -25,10 +26,31 @@ func (f *fakeScaleControl) AcquireAndGenerateJIT(_ context.Context, id int64, _,
 	f.acquired = id
 	return githubscaleset.NewJITSecret("jit"), f.err
 }
+func (f *fakeScaleControl) GenerateJIT(context.Context, string, string) (*githubscaleset.JITSecret, error) {
+	f.generated++
+	return githubscaleset.NewJITSecret("jit"), f.err
+}
 func (f *fakeScaleControl) Deregister(context.Context, string) error {
 	f.deregister++
 	f.registered = false
 	return f.err
+}
+
+func TestControlRouterGeneratesJITDirectlyForPreassignedDemand(t *testing.T) {
+	state := &memoryState{instance: lifecycleInstance(operations.StateReachable)}
+	state.instance.Demand.JobID = 1<<62 | 7
+	source := &fakeScaleControl{}
+	router := ControlRouter{State: state, Sources: map[SourceKey]SourceBinding{
+		{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 9, Source: source},
+	}}
+	secret, err := router.AcquireAndGenerateJIT(context.Background(), state.instance.Demand.JobID, state.instance.ID, "_work")
+	if err != nil || secret == nil {
+		t.Fatalf("preassigned JIT = %v, %v", secret, err)
+	}
+	secret.Destroy()
+	if source.generated != 1 || source.acquired != 0 {
+		t.Fatalf("direct/acquire calls = %d/%d", source.generated, source.acquired)
+	}
 }
 
 type fakeDemandReader struct {
