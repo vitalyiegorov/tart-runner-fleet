@@ -80,6 +80,7 @@ type Readiness interface {
 
 type Registration interface {
 	Registered(context.Context, string) (bool, error)
+	ResetRegistration(context.Context, string) error
 	AcquireAndGenerateJIT(context.Context, int64, string, string) (*githubscaleset.JITSecret, error)
 }
 
@@ -172,19 +173,29 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			if observeErr != nil {
 				return e.fail(ctx, instance, StageRegister)
 			}
-			if !registered {
-				secret, acquireErr := e.Registration.AcquireAndGenerateJIT(ctx, instance.Demand.JobID, instance.ID, e.workFolder())
-				if acquireErr != nil || secret == nil || secret.Reveal() == "" {
-					if secret != nil {
-						secret.Destroy()
-					}
-					return e.fail(ctx, instance, StageAcquire)
+			if registered {
+				// GenerateJIT creates a broker-side runner record before the guest
+				// listener starts. A Reachable instance therefore cannot trust an
+				// existing record after a crashed/failed bootstrap; replace it.
+				if resetErr := e.Registration.ResetRegistration(ctx, instance.ID); resetErr != nil {
+					return e.fail(ctx, instance, StageRegister)
 				}
-				bootstrapErr := e.Bootstrap.Bootstrap(ctx, instance.ID, secret)
-				secret.Destroy()
-				if bootstrapErr != nil {
-					return e.fail(ctx, instance, StageBootstrap)
+			}
+			secret, acquireErr := e.Registration.AcquireAndGenerateJIT(ctx, instance.Demand.JobID, instance.ID, e.workFolder())
+			if acquireErr != nil || secret == nil || secret.Reveal() == "" {
+				if secret != nil {
+					secret.Destroy()
 				}
+				return e.fail(ctx, instance, StageAcquire)
+			}
+			bootstrapErr := e.Bootstrap.Bootstrap(ctx, instance.ID, secret)
+			secret.Destroy()
+			if bootstrapErr != nil {
+				// Best-effort immediate cleanup prevents the reservation created by
+				// GenerateJIT from masquerading as a live listener on retry. Even if
+				// cleanup fails, the next Reachable attempt retries it before acquire.
+				_ = e.Registration.ResetRegistration(ctx, instance.ID)
+				return e.fail(ctx, instance, StageBootstrap)
 			}
 			instance, err = e.advance(ctx, instance, operations.StateRegistering)
 		case operations.StateRegistering:

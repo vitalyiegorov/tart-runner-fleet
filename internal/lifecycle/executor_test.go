@@ -84,6 +84,7 @@ type fakeRegistration struct {
 	secret        *githubscaleset.JITSecret
 	registeredErr error
 	acquireErr    error
+	resetErr      error
 }
 
 func (r *fakeRegistration) Registered(_ context.Context, name string) (bool, error) {
@@ -107,6 +108,9 @@ func (r *fakeRegistration) AcquireAndGenerateJIT(_ context.Context, requestID in
 
 func (r *fakeRegistration) ResetRegistration(_ context.Context, name string) error {
 	*r.calls = append(*r.calls, "reset:"+name)
+	if r.resetErr != nil {
+		return r.resetErr
+	}
 	r.registered = false
 	return nil
 }
@@ -209,7 +213,7 @@ func TestProvisionExecutorReplacesGhostJITReservationAfterBootstrapFailure(t *te
 	}
 	want := []string{
 		"registered:trf-small-1", "acquire:trf-small-1:_work", "bootstrap:trf-small-1",
-		"registered:trf-small-1", "reset:trf-small-1", "acquire:trf-small-1:_work",
+		"reset:trf-small-1", "registered:trf-small-1", "acquire:trf-small-1:_work",
 		"bootstrap:trf-small-1", "registered:trf-small-1",
 	}
 	if !reflect.DeepEqual(calls, want) {

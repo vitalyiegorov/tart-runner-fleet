@@ -26,7 +26,7 @@ func guestConfigForHome(home string) (guestbootstrap.Config, error) {
 	return guestbootstrap.Config{
 		RunnerPath:  filepath.Join(workDir, "run.sh"),
 		WorkDir:     workDir,
-		LogPath:     filepath.Join(workDir, "_diag", "tart-runner-fleet.log"),
+		LogPath:     filepath.Join(workDir, ".tart-runner-fleet", "runner.log"),
 		MaxJITBytes: 1 << 20,
 	}, nil
 }

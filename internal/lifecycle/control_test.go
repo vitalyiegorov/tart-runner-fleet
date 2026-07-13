@@ -73,6 +73,9 @@ func TestControlRouterResolvesRegistrationAndFreshDrainState(t *testing.T) {
 	if err != nil || !registered {
 		t.Fatalf("Registered() = %v, %v", registered, err)
 	}
+	if err := router.ResetRegistration(context.Background(), state.instance.ID); err != nil || source.registered || source.deregister != 1 {
+		t.Fatalf("ResetRegistration() = %v registered=%v count=%d", err, source.registered, source.deregister)
+	}
 	secret, err := router.AcquireAndGenerateJIT(context.Background(), state.instance.Demand.JobID, state.instance.ID, "_work")
 	if err != nil || secret == nil || source.acquired != state.instance.Demand.JobID {
 		t.Fatalf("Acquire() = %v, %v", secret, err)
@@ -82,7 +85,7 @@ func TestControlRouterResolvesRegistrationAndFreshDrainState(t *testing.T) {
 	if err != nil || !safe {
 		t.Fatalf("SafeToDeregister() = %v, %v", safe, err)
 	}
-	if err := router.Deregister(context.Background(), state.instance); err != nil || source.deregister != 1 {
+	if err := router.Deregister(context.Background(), state.instance); err != nil || source.deregister != 2 {
 		t.Fatalf("Deregister() = %v count=%d", err, source.deregister)
 	}
 	confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID)
