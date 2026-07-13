@@ -183,6 +183,41 @@ func TestDemandCoordinatorFiltersScopeTargetsAndUsesDurableStoreKey(t *testing.T
 	}
 }
 
+func TestCanaryDemandIsolationRequiresDedicatedLabelAtIngestionAndRead(t *testing.T) {
+	queue := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	binding := Binding{
+		StoreKey: 99, ScaleSetID: 3, Scope: "fleet-repo", Targets: []string{"owner/repo"},
+		RequiredLabels: []string{"tart-fleet-canary"},
+		Profile:        domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux},
+	}
+	ordinary := githubscaleset.JobEvent{Kind: githubscaleset.JobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo",
+		WorkflowRunID: 9, QueueTime: queue, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}}
+	canary := ordinary
+	canary.RunnerRequestID = 2
+	canary.WorkflowRunID = 10
+	canary.Labels = append(append([]string(nil), ordinary.Labels...), "tart-fleet-canary")
+
+	store := &fakeDemandStore{applied: true}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 8, Events: []githubscaleset.JobEvent{ordinary, canary}}}
+	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.batches) != 1 || store.batches[0].RunnerRequestID != canary.RunnerRequestID {
+		t.Fatalf("canary ingest admitted ordinary same-profile demand: %#v", store.batches)
+	}
+
+	store.records = []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 9,
+			QueueTime: queue, Labels: append([]string(nil), ordinary.Labels...)},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "repo", WorkflowRunID: 10,
+			QueueTime: queue, Labels: append([]string(nil), canary.Labels...)},
+	}
+	queued, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(queued) != 1 || queued[0].Key.JobID != canary.RunnerRequestID {
+		t.Fatalf("canary queue isolation = %#v, %v", queued, err)
+	}
+}
+
 func TestDemandProjectionFailurePreventsAcknowledgement(t *testing.T) {
 	want := errors.New("projection")
 	store := &fakeDemandStore{applied: true, projectErr: want}
