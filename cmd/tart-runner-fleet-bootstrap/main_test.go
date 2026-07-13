@@ -18,7 +18,9 @@ func TestExecuteIsQuietOnSuccessAndSanitizesFailure(t *testing.T) {
 		t.Fatalf("success code=%d stderr=%q", code, stderr.String())
 	}
 	stderr.Reset()
-	run = func(context.Context, io.Reader, guestbootstrap.Config) error { return errors.New("safe bootstrap failure") }
+	run = func(context.Context, io.Reader, guestbootstrap.Config) error {
+		return errors.New("safe bootstrap failure")
+	}
 	if code := execute(nil, strings.NewReader("jit"), &stderr, run); code != 1 || stderr.String() != "runner bootstrap failed\n" {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}
