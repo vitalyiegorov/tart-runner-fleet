@@ -1,0 +1,29 @@
+name: Fleet authority canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-authority-canary
+  cancel-in-progress: false
+
+jobs:
+  linux-small:
+    name: Prove one Go-managed ephemeral runner
+    runs-on: [self-hosted, linux-tiered, linux-small, tart-fleet-canary]
+    timeout-minutes: 5
+    steps:
+      - name: Verify the dedicated self-hosted ARM64 canary
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_ARCH: ${{ runner.arch }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          test "$RUNNER_ARCH" = ARM64
+          test "$RUNNER_OS" = Linux
+          test "$(uname -m)" = aarch64
