@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -166,5 +168,230 @@ func TestValidateAuthority(t *testing.T) {
 	clone.GitHub.ScaleSets[0].ID = 99
 	if valid.GitHub.ScaleSets[0].ID == 99 {
 		t.Fatal("Clone aliases scale sets")
+	}
+}
+
+func TestValidateAuthorityAcceptsMultipleInstallationsAndRegistrationScopes(t *testing.T) {
+	valid := multiScopeAuthorityConfig()
+
+	if err := valid.ValidateAuthority(); err != nil {
+		t.Fatalf("ValidateAuthority() = %v", err)
+	}
+
+	clone := valid.Clone()
+	clone.GitHub.Installations[0].Name = "changed"
+	clone.GitHub.Scopes[0].Targets[0] = "other/repo"
+	clone.GitHub.Scopes[0].ScaleSets[0].Labels[0] = "changed"
+	if valid.GitHub.Installations[0].Name == "changed" ||
+		valid.GitHub.Scopes[0].Targets[0] == "other/repo" ||
+		valid.GitHub.Scopes[0].ScaleSets[0].Labels[0] == "changed" {
+		t.Fatal("Clone() aliases multi-scope GitHub configuration")
+	}
+}
+
+func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
+	raw := `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux-burst",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048}],
+      "macosBurst":{"enabled":false},
+      "github":{
+        "sessionOwner":"fleet-macmini",
+        "app":{"clientId":"Iv1.test","keychainService":"fleet","keychainAccount":"app"},
+        "installations":[{"name":"personal","installationId":146307296}],
+        "scopes":[{
+          "name":"knee-doctor","kind":"repository",
+          "configUrl":"https://github.com/vitalyiegorov/knee-doctor",
+          "installation":"personal","targets":["vitalyiegorov/knee-doctor"],
+          "scaleSets":[{"profile":"small","name":"fleet-knee-linux-small","maxCapacity":4,
+            "labels":["self-hosted","linux-tiered","linux-small"]}]
+        }]
+      },
+      "targets":[{"type":"repo","slug":"vitalyiegorov/knee-doctor","maxActive":3}]
+    }`
+
+	cfg, err := Decode(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if cfg.GitHub.App.ClientID != "Iv1.test" || cfg.GitHub.Installations[0].InstallationID != 146307296 ||
+		cfg.GitHub.Scopes[0].ScaleSets[0].Name != "fleet-knee-linux-small" {
+		t.Fatalf("multi-scope GitHub decode = %+v", cfg.GitHub)
+	}
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("ValidateAuthority() = %v", err)
+	}
+}
+
+func TestEncodeDeterministicallyRoundTripsMultiScopeConfiguration(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	cfg.GitHub.Scopes[0].ScaleSets[0].ID = 101
+	cfg.GitHub.Scopes[1].ScaleSets[4].ID = 205
+	var first, second bytes.Buffer
+	if err := Encode(&first, cfg); err != nil {
+		t.Fatalf("Encode(first) = %v", err)
+	}
+	if err := Encode(&second, cfg); err != nil {
+		t.Fatalf("Encode(second) = %v", err)
+	}
+	if !bytes.Equal(first.Bytes(), second.Bytes()) {
+		t.Fatal("Encode() is not deterministic")
+	}
+	roundTrip, err := Decode(bytes.NewReader(first.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode(Encode()) = %v", err)
+	}
+	if err := roundTrip.ValidateAuthority(); err != nil {
+		t.Fatalf("round-trip ValidateAuthority() = %v", err)
+	}
+	if roundTrip.GitHub.Scopes[0].ScaleSets[0].ID != 101 || roundTrip.GitHub.Scopes[1].ScaleSets[4].ID != 205 ||
+		roundTrip.Linux.Profiles[0].Resources != cfg.Linux.Profiles[0].Resources || roundTrip.Timeouts != cfg.Timeouts {
+		t.Fatalf("round trip lost data: %+v", roundTrip)
+	}
+	if strings.Contains(first.String(), "privateKey") || strings.Contains(first.String(), "encodedJITConfig") {
+		t.Fatal("Encode() emitted credential material")
+	}
+}
+
+func TestEncodeRejectsInvalidConfigurationAndWriterFailure(t *testing.T) {
+	invalid := Default()
+	invalid.PollInterval = 0
+	if err := Encode(&bytes.Buffer{}, invalid); err == nil {
+		t.Fatal("Encode(invalid) unexpectedly succeeded")
+	}
+	if err := Encode(errorWriter{}, Default()); err == nil {
+		t.Fatal("Encode(errorWriter) unexpectedly succeeded")
+	}
+	if err := Encode(nil, Default()); err == nil {
+		t.Fatal("Encode(nil) unexpectedly succeeded")
+	}
+}
+
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+func TestEncodeRejectsSubsecondDurations(t *testing.T) {
+	tests := map[string]func(*Config){
+		"poll":        func(c *Config) { c.PollInterval += time.Nanosecond },
+		"reservation": func(c *Config) { c.ReservationAge += time.Nanosecond },
+		"github":      func(c *Config) { c.Timeouts.GitHub += time.Nanosecond },
+		"tart":        func(c *Config) { c.Timeouts.Tart += time.Nanosecond },
+		"boot":        func(c *Config) { c.Timeouts.Boot += time.Nanosecond },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := Default()
+			mutate(&cfg)
+			if err := Encode(&bytes.Buffer{}, cfg); err == nil {
+				t.Fatal("Encode(subsecond) unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestValidateAuthorityRejectsAmbiguousOrUnsafeMultiScopeConfiguration(t *testing.T) {
+	tests := map[string]func(*Config){
+		"mixed legacy and multi-scope": func(c *Config) { c.GitHub.ConfigURL = "https://github.com/legacy/repo" },
+		"missing session owner":        func(c *Config) { c.GitHub.SessionOwner = "" },
+		"missing app client":           func(c *Config) { c.GitHub.App.ClientID = "" },
+		"missing keychain service":     func(c *Config) { c.GitHub.App.KeychainService = "" },
+		"missing installations":        func(c *Config) { c.GitHub.Installations = nil },
+		"missing scopes":               func(c *Config) { c.GitHub.Scopes = nil },
+		"bad installation id":          func(c *Config) { c.GitHub.Installations[0].InstallationID = 0 },
+		"duplicate installation name": func(c *Config) {
+			c.GitHub.Installations = append(c.GitHub.Installations, c.GitHub.Installations[0])
+		},
+		"duplicate installation id": func(c *Config) {
+			other := c.GitHub.Installations[0]
+			other.Name = "personal-alias"
+			c.GitHub.Installations = append(c.GitHub.Installations, other)
+		},
+		"unknown installation": func(c *Config) { c.GitHub.Scopes[0].Installation = "missing" },
+		"missing scope name":   func(c *Config) { c.GitHub.Scopes[0].Name = "" },
+		"duplicate scope name": func(c *Config) { c.GitHub.Scopes[1].Name = c.GitHub.Scopes[0].Name },
+		"duplicate scope url": func(c *Config) {
+			c.GitHub.Scopes[1].ConfigURL = c.GitHub.Scopes[0].ConfigURL
+			c.GitHub.Scopes[1].Kind = ScopeRepository
+		},
+		"bad scope url":           func(c *Config) { c.GitHub.Scopes[0].ConfigURL = "://" },
+		"wrong repository path":   func(c *Config) { c.GitHub.Scopes[0].ConfigURL = "https://github.com/vitalyiegorov" },
+		"repository runner group": func(c *Config) { c.GitHub.Scopes[0].RunnerGroup = "custom" },
+		"wrong organization path": func(c *Config) { c.GitHub.Scopes[1].ConfigURL = "https://github.com/budgie-at/budgie" },
+		"unsupported scope kind":  func(c *Config) { c.GitHub.Scopes[0].Kind = "enterprise" },
+		"repository target count": func(c *Config) {
+			c.GitHub.Scopes[0].Targets = append(c.GitHub.Scopes[0].Targets, "budgie-at/budgie")
+		},
+		"repo target mismatch": func(c *Config) { c.GitHub.Scopes[0].ConfigURL = "https://github.com/vitalyiegorov/other" },
+		"org target mismatch":  func(c *Config) { c.GitHub.Scopes[1].ConfigURL = "https://github.com/other" },
+		"duplicate target ownership": func(c *Config) {
+			c.GitHub.Scopes[1].Targets = append(c.GitHub.Scopes[1].Targets, c.GitHub.Scopes[0].Targets[0])
+		},
+		"scope without targets":  func(c *Config) { c.GitHub.Scopes[0].Targets = nil },
+		"uncovered target":       func(c *Config) { c.GitHub.Scopes = c.GitHub.Scopes[1:] },
+		"unknown target":         func(c *Config) { c.GitHub.Scopes[0].Targets[0] = "vitalyiegorov/unknown" },
+		"unknown profile":        func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Profile = "unknown" },
+		"missing profile":        func(c *Config) { c.GitHub.Scopes[0].ScaleSets = c.GitHub.Scopes[0].ScaleSets[:4] },
+		"duplicate profile":      func(c *Config) { c.GitHub.Scopes[0].ScaleSets[1].Profile = "small" },
+		"missing scale set name": func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Name = "" },
+		"duplicate scale set name": func(c *Config) {
+			c.GitHub.Scopes[0].ScaleSets[1].Name = c.GitHub.Scopes[0].ScaleSets[0].Name
+		},
+		"negative scale set id": func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].ID = -1 },
+		"negative capacity":     func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].MaxCapacity = -1 },
+		"empty label":           func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Labels[0] = "" },
+		"duplicate label": func(c *Config) {
+			c.GitHub.Scopes[0].ScaleSets[0].Labels = []string{"self-hosted", "linux-small", "linux-small"}
+		},
+		"missing self-hosted label":   func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Labels = []string{"linux-small"} },
+		"missing profile route label": func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Labels = []string{"self-hosted", "linux-tiered"} },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := multiScopeAuthorityConfig()
+			mutate(&cfg)
+			if err := cfg.ValidateAuthority(); err == nil {
+				t.Fatal("ValidateAuthority() unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestPathPartsRejectsRoot(t *testing.T) {
+	if parts := pathParts("///"); parts != nil {
+		t.Fatalf("pathParts(root) = %v", parts)
+	}
+}
+
+func multiScopeAuthorityConfig() Config {
+	cfg := Default()
+	cfg.Targets = []Target{
+		{Type: "repo", Slug: "vitalyiegorov/knee-doctor", MaxActive: 4},
+		{Type: "repo", Slug: "budgie-at/budgie", MaxActive: 4},
+	}
+	cfg.GitHub = GitHub{
+		SessionOwner: "fleet-macmini",
+		App:          GitHubApp{ClientID: "Iv1.test", KeychainService: "fleet", KeychainAccount: "app"},
+		Installations: []GitHubInstallation{
+			{Name: "personal", InstallationID: 146307296},
+			{Name: "budgie", InstallationID: 146307362},
+		},
+		Scopes: []GitHubScope{
+			{Name: "knee-doctor", Kind: ScopeRepository, ConfigURL: "https://github.com/vitalyiegorov/knee-doctor", Installation: "personal", Targets: []string{"vitalyiegorov/knee-doctor"}, ScaleSets: profileScaleSets("knee")},
+			{Name: "budgie-at", Kind: ScopeOrganization, ConfigURL: "https://github.com/budgie-at", Installation: "budgie", Targets: []string{"budgie-at/budgie"}, ScaleSets: profileScaleSets("budgie")},
+		},
+	}
+	return cfg
+}
+
+func profileScaleSets(scope string) []ScaleSet {
+	return []ScaleSet{
+		{Profile: "small", Name: "fleet-" + scope + "-linux-small", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}},
+		{Profile: "medium", Name: "fleet-" + scope + "-linux-medium", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-medium"}},
+		{Profile: "large", Name: "fleet-" + scope + "-linux-large", MaxCapacity: 2, Labels: []string{"self-hosted", "linux-tiered", "linux-large"}},
+		{Profile: "builder", Name: "fleet-" + scope + "-macos-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-builder"}},
+		{Profile: "maestro", Name: "fleet-" + scope + "-macos-maestro", MaxCapacity: 2, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"}},
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -74,7 +75,37 @@ type Guards struct {
 	MinFreeDiskGiB int
 }
 
+const (
+	ScopeRepository   = "repository"
+	ScopeOrganization = "organization"
+)
+
+type GitHubApp struct {
+	ClientID        string `json:"clientId"`
+	KeychainService string `json:"keychainService"`
+	KeychainAccount string `json:"keychainAccount"`
+}
+
+type GitHubInstallation struct {
+	Name           string `json:"name"`
+	InstallationID int64  `json:"installationId"`
+}
+
+// GitHubScope is one GitHub Actions registration boundary. A scale set cannot
+// cross this boundary or the GitHub App installation that owns it.
+type GitHubScope struct {
+	Name         string     `json:"name"`
+	Kind         string     `json:"kind"`
+	ConfigURL    string     `json:"configUrl"`
+	Installation string     `json:"installation"`
+	RunnerGroup  string     `json:"runnerGroup,omitempty"`
+	Targets      []string   `json:"targets"`
+	ScaleSets    []ScaleSet `json:"scaleSets"`
+}
+
 type GitHub struct {
+	// Legacy single-scope fields remain decodable for observe-mode and rolling
+	// migration. Authority mode rejects mixing them with the scoped model.
 	ConfigURL       string     `json:"configUrl"`
 	Owner           string     `json:"owner"`
 	ClientID        string     `json:"clientId"`
@@ -82,12 +113,19 @@ type GitHub struct {
 	KeychainService string     `json:"keychainService"`
 	KeychainAccount string     `json:"keychainAccount"`
 	ScaleSets       []ScaleSet `json:"scaleSets"`
+
+	SessionOwner  string               `json:"sessionOwner"`
+	App           GitHubApp            `json:"app"`
+	Installations []GitHubInstallation `json:"installations"`
+	Scopes        []GitHubScope        `json:"scopes"`
 }
 
 type ScaleSet struct {
-	Profile     string `json:"profile"`
-	ID          int    `json:"id"`
-	MaxCapacity int    `json:"maxCapacity"`
+	Profile     string   `json:"profile"`
+	Name        string   `json:"name,omitempty"`
+	ID          int      `json:"id"`
+	MaxCapacity int      `json:"maxCapacity"`
+	Labels      []string `json:"labels,omitempty"`
 }
 
 type Config struct {
@@ -152,6 +190,83 @@ func Decode(r io.Reader) (Config, error) {
 	return cfg, nil
 }
 
+// Encode writes the stable on-disk JSON representation. Runtime-only resource
+// fields and durations are projected back through wireConfig so a decoded file
+// can be safely updated with server-assigned scale-set IDs and persisted.
+func Encode(w io.Writer, cfg Config) error {
+	if w == nil {
+		return errors.New("config writer is required")
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validate config before encoding: %w", err)
+	}
+	pollSeconds, err := wholeSeconds("poll interval", cfg.PollInterval)
+	if err != nil {
+		return err
+	}
+	reservationSeconds, err := wholeSeconds("reservation age", cfg.ReservationAge)
+	if err != nil {
+		return err
+	}
+	githubSeconds, err := wholeSeconds("GitHub timeout", cfg.Timeouts.GitHub)
+	if err != nil {
+		return err
+	}
+	tartSeconds, err := wholeSeconds("Tart timeout", cfg.Timeouts.Tart)
+	if err != nil {
+		return err
+	}
+	bootSeconds, err := wholeSeconds("boot timeout", cfg.Timeouts.Boot)
+	if err != nil {
+		return err
+	}
+
+	wire := wireConfig{
+		BaseVM: cfg.Linux.BaseVM, VMPrefix: cfg.Linux.VMPrefix,
+		PollSeconds: pollSeconds, MaxLinuxWhenMacOSIdle: cfg.Linux.MaxInstances,
+		MaxLinuxCPU: cfg.Linux.Capacity.CPU, MaxLinuxMemoryMiB: cfg.Linux.Capacity.MemoryMiB,
+		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
+		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, GitHubTimeoutSeconds: githubSeconds,
+		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds,
+		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
+	}
+	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
+	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
+	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
+	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
+	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
+
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(wire); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	return nil
+}
+
+func wholeSeconds(name string, value time.Duration) (int, error) {
+	if value%time.Second != 0 {
+		return 0, fmt.Errorf("%s must use whole seconds", name)
+	}
+	return int(value / time.Second), nil
+}
+
+func encodeProfiles(profiles []Profile) []Profile {
+	out := make([]Profile, len(profiles))
+	for i, profile := range profiles {
+		out[i] = encodeProfile(profile)
+	}
+	return out
+}
+
+func encodeProfile(profile Profile) Profile {
+	profile = profile.normalized()
+	profile.CPU = profile.Resources.CPU
+	profile.MemoryMiB = profile.Resources.MemoryMiB
+	return profile
+}
+
 func ensureEOF(dec *json.Decoder) error {
 	var extra any
 	if err := dec.Decode(&extra); err == io.EOF {
@@ -207,6 +322,18 @@ func (c Config) Clone() Config {
 	out := c
 	out.Linux.Profiles = append([]Profile(nil), c.Linux.Profiles...)
 	out.GitHub.ScaleSets = append([]ScaleSet(nil), c.GitHub.ScaleSets...)
+	for i := range out.GitHub.ScaleSets {
+		out.GitHub.ScaleSets[i].Labels = append([]string(nil), c.GitHub.ScaleSets[i].Labels...)
+	}
+	out.GitHub.Installations = append([]GitHubInstallation(nil), c.GitHub.Installations...)
+	out.GitHub.Scopes = append([]GitHubScope(nil), c.GitHub.Scopes...)
+	for i := range out.GitHub.Scopes {
+		out.GitHub.Scopes[i].Targets = append([]string(nil), c.GitHub.Scopes[i].Targets...)
+		out.GitHub.Scopes[i].ScaleSets = append([]ScaleSet(nil), c.GitHub.Scopes[i].ScaleSets...)
+		for j := range out.GitHub.Scopes[i].ScaleSets {
+			out.GitHub.Scopes[i].ScaleSets[j].Labels = append([]string(nil), c.GitHub.Scopes[i].ScaleSets[j].Labels...)
+		}
+	}
 	out.Targets = append([]Target(nil), c.Targets...)
 	for i := range out.Targets {
 		out.Targets[i].RunnerLabels = append([]string(nil), c.Targets[i].RunnerLabels...)
@@ -280,6 +407,16 @@ func (c Config) ValidateAuthority() error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	if c.GitHub.multiScopeConfigured() {
+		if c.GitHub.legacyConfigured() {
+			return errors.New("legacy and multi-scope GitHub authority configuration cannot be mixed")
+		}
+		return c.validateMultiScopeAuthority()
+	}
+	return c.validateLegacyAuthority()
+}
+
+func (c Config) validateLegacyAuthority() error {
 	if c.GitHub.ConfigURL == "" || c.GitHub.Owner == "" || c.GitHub.ClientID == "" || c.GitHub.InstallationID <= 0 ||
 		c.GitHub.KeychainService == "" || c.GitHub.KeychainAccount == "" {
 		return errors.New("complete GitHub App and Keychain configuration is required")
@@ -308,3 +445,211 @@ func (c Config) ValidateAuthority() error {
 	}
 	return nil
 }
+
+func (g GitHub) multiScopeConfigured() bool {
+	return g.SessionOwner != "" || g.App != (GitHubApp{}) || len(g.Installations) > 0 || len(g.Scopes) > 0
+}
+
+func (g GitHub) legacyConfigured() bool {
+	return g.ConfigURL != "" || g.Owner != "" || g.ClientID != "" || g.InstallationID != 0 ||
+		g.KeychainService != "" || g.KeychainAccount != "" || len(g.ScaleSets) > 0
+}
+
+func (c Config) validateMultiScopeAuthority() error {
+	github := c.GitHub
+	if strings.TrimSpace(github.SessionOwner) == "" || strings.TrimSpace(github.App.ClientID) == "" ||
+		strings.TrimSpace(github.App.KeychainService) == "" || strings.TrimSpace(github.App.KeychainAccount) == "" {
+		return errors.New("complete multi-scope GitHub App, session owner, and Keychain configuration is required")
+	}
+	if len(github.Installations) == 0 || len(github.Scopes) == 0 {
+		return errors.New("multi-scope GitHub authority requires installations and scopes")
+	}
+
+	installations := make(map[string]struct{}, len(github.Installations))
+	installationIDs := make(map[int64]struct{}, len(github.Installations))
+	for _, installation := range github.Installations {
+		key := folded(installation.Name)
+		if key == "" || installation.InstallationID <= 0 {
+			return fmt.Errorf("invalid GitHub installation %q", installation.Name)
+		}
+		if _, exists := installations[key]; exists {
+			return fmt.Errorf("duplicate GitHub installation name %q", installation.Name)
+		}
+		if _, exists := installationIDs[installation.InstallationID]; exists {
+			return fmt.Errorf("duplicate GitHub installation ID %d", installation.InstallationID)
+		}
+		installations[key] = struct{}{}
+		installationIDs[installation.InstallationID] = struct{}{}
+	}
+
+	profiles := c.authorityProfiles()
+	targets := make(map[string]string, len(c.Targets))
+	for _, target := range c.Targets {
+		targets[folded(target.Slug)] = target.Slug
+	}
+	assignedTargets := make(map[string]string, len(targets))
+	scopeNames := make(map[string]struct{}, len(github.Scopes))
+	scopeURLs := make(map[string]struct{}, len(github.Scopes))
+	for _, scope := range github.Scopes {
+		scopeName := folded(scope.Name)
+		if scopeName == "" {
+			return errors.New("GitHub scope name is required")
+		}
+		if _, exists := scopeNames[scopeName]; exists {
+			return fmt.Errorf("duplicate GitHub scope name %q", scope.Name)
+		}
+		scopeNames[scopeName] = struct{}{}
+		if _, exists := installations[folded(scope.Installation)]; !exists {
+			return fmt.Errorf("GitHub scope %q references unknown installation %q", scope.Name, scope.Installation)
+		}
+
+		parsed, urlKey, err := parseScopeURL(scope)
+		if err != nil {
+			return fmt.Errorf("invalid GitHub scope %q: %w", scope.Name, err)
+		}
+		if _, exists := scopeURLs[urlKey]; exists {
+			return fmt.Errorf("duplicate GitHub scope URL %q", scope.ConfigURL)
+		}
+		scopeURLs[urlKey] = struct{}{}
+		if err := validateScopeTargets(scope, parsed, targets, assignedTargets); err != nil {
+			return err
+		}
+		if err := validateScopeScaleSets(scope, profiles); err != nil {
+			return err
+		}
+	}
+	for _, target := range c.Targets {
+		if _, exists := assignedTargets[folded(target.Slug)]; !exists {
+			return fmt.Errorf("target %q has no GitHub registration scope", target.Slug)
+		}
+	}
+	return nil
+}
+
+func (c Config) authorityProfiles() map[string]string {
+	profiles := make(map[string]string, len(c.Linux.Profiles)+2)
+	for _, profile := range c.Linux.Profiles {
+		profiles[profile.ID] = profile.Label
+	}
+	if c.MacOS.Enabled {
+		profiles[c.MacOS.Builder.ID] = c.MacOS.Builder.Label
+		profiles[c.MacOS.Maestro.ID] = c.MacOS.Maestro.Label
+	}
+	return profiles
+}
+
+func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {
+	parsed, err := url.Parse(scope.ConfigURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, "", errors.New("configUrl must be an absolute HTTPS URL without credentials, query, or fragment")
+	}
+	parts := pathParts(parsed.Path)
+	switch scope.Kind {
+	case ScopeRepository:
+		if len(parts) != 2 {
+			return nil, "", errors.New("repository scope configUrl must identify owner/repository")
+		}
+		if scope.RunnerGroup != "" && !strings.EqualFold(scope.RunnerGroup, "default") {
+			return nil, "", errors.New("repository scope supports only the default runner group")
+		}
+	case ScopeOrganization:
+		if len(parts) != 1 {
+			return nil, "", errors.New("organization scope configUrl must identify one organization")
+		}
+	default:
+		return nil, "", fmt.Errorf("unsupported scope kind %q", scope.Kind)
+	}
+	key := strings.ToLower(parsed.Scheme + "://" + parsed.Host + "/" + strings.Join(parts, "/"))
+	return parsed, key, nil
+}
+
+func validateScopeTargets(scope GitHubScope, parsed *url.URL, targets, assigned map[string]string) error {
+	if len(scope.Targets) == 0 {
+		return fmt.Errorf("GitHub scope %q must own at least one target", scope.Name)
+	}
+	parts := pathParts(parsed.Path)
+	if scope.Kind == ScopeRepository && len(scope.Targets) != 1 {
+		return fmt.Errorf("repository scope %q must own exactly one target", scope.Name)
+	}
+	for _, target := range scope.Targets {
+		key := folded(target)
+		canonical, exists := targets[key]
+		if !exists {
+			return fmt.Errorf("GitHub scope %q owns unknown target %q", scope.Name, target)
+		}
+		if owner, exists := assigned[key]; exists {
+			return fmt.Errorf("target %q is owned by both GitHub scopes %q and %q", canonical, owner, scope.Name)
+		}
+		switch scope.Kind {
+		case ScopeRepository:
+			if !strings.EqualFold(strings.Join(parts, "/"), canonical) {
+				return fmt.Errorf("repository scope %q URL does not match target %q", scope.Name, canonical)
+			}
+		case ScopeOrganization:
+			owner, _, _ := strings.Cut(canonical, "/")
+			if !strings.EqualFold(parts[0], owner) {
+				return fmt.Errorf("organization scope %q cannot own target %q", scope.Name, canonical)
+			}
+		}
+		assigned[key] = scope.Name
+	}
+	return nil
+}
+
+func validateScopeScaleSets(scope GitHubScope, profiles map[string]string) error {
+	seenProfiles := make(map[string]struct{}, len(scope.ScaleSets))
+	seenNames := make(map[string]struct{}, len(scope.ScaleSets))
+	for _, scaleSet := range scope.ScaleSets {
+		route, known := profiles[scaleSet.Profile]
+		if !known || strings.TrimSpace(scaleSet.Name) == "" || scaleSet.ID < 0 || scaleSet.MaxCapacity < 0 {
+			return fmt.Errorf("invalid scale set for profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)
+		}
+		if _, duplicate := seenProfiles[scaleSet.Profile]; duplicate {
+			return fmt.Errorf("duplicate scale set profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)
+		}
+		name := folded(scaleSet.Name)
+		if _, duplicate := seenNames[name]; duplicate {
+			return fmt.Errorf("duplicate scale set name %q in GitHub scope %q", scaleSet.Name, scope.Name)
+		}
+		if err := validateScaleSetLabels(scope.Name, scaleSet, route); err != nil {
+			return err
+		}
+		seenProfiles[scaleSet.Profile] = struct{}{}
+		seenNames[name] = struct{}{}
+	}
+	if len(seenProfiles) != len(profiles) {
+		return fmt.Errorf("every enabled profile requires one scale set in GitHub scope %q", scope.Name)
+	}
+	return nil
+}
+
+func validateScaleSetLabels(scopeName string, scaleSet ScaleSet, route string) error {
+	seen := make(map[string]struct{}, len(scaleSet.Labels))
+	hasSelfHosted, hasRoute := false, false
+	for _, label := range scaleSet.Labels {
+		key := folded(label)
+		if key == "" {
+			return fmt.Errorf("scale set %q in GitHub scope %q has an empty label", scaleSet.Name, scopeName)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("scale set %q in GitHub scope %q has duplicate label %q", scaleSet.Name, scopeName, label)
+		}
+		seen[key] = struct{}{}
+		hasSelfHosted = hasSelfHosted || key == "self-hosted"
+		hasRoute = hasRoute || strings.EqualFold(label, route)
+	}
+	if !hasSelfHosted || !hasRoute {
+		return fmt.Errorf("scale set %q in GitHub scope %q requires self-hosted and profile route labels", scaleSet.Name, scopeName)
+	}
+	return nil
+}
+
+func pathParts(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+func folded(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
