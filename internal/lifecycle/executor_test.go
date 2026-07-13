@@ -79,6 +79,7 @@ func (r fakeReady) Wait(_ context.Context, instance operations.Instance) error {
 type fakeRegistration struct {
 	calls         *[]string
 	registered    bool
+	registerOnJIT bool
 	delayedChecks int
 	secret        *githubscaleset.JITSecret
 	registeredErr error
@@ -98,19 +99,32 @@ func (r *fakeRegistration) AcquireAndGenerateJIT(_ context.Context, requestID in
 	if requestID <= 0 {
 		return nil, operations.ErrInvalid
 	}
+	if r.registerOnJIT {
+		r.registered = true
+	}
 	return r.secret, r.acquireErr
+}
+
+func (r *fakeRegistration) ResetRegistration(_ context.Context, name string) error {
+	*r.calls = append(*r.calls, "reset:"+name)
+	r.registered = false
+	return nil
 }
 
 type fakeBootstrap struct {
 	calls        *[]string
 	registration *fakeRegistration
 	err          error
+	failures     int
 }
 
 func (b fakeBootstrap) Bootstrap(_ context.Context, name string, secret *githubscaleset.JITSecret) error {
 	*b.calls = append(*b.calls, "bootstrap:"+name)
 	if secret == nil || secret.Reveal() == "" {
 		return operations.ErrInvalid
+	}
+	if b.failures > 0 {
+		return errors.New("safe bootstrap failure")
 	}
 	if b.err == nil {
 		b.registration.registered = true
@@ -170,6 +184,36 @@ func TestProvisionedJobSpecificJITBecomesAssigned(t *testing.T) {
 	}
 	if state.instance.State != operations.StateAssigned {
 		t.Fatalf("job-specific JIT state=%s, want %s", state.instance.State, operations.StateAssigned)
+	}
+}
+
+func TestProvisionExecutorReplacesGhostJITReservationAfterBootstrapFailure(t *testing.T) {
+	calls := []string{}
+	registration := &fakeRegistration{calls: &calls, registerOnJIT: true, secret: githubscaleset.NewJITSecret("first-jit")}
+	bootstrap := fakeBootstrap{calls: &calls, registration: registration, failures: 1}
+	state := &memoryState{instance: lifecycleInstance(operations.StateReachable)}
+	executor := ProvisionExecutor{State: state, Registration: registration, Bootstrap: bootstrap}
+	operation := operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID}
+
+	if err := executor.Execute(context.Background(), operation); err == nil || state.instance.State != operations.StateReachable {
+		t.Fatalf("first bootstrap error=%v state=%s", err, state.instance.State)
+	}
+	registration.secret = githubscaleset.NewJITSecret("replacement-jit")
+	bootstrap.failures = 0
+	executor.Bootstrap = bootstrap
+	if err := executor.Execute(context.Background(), operation); err != nil {
+		t.Fatal(err)
+	}
+	if state.instance.State != operations.StateAssigned {
+		t.Fatalf("replacement state=%s", state.instance.State)
+	}
+	want := []string{
+		"registered:trf-small-1", "acquire:trf-small-1:_work", "bootstrap:trf-small-1",
+		"registered:trf-small-1", "reset:trf-small-1", "acquire:trf-small-1:_work",
+		"bootstrap:trf-small-1", "registered:trf-small-1",
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%#v want=%#v", calls, want)
 	}
 }
 

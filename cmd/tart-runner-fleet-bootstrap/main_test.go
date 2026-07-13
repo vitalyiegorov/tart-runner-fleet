@@ -37,7 +37,7 @@ func TestGuestConfigUsesTheExecutingGuestUsersRunner(t *testing.T) {
 	}
 	if config.WorkDir != "/home/admin/actions-runner" ||
 		config.RunnerPath != "/home/admin/actions-runner/run.sh" ||
-		config.LogPath != "/home/admin/actions-runner/_diag/tart-runner-fleet.log" {
+		config.LogPath != "/home/admin/actions-runner/.tart-runner-fleet/runner.log" {
 		t.Fatalf("guest config = %#v", config)
 	}
 	if _, err := guestConfigForHome(""); err == nil {
