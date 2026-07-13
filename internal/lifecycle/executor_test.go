@@ -277,6 +277,10 @@ func TestStdinBootstrapperKeepsJITOutOfArgvAndDestroysIt(t *testing.T) {
 	if strings.Contains(strings.Join(runner.args, " "), "jit-super-secret") || runner.stdin != "jit-super-secret\n" {
 		t.Fatalf("argv=%q stdin=%q", runner.args, runner.stdin)
 	}
+	wantArgs := []string{"exec", "-i", "trf-small-1", bootstrapHelper}
+	if !reflect.DeepEqual(runner.args, wantArgs) {
+		t.Fatalf("bootstrap argv=%q want=%q", runner.args, wantArgs)
+	}
 	if secret.Reveal() != "" {
 		t.Fatal("secret not destroyed")
 	}

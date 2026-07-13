@@ -376,7 +376,7 @@ func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *g
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := b.Runner.Run(commandCtx, strings.NewReader(encoded+"\n"), "exec", name, "--", bootstrapHelper); err != nil {
+	if err := b.Runner.Run(commandCtx, strings.NewReader(encoded+"\n"), "exec", "-i", name, bootstrapHelper); err != nil {
 		if commandCtx.Err() != nil {
 			return commandCtx.Err()
 		}
