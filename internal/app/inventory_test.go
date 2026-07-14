@@ -48,11 +48,22 @@ func TestProductionInventoryFreshSnapshot(t *testing.T) {
 		Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}, Guards: macos.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2048}}
 	instances, host := inv.Observe(context.Background())
-	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].State != domain.InstanceRunning {
+	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].State != domain.InstanceRunning || instances.Value[0].Power != domain.InstancePowerRunning {
 		t.Fatalf("instances = %#v", instances)
 	}
 	if !host.Usable() || host.Value.Available.CPU != 8 || host.Value.Available.MemoryMB != 9952 || host.Value.Available.Slots != 4 {
 		t.Fatalf("host = %#v", host)
+	}
+}
+
+func TestProductionInventoryMarksStoppedOwnedRunner(t *testing.T) {
+	now := time.Now().UTC()
+	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateAssigned)}},
+		Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: false}}}, Host: fakeHost{healthySnapshot(now)},
+		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+	instances, _ := inv.Observe(context.Background())
+	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].Power != domain.InstancePowerStopped {
+		t.Fatalf("stopped instance = %#v", instances)
 	}
 }
 

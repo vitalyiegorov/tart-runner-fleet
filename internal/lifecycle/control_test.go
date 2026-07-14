@@ -111,6 +111,27 @@ func TestControlRouterFailsClosedForUnknownOrActiveDemand(t *testing.T) {
 	}
 }
 
+func TestControlRouterAcceptsStoppedAssignmentRecoveryOnlyAfterRunnerDisappears(t *testing.T) {
+	now := time.Unix(150, 0).UTC()
+	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+	state.instance.DrainPhase = 2
+	source := &fakeScaleControl{}
+	router := ControlRouter{State: state, Demand: fakeDemandReader{record: operations.DemandRecord{Status: operations.DemandJobAssigned}},
+		Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: source}},
+		Now:     func() time.Time { return now }}
+	if safe, err := router.SafeToDeregister(context.Background(), state.instance); err != nil || !safe {
+		t.Fatalf("recovered drain guard = %v, %v", safe, err)
+	}
+	confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID)
+	if err != nil || !confirmation.Safe(now, time.Second) {
+		t.Fatalf("recovered deletion confirmation = %#v, %v", confirmation, err)
+	}
+	source.registered = true
+	if safe, err := router.SafeToDeregister(context.Background(), state.instance); err != nil || safe {
+		t.Fatalf("registered recovery runner = %v, %v", safe, err)
+	}
+}
+
 func TestControlRouterPropagatesUnavailableStateAndScopedObservations(t *testing.T) {
 	ctx := context.Background()
 	instance := lifecycleInstance(operations.StateDraining)
