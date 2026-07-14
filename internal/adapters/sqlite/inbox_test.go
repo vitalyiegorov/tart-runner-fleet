@@ -177,6 +177,23 @@ func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
 			}
 		})
 	}
+	t.Run("started registering advance failure", func(t *testing.T) {
+		store := testStore(t)
+		instance := operations.Instance{ID: "registering-failure", State: operations.StateRegistering,
+			Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+		if err := store.CreateInstance(context.Background(), instance); err != nil {
+			t.Fatal(err)
+		}
+		store.injectFault = func(point string) error {
+			if point == "advance.begin" {
+				return errors.New("injected")
+			}
+			return nil
+		}
+		if err := store.projectDemandRank(context.Background(), instance, operations.DemandJobStarted); err == nil {
+			t.Fatal("registering storage failure was ignored")
+		}
+	})
 	store := testStore(t)
 	store.injectFault = func(point string) error {
 		if point == "inbox.active.query" || point == "inbox.cursor.load" {
