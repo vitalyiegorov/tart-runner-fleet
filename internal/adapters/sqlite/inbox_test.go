@@ -355,7 +355,11 @@ func TestProjectDemandRankFailsClosedForImpossibleStatesAndStorageErrors(t *test
 		})
 		t.Run(string(status)+" advance failure", func(t *testing.T) {
 			store := testStore(t)
-			instance := operations.Instance{ID: "registering", State: operations.StateRegistering,
+			state := operations.StateRegistering
+			if status == operations.DemandJobStarted {
+				state = operations.StateOnlineIdle
+			}
+			instance := operations.Instance{ID: "advance-failure", State: state,
 				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
 			if err := store.CreateInstance(context.Background(), instance); err != nil {
 				t.Fatal(err)
