@@ -196,9 +196,18 @@ type Instance struct {
 	Route     Route
 	Resources Resources
 	State     InstanceState
+	Power     InstancePower
 	Attempts  int
 	RetryAt   time.Time
 }
+
+type InstancePower string
+
+const (
+	InstancePowerUnknown InstancePower = ""
+	InstancePowerRunning InstancePower = "running"
+	InstancePowerStopped InstancePower = "stopped"
+)
 
 func (i Instance) Live() bool { return i.State != InstanceDeleted }
 

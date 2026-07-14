@@ -82,6 +82,10 @@ func (r ControlRouter) SafeToDeregister(ctx context.Context, instance operations
 	if err != nil {
 		return false, err
 	}
+	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery {
+		registered, registrationErr := binding.Source.Registered(ctx, instance.ID)
+		return !registered, registrationErr
+	}
 	record, err := r.demand(ctx, binding, instance)
 	if err != nil {
 		return false, err
@@ -102,11 +106,15 @@ func (r ControlRouter) ConfirmDeletion(ctx context.Context, name string) (operat
 	if err != nil {
 		return operations.DeletionConfirmation{}, err
 	}
-	record, err := r.demand(ctx, binding, instance)
+	registered, err := binding.Source.Registered(ctx, name)
 	if err != nil {
 		return operations.DeletionConfirmation{}, err
 	}
-	registered, err := binding.Source.Registered(ctx, name)
+	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery {
+		return operations.DeletionConfirmation{Fresh: true, RunnerInactive: !registered,
+			JobsInactive: !registered, ObservedAt: r.now()}, nil
+	}
+	record, err := r.demand(ctx, binding, instance)
 	if err != nil {
 		return operations.DeletionConfirmation{}, err
 	}
