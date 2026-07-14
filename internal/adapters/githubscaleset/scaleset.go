@@ -305,6 +305,13 @@ func (s *ScaleSet) Deregister(ctx context.Context, name string) error {
 		return nil
 	}
 	if err := s.runners.RemoveRunner(ctx, int64(runner.ID)); err != nil {
+		// JIT runners are ephemeral and may remove themselves after the fresh
+		// lookup above but before this DELETE reaches GitHub. The official
+		// client preserves RunnerNotFoundError through wrapping, so treat that
+		// race exactly like the already-absent observation.
+		if errors.Is(err, scaleset.RunnerNotFoundError) {
+			return nil
+		}
 		return fmt.Errorf("remove scale-set runner: %w", err)
 	}
 	return nil
