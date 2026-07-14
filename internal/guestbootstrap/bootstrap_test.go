@@ -114,6 +114,28 @@ func TestChildEnvironmentProvidesDeterministicRunnerToolchainPath(t *testing.T) 
 	}
 }
 
+func TestDarwinRunnerEnvironmentProvidesAndroidSDK(t *testing.T) {
+	t.Setenv("ANDROID_HOME", "/stale/android-home")
+	t.Setenv("ANDROID_SDK_ROOT", "/stale/android-sdk-root")
+	environment := childEnvironmentForOS("jit", "darwin")
+	want := "/Users/admin/android-sdk"
+	for _, name := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
+		if got := environmentValue(environment, name); got != want {
+			t.Fatalf("runner %s=%q want=%q", name, got, want)
+		}
+		if countEnvironment(environment, name) != 1 {
+			t.Fatalf("duplicate %s environment", name)
+		}
+	}
+
+	linux := childEnvironmentForOS("jit", "linux")
+	for _, name := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
+		if countEnvironment(linux, name) != 0 {
+			t.Fatalf("linux runner unexpectedly defines %s", name)
+		}
+	}
+}
+
 func TestBootstrapBoundsAndValidatesInputWithoutEchoingIt(t *testing.T) {
 	config := bootstrapConfig(t)
 	secret := "do-not-echo"
