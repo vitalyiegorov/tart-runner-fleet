@@ -417,6 +417,28 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 6: %w", err)
 		}
 	}
+	if version < 7 {
+		now := time.Now().UTC().UnixNano()
+		// v0.1.71 still used the generic five-attempt budget for drain
+		// operations. A transient scale-set observation could therefore
+		// exhaust cleanup before GitHub converged even though the ephemeral
+		// runner was already absent. Requeue only that exact, effect-free,
+		// owned draining state; migration 7 is transactional and one-shot.
+		if _, err := s.txExec(ctx, tx, "migrate.v7", `UPDATE operations
+			SET status=?,attempts=0,available_at=?,lease_owner='',lease_until=0,last_error='',updated_at=?
+			WHERE status=? AND kind=? AND last_error=?
+			AND effect_key=kind||':'||resource_id
+			AND NOT EXISTS (SELECT 1 FROM operation_effects WHERE operation_effects.operation_id=operations.id)
+			AND EXISTS (
+				SELECT 1 FROM instances WHERE instances.id=operations.resource_id AND instances.state=? AND instances.drain_phase=1
+			)`, operations.OperationPending, now, now, operations.OperationDead, lifecycle.OperationDrain,
+			legacyStageDeregisterError, operations.StateDraining); err != nil {
+			return fmt.Errorf("migration 7: %w", err)
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v7.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(7, ?)`, now); err != nil {
+			return fmt.Errorf("record migration 7: %w", err)
+		}
+	}
 	if err := s.commit(tx, "migrate.commit"); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}

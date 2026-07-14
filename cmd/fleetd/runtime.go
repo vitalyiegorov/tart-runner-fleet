@@ -72,6 +72,9 @@ const (
 	deletionConfirmationMaxAge  = 30 * time.Second
 	scaleSetCloseTimeout        = 20 * time.Second
 	scaleSetCloseConcurrency    = 4
+	lifecycleRetryMaxAttempts   = 5
+	drainRetryMaxAttempts       = 12
+	drainRetryMaximum           = 30 * time.Second
 )
 
 var errScaleSetClose = errors.New("scale-set session cleanup failed")
@@ -280,7 +283,12 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						domain.PlatformLinux: cfg.Linux.BaseVM, domain.PlatformMacOS: cfg.MacOS.BaseVM}},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
-			}, Retry: operations.RetryPolicy{MaxAttempts: 5}, OperationDeadline: lifecycleOperationDeadline(cfg),
+			},
+			Retry: operations.RetryPolicy{MaxAttempts: lifecycleRetryMaxAttempts},
+			RetryByKind: map[string]operations.RetryPolicy{
+				lifecycle.OperationDrain: {Maximum: drainRetryMaximum, MaxAttempts: drainRetryMaxAttempts},
+			},
+			OperationDeadline: lifecycleOperationDeadline(cfg),
 		}}
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
