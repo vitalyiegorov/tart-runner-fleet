@@ -45,6 +45,117 @@ type scaleSetSource interface {
 	Close(context.Context) error
 }
 
+type scaleSetSourceFactory func(context.Context) (scaleSetSource, error)
+
+// recoveringScaleSetSource keeps the message-session and lifecycle-control
+// views on one atomically replaceable official client. A failed long poll is a
+// session failure, not a reason to reuse the same broken session forever.
+type recoveringScaleSetSource struct {
+	mu      sync.RWMutex
+	source  scaleSetSource
+	open    scaleSetSourceFactory
+	limiter chan struct{}
+	closed  bool
+}
+
+func newRecoveringScaleSetSource(source scaleSetSource, open scaleSetSourceFactory, limiter chan struct{}) (*recoveringScaleSetSource, error) {
+	if source == nil || open == nil || limiter == nil {
+		return nil, operations.ErrInvalid
+	}
+	return &recoveringScaleSetSource{source: source, open: open, limiter: limiter}, nil
+}
+
+func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
+	s.mu.RLock()
+	if s.closed || s.source == nil {
+		s.mu.RUnlock()
+		return nil, func() {}, operations.ErrInvalid
+	}
+	return s.source, s.mu.RUnlock, nil
+}
+
+func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(context.Context, githubscaleset.Demand) error) error {
+	source, release, err := s.acquire()
+	if err != nil {
+		return err
+	}
+	err = source.Handle(ctx, commit)
+	release()
+	if err == nil || ctx.Err() != nil {
+		return err
+	}
+	// Return the original bounded failure to the service loop. Recovery is an
+	// internal best effort and its concrete broker errors must not reach logs.
+	_ = s.replace(ctx, source)
+	return err
+}
+
+func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetSource) error {
+	select {
+	case s.limiter <- struct{}{}:
+		defer func() { <-s.limiter }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.source != failed {
+		return nil
+	}
+	closeCtx, cancel := context.WithTimeout(ctx, scaleSetCloseTimeout)
+	closeErr := failed.Close(closeCtx)
+	cancel()
+	if closeErr != nil {
+		return errScaleSetClose
+	}
+	replacement, err := s.open(ctx)
+	if err != nil {
+		return errors.New("recreate scale-set session failed")
+	}
+	s.source = replacement
+	return nil
+}
+
+func (s *recoveringScaleSetSource) Registered(ctx context.Context, name string) (bool, error) {
+	source, release, err := s.acquire()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return source.Registered(ctx, name)
+}
+
+func (s *recoveringScaleSetSource) AcquireAndGenerateJIT(ctx context.Context, requestID int64, name, workFolder string) (*githubscaleset.JITSecret, error) {
+	source, release, err := s.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return source.AcquireAndGenerateJIT(ctx, requestID, name, workFolder)
+}
+
+func (s *recoveringScaleSetSource) Deregister(ctx context.Context, name string) error {
+	source, release, err := s.acquire()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return source.Deregister(ctx, name)
+}
+
+func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.source == nil {
+		return nil
+	}
+	return s.source.Close(ctx)
+}
+
 type dependencies struct {
 	openConfig  func(string) (io.ReadCloser, error)
 	openStore   func(context.Context, string) (runtimeStore, error)
@@ -217,6 +328,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	coordinator := app.DemandCoordinator{Store: store}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
+	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if opts.Mode != reconcile.Observe {
 		service, account, path := githubCredential(cfg)
@@ -243,16 +355,26 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			if err != nil {
 				return err
 			}
-			cursor, err := d.cursor(ctx, store, settings.cursorKey)
+			openSource := func(openCtx context.Context) (scaleSetSource, error) {
+				cursor, cursorErr := d.cursor(openCtx, store, settings.cursorKey)
+				if cursorErr != nil {
+					return nil, cursorErr
+				}
+				return d.newScaleSet(openCtx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: settings.configURL,
+					ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
+					ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
+					RequestTimeout: cfg.Timeouts.GitHub,
+					System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
+			}
+			initial, err := openSource(ctx)
 			if err != nil {
 				return err
 			}
-			source, err := d.newScaleSet(ctx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: settings.configURL,
-				ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
-				ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
-				RequestTimeout: cfg.Timeouts.GitHub,
-				System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
+			source, err := newRecoveringScaleSetSource(initial, openSource, recoveryLimiter)
 			if err != nil {
+				if initial != nil {
+					_ = initial.Close(ctx)
+				}
 				return err
 			}
 			closers = append(closers, source)

@@ -64,6 +64,29 @@ func (*fakeSource) AcquireAndGenerateJIT(context.Context, int64, string, string)
 }
 func (*fakeSource) Deregister(context.Context, string) error { return nil }
 
+type brokenSessionSource struct {
+	fakeSource
+	handled chan<- struct{}
+}
+
+func (s *brokenSessionSource) Handle(context.Context, func(context.Context, githubscaleset.Demand) error) error {
+	select {
+	case s.handled <- struct{}{}:
+	default:
+	}
+	return errors.New("terminal broker session")
+}
+
+type successfulSessionSource struct {
+	fakeSource
+	handled atomic.Int32
+}
+
+func (s *successfulSessionSource) Handle(context.Context, func(context.Context, githubscaleset.Demand) error) error {
+	s.handled.Add(1)
+	return nil
+}
+
 type blockingCloseSource struct {
 	fakeSource
 	started chan<- struct{}
@@ -414,6 +437,197 @@ func TestRunReportsRedactedScaleSetCleanupFailure(t *testing.T) {
 	}
 }
 
+// Regression: an official Actions message session can become permanently
+// unusable after startup while every other scale set stays healthy. Reusing the
+// same failed source forever marks one critical observation unavailable and
+// fail-closes the entire scheduler until an operator restarts fleetd.
+func TestRunRecreatesBrokenScaleSetSessionWithoutDaemonRestart(t *testing.T) {
+	d := testDependencies(t)
+	brokenHandled := make(chan struct{}, 1)
+	recreated := make(chan struct{})
+	var recreatedOnce sync.Once
+	broken := &brokenSessionSource{handled: brokenHandled}
+	var smallCreations atomic.Int32
+	var smallCursorReads atomic.Int32
+	baseCursor := d.cursor
+	d.cursor = func(ctx context.Context, store runtimeStore, key int64) (int64, error) {
+		if key == 1 {
+			smallCursorReads.Add(1)
+		}
+		return baseCursor(ctx, store, key)
+	}
+	d.newScaleSet = func(_ context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		if cfg.ScaleSetID != 1 {
+			return &fakeSource{}, nil
+		}
+		if smallCreations.Add(1) == 1 {
+			return broken, nil
+		}
+		recreatedOnce.Do(func() { close(recreated) })
+		return &fakeSource{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{
+			ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Shadow,
+		}, d)
+	}()
+	select {
+	case <-brokenHandled:
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped before session failure: %v", err)
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("broken source was not polled")
+	}
+	select {
+	case <-recreated:
+		cancel()
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped instead of recreating session: %v", err)
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("broken scale-set session was reused instead of recreated")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if broken.closed.Load() != 1 || smallCreations.Load() != 2 || smallCursorReads.Load() != 2 {
+		t.Fatalf("broken closes=%d small creations=%d cursor reads=%d", broken.closed.Load(), smallCreations.Load(), smallCursorReads.Load())
+	}
+}
+
+func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
+	if _, err := newRecoveringScaleSetSource(nil, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1)); err == nil {
+		t.Fatal("nil initial source accepted")
+	}
+	if _, err := newRecoveringScaleSetSource(&fakeSource{}, nil, make(chan struct{}, 1)); err == nil {
+		t.Fatal("nil source factory accepted")
+	}
+	if _, err := newRecoveringScaleSetSource(&fakeSource{}, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, nil); err == nil {
+		t.Fatal("nil recovery limiter accepted")
+	}
+
+	initial := &fakeSource{}
+	source, err := newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := source.Registered(context.Background(), "runner")
+	if err != nil || !registered {
+		t.Fatalf("registered=%v err=%v", registered, err)
+	}
+	jit, err := source.AcquireAndGenerateJIT(context.Background(), 1, "runner", "_work")
+	if err != nil || jit == nil {
+		t.Fatalf("jit=%v err=%v", jit, err)
+	}
+	jit.Destroy()
+	if err := source.Deregister(context.Background(), "runner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(context.Background()); err != nil || initial.closed.Load() != 1 {
+		t.Fatalf("second close err=%v closes=%d", err, initial.closed.Load())
+	}
+	if _, err := source.Registered(context.Background(), "runner"); err == nil {
+		t.Fatal("closed recovering source accepted a control call")
+	}
+	if _, err := source.AcquireAndGenerateJIT(context.Background(), 1, "runner", "_work"); err == nil {
+		t.Fatal("closed recovering source generated JIT configuration")
+	}
+	if err := source.Deregister(context.Background(), "runner"); err == nil {
+		t.Fatal("closed recovering source deregistered a runner")
+	}
+}
+
+func TestRecoveringScaleSetSourceBoundsReplacementFailures(t *testing.T) {
+	closeFailure := &failingCloseSource{err: errors.New("private close detail")}
+	openCalls := 0
+	source, err := newRecoveringScaleSetSource(closeFailure, func(context.Context) (scaleSetSource, error) {
+		openCalls++
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.replace(context.Background(), closeFailure); !errors.Is(err, errScaleSetClose) || openCalls != 0 || strings.Contains(err.Error(), "private") {
+		t.Fatalf("close replacement err=%v opens=%d", err, openCalls)
+	}
+
+	initial := &fakeSource{}
+	source, _ = newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
+		return nil, errors.New("private open detail")
+	}, make(chan struct{}, 1))
+	if err := source.replace(context.Background(), initial); err == nil || strings.Contains(err.Error(), "private") {
+		t.Fatalf("open replacement err=%v", err)
+	}
+	if err := source.replace(context.Background(), &fakeSource{}); err != nil {
+		t.Fatalf("stale replacement err=%v", err)
+	}
+	source.limiter <- struct{}{}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := source.replace(canceled, initial); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled replacement err=%v", err)
+	}
+	<-source.limiter
+}
+
+func TestRecoveringScaleSetSourceSuccessAndTerminalBranches(t *testing.T) {
+	initial := &successfulSessionSource{}
+	replacement := &fakeSource{}
+	source, err := newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
+		return replacement, nil
+	}, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Handle(context.Background(), func(context.Context, githubscaleset.Demand) error { return nil }); err != nil || initial.handled.Load() != 1 {
+		t.Fatalf("successful handle err=%v calls=%d", err, initial.handled.Load())
+	}
+	if err := source.replace(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	source.mu.RLock()
+	current := source.source
+	source.mu.RUnlock()
+	if current != replacement || initial.closed.Load() != 1 {
+		t.Fatalf("replacement=%T initial closes=%d", current, initial.closed.Load())
+	}
+	if err := source.Close(context.Background()); err != nil || replacement.closed.Load() != 1 {
+		t.Fatalf("replacement close err=%v closes=%d", err, replacement.closed.Load())
+	}
+	if err := source.Handle(context.Background(), func(context.Context, githubscaleset.Demand) error { return nil }); err == nil {
+		t.Fatal("closed source accepted message ingestion")
+	}
+	if err := source.replace(context.Background(), replacement); err != nil {
+		t.Fatalf("closed source replacement err=%v", err)
+	}
+
+	empty, _ := newRecoveringScaleSetSource(&fakeSource{}, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1))
+	empty.mu.Lock()
+	empty.source = nil
+	empty.mu.Unlock()
+	if err := empty.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Regression: the released controller accepts the mutation modes in the
 // domain model, but the production runtime rejects them before loading its
 // validated authority configuration. That makes the documented
@@ -568,6 +782,11 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 		{name: "scale", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
 			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 				return nil, want
+			}
+		}},
+		{name: "nil scale", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
+			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+				return nil, nil
 			}
 		}},
 		{name: "cursor", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
