@@ -254,7 +254,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 func linuxFree(in Input) domain.Resources {
 	free := in.Config.LinuxCapacity
 	for _, instance := range in.Instances.Value {
-		if instance.Live() {
+		if instance.ConsumesHostResources() {
 			var ok bool
 			free, ok = free.Sub(instance.Resources)
 			if !ok {
@@ -534,7 +534,7 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 	var drains []Operation
 	allIdle := true
 	for _, instance := range sortedInstances(in.Instances.Value) {
-		if instance.Platform != domain.PlatformLinux || !instance.Live() {
+		if instance.Platform != domain.PlatformLinux || !instance.ConsumesHostResources() {
 			continue
 		}
 		if instance.State != domain.InstanceOnlineIdle {
@@ -660,7 +660,7 @@ func planLinuxHandoff(in Input, plan Plan, demands, macDemands []domain.Demand) 
 	allIdle := true
 	filtered := append([]domain.Instance(nil), in.Instances.Value...)
 	for _, instance := range sortedInstances(in.Instances.Value) {
-		if instance.Platform != domain.PlatformMacOS || !instance.Live() {
+		if instance.Platform != domain.PlatformMacOS || !instance.ConsumesHostResources() {
 			continue
 		}
 		if instance.State != domain.InstanceOnlineIdle {
@@ -743,7 +743,7 @@ func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
 	var drains []Operation
 	allSwitchable := true
 	for _, instance := range sortedInstances(in.Instances.Value) {
-		if instance.Platform != domain.PlatformMacOS || !instance.Live() || instance.Profile == profile {
+		if instance.Platform != domain.PlatformMacOS || !instance.ConsumesHostResources() || instance.Profile == profile {
 			continue
 		}
 		if instance.State != domain.InstanceOnlineIdle {
@@ -788,7 +788,7 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 	active := 0
 	free := in.Host.Value.Available
 	for _, instance := range in.Instances.Value {
-		if instance.Live() && instance.Platform == domain.PlatformMacOS && instance.Profile == profile.ID {
+		if instance.ConsumesHostResources() && instance.Platform == domain.PlatformMacOS && instance.Profile == profile.ID {
 			active++
 			var ok bool
 			free, ok = free.Sub(instance.Resources)

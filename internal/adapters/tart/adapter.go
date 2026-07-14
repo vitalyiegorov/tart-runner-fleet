@@ -90,6 +90,7 @@ func (r ExecRunner) Start(ctx context.Context, args ...string) error {
 	}
 	// #nosec G204 -- Binary is a trusted adapter dependency; arguments never pass through a shell.
 	command := exec.CommandContext(context.WithoutCancel(ctx), binary, args...)
+	configureDetached(command)
 	if err := command.Start(); err != nil {
 		return classify(args, nil, err, ctx.Err())
 	}
