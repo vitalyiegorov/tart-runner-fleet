@@ -163,6 +163,15 @@ func TestScaleSetRunnerRegistrationAndIdempotentDeregistration(t *testing.T) {
 	if err := scale.Deregister(context.Background(), "runner"); err != nil {
 		t.Fatalf("Deregister(absent) = %v", err)
 	}
+
+	// Ephemeral JIT runners may remove themselves after the observation above
+	// but before the explicit DELETE reaches GitHub. That race is the same
+	// already-absent state and must not strand the owned VM in draining.
+	fake.runner = &scaleset.RunnerReference{ID: 8, Name: "runner", RunnerScaleSetID: 9}
+	fake.deleteErr = fmt.Errorf("runner disappeared during removal: %w", scaleset.RunnerNotFoundError)
+	if err := scale.Deregister(context.Background(), "runner"); err != nil {
+		t.Fatalf("Deregister(disappeared) = %v", err)
+	}
 }
 
 func TestScaleSetRunnerAdministrationFailsClosed(t *testing.T) {
