@@ -77,6 +77,16 @@ func (s *brokenSessionSource) Handle(context.Context, func(context.Context, gith
 	return errors.New("terminal broker session")
 }
 
+type successfulSessionSource struct {
+	fakeSource
+	handled atomic.Int32
+}
+
+func (s *successfulSessionSource) Handle(context.Context, func(context.Context, githubscaleset.Demand) error) error {
+	s.handled.Add(1)
+	return nil
+}
+
 type blockingCloseSource struct {
 	fakeSource
 	started chan<- struct{}
@@ -568,6 +578,48 @@ func TestRecoveringScaleSetSourceBoundsReplacementFailures(t *testing.T) {
 		t.Fatalf("canceled replacement err=%v", err)
 	}
 	<-source.limiter
+}
+
+func TestRecoveringScaleSetSourceSuccessAndTerminalBranches(t *testing.T) {
+	initial := &successfulSessionSource{}
+	replacement := &fakeSource{}
+	source, err := newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
+		return replacement, nil
+	}, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Handle(context.Background(), func(context.Context, githubscaleset.Demand) error { return nil }); err != nil || initial.handled.Load() != 1 {
+		t.Fatalf("successful handle err=%v calls=%d", err, initial.handled.Load())
+	}
+	if err := source.replace(context.Background(), initial); err != nil {
+		t.Fatal(err)
+	}
+	source.mu.RLock()
+	current := source.source
+	source.mu.RUnlock()
+	if current != replacement || initial.closed.Load() != 1 {
+		t.Fatalf("replacement=%T initial closes=%d", current, initial.closed.Load())
+	}
+	if err := source.Close(context.Background()); err != nil || replacement.closed.Load() != 1 {
+		t.Fatalf("replacement close err=%v closes=%d", err, replacement.closed.Load())
+	}
+	if err := source.Handle(context.Background(), func(context.Context, githubscaleset.Demand) error { return nil }); err == nil {
+		t.Fatal("closed source accepted message ingestion")
+	}
+	if err := source.replace(context.Background(), replacement); err != nil {
+		t.Fatalf("closed source replacement err=%v", err)
+	}
+
+	empty, _ := newRecoveringScaleSetSource(&fakeSource{}, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1))
+	empty.mu.Lock()
+	empty.source = nil
+	empty.mu.Unlock()
+	if err := empty.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Regression: the released controller accepts the mutation modes in the
