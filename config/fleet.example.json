@@ -11,9 +11,9 @@
   "tartControlTimeoutSeconds": 45,
   "bootTimeoutSeconds": 180,
   "linuxProfiles": [
-    { "id": "small", "label": "linux-small", "cpu": 1, "memoryMb": 2048 },
-    { "id": "medium", "label": "linux-medium", "cpu": 2, "memoryMb": 4096 },
-    { "id": "large", "label": "linux-large", "cpu": 4, "memoryMb": 8192 }
+    { "id": "small", "label": "linux-small", "cpu": 1, "memoryMb": 2048, "diskGb": 50 },
+    { "id": "medium", "label": "linux-medium", "cpu": 2, "memoryMb": 4096, "diskGb": 50 },
+    { "id": "large", "label": "linux-large", "cpu": 4, "memoryMb": 8192, "diskGb": 50 }
   ],
   "macosBurst": {
     "enabled": true,

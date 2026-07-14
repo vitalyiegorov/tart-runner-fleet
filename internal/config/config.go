@@ -23,7 +23,11 @@ type Profile struct {
 	Resources Resources `json:"-"`
 	CPU       int       `json:"cpu"`
 	MemoryMiB int       `json:"memoryMb"`
-	MaxActive int       `json:"maxActive,omitempty"`
+	// DiskGiB is a minimum virtual-disk capacity. Zero preserves the base VM
+	// for backward-compatible observe-mode decoding; authority requires an
+	// explicit Linux floor so ephemeral runners cannot inherit a tiny image.
+	DiskGiB   int `json:"diskGb,omitempty"`
+	MaxActive int `json:"maxActive,omitempty"`
 }
 
 func (p Profile) normalized() Profile {
@@ -306,9 +310,9 @@ func Default() Config {
 		PollInterval: 20 * time.Second, ReservationAge: 5 * time.Minute,
 		Linux: Linux{BaseVM: "linux-runner-base", VMPrefix: "gha-linux", MaxInstances: 4,
 			Capacity: Resources{CPU: 8, MemoryMiB: 16384}, Profiles: []Profile{
-				{ID: "small", Label: "linux-small", Resources: Resources{CPU: 1, MemoryMiB: 2048}},
-				{ID: "medium", Label: "linux-medium", Resources: Resources{CPU: 2, MemoryMiB: 4096}},
-				{ID: "large", Label: "linux-large", Resources: Resources{CPU: 4, MemoryMiB: 8192}},
+				{ID: "small", Label: "linux-small", Resources: Resources{CPU: 1, MemoryMiB: 2048}, DiskGiB: 50},
+				{ID: "medium", Label: "linux-medium", Resources: Resources{CPU: 2, MemoryMiB: 4096}, DiskGiB: 50},
+				{ID: "large", Label: "linux-large", Resources: Resources{CPU: 4, MemoryMiB: 8192}, DiskGiB: 50},
 			}},
 		MacOS: MacOS{Enabled: true, BaseVM: "macos-tartelet-base", VMPrefix: "gha-macos",
 			Builder: Profile{ID: "builder", Label: "macos-builder", Resources: Resources{CPU: 8, MemoryMiB: 12288}, MaxActive: 1},
@@ -364,7 +368,7 @@ func (c Config) Validate() error {
 	seenProfiles := map[string]struct{}{}
 	for _, raw := range c.Linux.Profiles {
 		p := raw.normalized()
-		if p.ID == "" || p.Label == "" || p.Resources.CPU <= 0 || p.Resources.MemoryMiB <= 0 {
+		if p.ID == "" || p.Label == "" || p.Resources.CPU <= 0 || p.Resources.MemoryMiB <= 0 || p.DiskGiB < 0 {
 			return errors.New("invalid linux profile")
 		}
 		if p.Resources.CPU > c.Linux.Capacity.CPU || p.Resources.MemoryMiB > c.Linux.Capacity.MemoryMiB {
@@ -407,6 +411,11 @@ func (c Config) Validate() error {
 func (c Config) ValidateAuthority() error {
 	if err := c.Validate(); err != nil {
 		return err
+	}
+	for _, profile := range c.Linux.Profiles {
+		if profile.DiskGiB <= 0 {
+			return fmt.Errorf("linux profile %s requires a positive disk floor in authority mode", profile.ID)
+		}
 	}
 	if c.GitHub.multiScopeConfigured() {
 		if c.GitHub.legacyConfigured() {

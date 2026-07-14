@@ -102,7 +102,7 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		f.vms[name] = VM{Name: name, Source: "local"}
 		config := f.configs[args[1]]
 		if config.CPU == 0 || config.Memory == 0 {
-			config = VMConfig{CPU: 2, Memory: 4096}
+			config = VMConfig{CPU: 2, Memory: 4096, Disk: 20}
 		}
 		f.configs[name] = config
 		if f.lostResponse["clone"] {
@@ -122,13 +122,25 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		if err := f.commandError["set"]; err != nil && !f.lostResponse["set"] {
 			return nil, err
 		}
-		cpu, cpuErr := strconv.Atoi(args[3])
-		memory, memoryErr := strconv.Atoi(args[5])
-		if cpuErr != nil || memoryErr != nil {
-			return nil, errors.Join(cpuErr, memoryErr)
+		config := f.configs[args[1]]
+		for i := 2; i+1 < len(args); i += 2 {
+			value, valueErr := strconv.Atoi(args[i+1])
+			if valueErr != nil {
+				return nil, valueErr
+			}
+			switch args[i] {
+			case "--cpu":
+				config.CPU = value
+			case "--memory":
+				config.Memory = value
+			case "--disk-size":
+				config.Disk = value
+			default:
+				return nil, errors.New("unexpected set flag")
+			}
 		}
 		if !f.setNoEffect {
-			f.configs[args[1]] = VMConfig{CPU: cpu, Memory: memory}
+			f.configs[args[1]] = config
 		}
 		if f.lostResponse["set"] {
 			return nil, context.DeadlineExceeded
@@ -222,10 +234,10 @@ func TestCloneAndDeleteSuccessfulCommandResponses(t *testing.T) {
 	}
 }
 
-func TestCloneEnforcesExactProfileResourcesIdempotently(t *testing.T) {
+func TestCloneEnforcesExactProfileResourcesAndDiskFloorIdempotently(t *testing.T) {
 	now := time.Unix(175, 0).UTC()
 	adapter, runner, _, ownership := testAdapter(now)
-	request := Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}
+	request := Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, DiskGB: 50, Ownership: ownership}
 
 	if err := adapter.Clone(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -234,7 +246,7 @@ func TestCloneEnforcesExactProfileResourcesIdempotently(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := VMConfig{CPU: 4, Memory: 8192}
+	want := VMConfig{CPU: 4, Memory: 8192, Disk: 50}
 	if got := runner.configs[request.Name]; got != want {
 		t.Fatalf("VM config = %+v, want %+v", got, want)
 	}
@@ -246,6 +258,25 @@ func TestCloneEnforcesExactProfileResourcesIdempotently(t *testing.T) {
 	}
 	if setCommands != 1 {
 		t.Fatalf("set commands = %d, want one exact resize", setCommands)
+	}
+}
+
+func TestCloneNeverShrinksLargerBaseDisk(t *testing.T) {
+	now := time.Unix(176, 0).UTC()
+	adapter, runner, _, ownership := testAdapter(now)
+	runner.configs["base"] = VMConfig{CPU: 4, Memory: 8192, Disk: 100}
+	request := Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, DiskGB: 50, Ownership: ownership}
+
+	if err := adapter.Clone(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.configs[request.Name].Disk; got != 100 {
+		t.Fatalf("disk = %d, want inherited 100 GB", got)
+	}
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "set" {
+			t.Fatalf("larger base disk triggered resize: %v", command)
+		}
 	}
 }
 
@@ -481,6 +512,7 @@ func TestAdapterCloneFailureBranches(t *testing.T) {
 		"ownership": {Name: "vm", Base: "base", CPU: 1, MemoryMB: 2048},
 		"cpu":       {Name: "vm", Base: "base", MemoryMB: 2048, Ownership: ownership},
 		"memory":    {Name: "vm", Base: "base", CPU: 1, Ownership: ownership},
+		"disk":      {Name: "vm", Base: "base", CPU: 1, MemoryMB: 2048, DiskGB: -1, Ownership: ownership},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := adapter.Clone(context.Background(), request); !errors.Is(err, operations.ErrInvalid) {

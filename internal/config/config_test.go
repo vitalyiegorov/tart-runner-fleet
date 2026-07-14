@@ -16,7 +16,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
       "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
       "linuxProfiles":[
         {"id":"small","label":"linux-small","cpu":1,"memoryMb":2048},
-        {"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096}
+        {"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096,"diskGb":40}
       ],
       "macosBurst":{"enabled":true,"baseVm":"macos-base","vmPrefix":"gha-macos",
         "builder":{"label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},
@@ -34,6 +34,9 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.Linux.Capacity.CPU != 8 || cfg.Linux.Capacity.MemoryMiB != 16384 || cfg.Linux.MaxInstances != 4 {
 		t.Fatalf("linux capacity = %+v, max=%d", cfg.Linux.Capacity, cfg.Linux.MaxInstances)
 	}
+	if cfg.Linux.Profiles[0].DiskGiB != 0 || cfg.Linux.Profiles[1].DiskGiB != 40 {
+		t.Fatalf("profile disk floors = %d, %d", cfg.Linux.Profiles[0].DiskGiB, cfg.Linux.Profiles[1].DiskGiB)
+	}
 	if cfg.MacOS.Maestro.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
 		t.Fatalf("mac/target decode = %+v %+v", cfg.MacOS, cfg.Targets)
 	}
@@ -45,6 +48,7 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"missing base":           func(c *Config) { c.Linux.BaseVM = "" },
 		"duplicate profile":      func(c *Config) { c.Linux.Profiles = append(c.Linux.Profiles, c.Linux.Profiles[0]) },
 		"profile exceeds host":   func(c *Config) { c.Linux.Profiles[0].Resources.CPU = c.Linux.Capacity.CPU + 1 },
+		"negative profile disk":  func(c *Config) { c.Linux.Profiles[0].DiskGiB = -1 },
 		"invalid repository":     func(c *Config) { c.Targets[0].Slug = "bad" },
 		"duplicate repository":   func(c *Config) { c.Targets = append(c.Targets, c.Targets[0]) },
 		"zero timeout":           func(c *Config) { c.Timeouts.GitHub = 0 },
@@ -59,6 +63,14 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 				t.Fatal("Validate() unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestAuthorityRequiresExplicitLinuxDiskFloors(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	cfg.Linux.Profiles[0].DiskGiB = 0
+	if err := cfg.ValidateAuthority(); err == nil || !strings.Contains(err.Error(), "disk floor") {
+		t.Fatalf("ValidateAuthority() error = %v", err)
 	}
 }
 
@@ -228,7 +240,7 @@ func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
       "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
       "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
       "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
-      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048}],
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":50}],
       "macosBurst":{"enabled":false},
       "github":{
         "sessionOwner":"fleet-macmini",

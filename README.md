@@ -141,6 +141,14 @@ provisioned self-hosted Linux runners:
 workflow cancellation, so a superseded commit cannot retain the concurrency
 group and starve its successor.
 
+Every authority-mode Linux profile also declares a `diskGb` floor. Provisioning
+applies that floor with Tart before first boot, accepts an already-larger base,
+and never shrinks a disk. The default 50 GB sparse capacity follows Tart's
+official Linux runner guidance while copy-on-write keeps host allocation tied
+to actual writes. Observe mode can still decode legacy profiles without the
+field, but authority fails closed until they are migrated. See
+[`ADR 0006`](docs/adr/0006-per-profile-disk-floors.md).
+
 All Go analysis tools are pinned through Go 1.25 tool directives, every action
 uses an immutable commit SHA, and Go 1.25.12 is the minimum toolchain because it
 contains the required standard-library vulnerability fixes. Nightly CI repeats

@@ -51,7 +51,7 @@ type fakeVM struct {
 }
 
 func (v fakeVM) Clone(_ context.Context, request tart.Request) error {
-	*v.calls = append(*v.calls, fmt.Sprintf("clone:%s:%s:%d:%d", request.Base, request.Name, request.CPU, request.MemoryMB))
+	*v.calls = append(*v.calls, fmt.Sprintf("clone:%s:%s:%d:%d:%d", request.Base, request.Name, request.CPU, request.MemoryMB, request.DiskGB))
 	return v.cloneErr
 }
 func (v fakeVM) Start(_ context.Context, name string, _ operations.Ownership) error {
@@ -154,13 +154,14 @@ func TestProvisionExecutorRunsOwnedLifecycleInOrder(t *testing.T) {
 	executor := ProvisionExecutor{
 		State: state, VM: fakeVM{calls: &calls}, Ready: fakeReady{calls: &calls}, Registration: registration,
 		Bootstrap: fakeBootstrap{calls: &calls, registration: registration}, Bases: map[domain.Platform]string{domain.PlatformLinux: "linux-base"},
+		DiskGiB: map[domain.ProfileID]int{"small": 50},
 	}
 	operation := operations.Operation{Kind: OperationProvision, ResourceID: state.instance.ID}
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
 	}
 	wantCalls := []string{
-		"clone:linux-base:trf-small-1:1:2048", "start:trf-small-1", "ready:trf-small-1", "registered:trf-small-1",
+		"clone:linux-base:trf-small-1:1:2048:50", "start:trf-small-1", "ready:trf-small-1", "registered:trf-small-1",
 		"acquire:trf-small-1:_work", "bootstrap:trf-small-1", "registered:trf-small-1",
 	}
 	if !reflect.DeepEqual(calls, wantCalls) {

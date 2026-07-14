@@ -106,6 +106,7 @@ type ProvisionExecutor struct {
 	Registration             Registration
 	Bootstrap                Bootstrapper
 	Bases                    map[domain.Platform]string
+	DiskGiB                  map[domain.ProfileID]int
 	WorkFolder               string
 	RegistrationTimeout      time.Duration
 	RegistrationPollInterval time.Duration
@@ -146,7 +147,8 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 				return e.fail(ctx, instance, StageClone)
 			}
 			if err := e.VM.Clone(ctx, tart.Request{
-				Name: instance.ID, Base: base, CPU: instance.Resources.CPU, MemoryMB: instance.Resources.MemoryMB, Ownership: instance.Ownership,
+				Name: instance.ID, Base: base, CPU: instance.Resources.CPU, MemoryMB: instance.Resources.MemoryMB,
+				DiskGB: e.DiskGiB[instance.Profile], Ownership: instance.Ownership,
 			}); err != nil {
 				return e.fail(ctx, instance, StageClone)
 			}
