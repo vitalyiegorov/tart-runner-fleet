@@ -16,7 +16,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
       "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
       "linuxProfiles":[
         {"id":"small","label":"linux-small","cpu":1,"memoryMb":2048},
-        {"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096}
+        {"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096,"diskGb":40}
       ],
       "macosBurst":{"enabled":true,"baseVm":"macos-base","vmPrefix":"gha-macos",
         "builder":{"label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},
