@@ -545,6 +545,12 @@ func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
 	if _, err := source.Registered(context.Background(), "runner"); err == nil {
 		t.Fatal("closed recovering source accepted a control call")
 	}
+	if _, err := source.AcquireAndGenerateJIT(context.Background(), 1, "runner", "_work"); err == nil {
+		t.Fatal("closed recovering source generated JIT configuration")
+	}
+	if err := source.Deregister(context.Background(), "runner"); err == nil {
+		t.Fatal("closed recovering source deregistered a runner")
+	}
 }
 
 func TestRecoveringScaleSetSourceBoundsReplacementFailures(t *testing.T) {
@@ -776,6 +782,11 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 		{name: "scale", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
 			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 				return nil, want
+			}
+		}},
+		{name: "nil scale", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {
+			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+				return nil, nil
 			}
 		}},
 		{name: "cursor", opts: options{Mode: reconcile.Shadow, ConfigPath: shadow, DatabasePath: filepath.Join(t.TempDir(), "x.db")}, mutate: func(d *dependencies) {

@@ -372,7 +372,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			}
 			source, err := newRecoveringScaleSetSource(initial, openSource, recoveryLimiter)
 			if err != nil {
-				_ = initial.Close(ctx)
+				if initial != nil {
+					_ = initial.Close(ctx)
+				}
 				return err
 			}
 			closers = append(closers, source)
