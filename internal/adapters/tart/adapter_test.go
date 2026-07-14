@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -59,6 +60,7 @@ func (f fakeConfirmation) ConfirmDeletion(context.Context, string) (operations.D
 type fakeRunner struct {
 	mu            sync.Mutex
 	vms           map[string]VM
+	configs       map[string]VMConfig
 	commands      [][]string
 	lostResponse  map[string]bool
 	listError     error
@@ -66,6 +68,7 @@ type fakeRunner struct {
 	commandError  map[string]error
 	startError    error
 	startNoEffect bool
+	setNoEffect   bool
 	startHook     func()
 	observeError  error
 }
@@ -97,7 +100,37 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		}
 		name := args[2]
 		f.vms[name] = VM{Name: name, Source: "local"}
+		config := f.configs[args[1]]
+		if config.CPU == 0 || config.Memory == 0 {
+			config = VMConfig{CPU: 2, Memory: 4096}
+		}
+		f.configs[name] = config
 		if f.lostResponse["clone"] {
+			return nil, context.DeadlineExceeded
+		}
+	case "get":
+		if err := f.commandError["get"]; err != nil {
+			return nil, err
+		}
+		config, ok := f.configs[args[1]]
+		if !ok {
+			return nil, operations.ErrNotFound
+		}
+		config.Running = f.vms[args[1]].Running
+		return json.Marshal(config)
+	case "set":
+		if err := f.commandError["set"]; err != nil && !f.lostResponse["set"] {
+			return nil, err
+		}
+		cpu, cpuErr := strconv.Atoi(args[3])
+		memory, memoryErr := strconv.Atoi(args[5])
+		if cpuErr != nil || memoryErr != nil {
+			return nil, errors.Join(cpuErr, memoryErr)
+		}
+		if !f.setNoEffect {
+			f.configs[args[1]] = VMConfig{CPU: cpu, Memory: memory}
+		}
+		if f.lostResponse["set"] {
 			return nil, context.DeadlineExceeded
 		}
 	case "stop":
@@ -117,6 +150,7 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 			return nil, err
 		}
 		delete(f.vms, args[1])
+		delete(f.configs, args[1])
 		if f.lostResponse["delete"] {
 			return nil, context.DeadlineExceeded
 		}
@@ -144,7 +178,7 @@ func (f *fakeRunner) Start(_ context.Context, args ...string) error {
 }
 
 func testAdapter(now time.Time) (*Adapter, *fakeRunner, *memoryOwnership, operations.Ownership) {
-	runner := &fakeRunner{vms: map[string]VM{}, lostResponse: map[string]bool{}, commandError: map[string]error{}}
+	runner := &fakeRunner{vms: map[string]VM{}, configs: map[string]VMConfig{}, lostResponse: map[string]bool{}, commandError: map[string]error{}}
 	registry := &memoryOwnership{data: map[string]operations.Ownership{}}
 	ownership := operations.Ownership{ControllerID: "controller", ResourceID: "resource", OperationID: "operation"}
 	adapter := &Adapter{
@@ -159,7 +193,7 @@ func TestCloneLostResponseAndDuplicateAreIdempotent(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	adapter, runner, _, ownership := testAdapter(now)
 	runner.lostResponse["clone"] = true
-	request := Request{Name: "fleet-vm-1", Base: "linux-base", Ownership: ownership}
+	request := Request{Name: "fleet-vm-1", Base: "linux-base", CPU: 1, MemoryMB: 2048, Ownership: ownership}
 	if err := adapter.Clone(context.Background(), request); err != nil {
 		t.Fatalf("lost clone response was not reconciled: %v", err)
 	}
@@ -178,7 +212,7 @@ func TestCloneLostResponseAndDuplicateAreIdempotent(t *testing.T) {
 func TestCloneAndDeleteSuccessfulCommandResponses(t *testing.T) {
 	now := time.Unix(150, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
-	if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", Ownership: ownership}); err != nil {
+	if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", CPU: 1, MemoryMB: 2048, Ownership: ownership}); err != nil {
 		t.Fatal(err)
 	}
 	registry.data["vm"] = ownership
@@ -186,6 +220,76 @@ func TestCloneAndDeleteSuccessfulCommandResponses(t *testing.T) {
 	if err := adapter.Delete(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestCloneEnforcesExactProfileResourcesIdempotently(t *testing.T) {
+	now := time.Unix(175, 0).UTC()
+	adapter, runner, _, ownership := testAdapter(now)
+	request := Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}
+
+	if err := adapter.Clone(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Clone(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	want := VMConfig{CPU: 4, Memory: 8192}
+	if got := runner.configs[request.Name]; got != want {
+		t.Fatalf("VM config = %+v, want %+v", got, want)
+	}
+	setCommands := 0
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "set" {
+			setCommands++
+		}
+	}
+	if setCommands != 1 {
+		t.Fatalf("set commands = %d, want one exact resize", setCommands)
+	}
+}
+
+func TestCloneResourceReconciliationHandlesLostResponseAndFailsClosed(t *testing.T) {
+	now := time.Unix(180, 0).UTC()
+	t.Run("lost resize response", func(t *testing.T) {
+		adapter, runner, _, ownership := testAdapter(now)
+		runner.lostResponse["set"] = true
+		if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("running drift", func(t *testing.T) {
+		adapter, runner, registry, ownership := testAdapter(now)
+		registry.data["vm"] = ownership
+		runner.vms["vm"] = VM{Name: "vm", Running: true}
+		runner.configs["vm"] = VMConfig{CPU: 2, Memory: 4096}
+		if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err == nil {
+			t.Fatal("running resource drift was accepted")
+		}
+	})
+	t.Run("resize command failure", func(t *testing.T) {
+		adapter, runner, _, ownership := testAdapter(now)
+		runner.commandError["set"] = errors.New("set failed")
+		if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err == nil {
+			t.Fatal("resize failure was accepted")
+		}
+	})
+	t.Run("resize not observed", func(t *testing.T) {
+		adapter, runner, _, ownership := testAdapter(now)
+		runner.setNoEffect = true
+		if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err == nil {
+			t.Fatal("unobserved resize was accepted")
+		}
+	})
+	t.Run("invalid configuration", func(t *testing.T) {
+		adapter, runner, registry, ownership := testAdapter(now)
+		registry.data["vm"] = ownership
+		runner.vms["vm"] = VM{Name: "vm"}
+		runner.configs["vm"] = VMConfig{}
+		if err := adapter.Clone(context.Background(), Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err == nil {
+			t.Fatal("invalid observed configuration was accepted")
+		}
+	})
 }
 
 func TestStartStopDeleteAndFailClosedConfirmation(t *testing.T) {
@@ -370,11 +474,13 @@ func TestTypedErrorsClassifyAndRealRunners(t *testing.T) {
 func TestAdapterCloneFailureBranches(t *testing.T) {
 	now := time.Unix(400, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
-	valid := Request{Name: "vm", Base: "base", Ownership: ownership}
+	valid := Request{Name: "vm", Base: "base", CPU: 1, MemoryMB: 2048, Ownership: ownership}
 	for name, request := range map[string]Request{
-		"name":      {Name: "../bad", Base: "base", Ownership: ownership},
-		"base":      {Name: "vm", Base: "../bad", Ownership: ownership},
-		"ownership": {Name: "vm", Base: "base"},
+		"name":      {Name: "../bad", Base: "base", CPU: 1, MemoryMB: 2048, Ownership: ownership},
+		"base":      {Name: "vm", Base: "../bad", CPU: 1, MemoryMB: 2048, Ownership: ownership},
+		"ownership": {Name: "vm", Base: "base", CPU: 1, MemoryMB: 2048},
+		"cpu":       {Name: "vm", Base: "base", MemoryMB: 2048, Ownership: ownership},
+		"memory":    {Name: "vm", Base: "base", CPU: 1, Ownership: ownership},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := adapter.Clone(context.Background(), request); !errors.Is(err, operations.ErrInvalid) {
@@ -393,7 +499,7 @@ func TestAdapterCloneFailureBranches(t *testing.T) {
 	}
 	runner.observeError = errors.New("list failed")
 	runner.listError = nil
-	if err := adapter.Clone(context.Background(), Request{Name: "vm2", Base: "base", Ownership: ownership}); err == nil {
+	if err := adapter.Clone(context.Background(), Request{Name: "vm2", Base: "base", CPU: 1, MemoryMB: 2048, Ownership: ownership}); err == nil {
 		t.Fatal("clone observation uncertainty ignored")
 	} else if typed := new(Error); !errors.As(err, &typed) || typed.Kind != ErrorUncertain {
 		t.Fatalf("clone uncertainty type: %v", err)

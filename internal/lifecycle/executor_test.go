@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -50,7 +51,7 @@ type fakeVM struct {
 }
 
 func (v fakeVM) Clone(_ context.Context, request tart.Request) error {
-	*v.calls = append(*v.calls, "clone:"+request.Base+":"+request.Name)
+	*v.calls = append(*v.calls, fmt.Sprintf("clone:%s:%s:%d:%d", request.Base, request.Name, request.CPU, request.MemoryMB))
 	return v.cloneErr
 }
 func (v fakeVM) Start(_ context.Context, name string, _ operations.Ownership) error {
@@ -159,7 +160,7 @@ func TestProvisionExecutorRunsOwnedLifecycleInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantCalls := []string{
-		"clone:linux-base:trf-small-1", "start:trf-small-1", "ready:trf-small-1", "registered:trf-small-1",
+		"clone:linux-base:trf-small-1:1:2048", "start:trf-small-1", "ready:trf-small-1", "registered:trf-small-1",
 		"acquire:trf-small-1:_work", "bootstrap:trf-small-1", "registered:trf-small-1",
 	}
 	if !reflect.DeepEqual(calls, wantCalls) {
