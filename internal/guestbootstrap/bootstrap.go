@@ -136,25 +136,43 @@ func zero(value []byte) {
 }
 
 func childEnvironment(jit string) []string {
+	return childEnvironmentForOS(jit, runtime.GOOS)
+}
+
+func childEnvironmentForOS(jit, goos string) []string {
 	jitPrefix := JITEnvironment + "="
 	pathPrefix := "PATH="
 	langPrefix := "LANG="
 	lcAllPrefix := "LC_ALL="
+	androidHomePrefix := "ANDROID_HOME="
+	androidSDKRootPrefix := "ANDROID_SDK_ROOT="
 	parent := os.Environ()
-	environment := make([]string, 0, len(parent)+4)
+	environment := make([]string, 0, len(parent)+6)
 	for _, value := range parent {
 		if !strings.HasPrefix(value, jitPrefix) && !strings.HasPrefix(value, pathPrefix) &&
-			!strings.HasPrefix(value, langPrefix) && !strings.HasPrefix(value, lcAllPrefix) {
+			!strings.HasPrefix(value, langPrefix) && !strings.HasPrefix(value, lcAllPrefix) &&
+			!strings.HasPrefix(value, androidHomePrefix) && !strings.HasPrefix(value, androidSDKRootPrefix) {
 			environment = append(environment, value)
 		}
 	}
-	locale := runnerLocale(runtime.GOOS)
-	return append(environment,
+	locale := runnerLocale(goos)
+	environment = append(environment,
 		jitPrefix+jit,
-		pathPrefix+runnerToolchainPath(runtime.GOOS),
+		pathPrefix+runnerToolchainPath(goos),
 		langPrefix+locale,
 		lcAllPrefix+locale,
 	)
+	if goos == "darwin" {
+		environment = append(environment,
+			androidHomePrefix+darwinAndroidSDKPath(),
+			androidSDKRootPrefix+darwinAndroidSDKPath(),
+		)
+	}
+	return environment
+}
+
+func darwinAndroidSDKPath() string {
+	return "/Users/admin/android-sdk"
 }
 
 func runnerToolchainPath(goos string) string {
