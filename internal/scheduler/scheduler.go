@@ -23,9 +23,10 @@ type Config struct {
 type State struct {
 	// Reservation is deliberately singular: aged global FIFO permits only its
 	// head to reserve a vector. Backfill may use only the vector remainder.
-	Reservation *domain.Reservation
-	DRRCursor   string
-	MacHandoff  *MacHandoff
+	Reservation  *domain.Reservation
+	DRRCursor    string
+	MacHandoff   *MacHandoff
+	LinuxHandoff *LinuxHandoff
 }
 
 // MacHandoff durably bounds residual-capacity admission while Linux prevents
@@ -35,6 +36,17 @@ type State struct {
 type MacHandoff struct {
 	Demand           domain.DemandKey
 	Profile          domain.ProfileID
+	Since            time.Time
+	BackfillAdmitted bool
+}
+
+// LinuxHandoff durably bounds work-conserving admission while a busy macOS
+// instance prevents an older selected Linux demand from starting. Exactly one
+// compatible same-profile macOS backfill wave may use otherwise stranded host
+// capacity; subsequent ticks preserve the Linux handoff instead of admitting
+// an unbounded stream.
+type LinuxHandoff struct {
+	Demand           domain.DemandKey
 	Since            time.Time
 	BackfillAdmitted bool
 }
@@ -100,6 +112,7 @@ func PlanTick(in Input) Plan {
 	if len(demands) == 0 {
 		plan.Next.Reservation = nil
 		plan.Next.MacHandoff = nil
+		plan.Next.LinuxHandoff = nil
 		return finish(plan)
 	}
 
@@ -107,6 +120,7 @@ func PlanTick(in Input) Plan {
 	linux, macos := partition(ordered)
 	switch ordered[0].Platform {
 	case domain.PlatformMacOS:
+		plan.Next.LinuxHandoff = nil
 		if mode == domain.HostLinux {
 			plan = planMacHandoff(in, plan, linux, macos)
 		} else {
@@ -116,8 +130,9 @@ func PlanTick(in Input) Plan {
 	case domain.PlatformLinux:
 		plan.Next.MacHandoff = retainedMacHandoff(in.Prior.MacHandoff, macos)
 		if mode == domain.HostMacOS {
-			plan = planLinuxHandoff(in, plan, linux)
+			plan = planLinuxHandoff(in, plan, linux, macos)
 		} else {
+			plan.Next.LinuxHandoff = nil
 			plan = planLinux(in, plan, linux)
 		}
 	}
@@ -638,7 +653,9 @@ func profileLess(a, b domain.Profile) bool {
 	return a.ID < b.ID
 }
 
-func planLinuxHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
+func planLinuxHandoff(in Input, plan Plan, demands, macDemands []domain.Demand) Plan {
+	handoff := linuxHandoffFor(in.Prior.LinuxHandoff, priorityOrder(in, demands)[0], in.Now)
+	plan.Next.LinuxHandoff = &handoff
 	var drains []Operation
 	allIdle := true
 	filtered := append([]domain.Instance(nil), in.Instances.Value...)
@@ -655,8 +672,19 @@ func planLinuxHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
 	}
 	plan.Operations = append(plan.Operations, drains...)
 	if !allIdle {
+		if !handoff.BackfillAdmitted {
+			if profile, ok := activeMacProfile(in.Instances.Value); ok {
+				before := len(plan.Operations)
+				plan = appendMacSpawns(in, plan, demandsForProfile(macDemands, profile), nil)
+				if containsSpawn(plan.Operations[before:]) {
+					handoff.BackfillAdmitted = true
+					plan.Next.LinuxHandoff = &handoff
+				}
+			}
+		}
 		return plan
 	}
+	plan.Next.LinuxHandoff = nil
 	nextInput := in
 	nextInput.Instances = domain.Fresh(filtered, in.Instances.ObservedAt)
 	next := planLinux(nextInput, Plan{Status: plan.Status, Next: plan.Next}, demands)
@@ -668,6 +696,36 @@ func planLinuxHandoff(in Input, plan Plan, demands []domain.Demand) Plan {
 	}
 	plan.Next = next.Next
 	return plan
+}
+
+func linuxHandoffFor(prior *LinuxHandoff, demand domain.Demand, now time.Time) LinuxHandoff {
+	if prior != nil && prior.Demand == demand.Key {
+		return *prior
+	}
+	return LinuxHandoff{Demand: demand.Key, Since: now}
+}
+
+func activeMacProfile(instances []domain.Instance) (domain.ProfileID, bool) {
+	var selected domain.ProfileID
+	for _, instance := range instances {
+		if !instance.Live() || instance.Platform != domain.PlatformMacOS {
+			continue
+		}
+		if selected != "" && selected != instance.Profile {
+			return "", false
+		}
+		selected = instance.Profile
+	}
+	return selected, selected != ""
+}
+
+func containsSpawn(operations []Operation) bool {
+	for _, operation := range operations {
+		if operation.Kind == OperationSpawn {
+			return true
+		}
+	}
+	return false
 }
 
 func removeInstance(instances []domain.Instance, id string) []domain.Instance {
