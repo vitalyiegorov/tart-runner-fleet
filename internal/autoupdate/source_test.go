@@ -231,7 +231,37 @@ func TestArchiveExtractorRejectsDuplicateAndExcessiveMembers(t *testing.T) {
 	}
 }
 
-func makeReleaseAssets(t *testing.T, root, version string, malicious bool) string {
+func TestStageChecksumManifestCopiesExternalAssetWithoutOverwriting(t *testing.T) {
+	sourceDir := t.TempDir()
+	destinationDir := t.TempDir()
+	source := filepath.Join(sourceDir, "SHA256SUMS")
+	destination := filepath.Join(destinationDir, "SHA256SUMS")
+	if err := os.WriteFile(source, []byte("external manifest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageChecksumManifest(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(destination)
+	if err != nil || string(body) != "external manifest\n" {
+		t.Fatalf("manifest=%q err=%v", body, err)
+	}
+	if err := stageChecksumManifest(filepath.Join(sourceDir, "missing"), filepath.Join(destinationDir, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing source error=%v", err)
+	}
+	if err := stageChecksumManifest(source, destination); !errors.Is(err, ErrInvalidGeneration) {
+		t.Fatalf("archive manifest overwrite error=%v", err)
+	}
+	blocked := filepath.Join(destinationDir, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageChecksumManifest(source, filepath.Join(blocked, "SHA256SUMS")); err == nil {
+		t.Fatal("invalid destination accepted")
+	}
+}
+
+func makeReleaseAssets(t *testing.T, root, version string, malicious bool, embedManifest ...bool) string {
 	t.Helper()
 	releaseRoot := filepath.Join(t.TempDir(), "fixture")
 	dir := makeRelease(t, releaseRoot, version)
@@ -249,6 +279,11 @@ func makeReleaseAssets(t *testing.T, root, version string, malicious bool) strin
 	tarWriter := tar.NewWriter(gzipWriter)
 	entries, _ := os.ReadDir(dir)
 	for _, entry := range entries {
+		// Production creates the archive before the external checksum manifest,
+		// because embedding an archive's own digest would be circular.
+		if entry.Name() == "SHA256SUMS" && (len(embedManifest) == 0 || !embedManifest[0]) {
+			continue
+		}
 		body, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -275,7 +310,12 @@ func makeReleaseAssets(t *testing.T, root, version string, malicious bool) strin
 	}
 	body, _ := os.ReadFile(archivePath)
 	digest := sha256.Sum256(body)
-	if err := os.WriteFile(filepath.Join(assets, "SHA256SUMS"), []byte(hex.EncodeToString(digest[:])+"  "+archiveName+"\n"), 0o600); err != nil {
+	releaseSums, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalSums := append(releaseSums, []byte(hex.EncodeToString(digest[:])+"  "+archiveName+"\n")...)
+	if err := os.WriteFile(filepath.Join(assets, "SHA256SUMS"), externalSums, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return assets
@@ -339,5 +379,17 @@ func TestLatestProductionReleaseRejectsPrereleaseTamperingAndTraversal(t *testin
 				t.Fatal("unsafe release accepted")
 			}
 		})
+	}
+}
+
+func TestLatestProductionReleaseRejectsArchiveEmbeddedChecksumManifest(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "releases"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assets := makeReleaseAssets(t, root, "v2", false, true)
+	_, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`, assets: assets})
+	if !errors.Is(err, ErrInvalidGeneration) {
+		t.Fatalf("embedded checksum manifest error=%v", err)
 	}
 }

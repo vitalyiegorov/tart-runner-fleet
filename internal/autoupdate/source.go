@@ -85,6 +85,9 @@ func LatestProductionRelease(ctx context.Context, root, repository string, comma
 	if err := extractRelease(filepath.Join(download, archiveName), staging); err != nil {
 		return Release{}, err
 	}
+	if err := stageChecksumManifest(filepath.Join(download, "SHA256SUMS"), filepath.Join(staging, "SHA256SUMS")); err != nil {
+		return Release{}, err
+	}
 	if err := verifyReleaseIdentity(staging, metadata.TagName); err != nil {
 		return Release{}, err
 	}
@@ -96,6 +99,23 @@ func LatestProductionRelease(ctx context.Context, root, repository string, comma
 	}
 	removeStaging = false
 	return Release{Version: metadata.TagName, Dir: destination}, nil
+}
+
+// stageChecksumManifest persists the separately published checksum manifest
+// inside the immutable generation. The archive cannot contain a digest of
+// itself, so production publishes this manifest as an external release asset.
+// A manifest embedded in the archive is rejected instead of overwritten.
+func stageChecksumManifest(source, destination string) error {
+	if _, err := os.Lstat(destination); err == nil {
+		return ErrInvalidGeneration
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	body, err := os.ReadFile(source) // #nosec G304 -- exact downloaded checksum asset.
+	if err != nil {
+		return err
+	}
+	return atomicWrite(destination, body, 0o600)
 }
 
 func verifyReleaseIdentity(dir, version string) error {
