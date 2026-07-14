@@ -126,6 +126,14 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 	if err != nil || !strings.Contains(string(updater), candidate.ReleaseDir+"/fleetctl") || !strings.Contains(string(updater), "<integer>300</integer>") {
 		t.Fatalf("updater plist=%q err=%v", updater, err)
 	}
+	for _, want := range []string{
+		"<key>EnvironmentVariables</key>",
+		"<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
+	} {
+		if !strings.Contains(string(updater), want) {
+			t.Fatalf("updater plist does not provide launchd dependency PATH %q: %s", want, updater)
+		}
+	}
 	joined := strings.Join(command.calls, "\n")
 	for _, want := range []string{"fleetctl config validate", "launchctl bootout", "launchctl bootstrap", "status --require-ready"} {
 		if !strings.Contains(joined, want) {
