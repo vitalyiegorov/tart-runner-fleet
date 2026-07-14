@@ -183,6 +183,8 @@ unlimited jump-the-queue flag. See
 
 ## Documentation
 
+- [`INSTALL.md`](INSTALL.md) — verified immutable installation, auto-updates, and reboot proof
+- [`USAGE.md`](USAGE.md) — daily cockpit, resource model, scheduling, and incident workflow
 - [`docs/CLI.md`](docs/CLI.md) — operator commands, output, and exit codes
 - [`docs/API.md`](docs/API.md) — local API compatibility and security contract
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — deployment and rollout

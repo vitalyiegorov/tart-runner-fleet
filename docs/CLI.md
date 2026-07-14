@@ -1,8 +1,10 @@
 # fleetctl operator contract
 
-`fleetctl` is a read-only control-plane client for operators and agents. Its
-primary transport is a private Unix socket owned by `fleetd`; it never reads the
-SQLite schema and cannot execute arbitrary Tart, GitHub, shell, or SQL commands.
+`fleetctl` is the bounded control-plane client for operators and agents. Status
+commands use a private Unix socket owned by `fleetd` and never read SQLite.
+Bootstrap mutations are limited to explicit, guarded scale-set provisioning and
+production-generation adoption/update; arbitrary Tart, GitHub, shell, and SQL
+passthroughs do not exist.
 
 ## Commands
 
@@ -17,6 +19,9 @@ SQLite schema and cannot execute arbitrary Tart, GitHub, shell, or SQL commands.
 | `doctor` | Deterministic API, liveness, readiness, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
 | `config validate PATH` | Decode and validate a configuration without starting the daemon |
+| `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
+| `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
+| `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
 | `version` | CLI build version |
 | `api-version` | Machine API compatibility version |
 
@@ -68,9 +73,10 @@ fleetctl doctor --output json
 
 Exit 4 and 5 are evidence, not permission to assume zero demand or delete VMs.
 
-## Deliberately absent
+## Mutation boundary
 
-Drain/retry/pause commands will not exist until canary/authority promotion. Any
-future mutation must use an audited API, fresh ownership/version preconditions,
-an idempotency key, a reason, and explicit confirmation. Generic `exec`, SQL,
-and backend passthrough commands are permanently out of scope.
+`scale-sets provision` is plan-only unless `--apply --write`, an exact
+confirmation phrase, and a non-empty reason are supplied. `update adopt` and
+`update apply-latest` likewise require distinct exact confirmation phrases and
+preserve controller mode, readiness, checksums, and rollback. Generic `exec`,
+SQL, VM deletion, and backend passthrough commands are permanently out of scope.

@@ -123,7 +123,8 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 		t.Fatalf("journal survived commit: %v", err)
 	}
 	updater, err := os.ReadFile(filepath.Join(host.launchAgentsDir, UpdaterPlist))
-	if err != nil || !strings.Contains(string(updater), candidate.ReleaseDir+"/fleetctl") || !strings.Contains(string(updater), "<integer>300</integer>") {
+	if err != nil || !strings.Contains(string(updater), candidate.ReleaseDir+"/fleetctl") || !strings.Contains(string(updater), "<integer>300</integer>") ||
+		!strings.Contains(string(updater), "<key>RunAtLoad</key><true/>") {
 		t.Fatalf("updater plist=%q err=%v", updater, err)
 	}
 	for _, want := range []string{
