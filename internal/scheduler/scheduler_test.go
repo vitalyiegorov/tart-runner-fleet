@@ -191,6 +191,31 @@ func TestLinuxAndMacOSNeverOverlap(t *testing.T) {
 	}
 }
 
+func TestBlockedLinuxHandoffFillsSecondMaestroSlotOnce(t *testing.T) {
+	linux := demand("a/linux", 1, 10*time.Minute, "small")
+	queuedMaestro := demand("b/mobile", 2, 5*time.Minute, "maestro")
+	runningMaestro := domain.Instance{
+		ID: "maestro-1", Repo: "c/mobile", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+	in := input([]domain.Demand{linux, queuedMaestro}, []domain.Instance{runningMaestro}, State{})
+
+	first := PlanTick(in)
+	if got := spawnedKeys(first); !reflect.DeepEqual(got, []domain.DemandKey{queuedMaestro.Key}) {
+		t.Fatalf("blocked Linux handoff left the second Maestro slot idle: %#v", first)
+	}
+	if first.Next.LinuxHandoff == nil || first.Next.LinuxHandoff.Demand != linux.Key || !first.Next.LinuxHandoff.BackfillAdmitted {
+		t.Fatalf("bounded Linux handoff state = %#v", first.Next.LinuxHandoff)
+	}
+
+	in.Prior = first.Next
+	second := PlanTick(in)
+	if got := spawnedKeys(second); len(got) != 0 {
+		t.Fatalf("Linux handoff admitted an unbounded Maestro stream: %#v", second)
+	}
+}
+
 func TestOldestAgedMacProfileWinsWithoutPermanentBuilderPriority(t *testing.T) {
 	maestro := demand("a/repo", 1, 10*time.Minute, "maestro")
 	builder := demand("b/repo", 2, time.Minute, "builder")
