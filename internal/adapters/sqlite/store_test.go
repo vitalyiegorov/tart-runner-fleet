@@ -442,7 +442,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 	}
 	var version int
 	var journal string
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err != nil || journal != "wal" {
@@ -474,7 +474,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
+	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
 		t.Fatalf("upgrade version=%d err=%v", version, err)
 	}
 }
@@ -537,38 +537,14 @@ func TestMigrationSevenRequeuesV071DeregisterDeadLetterExactlyOnce(t *testing.T)
 	store := testStore(t)
 	now := time.Unix(468, 0).UTC().UnixNano()
 	ownership := `{"controller_id":"controller","resource_id":"job","operation_id":"spawn"}`
-	metadata := `{"schema_version":1,"repo":"owner/repo","platform":"darwin","profile":"maestro","route":"macos-maestro","resources":{"cpu":4,"memory_mb":7168,"slots":1},"demand":{"repo":"owner/repo","run_id":1,"job_id":2,"attempt":1}}`
-	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		"v071-ephemeral", operations.StateDraining, 7, 1, ownership, metadata, "", now, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"v071-drain", "v071-drain", "deregister:v071-ephemeral", lifecycle.OperationDrain, "v071-ephemeral", `{}`, operations.OperationDead, 5, now, "", 0, legacyStageDeregisterError, now, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version=7`); err != nil {
+	seedOwnedDeadDrain(t, store, "v071-ephemeral", "v071-drain", ownership, 7, 5, now)
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version>=7`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	var status string
-	var attempts, version int
-	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='v071-drain'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationPending) || attempts != 0 {
-		t.Fatalf("v0.1.71 drain was not requeued: status=%q attempts=%d err=%v", status, attempts, err)
-	}
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
-		t.Fatalf("migration version=%d err=%v", version, err)
-	}
-	if _, err := store.db.Exec(`UPDATE operations SET status=?,attempts=5,last_error=? WHERE id='v071-drain'`, operations.OperationDead, legacyStageDeregisterError); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='v071-drain'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationDead) || attempts != 5 {
-		t.Fatalf("migration 7 was not one-shot: status=%q attempts=%d err=%v", status, attempts, err)
-	}
+	assertDrainMigrationRequeuedOnce(t, store, "v071-drain", 5, 8)
 }
 
 func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing.T) {
@@ -576,28 +552,51 @@ func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing
 	store := testStore(t)
 	now := time.Unix(472, 0).UTC().UnixNano()
 	ownership := `{"controller_id":"controller","resource_id":"canceled-request","operation_id":"spawn"}`
-	metadata := `{"schema_version":1,"repo":"owner/repo","platform":"darwin","profile":"maestro","route":"macos-maestro","resources":{"cpu":4,"memory_mb":7168,"slots":1},"demand":{"repo":"owner/repo","run_id":1,"job_id":2,"attempt":1}}`
-	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		"replacement-job-runner", operations.StateDraining, 6, 1, ownership, metadata, "", now, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"replacement-job-drain", "replacement-job-drain", "deregister:replacement-job-runner", lifecycle.OperationDrain,
-		"replacement-job-runner", `{}`, operations.OperationDead, 12, now, "", 0, legacyStageDeregisterError, now, now); err != nil {
+	seedOwnedDeadDrain(t, store, "replacement-job-runner", "replacement-job-drain", ownership, 6, 12, now)
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version=8`); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	assertDrainMigrationRequeuedOnce(t, store, "replacement-job-drain", 12, 8)
+}
 
-	var status string
-	var attempts, version int
-	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='replacement-job-drain'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationPending) || attempts != 0 {
-		t.Fatalf("replacement-job drain was not recovered: status=%q attempts=%d err=%v", status, attempts, err)
+func seedOwnedDeadDrain(t *testing.T, store *Store, instanceID string, operationID string, ownership string, instanceVersion int, attempts int, now int64) {
+	t.Helper()
+	metadata := `{"schema_version":1,"repo":"owner/repo","platform":"darwin","profile":"maestro","route":"macos-maestro","resources":{"cpu":4,"memory_mb":7168,"slots":1},"demand":{"repo":"owner/repo","run_id":1,"job_id":2,"attempt":1}}`
+	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		instanceID, operations.StateDraining, instanceVersion, 1, ownership, metadata, "", now, now); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
+	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		operationID, operationID, "deregister:"+instanceID, lifecycle.OperationDrain,
+		instanceID, `{}`, operations.OperationDead, attempts, now, "", 0, legacyStageDeregisterError, now, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDrainMigrationRequeuedOnce(t *testing.T, store *Store, operationID string, attemptsBefore int, expectedVersion int) {
+	t.Helper()
+	ctx := context.Background()
+	var status string
+	var attempts int
+	var version int
+	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id=?`, operationID).Scan(&status, &attempts); err != nil || status != string(operations.OperationPending) || attempts != 0 {
+		t.Fatalf("drain %s was not requeued: status=%q attempts=%d err=%v", operationID, status, attempts, err)
+	}
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != expectedVersion {
 		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+	if _, err := store.db.Exec(`UPDATE operations SET status=?,attempts=?,last_error=? WHERE id=?`, operations.OperationDead, attemptsBefore, legacyStageDeregisterError, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id=?`, operationID).Scan(&status, &attempts); err != nil || status != string(operations.OperationDead) || attempts != attemptsBefore {
+		t.Fatalf("migration was not one-shot for %s: status=%q attempts=%d err=%v", operationID, status, attempts, err)
 	}
 }
 

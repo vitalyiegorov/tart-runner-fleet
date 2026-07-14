@@ -9,6 +9,10 @@ type RetryPolicy struct {
 	Jitter      func(attempt int, delay time.Duration) time.Duration
 }
 
+func DurableCleanupRetryPolicy(maximum time.Duration) RetryPolicy {
+	return RetryPolicy{Maximum: maximum}
+}
+
 func (p RetryPolicy) Next(attempt int, now time.Time) (time.Time, bool) {
 	if p.MaxAttempts > 0 && attempt >= p.MaxAttempts {
 		return time.Time{}, false
