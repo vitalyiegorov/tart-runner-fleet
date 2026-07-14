@@ -249,6 +249,11 @@ func makeReleaseAssets(t *testing.T, root, version string, malicious bool) strin
 	tarWriter := tar.NewWriter(gzipWriter)
 	entries, _ := os.ReadDir(dir)
 	for _, entry := range entries {
+		// Production creates the archive before the external checksum manifest,
+		// because embedding an archive's own digest would be circular.
+		if entry.Name() == "SHA256SUMS" {
+			continue
+		}
 		body, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if readErr != nil {
 			t.Fatal(readErr)
@@ -275,7 +280,12 @@ func makeReleaseAssets(t *testing.T, root, version string, malicious bool) strin
 	}
 	body, _ := os.ReadFile(archivePath)
 	digest := sha256.Sum256(body)
-	if err := os.WriteFile(filepath.Join(assets, "SHA256SUMS"), []byte(hex.EncodeToString(digest[:])+"  "+archiveName+"\n"), 0o600); err != nil {
+	releaseSums, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalSums := append(releaseSums, []byte(hex.EncodeToString(digest[:])+"  "+archiveName+"\n")...)
+	if err := os.WriteFile(filepath.Join(assets, "SHA256SUMS"), externalSums, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return assets
