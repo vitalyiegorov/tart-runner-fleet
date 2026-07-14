@@ -499,6 +499,9 @@ func TestMigrationNineOrdersDeadAcquireProvisionIntoCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version=9`); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -601,7 +604,7 @@ func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing
 	now := time.Unix(472, 0).UTC().UnixNano()
 	ownership := `{"controller_id":"controller","resource_id":"canceled-request","operation_id":"spawn"}`
 	seedOwnedDeadDrain(t, store, "replacement-job-runner", "replacement-job-drain", ownership, 6, 12, now)
-	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version=8`); err != nil {
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version>=8`); err != nil {
 		t.Fatal(err)
 	}
 
