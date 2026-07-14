@@ -131,6 +131,11 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 		switch instance.State {
 		case operations.StateAssigned, operations.StateRunning:
 			return nil
+		case operations.StateDraining, operations.StateDeregistering, operations.StateStopping, operations.StateDeleted:
+			// A demand completion may supersede provisioning before the guest
+			// registers. Completing the provision effect releases only its
+			// explicitly dependent cleanup operation; it never resurrects work.
+			return nil
 		case operations.StateOnlineIdle:
 			// Every provision operation owns one concrete GitHub job demand. A
 			// registered JIT runner is therefore already reserved, never warm

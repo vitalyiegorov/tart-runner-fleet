@@ -280,18 +280,14 @@ func (s *Store) projectDemandRank(ctx context.Context, instance operations.Insta
 			}
 		case operations.DemandJobCompleted:
 			switch instance.State {
+			case operations.StatePlanned, operations.StateCloning, operations.StateBooting, operations.StateReachable:
+				return s.enqueueDemandDrain(ctx, instance, []string{instance.Ownership.OperationID})
 			case operations.StateRegistering:
 				if err := advance(operations.StateOnlineIdle); err != nil {
 					return err
 				}
 			case operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning:
-				now := time.Now().UTC()
-				id := "event-drain-" + instance.ID
-				_, _, err := s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
-					ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: 1,
-					Operation: operations.Operation{ID: id, IdempotencyKey: id, EffectKey: "deregister:" + instance.ID,
-						Kind: "deregister", ResourceID: instance.ID, Payload: json.RawMessage(`{}`), AvailableAt: now}})
-				return err
+				return s.enqueueDemandDrain(ctx, instance, nil)
 			case operations.StateDraining, operations.StateDeregistering, operations.StateStopping, operations.StateDeleted:
 				return nil
 			default:
@@ -302,6 +298,17 @@ func (s *Store) projectDemandRank(ctx context.Context, instance operations.Insta
 		}
 	}
 	return operations.ErrUncertain
+}
+
+func (s *Store) enqueueDemandDrain(ctx context.Context, instance operations.Instance, dependencies []string) error {
+	now := time.Now().UTC()
+	id := "event-drain-" + instance.ID
+	_, _, err := s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
+		ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: 1,
+		Operation: operations.Operation{ID: id, IdempotencyKey: id, EffectKey: "deregister:" + instance.ID,
+			Kind: lifecycle.OperationDrain, ResourceID: instance.ID, Payload: json.RawMessage(`{}`), AvailableAt: now,
+			DependsOn: append([]string(nil), dependencies...)}})
+	return err
 }
 
 func scanDemand(row rowScanner) (operations.DemandRecord, error) {

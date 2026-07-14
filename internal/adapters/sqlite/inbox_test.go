@@ -333,14 +333,18 @@ func TestCompletedPreRegistrationDemandOrdersDrainBehindProvision(t *testing.T) 
 }
 
 func TestProjectDemandRankFailsClosedForImpossibleStatesAndStorageErrors(t *testing.T) {
-	for _, status := range []operations.DemandEventKind{
-		operations.DemandJobAssigned,
-		operations.DemandJobStarted,
-		operations.DemandJobCompleted,
+	for _, test := range []struct {
+		status operations.DemandEventKind
+		state  operations.State
+	}{
+		{status: operations.DemandJobAssigned, state: operations.StatePlanned},
+		{status: operations.DemandJobStarted, state: operations.StatePlanned},
+		{status: operations.DemandJobCompleted, state: operations.StateFailed},
 	} {
+		status := test.status
 		t.Run(string(status)+" uncertain", func(t *testing.T) {
 			store := testStore(t)
-			instance := operations.Instance{ID: "planned", State: operations.StatePlanned,
+			instance := operations.Instance{ID: "impossible", State: test.state,
 				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
 			if err := store.CreateInstance(context.Background(), instance); err != nil {
 				t.Fatal(err)
