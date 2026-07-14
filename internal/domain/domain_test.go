@@ -70,9 +70,13 @@ func TestExplicitInstanceLifecycleTransitionMatrixIsExhaustive(t *testing.T) {
 	}
 	allowed := map[[2]InstanceState]bool{
 		{InstancePlanned, InstanceCloning}:        true,
+		{InstancePlanned, InstanceDraining}:       true,
 		{InstanceCloning, InstanceBooting}:        true,
+		{InstanceCloning, InstanceDraining}:       true,
 		{InstanceBooting, InstanceReachable}:      true,
+		{InstanceBooting, InstanceDraining}:       true,
 		{InstanceReachable, InstanceRegistering}:  true,
+		{InstanceReachable, InstanceDraining}:     true,
 		{InstanceRegistering, InstanceOnlineIdle}: true,
 		{InstanceRegistering, InstanceAssigned}:   true,
 		{InstanceOnlineIdle, InstanceAssigned}:    true,

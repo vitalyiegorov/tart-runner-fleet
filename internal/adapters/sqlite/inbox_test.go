@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -176,6 +177,23 @@ func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
 			}
 		})
 	}
+	t.Run("started registering advance failure", func(t *testing.T) {
+		store := testStore(t)
+		instance := operations.Instance{ID: "registering-failure", State: operations.StateRegistering,
+			Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
+		if err := store.CreateInstance(context.Background(), instance); err != nil {
+			t.Fatal(err)
+		}
+		store.injectFault = func(point string) error {
+			if point == "advance.begin" {
+				return errors.New("injected")
+			}
+			return nil
+		}
+		if err := store.projectDemandRank(context.Background(), instance, operations.DemandJobStarted); err == nil {
+			t.Fatal("registering storage failure was ignored")
+		}
+	})
 	store := testStore(t)
 	store.injectFault = func(point string) error {
 		if point == "inbox.active.query" || point == "inbox.cursor.load" {
@@ -293,15 +311,57 @@ func TestProjectDemandRankCoversMonotonicLifecycleAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestCompletedPreRegistrationDemandOrdersDrainBehindProvision(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	instance := operations.Instance{
+		ID: "reachable", Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+		Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1},
+		Demand:    domain.DemandKey{Repo: "owner/repo", RunID: 77, Attempt: 1, JobID: 91}, State: operations.StateReachable,
+		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"},
+	}
+	if err := store.CreateInstance(ctx, instance); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"spawn", "spawn", "clone:reachable", lifecycle.OperationProvision, instance.ID, `{}`, operations.OperationPending, 0,
+		now.UnixNano(), "", 0, "", now.UnixNano(), now.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.projectDemandRank(ctx, instance, operations.DemandJobCompleted); err != nil {
+		t.Fatalf("project completion: %v", err)
+	}
+	got, err := store.Instance(ctx, instance.ID)
+	if err != nil || got.State != operations.StateDraining {
+		t.Fatalf("projected instance = %#v, %v", got, err)
+	}
+	claimed, err := store.Claim(ctx, "worker", 2, now.Add(time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != "spawn" {
+		t.Fatalf("provision must gate drain: %#v, %v", claimed, err)
+	}
+	if _, err := store.Complete(ctx, "spawn", "worker", "clone:reachable", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.Claim(ctx, "worker", 2, now.Add(2*time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].Kind != lifecycle.OperationDrain || claimed[0].ResourceID != instance.ID {
+		t.Fatalf("drain was not released after provision yielded: %#v, %v", claimed, err)
+	}
+}
+
 func TestProjectDemandRankFailsClosedForImpossibleStatesAndStorageErrors(t *testing.T) {
-	for _, status := range []operations.DemandEventKind{
-		operations.DemandJobAssigned,
-		operations.DemandJobStarted,
-		operations.DemandJobCompleted,
+	for _, test := range []struct {
+		status operations.DemandEventKind
+		state  operations.State
+	}{
+		{status: operations.DemandJobAssigned, state: operations.StatePlanned},
+		{status: operations.DemandJobStarted, state: operations.StatePlanned},
+		{status: operations.DemandJobCompleted, state: operations.StateFailed},
 	} {
+		status := test.status
 		t.Run(string(status)+" uncertain", func(t *testing.T) {
 			store := testStore(t)
-			instance := operations.Instance{ID: "planned", State: operations.StatePlanned,
+			instance := operations.Instance{ID: "impossible", State: test.state,
 				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
 			if err := store.CreateInstance(context.Background(), instance); err != nil {
 				t.Fatal(err)
@@ -312,7 +372,11 @@ func TestProjectDemandRankFailsClosedForImpossibleStatesAndStorageErrors(t *test
 		})
 		t.Run(string(status)+" advance failure", func(t *testing.T) {
 			store := testStore(t)
-			instance := operations.Instance{ID: "registering", State: operations.StateRegistering,
+			state := operations.StateRegistering
+			if status == operations.DemandJobStarted {
+				state = operations.StateOnlineIdle
+			}
+			instance := operations.Instance{ID: "advance-failure", State: state,
 				Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"}}
 			if err := store.CreateInstance(context.Background(), instance); err != nil {
 				t.Fatal(err)

@@ -160,13 +160,13 @@ func (s InstanceState) CanTransitionTo(next InstanceState) bool {
 	}
 	switch s {
 	case InstancePlanned:
-		return next == InstanceCloning
+		return next == InstanceCloning || next == InstanceDraining
 	case InstanceCloning:
-		return next == InstanceBooting
+		return next == InstanceBooting || next == InstanceDraining
 	case InstanceBooting:
-		return next == InstanceReachable
+		return next == InstanceReachable || next == InstanceDraining
 	case InstanceReachable:
-		return next == InstanceRegistering
+		return next == InstanceRegistering || next == InstanceDraining
 	case InstanceRegistering:
 		return next == InstanceOnlineIdle || next == InstanceAssigned
 	case InstanceOnlineIdle:

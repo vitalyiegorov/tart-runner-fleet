@@ -26,7 +26,10 @@ type Store struct {
 // legacyStageDeregisterError is the exact redacted value persisted by
 // releases before migration 6. Keep it immutable: deriving this predicate
 // from future error formatting could broaden a one-shot data repair.
-const legacyStageDeregisterError = "runner lifecycle failed at deregister"
+const (
+	legacyStageDeregisterError = "runner lifecycle failed at deregister"
+	legacyStageAcquireJITError = "runner lifecycle failed at acquire_jit"
+)
 
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
@@ -454,6 +457,63 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if _, err := s.txExec(ctx, tx, "migrate.v8.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(8, ?)`, now); err != nil {
 			return fmt.Errorf("record migration 8: %w", err)
+		}
+	}
+	if version < 9 {
+		now := time.Now().UTC().UnixNano()
+		// Releases through v0.1.104 could exhaust the generic five-attempt
+		// provision budget while acquiring a JIT configuration. No external
+		// effect had been recorded, but the owned Tart VM was already reachable.
+		// Repair only that exact redacted signature. The revived provision effect
+		// gates cleanup, so the worker first settles any ambiguous GitHub state and
+		// then removes the orphan without creating a replacement.
+		match := `o.status=? AND o.kind=? AND o.last_error=?
+			AND o.effect_key=o.kind||':'||o.resource_id
+			AND NOT EXISTS (SELECT 1 FROM operation_effects e WHERE e.operation_id=o.id)
+			AND i.id=o.resource_id AND i.state=?
+			AND json_extract(i.ownership,'$.controller_id')='tart-runner-fleet'
+			AND json_extract(i.ownership,'$.operation_id')=o.id`
+		steps := []struct {
+			point string
+			query string
+			args  []any
+		}{
+			{point: "drain", query: `INSERT INTO operations(
+				id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,
+				lease_owner,lease_until,last_error,created_at,updated_at)
+				SELECT 'recovery-drain-'||i.id,'recovery-drain-'||i.id,'deregister:'||i.id,?,i.id,'{}',?,0,?,'',0,'',?,?
+				FROM operations o JOIN instances i ON i.id=o.resource_id WHERE ` + match,
+				args: []any{lifecycle.OperationDrain, operations.OperationPending, now, now, now,
+					operations.OperationDead, lifecycle.OperationProvision, legacyStageAcquireJITError, operations.StateReachable}},
+			{point: "dependency", query: `INSERT INTO operation_dependencies(operation_id,depends_on)
+				SELECT 'recovery-drain-'||i.id,o.id FROM operations o JOIN instances i ON i.id=o.resource_id WHERE ` + match,
+				args: []any{operations.OperationDead, lifecycle.OperationProvision, legacyStageAcquireJITError, operations.StateReachable}},
+			{point: "history", query: `INSERT INTO transition_history(instance_id,from_state,to_state,version,operation_id,created_at)
+				SELECT i.id,i.state,?,i.version+1,'recovery-drain-'||i.id,? FROM operations o JOIN instances i ON i.id=o.resource_id WHERE ` + match,
+				args: []any{operations.StateDraining, now, operations.OperationDead, lifecycle.OperationProvision,
+					legacyStageAcquireJITError, operations.StateReachable}},
+			{point: "instance", query: `UPDATE instances SET state=?,version=version+1,drain_phase=1,updated_at=?
+				WHERE state=? AND json_extract(ownership,'$.controller_id')='tart-runner-fleet'
+				AND EXISTS (SELECT 1 FROM operations o WHERE o.id=json_extract(instances.ownership,'$.operation_id')
+					AND o.resource_id=instances.id AND o.status=? AND o.kind=? AND o.last_error=?
+					AND o.effect_key=o.kind||':'||o.resource_id
+					AND NOT EXISTS (SELECT 1 FROM operation_effects e WHERE e.operation_id=o.id))`,
+				args: []any{operations.StateDraining, now, operations.StateReachable, operations.OperationDead,
+					lifecycle.OperationProvision, legacyStageAcquireJITError}},
+			{point: "provision", query: `UPDATE operations
+				SET status=?,attempts=0,available_at=?,lease_owner='',lease_until=0,last_error='',updated_at=?
+				WHERE status=? AND kind=? AND last_error=? AND effect_key=kind||':'||resource_id
+				AND NOT EXISTS (SELECT 1 FROM operation_effects e WHERE e.operation_id=operations.id)
+				AND EXISTS (SELECT 1 FROM operation_dependencies d
+					WHERE d.operation_id='recovery-drain-'||operations.resource_id AND d.depends_on=operations.id)`,
+				args: []any{operations.OperationPending, now, now, operations.OperationDead, lifecycle.OperationProvision,
+					legacyStageAcquireJITError}},
+			{point: "record", query: `INSERT INTO schema_migrations(version, applied_at) VALUES(9, ?)`, args: []any{now}},
+		}
+		for _, step := range steps {
+			if _, err := s.txExec(ctx, tx, "migrate.v9."+step.point, step.query, step.args...); err != nil {
+				return fmt.Errorf("migration 9 %s: %w", step.point, err)
+			}
 		}
 	}
 	if err := s.commit(tx, "migrate.commit"); err != nil {

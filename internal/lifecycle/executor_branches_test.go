@@ -99,7 +99,7 @@ func TestProvisionExecutorValidationCancellationAndTerminals(t *testing.T) {
 	if err := executor.Execute(context.Background(), valid); err == nil || err.Error() != safeError(StagePersist).Error() {
 		t.Fatalf("failed provision completed: %v", err)
 	}
-	executor, _, _, _, _, _ = provisionFixture(operations.StateDeregistering)
+	executor, _, _, _, _, _ = provisionFixture(operations.State("invalid"))
 	if err := executor.Execute(context.Background(), valid); !errors.Is(err, operations.ErrConflict) {
 		t.Fatalf("invalid state error=%v", err)
 	}

@@ -183,7 +183,8 @@ const (
 	deletionConfirmationMaxAge  = 30 * time.Second
 	scaleSetCloseTimeout        = 20 * time.Second
 	scaleSetCloseConcurrency    = 4
-	lifecycleRetryMaxAttempts   = 5
+	lifecycleRetryMaxAttempts   = 0
+	provisionRetryMaximum       = 30 * time.Second
 	drainRetryMaximum           = 30 * time.Second
 )
 
@@ -406,7 +407,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
 			},
-			Retry: operations.RetryPolicy{MaxAttempts: lifecycleRetryMaxAttempts},
+			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
 				lifecycle.OperationDrain: operations.DurableCleanupRetryPolicy(drainRetryMaximum),
 			},
