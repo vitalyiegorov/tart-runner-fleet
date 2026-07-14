@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -285,7 +286,7 @@ func writeConfig(t *testing.T, shadow bool) string {
 	if shadow {
 		github = `,"github":{"configUrl":"https://github.com/owner","owner":"owner","clientId":"client","installationId":1,"keychainService":"fleet","keychainAccount":"app","scaleSets":[{"profile":"small","id":1,"maxCapacity":4},{"profile":"medium","id":2,"maxCapacity":4},{"profile":"large","id":3,"maxCapacity":2},{"profile":"builder","id":4,"maxCapacity":1},{"profile":"maestro","id":5,"maxCapacity":2}]}`
 	}
-	raw := `{"baseVm":"linux","vmPrefix":"gha","pollSeconds":1,"maxLinuxWhenMacosIdle":4,"maxLinuxCpu":8,"maxLinuxMemoryMb":16384,"linuxReservationAgeSeconds":300,"minFreeDiskGb":1,"linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048},{"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096},{"id":"large","label":"linux-large","cpu":4,"memoryMb":8192}],"macosBurst":{"enabled":true,"baseVm":"mac","vmPrefix":"gha-mac","builder":{"id":"builder","label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},"maestro":{"id":"maestro","label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2}},"targets":[{"type":"repo","slug":"owner/repo","maxActive":4}]` + github + `}`
+	raw := `{"baseVm":"linux","vmPrefix":"gha","pollSeconds":1,"maxLinuxWhenMacosIdle":4,"maxLinuxCpu":8,"maxLinuxMemoryMb":16384,"linuxReservationAgeSeconds":300,"minFreeDiskGb":1,"linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":50},{"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096,"diskGb":50},{"id":"large","label":"linux-large","cpu":4,"memoryMb":8192,"diskGb":50}],"macosBurst":{"enabled":true,"baseVm":"mac","vmPrefix":"gha-mac","builder":{"id":"builder","label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},"maestro":{"id":"maestro","label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2}},"targets":[{"type":"repo","slug":"owner/repo","maxActive":4}]` + github + `}`
 	path := filepath.Join(t.TempDir(), "fleet.json")
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
@@ -1128,6 +1129,17 @@ func TestCanaryWorkerConcurrencyIsOne(t *testing.T) {
 	}
 	if got := workerConcurrency(reconcile.Authority, cfg); got != cfg.Linux.MaxInstances {
 		t.Fatalf("authority concurrency=%d", got)
+	}
+}
+
+func TestProfileDiskFloorsPreserveProfileIdentity(t *testing.T) {
+	cfg := config.Default()
+	cfg.MacOS.Builder.DiskGiB = 160
+	cfg.MacOS.Maestro.DiskGiB = 150
+	got := profileDiskFloors(cfg)
+	want := map[domain.ProfileID]int{"small": 50, "medium": 50, "large": 50, "builder": 160, "maestro": 150}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("disk floors = %#v, want %#v", got, want)
 	}
 }
 

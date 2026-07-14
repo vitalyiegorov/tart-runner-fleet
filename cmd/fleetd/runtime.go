@@ -275,12 +275,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		control := &lifecycle.ControlRouter{State: store, Demand: store, Sources: controls, Now: d.now}
 		vm := d.newVM(store, cfg, control)
+		diskGiB := profileDiskFloors(cfg)
 		worker = operationRunner{worker: operations.Worker{
 			Store: store, Owner: controllerLeaseOwner, MaxConcurrent: workerConcurrency(opts.Mode, cfg),
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
 					Registration: control, Bootstrap: d.bootstrap(cfg), Bases: map[domain.Platform]string{
-						domain.PlatformLinux: cfg.Linux.BaseVM, domain.PlatformMacOS: cfg.MacOS.BaseVM}},
+						domain.PlatformLinux: cfg.Linux.BaseVM, domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
 			},
@@ -314,6 +315,18 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		}
 		return fmt.Errorf("%s %w", result.name, serverFailure(result.err))
 	}
+}
+
+func profileDiskFloors(cfg config.Config) map[domain.ProfileID]int {
+	floors := make(map[domain.ProfileID]int, len(cfg.Linux.Profiles)+2)
+	for _, profile := range cfg.Linux.Profiles {
+		floors[domain.ProfileID(profile.ID)] = profile.DiskGiB
+	}
+	if cfg.MacOS.Enabled {
+		floors[domain.ProfileID(cfg.MacOS.Builder.ID)] = cfg.MacOS.Builder.DiskGiB
+		floors[domain.ProfileID(cfg.MacOS.Maestro.ID)] = cfg.MacOS.Maestro.DiskGiB
+	}
+	return floors
 }
 
 func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) error {

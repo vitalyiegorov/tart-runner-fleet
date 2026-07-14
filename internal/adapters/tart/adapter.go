@@ -137,6 +137,7 @@ type VMConfig struct {
 	Running bool `json:"Running"`
 	CPU     int  `json:"CPU"`
 	Memory  int  `json:"Memory"`
+	Disk    int  `json:"Disk"`
 }
 
 type Adapter struct {
@@ -156,6 +157,7 @@ type Request struct {
 	Base      string
 	CPU       int
 	MemoryMB  int
+	DiskGB    int
 	Ownership operations.Ownership
 }
 
@@ -192,7 +194,7 @@ func (a *Adapter) Clone(ctx context.Context, request Request) error {
 	if !request.Ownership.Valid() {
 		return operations.ErrInvalid
 	}
-	if request.CPU <= 0 || request.MemoryMB <= 0 {
+	if request.CPU <= 0 || request.MemoryMB <= 0 || request.DiskGB < 0 {
 		return operations.ErrInvalid
 	}
 	a.mu.Lock()
@@ -226,18 +228,22 @@ func (a *Adapter) ensureResources(ctx context.Context, request Request) error {
 	if err != nil {
 		return err
 	}
-	if config.CPU == request.CPU && config.Memory == request.MemoryMB {
+	if resourcesMatch(config, request) {
 		return nil
 	}
 	if config.Running {
 		return &Error{Op: "set", Kind: ErrorUncertain, ExitCode: -1, Err: errors.New("running VM resource drift")}
 	}
 
+	args := []string{"set", request.Name, "--cpu", strconv.Itoa(request.CPU), "--memory", strconv.Itoa(request.MemoryMB)}
+	if request.DiskGB > 0 && config.Disk < request.DiskGB {
+		args = append(args, "--disk-size", strconv.Itoa(request.DiskGB))
+	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
-	_, commandErr := a.runner().Run(commandCtx, "set", request.Name, "--cpu", strconv.Itoa(request.CPU), "--memory", strconv.Itoa(request.MemoryMB))
+	_, commandErr := a.runner().Run(commandCtx, args...)
 	cancel()
 	observed, observeErr := a.getConfig(ctx, request.Name)
-	if observeErr == nil && observed.CPU == request.CPU && observed.Memory == request.MemoryMB {
+	if observeErr == nil && resourcesMatch(observed, request) {
 		return nil
 	}
 	if observeErr != nil {
@@ -247,6 +253,11 @@ func (a *Adapter) ensureResources(ctx context.Context, request Request) error {
 		return commandErr
 	}
 	return &Error{Op: "set", Kind: ErrorUncertain, ExitCode: -1, Err: errors.New("resource resize was not observed")}
+}
+
+func resourcesMatch(config VMConfig, request Request) bool {
+	diskMatches := request.DiskGB == 0 || config.Disk >= request.DiskGB
+	return config.CPU == request.CPU && config.Memory == request.MemoryMB && diskMatches
 }
 
 func (a *Adapter) getConfig(ctx context.Context, name string) (VMConfig, error) {
