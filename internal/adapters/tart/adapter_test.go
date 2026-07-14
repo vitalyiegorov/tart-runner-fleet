@@ -188,6 +188,33 @@ func TestCloneAndDeleteSuccessfulCommandResponses(t *testing.T) {
 	}
 }
 
+func TestCloneEnforcesExactProfileResourcesIdempotently(t *testing.T) {
+	now := time.Unix(175, 0).UTC()
+	adapter, runner, _, ownership := testAdapter(now)
+	request := Request{Name: "vm", Base: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}
+
+	if err := adapter.Clone(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Clone(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+
+	want := VMConfig{CPU: 4, Memory: 8192}
+	if got := runner.configs[request.Name]; got != want {
+		t.Fatalf("VM config = %+v, want %+v", got, want)
+	}
+	setCommands := 0
+	for _, command := range runner.commands {
+		if len(command) > 0 && command[0] == "set" {
+			setCommands++
+		}
+	}
+	if setCommands != 1 {
+		t.Fatalf("set commands = %d, want one exact resize", setCommands)
+	}
+}
+
 func TestStartStopDeleteAndFailClosedConfirmation(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
