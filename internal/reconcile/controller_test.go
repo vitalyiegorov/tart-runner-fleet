@@ -170,6 +170,26 @@ func TestControllerAuthorityTranslatesSpawnAndDependentDrain(t *testing.T) {
 	}
 }
 
+func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
+	instance := operations.Instance{ID: "stopped", State: operations.StateAssigned, Version: 4,
+		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "job", OperationID: "spawn"}}
+	store := &fakeStore{instances: map[string]operations.Instance{instance.ID: instance}}
+	controller := Controller{Store: store, ControllerID: "controller", Mode: Authority}
+	recovery := scheduler.Operation{ID: "recover", Kind: scheduler.OperationDrain, Instance: instance.ID, Recovery: true}
+	if applied, err := controller.Commit(context.Background(), readyPlan(recovery), "", controllerNow); err != nil || !applied {
+		t.Fatalf("recovery commit = %v, %v", applied, err)
+	}
+	intent := store.applied[0].Instances[0]
+	if intent.ExpectedState != operations.StateAssigned || intent.Instance.State != operations.StateDraining || intent.Instance.DrainPhase != 2 {
+		t.Fatalf("recovery intent = %#v", intent)
+	}
+	store.applied = nil
+	recovery.Recovery = false
+	if _, err := controller.Commit(context.Background(), readyPlan(recovery), "", controllerNow); err == nil {
+		t.Fatal("ordinary drain accepted an assigned instance")
+	}
+}
+
 func TestControllerFailClosedValidation(t *testing.T) {
 	valid := readyPlan()
 	tests := []struct {

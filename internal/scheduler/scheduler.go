@@ -63,6 +63,7 @@ type Operation struct {
 	Profile   domain.ProfileID
 	Route     domain.Route
 	DependsOn []string
+	Recovery  bool `json:"recovery,omitempty"`
 }
 
 type PlanStatus string
@@ -92,6 +93,10 @@ func PlanTick(in Input) Plan {
 
 	demands := normalizedDemands(in)
 	plan := Plan{Status: PlanReady, Next: in.Prior}
+	if recoveries := stoppedAssignmentRecoveries(in.Instances.Value); len(recoveries) > 0 {
+		plan.Operations = recoveries
+		return finish(plan)
+	}
 	if len(demands) == 0 {
 		plan.Next.Reservation = nil
 		plan.Next.MacHandoff = nil
@@ -117,6 +122,20 @@ func PlanTick(in Input) Plan {
 		}
 	}
 	return finish(plan)
+}
+
+func stoppedAssignmentRecoveries(instances []domain.Instance) []Operation {
+	var recoveries []Operation
+	for _, instance := range sortedInstances(instances) {
+		if instance.Power != domain.InstancePowerStopped ||
+			(instance.State != domain.InstanceAssigned && instance.State != domain.InstanceRunning) {
+			continue
+		}
+		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route, Recovery: true}
+		operation.ID = stableID("op", operation)
+		recoveries = append(recoveries, operation)
+	}
+	return recoveries
 }
 
 func normalizedDemands(in Input) []domain.Demand {

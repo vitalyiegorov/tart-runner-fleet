@@ -54,13 +54,19 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		if !instance.SchedulingMetadataValid() || instance.Repo == "" {
 			return domain.Unavailable[[]domain.Instance]("invalid durable scheduling metadata"), host
 		}
-		_, exists := byName[instance.ID]
+		vm, exists := byName[instance.ID]
 		if !exists && instance.State != operations.StatePlanned {
 			return domain.Unavailable[[]domain.Instance](fmt.Sprintf("owned VM %s missing from Tart", instance.ID)), host
 		}
 		delete(byName, instance.ID)
+		power := domain.InstancePowerUnknown
+		if exists && vm.Running {
+			power = domain.InstancePowerRunning
+		} else if exists {
+			power = domain.InstancePowerStopped
+		}
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Platform: instance.Platform, Profile: instance.Profile,
-			Route: instance.Route, Resources: instance.Resources, State: instance.State})
+			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {

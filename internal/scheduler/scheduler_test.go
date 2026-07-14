@@ -72,6 +72,20 @@ func TestFailClosedOnStaleOrUnavailableObservation(t *testing.T) {
 	}
 }
 
+func TestStoppedAssignedRunnerIsRecoveredBeforeNewAdmission(t *testing.T) {
+	stopped := domain.Instance{ID: "stopped", Repo: "a/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, State: domain.InstanceAssigned, Power: domain.InstancePowerStopped}
+	plan := PlanTick(input([]domain.Demand{demand("b/repo", 9, time.Minute, "small")}, []domain.Instance{stopped}, State{}))
+	if len(plan.Operations) != 1 || plan.Operations[0].Kind != OperationDrain || plan.Operations[0].Instance != stopped.ID || !plan.Operations[0].Recovery {
+		t.Fatalf("stopped-assignment recovery plan = %#v", plan)
+	}
+	running := stopped
+	running.Power = domain.InstancePowerRunning
+	if got := PlanTick(input(nil, []domain.Instance{running}, State{})); len(got.Operations) != 0 {
+		t.Fatalf("running assignment was recovered: %#v", got)
+	}
+}
+
 func TestQueuedSiblingsRemainDistinctWhenRunIsInProgress(t *testing.T) {
 	first := demand("a/repo", 11, time.Minute, "small")
 	second := demand("a/repo", 12, time.Minute, "small")

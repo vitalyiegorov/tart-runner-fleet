@@ -142,6 +142,8 @@ type Transition struct {
 	Operation       Operation
 }
 
+const DrainPhaseStoppedRecovery = 2
+
 type Lease struct {
 	Name      string
 	Owner     string
