@@ -142,3 +142,25 @@ func TestHostModeDerivesFromLiveInstancesAndRejectsOverlap(t *testing.T) {
 		t.Fatalf("terminal/unknown mode = %s, %v", mode, err)
 	}
 }
+
+func TestStoppedTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
+	for _, state := range []InstanceState{InstanceDraining, InstanceDeregistering, InstanceStopping} {
+		orphan := Instance{ID: "orphan", Platform: PlatformMacOS, State: state, Power: InstancePowerStopped}
+		if orphan.ConsumesHostResources() {
+			t.Fatalf("stopped %s instance consumed host resources", state)
+		}
+		if mode, err := DeriveHostMode([]Instance{orphan}); err != nil || mode != HostIdle {
+			t.Fatalf("stopped %s mode = %s, %v", state, mode, err)
+		}
+	}
+
+	for _, instance := range []Instance{
+		{ID: "running-drain", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerRunning},
+		{ID: "unknown-drain", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerUnknown},
+		{ID: "stopped-assigned", Platform: PlatformMacOS, State: InstanceAssigned, Power: InstancePowerStopped},
+	} {
+		if !instance.ConsumesHostResources() {
+			t.Fatalf("unsafe instance stopped consuming resources: %#v", instance)
+		}
+	}
+}

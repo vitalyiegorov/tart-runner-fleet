@@ -86,6 +86,17 @@ func TestStoppedAssignedRunnerIsRecoveredBeforeNewAdmission(t *testing.T) {
 	}
 }
 
+func TestStoppedDrainingOrphanCannotStarveUnrelatedCapacity(t *testing.T) {
+	orphan := domain.Instance{ID: "orphan", Repo: "a/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, State: domain.InstanceDraining, Power: domain.InstancePowerStopped}
+	queued := demand("b/repo", 9, time.Minute, "small")
+
+	plan := PlanTick(input([]domain.Demand{queued}, []domain.Instance{orphan}, State{}))
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{queued.Key}) {
+		t.Fatalf("stopped draining orphan starved unrelated work: plan=%#v", plan)
+	}
+}
+
 func TestQueuedSiblingsRemainDistinctWhenRunIsInProgress(t *testing.T) {
 	first := demand("a/repo", 11, time.Minute, "small")
 	second := demand("a/repo", 12, time.Minute, "small")
