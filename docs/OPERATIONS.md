@@ -140,6 +140,38 @@ edit a plist in place. The observe template remains the default and uses the
 existing `com.vitalyiegorov.tart-runner-fleet` label. Shadow and canary use
 separate databases, sockets, health ports, logs, and launchd labels:
 
+### Persistent automatic production updates
+
+After the first authority handoff is healthy and its rendered authority plist
+has been atomically installed at
+`$HOME/Library/LaunchAgents/com.vitalyiegorov.tart-runner-fleet.plist`, adopt it
+once:
+
+```sh
+fleetctl update adopt \
+  --release-dir "$RELEASE_DIR" \
+  --mode authority \
+  --confirm adopt-current-generation
+```
+
+Adoption refuses a mismatched plist, mode, version, config, checksum, or
+unready daemon. It installs
+`com.vitalyiegorov.tart-runner-fleet.updater.plist`, which checks the latest
+normal production release every five minutes. Each update verifies the external
+archive checksum and every executed artifact, validates the existing config
+with the candidate, and waits until queues, VMs, and operations are all empty.
+It then atomically replaces the persistent daemon and updater plists, requires
+the exact new version and the same controller mode to become ready, and restores
+the previous generation on any failure. Updates are strictly forward-only.
+
+To run the same idempotent check manually:
+
+```sh
+fleetctl update apply-latest \
+  --mode authority \
+  --confirm automatic-release-update
+```
+
 ```sh
 set -eu
 RELEASE_DIR="$HOME/Library/Application Support/tart-runner-fleet/releases/$VERSION"

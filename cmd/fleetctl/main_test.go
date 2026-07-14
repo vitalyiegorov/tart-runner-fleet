@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +18,7 @@ import (
 	"github.com/actions/scaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
@@ -51,6 +55,149 @@ func (f fakeClient) Metrics(context.Context) (string, error) {
 type errorWriter struct{}
 
 func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("broken output") }
+
+type fakeUpdateCommand struct{ calls []string }
+
+func (c *fakeUpdateCommand) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	call := name + " " + strings.Join(args, " ")
+	c.calls = append(c.calls, call)
+	if name == "gh" {
+		return []byte(`{"tag_name":"v2","draft":false,"prerelease":false}`), nil
+	}
+	if strings.Contains(call, "status --require-ready") {
+		return []byte(`{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":true}}}`), nil
+	}
+	return nil, nil
+}
+
+func makeUpdateRelease(t *testing.T, root string) string {
+	t.Helper()
+	dir := filepath.Join(root, "releases", "v2")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	template := []byte(`<plist><dict><string>__RELEASE_DIR__/fleetd</string><string>--mode=authority</string><string>__STATE_DIR__/fleet.json</string></dict></plist>`)
+	files := map[string][]byte{"RELEASE_VERSION": []byte("v2\n"), "fleetd": []byte("fleetd"), "fleetctl": []byte("fleetctl"),
+		"com.vitalyiegorov.tart-runner-fleet.authority.plist": template}
+	var sums strings.Builder
+	for _, name := range []string{"RELEASE_VERSION", "fleetd", "fleetctl", "com.vitalyiegorov.tart-runner-fleet.authority.plist"} {
+		body := files[name]
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(body)
+		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + name + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestGuardedAutomaticUpdateAdoptionAndIdempotentLatest(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	agents := filepath.Join(root, "LaunchAgents")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	release := makeUpdateRelease(t, root)
+	configPath := filepath.Join(state, "fleet.json")
+	if err := os.WriteFile(configPath, []byte(`{"valid":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(agents, autoupdate.CanonicalPlist)
+	if err := os.WriteFile(canonical, []byte(`<string>`+release+`/fleetd</string><string>--mode=authority</string>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := &fakeUpdateCommand{}
+	deps := dependencies{command: command}
+	common := []string{"--root", root, "--state-dir", state, "--launch-agents-dir", agents, "--config", configPath,
+		"--endpoint", "unix:///state/fleetd.sock", "--domain", "gui/501", "--repo", "owner/repo", "--mode", "authority"}
+	args := append([]string{"update", "adopt"}, common...)
+	args = append(args, "--release-dir", release, "--confirm", "adopt-current-generation")
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("adopt code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	args = append([]string{"update", "apply-latest"}, common...)
+	args = append(args, "--confirm", "automatic-release-update")
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess || !strings.Contains(stdout.String(), "v2") {
+		t.Fatalf("latest code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(agents, autoupdate.UpdaterPlist)); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWith(context.Background(), []string{"update", "apply-latest"}, &stdout, &stderr, deps); code != exitUnsafe {
+		t.Fatalf("unguarded update code=%d", code)
+	}
+}
+
+func TestUpdateCommandFailureModes(t *testing.T) {
+	if body, err := (execCommand{}).Run(context.Background(), "/usr/bin/printf", "ok"); err != nil || string(body) != "ok" {
+		t.Fatalf("exec body=%q err=%v", body, err)
+	}
+	for _, args := range [][]string{{"update"}, {"update", "other"}, {"update", "adopt", "--bad"}} {
+		var stdout, stderr bytes.Buffer
+		if code := executeWith(context.Background(), args, &stdout, &stderr, dependencies{}); code != exitUsage {
+			t.Fatalf("args=%v code=%d", args, code)
+		}
+	}
+
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	agents := filepath.Join(root, "agents")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := &fakeUpdateCommand{}
+	deps := dependencies{command: command}
+	base := []string{"--root", root, "--state-dir", state, "--launch-agents-dir", agents, "--repo", "owner/repo",
+		"--domain", "gui/501", "--config", filepath.Join(state, "fleet.json"), "--endpoint", "unix:///state/fleetd.sock"}
+	tests := []struct {
+		name string
+		args []string
+		code int
+	}{
+		{name: "invalid host", args: []string{"update", "apply-latest", "--repo", "bad", "--confirm", "automatic-release-update"}, code: exitFailure},
+		{name: "adopt missing release", args: append(append([]string{"update", "adopt"}, base...), "--confirm", "adopt-current-generation"), code: exitUsage},
+		{name: "adopt failure", args: append(append([]string{"update", "adopt"}, base...), "--release-dir", filepath.Join(root, "releases", "missing"), "--confirm", "adopt-current-generation"), code: exitFailure},
+		{name: "latest rejects release dir", args: append(append([]string{"update", "apply-latest"}, base...), "--release-dir", "/x", "--confirm", "automatic-release-update"), code: exitUsage},
+		{name: "latest source failure", args: append(append([]string{"update", "apply-latest"}, base...), "--confirm", "automatic-release-update"), code: exitFailure},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := executeWith(context.Background(), test.args, &stdout, &stderr, deps); code != test.code {
+				t.Fatalf("code=%d want=%d stdout=%q stderr=%q", code, test.code, stdout.String(), stderr.String())
+			}
+		})
+	}
+
+	release := makeUpdateRelease(t, root)
+	installed := autoupdate.Generation{Version: "v1", Mode: "authority", ReleaseDir: filepath.Join(root, "releases", "v1"),
+		ConfigPath: filepath.Join(state, "fleet.json"), Endpoint: "unix:///state/fleetd.sock"}
+	body, _ := json.Marshal(installed)
+	if err := os.WriteFile(filepath.Join(state, autoupdate.InstalledGenerationFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = release
+	args := append(append([]string{"update", "apply-latest"}, base...), "--confirm", "automatic-release-update")
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitFailure || !strings.Contains(stderr.String(), "apply production release") {
+		t.Fatalf("apply code=%d stderr=%q", code, stderr.String())
+	}
+}
 
 func healthyStatus() adminapi.StatusEnvelope {
 	now := time.Date(2026, 7, 12, 20, 0, 0, 0, time.UTC)
