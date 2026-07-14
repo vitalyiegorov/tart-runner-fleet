@@ -114,25 +114,25 @@ func TestWorkerRetriesTimeoutPanicUnknownAndPersistenceFailure(t *testing.T) {
 	}
 }
 
-func TestWorkerUsesBoundedOperationSpecificRetryPolicy(t *testing.T) {
+func TestWorkerUsesDurableCleanupAndBoundedProvisionRetryPolicies(t *testing.T) {
 	now := time.Unix(705, 0).UTC()
 	failing := ExecutorFunc(func(context.Context, Operation) error { return errors.New("transient external cleanup") })
 
 	drain := workerOperation("drain", "deregister")
-	drain.Attempts = 4
+	drain.Attempts = 100
 	store := &workerStore{claimed: []Operation{drain}}
 	worker := Worker{
 		Store: store, Owner: "worker", Now: func() time.Time { return now },
 		Executors: map[string]Executor{"deregister": failing},
 		Retry:     RetryPolicy{Initial: time.Second, Maximum: 8 * time.Second, MaxAttempts: 5},
 		RetryByKind: map[string]RetryPolicy{
-			"deregister": {Initial: time.Second, Maximum: 30 * time.Second, MaxAttempts: 12},
+			"deregister": DurableCleanupRetryPolicy(30 * time.Second),
 		},
 	}
 	if completed, err := worker.RunOnce(context.Background()); err != nil || completed != 0 || store.retried != 1 || store.dead != 0 {
 		t.Fatalf("drain retry result completed=%d retried=%d dead=%d err=%v", completed, store.retried, store.dead, err)
 	}
-	if want := now.Add(16 * time.Second); !store.retryAvailable.Equal(want) {
+	if want := now.Add(30 * time.Second); !store.retryAvailable.Equal(want) {
 		t.Fatalf("drain retry at %v, want %v", store.retryAvailable, want)
 	}
 

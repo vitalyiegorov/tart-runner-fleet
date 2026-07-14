@@ -138,11 +138,17 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 			if err != nil {
 				return operations.Plan{}, err
 			}
-			if instance.State != operations.StateOnlineIdle {
+			drainPhase := 1
+			validState := instance.State == operations.StateOnlineIdle
+			if operation.Recovery {
+				drainPhase = operations.DrainPhaseStoppedRecovery
+				validState = instance.State == operations.StateAssigned || instance.State == operations.StateRunning
+			}
+			if !validState {
 				return operations.Plan{}, fmt.Errorf("drain %s in state %s: %w", instance.ID, instance.State, operations.ErrConflict)
 			}
 			next := instance
-			next.State, next.Version, next.DrainPhase, next.UpdatedAt = operations.StateDraining, instance.Version+1, 1, now.UTC()
+			next.State, next.Version, next.DrainPhase, next.UpdatedAt = operations.StateDraining, instance.Version+1, drainPhase, now.UTC()
 			durable.Instances = append(durable.Instances, operations.InstanceIntent{ExpectedVersion: instance.Version, ExpectedState: instance.State, Instance: next})
 			durable.Operations = append(durable.Operations, outbox(operation, "deregister", instance.ID, instance.Ownership, now))
 		case scheduler.OperationSpawn:

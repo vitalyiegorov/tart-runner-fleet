@@ -73,7 +73,6 @@ const (
 	scaleSetCloseTimeout        = 20 * time.Second
 	scaleSetCloseConcurrency    = 4
 	lifecycleRetryMaxAttempts   = 5
-	drainRetryMaxAttempts       = 12
 	drainRetryMaximum           = 30 * time.Second
 )
 
@@ -287,7 +286,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			},
 			Retry: operations.RetryPolicy{MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
-				lifecycle.OperationDrain: {Maximum: drainRetryMaximum, MaxAttempts: drainRetryMaxAttempts},
+				lifecycle.OperationDrain: operations.DurableCleanupRetryPolicy(drainRetryMaximum),
 			},
 			OperationDeadline: lifecycleOperationDeadline(cfg),
 		}}
