@@ -571,6 +571,36 @@ func TestMigrationSevenRequeuesV071DeregisterDeadLetterExactlyOnce(t *testing.T)
 	}
 }
 
+func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	now := time.Unix(472, 0).UTC().UnixNano()
+	ownership := `{"controller_id":"controller","resource_id":"canceled-request","operation_id":"spawn"}`
+	metadata := `{"schema_version":1,"repo":"owner/repo","platform":"darwin","profile":"maestro","route":"macos-maestro","resources":{"cpu":4,"memory_mb":7168,"slots":1},"demand":{"repo":"owner/repo","run_id":1,"job_id":2,"attempt":1}}`
+	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"replacement-job-runner", operations.StateDraining, 6, 1, ownership, metadata, "", now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"replacement-job-drain", "replacement-job-drain", "deregister:replacement-job-runner", lifecycle.OperationDrain,
+		"replacement-job-runner", `{}`, operations.OperationDead, 12, now, "", 0, legacyStageDeregisterError, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var status string
+	var attempts, version int
+	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='replacement-job-drain'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationPending) || attempts != 0 {
+		t.Fatalf("replacement-job drain was not recovered: status=%q attempts=%d err=%v", status, attempts, err)
+	}
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 8 {
+		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+}
+
 func TestRenewOperationLeaseFencing(t *testing.T) {
 	store := testStore(t)
 	now := time.Unix(470, 0).UTC()
