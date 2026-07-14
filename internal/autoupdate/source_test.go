@@ -231,6 +231,29 @@ func TestArchiveExtractorRejectsDuplicateAndExcessiveMembers(t *testing.T) {
 	}
 }
 
+func TestStageChecksumManifestCopiesExternalAssetWithoutOverwriting(t *testing.T) {
+	sourceDir := t.TempDir()
+	destinationDir := t.TempDir()
+	source := filepath.Join(sourceDir, "SHA256SUMS")
+	destination := filepath.Join(destinationDir, "SHA256SUMS")
+	if err := os.WriteFile(source, []byte("external manifest\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := stageChecksumManifest(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(destination)
+	if err != nil || string(body) != "external manifest\n" {
+		t.Fatalf("manifest=%q err=%v", body, err)
+	}
+	if err := stageChecksumManifest(filepath.Join(sourceDir, "missing"), filepath.Join(destinationDir, "missing")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing source error=%v", err)
+	}
+	if err := stageChecksumManifest(source, destination); !errors.Is(err, ErrInvalidGeneration) {
+		t.Fatalf("archive manifest overwrite error=%v", err)
+	}
+}
+
 func makeReleaseAssets(t *testing.T, root, version string, malicious bool) string {
 	t.Helper()
 	releaseRoot := filepath.Join(t.TempDir(), "fixture")
