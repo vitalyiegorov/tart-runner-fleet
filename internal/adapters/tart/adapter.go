@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -132,6 +133,12 @@ type VM struct {
 	Source  string `json:"Source"`
 }
 
+type VMConfig struct {
+	Running bool `json:"Running"`
+	CPU     int  `json:"CPU"`
+	Memory  int  `json:"Memory"`
+}
+
 type Adapter struct {
 	Runner             Runner
 	Ownership          OwnershipRegistry
@@ -147,6 +154,8 @@ type Adapter struct {
 type Request struct {
 	Name      string
 	Base      string
+	CPU       int
+	MemoryMB  int
 	Ownership operations.Ownership
 }
 
@@ -183,29 +192,75 @@ func (a *Adapter) Clone(ctx context.Context, request Request) error {
 	if !request.Ownership.Valid() {
 		return operations.ErrInvalid
 	}
+	if request.CPU <= 0 || request.MemoryMB <= 0 {
+		return operations.ErrInvalid
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.Ownership.PutOwnership(ctx, request.Name, request.Ownership); err != nil {
 		return err
 	}
 	exists, err := a.existsOwned(ctx, request.Name, request.Ownership)
-	if err != nil || exists {
+	if err != nil {
 		return err
 	}
-	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
-	_, commandErr := a.runner().Run(commandCtx, "clone", request.Base, request.Name)
-	cancel()
-	if commandErr == nil {
+	if !exists {
+		commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
+		_, commandErr := a.runner().Run(commandCtx, "clone", request.Base, request.Name)
+		cancel()
+		if commandErr != nil {
+			exists, observeErr := a.existsOwned(ctx, request.Name, request.Ownership)
+			if observeErr != nil {
+				return &Error{Op: "clone", Kind: ErrorUncertain, ExitCode: -1, Err: errors.Join(commandErr, observeErr)}
+			}
+			if !exists {
+				return commandErr
+			}
+		}
+	}
+	return a.ensureResources(ctx, request)
+}
+
+func (a *Adapter) ensureResources(ctx context.Context, request Request) error {
+	config, err := a.getConfig(ctx, request.Name)
+	if err != nil {
+		return err
+	}
+	if config.CPU == request.CPU && config.Memory == request.MemoryMB {
 		return nil
 	}
-	exists, observeErr := a.existsOwned(ctx, request.Name, request.Ownership)
-	if observeErr == nil && exists {
+	if config.Running {
+		return &Error{Op: "set", Kind: ErrorUncertain, ExitCode: -1, Err: errors.New("running VM resource drift")}
+	}
+
+	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
+	_, commandErr := a.runner().Run(commandCtx, "set", request.Name, "--cpu", strconv.Itoa(request.CPU), "--memory", strconv.Itoa(request.MemoryMB))
+	cancel()
+	observed, observeErr := a.getConfig(ctx, request.Name)
+	if observeErr == nil && observed.CPU == request.CPU && observed.Memory == request.MemoryMB {
 		return nil
 	}
 	if observeErr != nil {
-		return &Error{Op: "clone", Kind: ErrorUncertain, ExitCode: -1, Err: errors.Join(commandErr, observeErr)}
+		return &Error{Op: "set", Kind: ErrorUncertain, ExitCode: -1, Err: errors.Join(commandErr, observeErr)}
 	}
-	return commandErr
+	if commandErr != nil {
+		return commandErr
+	}
+	return &Error{Op: "set", Kind: ErrorUncertain, ExitCode: -1, Err: errors.New("resource resize was not observed")}
+}
+
+func (a *Adapter) getConfig(ctx context.Context, name string) (VMConfig, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
+	output, err := a.runner().Run(commandCtx, "get", name, "--format", "json")
+	cancel()
+	if err != nil {
+		return VMConfig{}, err
+	}
+	var config VMConfig
+	if err := json.Unmarshal(output, &config); err != nil || config.CPU <= 0 || config.Memory <= 0 {
+		return VMConfig{}, &Error{Op: "get", Kind: ErrorUncertain, ExitCode: -1, Stderr: string(output), Err: errors.Join(err, errors.New("invalid VM configuration"))}
+	}
+	return config, nil
 }
 
 func (a *Adapter) Start(ctx context.Context, name string, ownership operations.Ownership) error {

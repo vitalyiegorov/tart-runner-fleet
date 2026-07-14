@@ -145,7 +145,9 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			if e.VM == nil || tart.ValidateName(base) != nil {
 				return e.fail(ctx, instance, StageClone)
 			}
-			if err := e.VM.Clone(ctx, tart.Request{Name: instance.ID, Base: base, Ownership: instance.Ownership}); err != nil {
+			if err := e.VM.Clone(ctx, tart.Request{
+				Name: instance.ID, Base: base, CPU: instance.Resources.CPU, MemoryMB: instance.Resources.MemoryMB, Ownership: instance.Ownership,
+			}); err != nil {
 				return e.fail(ctx, instance, StageClone)
 			}
 			instance, err = e.advance(ctx, instance, operations.StateCloning)
