@@ -415,6 +415,9 @@ func (h *LocalHost) renderUpdater(candidate Generation) []byte {
 %s  </array>
   <key>RunAtLoad</key><true/>
   <key>StartInterval</key><integer>%d</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
   <key>StandardOutPath</key><string>%s/update.stdout.log</string>
