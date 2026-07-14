@@ -64,6 +64,19 @@ func (*fakeSource) AcquireAndGenerateJIT(context.Context, int64, string, string)
 }
 func (*fakeSource) Deregister(context.Context, string) error { return nil }
 
+type brokenSessionSource struct {
+	fakeSource
+	handled chan<- struct{}
+}
+
+func (s *brokenSessionSource) Handle(context.Context, func(context.Context, githubscaleset.Demand) error) error {
+	select {
+	case s.handled <- struct{}{}:
+	default:
+	}
+	return errors.New("terminal broker session")
+}
+
 type blockingCloseSource struct {
 	fakeSource
 	started chan<- struct{}
@@ -411,6 +424,63 @@ func TestRunReportsRedactedScaleSetCleanupFailure(t *testing.T) {
 	err := <-done
 	if !errors.Is(err, errScaleSetClose) || strings.Contains(err.Error(), brokerFailure.Error()) {
 		t.Fatalf("cleanup error=%v", err)
+	}
+}
+
+// Regression: an official Actions message session can become permanently
+// unusable after startup while every other scale set stays healthy. Reusing the
+// same failed source forever marks one critical observation unavailable and
+// fail-closes the entire scheduler until an operator restarts fleetd.
+func TestRunRecreatesBrokenScaleSetSessionWithoutDaemonRestart(t *testing.T) {
+	d := testDependencies(t)
+	brokenHandled := make(chan struct{}, 1)
+	recreated := make(chan struct{})
+	var recreatedOnce sync.Once
+	broken := &brokenSessionSource{handled: brokenHandled}
+	var smallCreations atomic.Int32
+	d.newScaleSet = func(_ context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		if cfg.ScaleSetID != 1 {
+			return &fakeSource{}, nil
+		}
+		if smallCreations.Add(1) == 1 {
+			return broken, nil
+		}
+		recreatedOnce.Do(func() { close(recreated) })
+		return &fakeSource{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{
+			ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Shadow,
+		}, d)
+	}()
+	select {
+	case <-brokenHandled:
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped before session failure: %v", err)
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("broken source was not polled")
+	}
+	select {
+	case <-recreated:
+		cancel()
+	case err := <-done:
+		cancel()
+		t.Fatalf("runtime stopped instead of recreating session: %v", err)
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("broken scale-set session was reused instead of recreated")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if broken.closed.Load() != 1 || smallCreations.Load() != 2 {
+		t.Fatalf("broken closes=%d small creations=%d", broken.closed.Load(), smallCreations.Load())
 	}
 }
 
