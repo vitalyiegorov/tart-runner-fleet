@@ -438,6 +438,14 @@ func TestRunRecreatesBrokenScaleSetSessionWithoutDaemonRestart(t *testing.T) {
 	var recreatedOnce sync.Once
 	broken := &brokenSessionSource{handled: brokenHandled}
 	var smallCreations atomic.Int32
+	var smallCursorReads atomic.Int32
+	baseCursor := d.cursor
+	d.cursor = func(ctx context.Context, store runtimeStore, key int64) (int64, error) {
+		if key == 1 {
+			smallCursorReads.Add(1)
+		}
+		return baseCursor(ctx, store, key)
+	}
 	d.newScaleSet = func(_ context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 		if cfg.ScaleSetID != 1 {
 			return &fakeSource{}, nil
@@ -479,9 +487,87 @@ func TestRunRecreatesBrokenScaleSetSessionWithoutDaemonRestart(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if broken.closed.Load() != 1 || smallCreations.Load() != 2 {
-		t.Fatalf("broken closes=%d small creations=%d", broken.closed.Load(), smallCreations.Load())
+	if broken.closed.Load() != 1 || smallCreations.Load() != 2 || smallCursorReads.Load() != 2 {
+		t.Fatalf("broken closes=%d small creations=%d cursor reads=%d", broken.closed.Load(), smallCreations.Load(), smallCursorReads.Load())
 	}
+}
+
+func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
+	if _, err := newRecoveringScaleSetSource(nil, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1)); err == nil {
+		t.Fatal("nil initial source accepted")
+	}
+	if _, err := newRecoveringScaleSetSource(&fakeSource{}, nil, make(chan struct{}, 1)); err == nil {
+		t.Fatal("nil source factory accepted")
+	}
+	if _, err := newRecoveringScaleSetSource(&fakeSource{}, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, nil); err == nil {
+		t.Fatal("nil recovery limiter accepted")
+	}
+
+	initial := &fakeSource{}
+	source, err := newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := source.Registered(context.Background(), "runner")
+	if err != nil || !registered {
+		t.Fatalf("registered=%v err=%v", registered, err)
+	}
+	jit, err := source.AcquireAndGenerateJIT(context.Background(), 1, "runner", "_work")
+	if err != nil || jit == nil {
+		t.Fatalf("jit=%v err=%v", jit, err)
+	}
+	jit.Destroy()
+	if err := source.Deregister(context.Background(), "runner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(context.Background()); err != nil || initial.closed.Load() != 1 {
+		t.Fatalf("second close err=%v closes=%d", err, initial.closed.Load())
+	}
+	if _, err := source.Registered(context.Background(), "runner"); err == nil {
+		t.Fatal("closed recovering source accepted a control call")
+	}
+}
+
+func TestRecoveringScaleSetSourceBoundsReplacementFailures(t *testing.T) {
+	closeFailure := &failingCloseSource{err: errors.New("private close detail")}
+	openCalls := 0
+	source, err := newRecoveringScaleSetSource(closeFailure, func(context.Context) (scaleSetSource, error) {
+		openCalls++
+		return &fakeSource{}, nil
+	}, make(chan struct{}, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.replace(context.Background(), closeFailure); !errors.Is(err, errScaleSetClose) || openCalls != 0 || strings.Contains(err.Error(), "private") {
+		t.Fatalf("close replacement err=%v opens=%d", err, openCalls)
+	}
+
+	initial := &fakeSource{}
+	source, _ = newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
+		return nil, errors.New("private open detail")
+	}, make(chan struct{}, 1))
+	if err := source.replace(context.Background(), initial); err == nil || strings.Contains(err.Error(), "private") {
+		t.Fatalf("open replacement err=%v", err)
+	}
+	if err := source.replace(context.Background(), &fakeSource{}); err != nil {
+		t.Fatalf("stale replacement err=%v", err)
+	}
+	source.limiter <- struct{}{}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := source.replace(canceled, initial); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled replacement err=%v", err)
+	}
+	<-source.limiter
 }
 
 // Regression: the released controller accepts the mutation modes in the
