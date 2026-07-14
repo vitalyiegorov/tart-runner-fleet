@@ -479,6 +479,54 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 	}
 }
 
+func TestMigrationNineOrdersDeadAcquireProvisionIntoCleanup(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	now := time.Unix(464, 0).UTC().UnixNano()
+	ownership := `{"controller_id":"tart-runner-fleet","resource_id":"owner/repo/1/1/2","operation_id":"dead-clone"}`
+	metadata := `{"schema_version":1,"repo":"owner/repo","platform":"linux","profile":"small","route":"linux-small","resources":{"CPU":1,"MemoryMB":2048,"Slots":1},"demand":{"Repo":"owner/repo","RunID":1,"Attempt":1,"JobID":2}}`
+	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"orphan", operations.StateReachable, 3, 0, ownership, metadata, "", now, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []struct{ id, resource, effect, failure string }{
+		{"dead-clone", "orphan", "clone:orphan", "runner lifecycle failed at acquire_jit"},
+		{"unrelated-clone", "orphan", "clone:other", "runner lifecycle failed at acquire_jit"},
+	} {
+		if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			operation.id, operation.id, operation.effect, lifecycle.OperationProvision, operation.resource, `{}`, operations.OperationDead, 5,
+			now, "", 0, operation.failure, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 9 {
+		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+	instance, err := store.Instance(ctx, "orphan")
+	if err != nil || instance.State != operations.StateDraining || instance.DrainPhase != 1 {
+		t.Fatalf("recovered instance=%#v err=%v", instance, err)
+	}
+	var status string
+	var attempts int
+	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='dead-clone'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationPending) || attempts != 0 {
+		t.Fatalf("provision recovery status=%q attempts=%d err=%v", status, attempts, err)
+	}
+	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='unrelated-clone'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationDead) || attempts != 5 {
+		t.Fatalf("unrelated operation changed: status=%q attempts=%d err=%v", status, attempts, err)
+	}
+	var drainKind, dependency string
+	if err := store.db.QueryRow(`SELECT kind FROM operations WHERE id='recovery-drain-orphan'`).Scan(&drainKind); err != nil || drainKind != lifecycle.OperationDrain {
+		t.Fatalf("recovery drain=%q err=%v", drainKind, err)
+	}
+	if err := store.db.QueryRow(`SELECT depends_on FROM operation_dependencies WHERE operation_id='recovery-drain-orphan'`).Scan(&dependency); err != nil || dependency != "dead-clone" {
+		t.Fatalf("recovery dependency=%q err=%v", dependency, err)
+	}
+}
+
 func TestMigrationSixRevivesOnlyKnownEphemeralDeregisterDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)

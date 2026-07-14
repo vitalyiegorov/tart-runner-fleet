@@ -193,6 +193,23 @@ func TestProvisionedJobSpecificJITBecomesAssigned(t *testing.T) {
 	}
 }
 
+func TestProvisionExecutorYieldsToDurableCancellationDrain(t *testing.T) {
+	for _, state := range []operations.State{
+		operations.StateDraining,
+		operations.StateDeregistering,
+		operations.StateStopping,
+		operations.StateDeleted,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			memory := &memoryState{instance: lifecycleInstance(state)}
+			executor := ProvisionExecutor{State: memory}
+			if err := executor.Execute(context.Background(), operations.Operation{Kind: OperationProvision, ResourceID: memory.instance.ID}); err != nil {
+				t.Fatalf("cancellation cleanup state %s blocked provision completion: %v", state, err)
+			}
+		})
+	}
+}
+
 func TestProvisionExecutorReplacesGhostJITReservationAfterBootstrapFailure(t *testing.T) {
 	calls := []string{}
 	registration := &fakeRegistration{calls: &calls, registerOnJIT: true, secret: githubscaleset.NewJITSecret("first-jit")}

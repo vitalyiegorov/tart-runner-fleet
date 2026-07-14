@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -290,6 +291,44 @@ func TestProjectDemandRankCoversMonotonicLifecycleAndIdempotency(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCompletedPreRegistrationDemandOrdersDrainBehindProvision(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	instance := operations.Instance{
+		ID: "reachable", Repo: "owner/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+		Resources: domain.Resources{CPU: 1, MemoryMB: 2048, Slots: 1},
+		Demand:    domain.DemandKey{Repo: "owner/repo", RunID: 77, Attempt: 1, JobID: 91}, State: operations.StateReachable,
+		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: "demand", OperationID: "spawn"},
+	}
+	if err := store.CreateInstance(ctx, instance); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"spawn", "spawn", "clone:reachable", lifecycle.OperationProvision, instance.ID, `{}`, operations.OperationPending, 0,
+		now.UnixNano(), "", 0, "", now.UnixNano(), now.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.projectDemandRank(ctx, instance, operations.DemandJobCompleted); err != nil {
+		t.Fatalf("project completion: %v", err)
+	}
+	got, err := store.Instance(ctx, instance.ID)
+	if err != nil || got.State != operations.StateDraining {
+		t.Fatalf("projected instance = %#v, %v", got, err)
+	}
+	claimed, err := store.Claim(ctx, "worker", 2, now.Add(time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != "spawn" {
+		t.Fatalf("provision must gate drain: %#v, %v", claimed, err)
+	}
+	if _, err := store.Complete(ctx, "spawn", "worker", "clone:reachable", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.Claim(ctx, "worker", 2, now.Add(2*time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].Kind != lifecycle.OperationDrain || claimed[0].ResourceID != instance.ID {
+		t.Fatalf("drain was not released after provision yielded: %#v, %v", claimed, err)
 	}
 }
 

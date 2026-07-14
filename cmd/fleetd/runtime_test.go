@@ -1236,6 +1236,12 @@ func TestAuthorityLeaseRecoversExpiredWorkAndFencesAnotherController(t *testing.
 	}
 }
 
+func TestProvisionLifecycleNeverDeadLettersOwnedVMs(t *testing.T) {
+	if lifecycleRetryMaxAttempts != 0 {
+		t.Fatalf("provision retry max attempts = %d, want durable retry", lifecycleRetryMaxAttempts)
+	}
+}
+
 type recoverFailStore struct{ operations.Store }
 
 func (recoverFailStore) RecoverExpired(context.Context, time.Time) (int64, error) {
