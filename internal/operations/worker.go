@@ -33,6 +33,7 @@ type Worker struct {
 	RenewEvery        time.Duration
 	OperationDeadline time.Duration
 	Retry             RetryPolicy
+	RetryByKind       map[string]RetryPolicy
 	Now               func() time.Time
 	After             func(time.Duration) <-chan time.Time
 }
@@ -95,7 +96,7 @@ func (w Worker) runOperation(parent context.Context, operation Operation) (bool,
 	}
 	now := w.now()
 	if executionErr != nil {
-		next, retry := w.Retry.Next(operation.Attempts+1, now)
+		next, retry := w.retryPolicy(operation.Kind).Next(operation.Attempts+1, now)
 		if err := w.Store.Retry(context.WithoutCancel(parent), operation.ID, w.Owner, executionErr.Error(), next, !retry); err != nil {
 			return false, errorsJoin(executionErr, err)
 		}
@@ -103,6 +104,13 @@ func (w Worker) runOperation(parent context.Context, operation Operation) (bool,
 	}
 	_, err := w.Store.Complete(context.WithoutCancel(parent), operation.ID, w.Owner, operation.EffectKey, now)
 	return err == nil, err
+}
+
+func (w Worker) retryPolicy(kind string) RetryPolicy {
+	if policy, ok := w.RetryByKind[kind]; ok {
+		return policy
+	}
+	return w.Retry
 }
 
 func executeSafely(ctx context.Context, executor Executor, operation Operation) (err error) {

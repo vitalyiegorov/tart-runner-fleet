@@ -442,7 +442,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 	}
 	var version int
 	var journal string
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err != nil || journal != "wal" {
@@ -474,7 +474,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 6 {
+	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 7 {
 		t.Fatalf("upgrade version=%d err=%v", version, err)
 	}
 }
@@ -505,7 +505,7 @@ func TestMigrationSixRevivesOnlyKnownEphemeralDeregisterDeadLetter(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version=6`); err != nil {
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version>=6`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Migrate(ctx); err != nil {
@@ -544,6 +544,9 @@ func TestMigrationSevenRequeuesV071DeregisterDeadLetterExactlyOnce(t *testing.T)
 	}
 	if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"v071-drain", "v071-drain", "deregister:v071-ephemeral", lifecycle.OperationDrain, "v071-ephemeral", `{}`, operations.OperationDead, 5, now, "", 0, legacyStageDeregisterError, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version=7`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Migrate(ctx); err != nil {
