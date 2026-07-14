@@ -23,6 +23,11 @@ type Store struct {
 	injectRows  func(string) rowsScanner
 }
 
+// legacyStageDeregisterError is the exact redacted value persisted by
+// releases before migration 6. Keep it immutable: deriving this predicate
+// from future error formatting could broaden a one-shot data repair.
+const legacyStageDeregisterError = "runner lifecycle failed at deregister"
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, operations.ErrInvalid
@@ -399,10 +404,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 		// in the same transaction makes this recovery one-shot across restarts.
 		if _, err := s.txExec(ctx, tx, "migrate.v6", `UPDATE operations
 			SET status=?,attempts=0,available_at=?,lease_owner='',lease_until=0,last_error='',updated_at=?
-			WHERE status=? AND kind=? AND last_error=? AND EXISTS (
-				SELECT 1 FROM instances WHERE instances.id=operations.resource_id AND instances.state=?
+			WHERE status=? AND kind=? AND last_error=?
+			AND effect_key=kind||':'||resource_id
+			AND NOT EXISTS (SELECT 1 FROM operation_effects WHERE operation_effects.operation_id=operations.id)
+			AND EXISTS (
+				SELECT 1 FROM instances WHERE instances.id=operations.resource_id AND instances.state=? AND instances.drain_phase=1
 			)`, operations.OperationPending, now, now, operations.OperationDead, lifecycle.OperationDrain,
-			"runner lifecycle failed at "+string(lifecycle.StageDeregister), operations.StateDraining); err != nil {
+			legacyStageDeregisterError, operations.StateDraining); err != nil {
 			return fmt.Errorf("migration 6: %w", err)
 		}
 		if _, err := s.txExec(ctx, tx, "migrate.v6.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(6, ?)`, now); err != nil {

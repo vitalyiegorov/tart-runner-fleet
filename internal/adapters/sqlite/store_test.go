@@ -489,12 +489,19 @@ func TestMigrationSixRevivesOnlyKnownEphemeralDeregisterDeadLetter(t *testing.T)
 		"ephemeral", operations.StateDraining, 7, 1, ownership, metadata, "", now, now); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []struct{ id, kind, resource, lastError string }{
-		{"ephemeral-drain", "deregister", "ephemeral", "runner lifecycle failed at deregister"},
-		{"unrelated-dead", "clone", "ephemeral", "runner lifecycle failed at clone"},
+	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"running", operations.StateRunning, 7, 0, ownership, metadata, "", now, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []struct{ id, kind, resource, effect, lastError string }{
+		{"ephemeral-drain", "deregister", "ephemeral", "deregister:ephemeral", legacyStageDeregisterError},
+		{"unrelated-dead", "clone", "ephemeral", "clone:ephemeral", "runner lifecycle failed at clone"},
+		{"wrong-effect", "deregister", "ephemeral", "deregister:other", legacyStageDeregisterError},
+		{"wrong-state", "deregister", "running", "deregister:running", legacyStageDeregisterError},
+		{"wrong-stage", "deregister", "ephemeral", "deregister:ephemeral:other", "runner lifecycle failed at confirm_inactive"},
 	} {
 		if _, err := store.db.Exec(`INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,lease_owner,lease_until,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			operation.id, operation.id, operation.kind+":"+operation.resource, operation.kind, operation.resource, `{}`, operations.OperationDead, 5, now, "", 0, operation.lastError, now, now); err != nil {
+			operation.id, operation.id, operation.effect, operation.kind, operation.resource, `{}`, operations.OperationDead, 5, now, "", 0, operation.lastError, now, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -509,8 +516,19 @@ func TestMigrationSixRevivesOnlyKnownEphemeralDeregisterDeadLetter(t *testing.T)
 	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='ephemeral-drain'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationPending) || attempts != 0 {
 		t.Fatalf("ephemeral drain was not revived once: status=%q attempts=%d err=%v", status, attempts, err)
 	}
-	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='unrelated-dead'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationDead) || attempts != 5 {
-		t.Fatalf("unrelated dead letter changed: status=%q attempts=%d err=%v", status, attempts, err)
+	for _, id := range []string{"unrelated-dead", "wrong-effect", "wrong-state", "wrong-stage"} {
+		if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id=?`, id).Scan(&status, &attempts); err != nil || status != string(operations.OperationDead) || attempts != 5 {
+			t.Fatalf("unrelated dead letter %s changed: status=%q attempts=%d err=%v", id, status, attempts, err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE operations SET status=?,attempts=5,last_error=? WHERE id='ephemeral-drain'`, operations.OperationDead, legacyStageDeregisterError); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT status,attempts FROM operations WHERE id='ephemeral-drain'`).Scan(&status, &attempts); err != nil || status != string(operations.OperationDead) || attempts != 5 {
+		t.Fatalf("migration 6 was not one-shot: status=%q attempts=%d err=%v", status, attempts, err)
 	}
 }
 
@@ -777,7 +795,7 @@ func TestMigrationFaultInjectionRollsBackEveryStage(t *testing.T) {
 	points := []string{
 		"migrate.pragma", "migrate.begin", "migrate.table", "migrate.version", "migrate.v1", "migrate.v1.record",
 		"migrate.v2", "migrate.v2.record", "migrate.v3", "migrate.v3.record", "migrate.v4", "migrate.v4.record",
-		"migrate.v5", "migrate.v5.record", "migrate.commit", "migrate.quick",
+		"migrate.v5", "migrate.v5.record", "migrate.v6", "migrate.v6.record", "migrate.commit", "migrate.quick",
 	}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {
