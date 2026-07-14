@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -47,6 +49,7 @@ type dependencies struct {
 	loadPrivateKey func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
 	openProvision  func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
 	writeConfig    func(string, config.Config) error
+	command        autoupdate.Command
 }
 
 type loadedSecret interface {
@@ -87,6 +90,7 @@ func defaultDependencies() dependencies {
 			return githubscaleset.NewProvisioner(cfg)
 		},
 		writeConfig: atomicWriteConfig,
+		command:     execCommand{},
 	}
 }
 
@@ -123,6 +127,8 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		return runConfig(args[1:], stdout, stderr)
 	case "scale-sets":
 		return runScaleSets(ctx, args[1:], stdout, stderr, deps)
+	case "update":
+		return runUpdate(ctx, args[1:], stdout, stderr, deps)
 	case "validate-config":
 		return runConfig(append([]string{"validate"}, args[1:]...), stdout, stderr)
 	case "status", "queues", "instances", "operations", "observations", "health", "doctor", "metrics":
@@ -135,6 +141,84 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		writeHelp(stderr)
 		return exitUsage
 	}
+}
+
+type execCommand struct{}
+
+func (execCommand) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput() // #nosec G204 -- arguments are validated release/update fields, never shell text.
+}
+
+func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	if len(args) == 0 || (args[0] != "adopt" && args[0] != "apply-latest") {
+		fmt.Fprintln(stderr, "usage: fleetctl update adopt|apply-latest [guarded flags]")
+		return exitUsage
+	}
+	operation := args[0]
+	flags := flag.NewFlagSet("fleetctl update "+operation, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	home, _ := os.UserHomeDir()
+	rootDefault := filepath.Join(home, "Library", "Application Support", "tart-runner-fleet")
+	root := flags.String("root", rootDefault, "immutable installation root")
+	stateDir := flags.String("state-dir", filepath.Join(rootDefault, "state"), "fleet state directory")
+	launchAgentsDir := flags.String("launch-agents-dir", filepath.Join(home, "Library", "LaunchAgents"), "user LaunchAgents directory")
+	repository := flags.String("repo", "vitalyiegorov/tart-runner-fleet", "GitHub release repository")
+	mode := flags.String("mode", "authority", "preserved controller mode")
+	configPath := flags.String("config", filepath.Join(rootDefault, "state", "fleet.json"), "persisted fleet configuration")
+	endpoint := flags.String("endpoint", "unix://"+filepath.Join(rootDefault, "state", "fleetd.sock"), "local readiness endpoint")
+	domain := flags.String("domain", fmt.Sprintf("gui/%d", os.Getuid()), "launchd domain")
+	confirm := flags.String("confirm", "", "exact mutation confirmation")
+	releaseDir := flags.String("release-dir", "", "current immutable release directory (adopt only)")
+	interval := flags.Duration("interval", 5*time.Minute, "production release poll interval")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+		return exitUsage
+	}
+	wantConfirm := "automatic-release-update"
+	if operation == "adopt" {
+		wantConfirm = "adopt-current-generation"
+	}
+	if *confirm != wantConfirm {
+		fmt.Fprintf(stderr, "unsafe update: require --confirm %s\n", wantConfirm)
+		return exitUnsafe
+	}
+	host, err := autoupdate.NewLocalHost(autoupdate.LocalHostConfig{RootDir: *root, StateDir: *stateDir,
+		LaunchAgentsDir: *launchAgentsDir, Domain: *domain, Repository: *repository, UpdateInterval: *interval,
+		ReadyAttempts: 30, ReadyDelay: 2 * time.Second}, deps.command)
+	if err != nil {
+		fmt.Fprintf(stderr, "configure updater: %v\n", err)
+		return exitFailure
+	}
+	if operation == "adopt" {
+		if *releaseDir == "" {
+			fmt.Fprintln(stderr, "adopt requires --release-dir")
+			return exitUsage
+		}
+		candidate := autoupdate.Generation{Version: filepath.Base(filepath.Clean(*releaseDir)), Mode: *mode,
+			ReleaseDir: *releaseDir, ConfigPath: *configPath, Endpoint: *endpoint}
+		if err := host.Adopt(ctx, candidate); err != nil {
+			fmt.Fprintf(stderr, "adopt generation: %v\n", err)
+			return exitFailure
+		}
+		fmt.Fprintf(stdout, "automatic production updates enabled for %s\n", candidate.Version)
+		return exitSuccess
+	}
+	if *releaseDir != "" {
+		fmt.Fprintln(stderr, "--release-dir is valid only with adopt")
+		return exitUsage
+	}
+	release, err := autoupdate.LatestProductionRelease(ctx, *root, *repository, deps.command)
+	if err != nil {
+		fmt.Fprintf(stderr, "resolve production release: %v\n", err)
+		return exitFailure
+	}
+	candidate := autoupdate.Generation{Version: release.Version, Mode: *mode, ReleaseDir: release.Dir,
+		ConfigPath: *configPath, Endpoint: *endpoint}
+	if err := (autoupdate.Controller{Host: host}).Apply(ctx, candidate); err != nil {
+		fmt.Fprintf(stderr, "apply production release: %v\n", err)
+		return exitFailure
+	}
+	fmt.Fprintf(stdout, "production generation is current: %s\n", release.Version)
+	return exitSuccess
 }
 
 func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
@@ -512,6 +596,12 @@ GUARDED BOOTSTRAP
   fleetctl scale-sets provision --config path
   fleetctl scale-sets provision --config path --apply --write \
     --confirm provision-scale-sets --reason "operator reason"
+
+GUARDED RELEASE UPDATES
+  fleetctl update adopt --release-dir /absolute/release --mode authority \
+    --confirm adopt-current-generation
+  fleetctl update apply-latest --mode authority \
+    --confirm automatic-release-update
 
 CONNECTION
   fleetctl [--endpoint unix:///path/to/fleetd.sock] <remote-command>
