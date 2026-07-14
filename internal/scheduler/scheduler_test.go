@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -83,6 +84,17 @@ func TestStoppedAssignedRunnerIsRecoveredBeforeNewAdmission(t *testing.T) {
 	running.Power = domain.InstancePowerRunning
 	if got := PlanTick(input(nil, []domain.Instance{running}, State{})); len(got.Operations) != 0 {
 		t.Fatalf("running assignment was recovered: %#v", got)
+	}
+}
+
+func TestStoppedDrainingOrphanCannotStarveUnrelatedCapacity(t *testing.T) {
+	orphan := domain.Instance{ID: "orphan", Repo: "a/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, State: domain.InstanceDraining, Power: domain.InstancePowerStopped}
+	queued := demand("b/repo", 9, time.Minute, "small")
+
+	plan := PlanTick(input([]domain.Demand{queued}, []domain.Instance{orphan}, State{}))
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{queued.Key}) {
+		t.Fatalf("stopped draining orphan starved unrelated work: plan=%#v", plan)
 	}
 }
 
@@ -188,6 +200,85 @@ func TestLinuxAndMacOSNeverOverlap(t *testing.T) {
 	plan := PlanTick(input([]domain.Demand{linuxJob}, []domain.Instance{mac}, State{}))
 	if len(spawnedKeys(plan)) != 0 {
 		t.Fatalf("spawned Linux alongside macOS: %#v", plan)
+	}
+}
+
+func TestBlockedLinuxHandoffFillsSecondMaestroSlotOnce(t *testing.T) {
+	linux := demand("a/linux", 1, 10*time.Minute, "small")
+	queuedMaestro := demand("b/mobile", 2, 5*time.Minute, "maestro")
+	runningMaestro := domain.Instance{
+		ID: "maestro-1", Repo: "c/mobile", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+	in := input([]domain.Demand{linux, queuedMaestro}, []domain.Instance{runningMaestro}, State{})
+
+	first := PlanTick(in)
+	if got := spawnedKeys(first); !reflect.DeepEqual(got, []domain.DemandKey{queuedMaestro.Key}) {
+		t.Fatalf("blocked Linux handoff left the second Maestro slot idle: %#v", first)
+	}
+	if first.Next.LinuxHandoff == nil || first.Next.LinuxHandoff.Demand != linux.Key || !first.Next.LinuxHandoff.BackfillAdmitted {
+		t.Fatalf("bounded Linux handoff state = %#v", first.Next.LinuxHandoff)
+	}
+
+	in.Prior = first.Next
+	second := PlanTick(in)
+	if got := spawnedKeys(second); len(got) != 0 {
+		t.Fatalf("Linux handoff admitted an unbounded Maestro stream: %#v", second)
+	}
+}
+
+func TestLinuxHandoffBackfillWaitsForCapacityAndMatchesActiveProfile(t *testing.T) {
+	linux := demand("a/repo", 1, 10*time.Minute, "small")
+	maestro := demand("b/repo", 2, 5*time.Minute, "maestro")
+	builder := demand("c/repo", 3, 4*time.Minute, "builder")
+	running := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+
+	in := input([]domain.Demand{linux, maestro, builder}, []domain.Instance{running}, State{})
+	in.Host = domain.Fresh(domain.Host{Available: running.Resources}, testNow)
+	blocked := PlanTick(in)
+	if got := spawnedKeys(blocked); len(got) != 0 {
+		t.Fatalf("host-exhausted backfill = %#v", blocked)
+	}
+	if blocked.Next.LinuxHandoff == nil || blocked.Next.LinuxHandoff.BackfillAdmitted {
+		t.Fatalf("host-exhausted backfill consumed its one-shot budget: %#v", blocked.Next.LinuxHandoff)
+	}
+
+	in.Prior = blocked.Next
+	in.Host = domain.Fresh(domain.Host{Available: testConfig().LinuxCapacity}, testNow)
+	admitted := PlanTick(in)
+	if got := spawnedKeys(admitted); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("capacity recovery selected a cross-profile demand: %#v", admitted)
+	}
+}
+
+func TestLinuxHandoffStateRoundTripsAndResetsForANewHead(t *testing.T) {
+	first := demand("a/repo", 1, 10*time.Minute, "small")
+	second := demand("b/repo", 2, 9*time.Minute, "small")
+	want := State{LinuxHandoff: &LinuxHandoff{Demand: first.Key, Since: testNow, BackfillAdmitted: true}}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded State
+	if err := json.Unmarshal(encoded, &decoded); err != nil || !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("durable Linux handoff = %#v, %v", decoded, err)
+	}
+	if got := linuxHandoffFor(decoded.LinuxHandoff, first, testNow.Add(time.Minute)); !reflect.DeepEqual(got, *want.LinuxHandoff) {
+		t.Fatalf("same-head handoff changed = %#v", got)
+	}
+	if got := linuxHandoffFor(decoded.LinuxHandoff, second, testNow.Add(time.Minute)); got.Demand != second.Key || got.BackfillAdmitted || got.Since != testNow.Add(time.Minute) {
+		t.Fatalf("new-head handoff did not reset = %#v", got)
+	}
+	if _, ok := activeMacProfile([]domain.Instance{
+		{ID: "one", Platform: domain.PlatformMacOS, Profile: "maestro", State: domain.InstanceRunning},
+		{ID: "two", Platform: domain.PlatformMacOS, Profile: "builder", State: domain.InstanceRunning},
+	}); ok {
+		t.Fatal("mixed active macOS profiles accepted")
 	}
 }
 
@@ -939,5 +1030,8 @@ func TestIdleMacToLinuxSwitchSpawnsInSameDependentPlan(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.Operations[1].DependsOn, []string{plan.Operations[0].ID}) {
 		t.Fatalf("Linux spawn missing drain dependency: %#v", plan)
+	}
+	if plan.Next.LinuxHandoff != nil {
+		t.Fatalf("completed Linux handoff retained stale state: %#v", plan.Next.LinuxHandoff)
 	}
 }

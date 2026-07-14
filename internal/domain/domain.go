@@ -211,6 +211,26 @@ const (
 
 func (i Instance) Live() bool { return i.State != InstanceDeleted }
 
+// ConsumesHostResources distinguishes durable cleanup state from physical
+// CPU/RAM occupancy. A VM observed stopped while already tearing down remains
+// live until GitHub deregistration and Tart deletion complete, but cannot
+// execute again and must not reserve the host's compute envelope forever.
+// Unknown power and all non-teardown states remain fail-closed.
+func (i Instance) ConsumesHostResources() bool {
+	if !i.Live() {
+		return false
+	}
+	if i.Power != InstancePowerStopped {
+		return true
+	}
+	switch i.State {
+	case InstanceDraining, InstanceDeregistering, InstanceStopping:
+		return false
+	default:
+		return true
+	}
+}
+
 func (i Instance) CanRetry(now time.Time, maxAttempts int) bool {
 	return i.State == InstanceFailed && maxAttempts > 0 && i.Attempts < maxAttempts && !now.Before(i.RetryAt)
 }
@@ -226,7 +246,7 @@ const (
 func DeriveHostMode(instances []Instance) (HostMode, error) {
 	linux, macos := false, false
 	for _, instance := range instances {
-		if !instance.Live() {
+		if !instance.ConsumesHostResources() {
 			continue
 		}
 		switch instance.Platform {
