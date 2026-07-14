@@ -5,11 +5,13 @@ all changes as safety critical.
 
 1. Write a failing test before production code. Production incidents begin as
    replay fixtures.
-2. Track every CI or fleet incident in a GitHub issue. When reproducible, open
-   one fix PR and develop it test-first: prove the regression red, implement the
-   fix in that same PR, and hand it off only when every required check is green.
-   A red-only regression PR is not a completed fix unless progress is genuinely
-   blocked and the blocker is explicit.
+2. For every reproducible CI or fleet incident, open one focused fix PR and
+   develop it test-first: prove the regression red, implement the fix in that
+   same PR, and hand it off only when every required check is green. Create a
+   concise issue when the operator requests one or tracking adds value, but do
+   not block a safety repair on issue publication. A red-only regression PR is
+   not a completed fix unless progress is genuinely blocked and the blocker is
+   explicit.
 3. Keep policy pure and deterministic. Time, I/O, randomness, and process
    execution enter through interfaces.
 4. Never represent an unavailable observation as an empty collection.

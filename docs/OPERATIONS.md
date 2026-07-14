@@ -11,6 +11,11 @@ deregistered, stopped, and deleted through the Go controller.
 
 ## Self-hosting and bootstrap
 
+For a clean-machine procedure, verified release extraction, first LaunchAgent
+installation, updater adoption, and the post-reboot proof, start with
+[`INSTALL.md`](../INSTALL.md). For the daily operator cockpit and incident
+workflow, use [`USAGE.md`](../USAGE.md).
+
 `vitalyiegorov/tart-runner-fleet` is a first-class target with three concurrent
 Linux slots. Its preflight, quality, coverage, race, reproducible-build, release,
 and nightly jobs therefore run on ephemeral VMs scheduled by this fleet. There
@@ -163,6 +168,10 @@ with the candidate, and waits until queues, VMs, and operations are all empty.
 It then atomically replaces the persistent daemon and updater plists, requires
 the exact new version and the same controller mode to become ready, and restores
 the previous generation on any failure. Updates are strictly forward-only.
+Both generated plists use `RunAtLoad`; the daemon additionally uses
+restart-on-failure `KeepAlive`, while the updater uses a five-minute
+`StartInterval`. Every committed update rewrites the updater to the new immutable
+`fleetctl`, so a later login or reboot cannot regress to an older updater.
 
 To run the same idempotent check manually:
 
@@ -170,6 +179,16 @@ To run the same idempotent check manually:
 fleetctl update apply-latest \
   --mode authority \
   --confirm automatic-release-update
+```
+
+After every install or reboot, require both LaunchAgents and exact daemon
+readiness rather than treating process presence as health:
+
+```sh
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater
+fleetctl status --require-ready --output json
+fleetctl doctor --output json
 ```
 
 ```sh
