@@ -18,7 +18,7 @@ import (
 
 const (
 	InstalledGenerationFile         = "installed-generation.json"
-	CurrentGenerationLink          = "current"
+	CurrentGenerationLink           = "current"
 	UpdateJournalFile               = "update-transaction.json"
 	CanonicalPlist                  = "com.vitalyiegorov.tart-runner-fleet.plist"
 	UpdaterPlist                    = "com.vitalyiegorov.tart-runner-fleet.updater.plist"

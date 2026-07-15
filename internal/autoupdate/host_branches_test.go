@@ -701,9 +701,10 @@ func TestAtomicSymlinkReportsEveryDurabilityFailure(t *testing.T) {
 	}
 	file := &failingAtomicFile{}
 	ops := atomicSymlinkOps{
-		createTemp: func(string, string) (atomicWriteFile, error) { return file, nil },
-		remove: func(string) error { return nil }, symlink: func(string, string) error { return nil },
-		rename: func(string, string) error { return nil },
+		createTemp:    func(string, string) (atomicWriteFile, error) { return file, nil },
+		remove:        func(string) error { return nil },
+		symlink:       func(string, string) error { return nil },
+		rename:        func(string, string) error { return nil },
 		openDirectory: func(string) (atomicSyncCloser, error) { return file, nil },
 	}
 	if err := atomicSymlinkWith("/releases/v2", "/root/current", ops); err != nil {
