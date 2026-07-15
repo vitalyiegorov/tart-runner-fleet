@@ -40,6 +40,10 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.MacOS.Maestro.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
 		t.Fatalf("mac/target decode = %+v %+v", cfg.MacOS, cfg.Targets)
 	}
+	wantGuards := Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
+	if cfg.Guards != wantGuards {
+		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
+	}
 }
 
 func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
@@ -53,6 +57,10 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"duplicate repository":   func(c *Config) { c.Targets = append(c.Targets, c.Targets[0]) },
 		"zero timeout":           func(c *Config) { c.Timeouts.GitHub = 0 },
 		"unsafe disk reserve":    func(c *Config) { c.Guards.MinFreeDiskGiB = 0 },
+		"negative memory reserve": func(c *Config) { c.Guards.MinAvailableMemoryMiB = -1 },
+		"negative swap ceiling":   func(c *Config) { c.Guards.MaxSwapUsedMiB = -1 },
+		"negative load ceiling":   func(c *Config) { c.Guards.MaxLoadAverage = -1 },
+		"invalid cpu idle floor":  func(c *Config) { c.Guards.MinCPUIdlePercent = 101 },
 		"too many linux runners": func(c *Config) { c.Linux.MaxInstances = 5 },
 	}
 	for name, mutate := range tests {
@@ -292,7 +300,8 @@ func TestEncodeDeterministicallyRoundTripsMultiScopeConfiguration(t *testing.T) 
 		t.Fatalf("round-trip ValidateAuthority() = %v", err)
 	}
 	if roundTrip.GitHub.Scopes[0].ScaleSets[0].ID != 101 || roundTrip.GitHub.Scopes[1].ScaleSets[4].ID != 205 ||
-		roundTrip.Linux.Profiles[0].Resources != cfg.Linux.Profiles[0].Resources || roundTrip.Timeouts != cfg.Timeouts {
+		roundTrip.Linux.Profiles[0].Resources != cfg.Linux.Profiles[0].Resources || roundTrip.Timeouts != cfg.Timeouts ||
+		roundTrip.Guards != cfg.Guards {
 		t.Fatalf("round trip lost data: %+v", roundTrip)
 	}
 	if strings.Contains(first.String(), "privateKey") || strings.Contains(first.String(), "encodedJITConfig") {

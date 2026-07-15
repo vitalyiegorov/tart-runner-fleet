@@ -65,12 +65,16 @@ func TestEngineTickPlansAndCommitsFreshSnapshot(t *testing.T) {
 		Status: operations.DemandJobAvailable, RunnerRequestID: 10, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute),
 	}}}}
 	binding := Binding{ScaleSetID: 1, Profile: tickConfig().Profiles["small"]}
+	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
 	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
-		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(domain.Host{Available: tickConfig().LinuxCapacity}, now),
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
 	}, Config: tickConfig(), Bindings: []Binding{binding}, ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
 	result, err := engine.Tick(context.Background())
 	if err != nil || !result.Applied || result.Plan.Status != scheduler.PlanReady || len(result.Plan.Operations) != 1 || len(store.plans) != 1 {
 		t.Fatalf("Tick() = %#v, %v, durable=%d", result, err, len(store.plans))
+	}
+	if result.Host != host {
+		t.Fatalf("Tick() host = %#v, want %#v", result.Host, host)
 	}
 }
 

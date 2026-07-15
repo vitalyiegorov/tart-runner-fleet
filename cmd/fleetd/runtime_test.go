@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
@@ -833,6 +834,19 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 				t.Fatal("unexpected success")
 			}
 		})
+	}
+}
+
+func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
+	cfg := config.Default()
+	cfg.Guards = config.Guards{MinFreeDiskGiB: 70, MinAvailableMemoryMiB: 1536, MaxSwapUsedMiB: 3072, MaxLoadAverage: 8.5, MinCPUIdlePercent: 7.5}
+	production, ok := defaultDependencies().inventory(nil, cfg).(app.ProductionInventory)
+	if !ok {
+		t.Fatal("production inventory adapter type changed")
+	}
+	want := macos.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
+	if production.Guards != want {
+		t.Fatalf("wired guards = %+v, want %+v", production.Guards, want)
 	}
 }
 

@@ -28,6 +28,8 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 	_ = health.SetQueue("linux-small", 2, clock.Now().Add(-9*time.Second))
 	_ = health.SetInstances("linux-small", 2, 4, 8192)
 	health.SetOperations(3, 1)
+	_ = health.SetHostPressure(HostPressureMetric{AvailableMemoryMiB: 10240, FreeDiskGiB: 203, SwapUsedMiB: 0,
+		SwapOuts: 0, CPUIdlePercent: 54, LoadAverage: 3, AdmissionAllowed: true, AdmissionReason: "capacity available"})
 
 	server, err := NewServer(health, ServerConfig{ControllerVersion: "v1.2.3", ControllerMode: "shadow"})
 	if err != nil {
@@ -46,7 +48,8 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 		status.Data.HostMode != "linux" || !status.Data.Live.OK || !status.Data.Ready.OK ||
 		len(status.Data.Queues) != 1 || status.Data.Queues[0].Profile != "linux-small" ||
 		len(status.Data.Instances) != 1 || len(status.Data.Observations) != 3 ||
-		status.Data.Operations.Retrying != 3 || status.Data.Operations.Dead != 1 || status.Warnings == nil {
+		status.Data.Operations.Retrying != 3 || status.Data.Operations.Dead != 1 || status.Data.HostPressure.FreeDiskGiB != 203 ||
+		!status.Data.HostPressure.AdmissionAllowed || status.Warnings == nil {
 		t.Fatalf("status=%+v", status)
 	}
 	if got := statusResponse.Header.Get("ETag"); got == "" {
@@ -66,6 +69,10 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 		`fleet_instance_cpu{profile="linux-small"} 4`,
 		`fleet_instance_memory_mib{profile="linux-small"} 8192`,
 		`fleet_operation_retries 3`, `fleet_operations_dead 1`,
+		`fleet_host_available_memory_mib 10240`, `fleet_host_free_disk_gib 203`,
+		`fleet_host_swap_used_mib 0`, `fleet_host_swapouts_total 0`,
+		`fleet_host_cpu_idle_percent 54`, `fleet_host_load_average 3`,
+		`fleet_host_admission_allowed 1`,
 		`fleet_observation_fresh{observation="github"} 1`,
 		`fleet_mode{mode="linux"} 1`,
 		`fleet_last_successful_tick_timestamp_seconds 1700000000`,
