@@ -151,6 +151,17 @@ configuration over `tart exec -i` standard input; it never appears in argv,
 logs, SQLite, or the parent environment. Build new `*-go` bases and retain the
 incumbent bases unchanged for rollback.
 
+Treat the helper as part of the immutable base contract. Before promoting a
+controller release, update each stopped base from that release's platform
+artifact, require root ownership and mode `0755`, boot it only for a helper
+version/smoke check, then stop it and retain the preceding base. Never patch an
+active job VM. The helper keeps a detached supervisor around the ephemeral
+listener and requests `sudo -n shutdown -h now` after it exits; verify the base
+grants that exact non-interactive operation. A real canary must prove the full
+chain: runner exits, guest powers off, fresh inventory observes stopped, and
+the durable drain/deregister/delete operation completes before the base is
+selected for production.
+
 ## Real canary and authority handoff
 
 Every release carries four immutable launchd templates plus

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -351,7 +352,7 @@ func TestExecLauncherStartsDetachedProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer log.Close()
-	process, err := (ExecLauncher{}).Start(context.Background(), ProcessSpec{
+	process, err := (ExecLauncher{SudoPath: "/usr/bin/true", ShutdownPath: "/usr/bin/true"}).Start(context.Background(), ProcessSpec{
 		Path: "/usr/bin/true", Dir: root, Env: os.Environ(), Log: log,
 	})
 	if err != nil {
@@ -363,6 +364,51 @@ func TestExecLauncherStartsDetachedProcess(t *testing.T) {
 	if err := process.Release(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
+	root := t.TempDir()
+	runnerMarker := filepath.Join(root, "runner-finished")
+	shutdownMarker := filepath.Join(root, "shutdown-requested")
+	runner := filepath.Join(root, "run.sh")
+	sudo := filepath.Join(root, "sudo")
+	shutdown := filepath.Join(root, "shutdown")
+	if err := os.WriteFile(runner, []byte("#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shutdown, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	process, err := (ExecLauncher{ShellPath: "/bin/sh", SudoPath: sudo, ShutdownPath: shutdown}).Start(context.Background(), ProcessSpec{
+		Path: runner, Dir: root, Env: append(os.Environ(), "RUNNER_MARKER="+runnerMarker, "SHUTDOWN_MARKER="+shutdownMarker), Log: log,
+	})
+	if err != nil || process == nil {
+		t.Fatalf("start supervisor = %v, %v", process, err)
+	}
+	if err := process.Release(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		runnerResult, runnerErr := os.ReadFile(runnerMarker)
+		shutdownResult, shutdownErr := os.ReadFile(shutdownMarker)
+		if runnerErr == nil && shutdownErr == nil {
+			if string(runnerResult) != "finished" || string(shutdownResult) != "-n "+shutdown+" -h now" {
+				t.Fatalf("runner/shutdown = %q/%q", runnerResult, shutdownResult)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("detached supervisor did not request guest shutdown after runner exit")
 }
 
 func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
@@ -383,6 +429,23 @@ func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
 	defer log.Close()
 	if _, err := (ExecLauncher{}).Start(context.Background(), ProcessSpec{Path: "/definitely/missing", Dir: t.TempDir(), Log: log}); err == nil {
 		t.Fatal("missing executable started")
+	}
+	if _, err := (ExecLauncher{SudoPath: "/usr/bin/true", ShutdownPath: "/usr/bin/true"}).Start(context.Background(), ProcessSpec{
+		Path: "/usr/bin/true", Dir: filepath.Join(t.TempDir(), "missing"), Log: log,
+	}); err == nil {
+		t.Fatal("missing working directory started")
+	}
+	for name, launcher := range map[string]ExecLauncher{
+		"relative shell":   {ShellPath: "bin/sh"},
+		"missing shell":    {ShellPath: "/definitely/missing-shell"},
+		"missing sudo":     {SudoPath: "/definitely/missing-sudo"},
+		"missing shutdown": {ShutdownPath: "/definitely/missing-shutdown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := launcher.Start(context.Background(), ProcessSpec{Path: "/usr/bin/true", Dir: t.TempDir(), Log: log}); !errors.Is(err, ErrStart) {
+				t.Fatalf("invalid supervisor path error=%v", err)
+			}
+		})
 	}
 }
 
