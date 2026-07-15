@@ -111,6 +111,8 @@ func waitSupervisorReady(ctx context.Context, path string, limit time.Duration) 
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		// #nosec G304 -- path is the random marker created by os.CreateTemp
+		// inside ExecLauncher.Start and is never accepted from external input.
 		value, err := os.ReadFile(path)
 		if err == nil && string(value) == supervisorReadyValue {
 			return nil
