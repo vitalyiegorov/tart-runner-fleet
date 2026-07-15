@@ -214,6 +214,9 @@ func healthyStatus() adminapi.StatusEnvelope {
 }
 
 func TestOperatorCommandsHumanAndJSON(t *testing.T) {
+	if admissionState(false) != "deferred" {
+		t.Fatal("blocked admission rendered as allowed")
+	}
 	status := healthyStatus()
 	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
 		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil

@@ -1041,14 +1041,18 @@ func TestEngineTickerRecordsBoundedMetricsAndModes(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	ticker := engineTicker{health: health, profiles: []string{"small", "maestro"}}
-	ticker.recordMetrics(app.TickResult{HostMode: domain.HostLinux, Demands: []domain.Demand{
+	ticker.recordMetrics(app.TickResult{HostMode: domain.HostLinux, Host: domain.Host{Pressure: domain.HostPressure{
+		AvailableMemoryMB: 8192, FreeDiskGB: 200, CPUIdlePercent: 50, LoadAverage: 3,
+		AdmissionAllowed: true, AdmissionReason: "capacity available",
+	}}, Demands: []domain.Demand{
 		{Profile: "small", CreatedAt: now.Add(-time.Minute)}, {Profile: "small", CreatedAt: now.Add(-2 * time.Minute)},
 	}, Instances: []domain.Instance{
 		{Profile: "small", State: domain.InstanceRunning, Resources: domain.Resources{CPU: 2, MemoryMB: 4096}},
 		{Profile: "maestro", State: domain.InstanceDeleted, Resources: domain.Resources{CPU: 4, MemoryMB: 7168}},
 	}})
 	snapshot := health.Snapshot()
-	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 {
+	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 ||
+		snapshot.HostPressure.FreeDiskGiB != 200 || !snapshot.HostPressure.AdmissionAllowed {
 		t.Fatalf("snapshot=%#v", snapshot)
 	}
 	ticker.recordMetrics(app.TickResult{HostMode: domain.HostMacOS})

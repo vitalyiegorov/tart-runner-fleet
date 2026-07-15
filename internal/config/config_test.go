@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,7 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"negative swap ceiling":   func(c *Config) { c.Guards.MaxSwapUsedMiB = -1 },
 		"negative load ceiling":   func(c *Config) { c.Guards.MaxLoadAverage = -1 },
 		"invalid cpu idle floor":  func(c *Config) { c.Guards.MinCPUIdlePercent = 101 },
+		"invalid load number":     func(c *Config) { c.Guards.MaxLoadAverage = math.NaN() },
 		"too many linux runners":  func(c *Config) { c.Linux.MaxInstances = 5 },
 	}
 	for name, mutate := range tests {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -403,7 +404,9 @@ func (c Config) Validate() error {
 		return errors.New("disk reserve must be positive")
 	}
 	if c.Guards.MinAvailableMemoryMiB < 0 || c.Guards.MaxSwapUsedMiB < 0 || c.Guards.MaxLoadAverage < 0 ||
-		c.Guards.MinCPUIdlePercent < 0 || c.Guards.MinCPUIdlePercent > 100 {
+		math.IsNaN(c.Guards.MaxLoadAverage) || math.IsInf(c.Guards.MaxLoadAverage, 0) ||
+		c.Guards.MinCPUIdlePercent < 0 || c.Guards.MinCPUIdlePercent > 100 ||
+		math.IsNaN(c.Guards.MinCPUIdlePercent) || math.IsInf(c.Guards.MinCPUIdlePercent, 0) {
 		return errors.New("host pressure guards are invalid")
 	}
 	seenProfiles := map[string]struct{}{}
