@@ -17,13 +17,13 @@ import (
 )
 
 const (
-	InstalledGenerationFile  = "installed-generation.json"
-	UpdateJournalFile        = "update-transaction.json"
-	CanonicalPlist           = "com.vitalyiegorov.tart-runner-fleet.plist"
-	UpdaterPlist             = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
-	updateBackupFile         = "update-previous.plist"
-	updateBackupUpdaterFile  = "update-previous-updater.plist"
-	launchdBootstrapAttempts = 3
+	InstalledGenerationFile         = "installed-generation.json"
+	UpdateJournalFile               = "update-transaction.json"
+	CanonicalPlist                  = "com.vitalyiegorov.tart-runner-fleet.plist"
+	UpdaterPlist                    = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
+	updateBackupFile                = "update-previous.plist"
+	updateBackupUpdaterFile         = "update-previous-updater.plist"
+	minimumLaunchdBootstrapAttempts = 3
 )
 
 var (
@@ -381,14 +381,18 @@ func (h *LocalHost) Rollback(ctx context.Context, current Generation) error {
 // after bootout. Retrying this single idempotent boundary is safe; the rest of
 // activation and rollback remains fail-closed and is never replayed.
 func (h *LocalHost) bootstrapService(ctx context.Context, plist string) error {
+	attempts := h.readyAttempts
+	if attempts < minimumLaunchdBootstrapAttempts {
+		attempts = minimumLaunchdBootstrapAttempts
+	}
 	var last error
-	for attempt := 0; attempt < launchdBootstrapAttempts; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		if _, err := h.command.Run(ctx, "launchctl", "bootstrap", h.domain, plist); err == nil {
 			return nil
 		} else {
 			last = err
 		}
-		if attempt+1 < launchdBootstrapAttempts {
+		if attempt+1 < attempts {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
