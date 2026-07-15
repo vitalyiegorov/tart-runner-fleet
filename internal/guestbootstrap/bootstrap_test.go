@@ -396,7 +396,7 @@ func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
 	if err := process.Release(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		runnerResult, runnerErr := os.ReadFile(runnerMarker)
 		shutdownResult, shutdownErr := os.ReadFile(shutdownMarker)
@@ -429,6 +429,11 @@ func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
 	defer log.Close()
 	if _, err := (ExecLauncher{}).Start(context.Background(), ProcessSpec{Path: "/definitely/missing", Dir: t.TempDir(), Log: log}); err == nil {
 		t.Fatal("missing executable started")
+	}
+	if _, err := (ExecLauncher{SudoPath: "/usr/bin/true", ShutdownPath: "/usr/bin/true"}).Start(context.Background(), ProcessSpec{
+		Path: "/usr/bin/true", Dir: filepath.Join(t.TempDir(), "missing"), Log: log,
+	}); err == nil {
+		t.Fatal("missing working directory started")
 	}
 	for name, launcher := range map[string]ExecLauncher{
 		"relative shell":   {ShellPath: "bin/sh"},

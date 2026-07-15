@@ -43,10 +43,10 @@ func (l ExecLauncher) Start(ctx context.Context, spec ProcessSpec) (Process, err
 	// program remains as the runner's detached parent so an ephemeral listener
 	// exit always powers off the guest. Paths are validated positional
 	// arguments; no path or JIT value is interpolated into the program.
-	// #nosec G204 -- all executable paths are fixed defaults or trusted test
-	// injection and are validated as clean absolute paths.
 	args := []string{"-c", supervisorScript, "tart-runner-fleet-supervisor", spec.Path, sudo, shutdown}
 	args = append(args, spec.Args...)
+	// #nosec G204 -- all executable paths are fixed defaults or trusted test
+	// injection and are validated as clean absolute executable paths.
 	command := exec.Command(shell, args...)
 	command.Dir = spec.Dir
 	command.Env = append([]string(nil), spec.Env...)
