@@ -137,7 +137,8 @@ provisioned self-hosted Linux runners:
 - medium quality: vet, golangci-lint with gosec, CPD, official deadcode,
   govulncheck;
 - medium unit/coverage and large race jobs run concurrently;
-- a small required build gate produces verified macOS ARM64 binaries.
+- a required build gate on a Linux medium runner produces verified macOS ARM64
+  binaries.
 
 `Required CI` fails closed for unsuccessful upstream gates but does not survive
 workflow cancellation, so a superseded commit cannot retain the concurrency
@@ -195,6 +196,8 @@ unlimited jump-the-queue flag. See
 - [`docs/CLI.md`](docs/CLI.md) — operator commands, output, and exit codes
 - [`docs/API.md`](docs/API.md) — local API compatibility and security contract
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — deployment and rollout
+- [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) — copy-paste inspection and
+  incident workflow for agents
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model and secret handling
 - [`docs/TESTING.md`](docs/TESTING.md) — TDD and verification layers
 - [`AGENTS.md`](AGENTS.md) — mandatory workflow for coding agents

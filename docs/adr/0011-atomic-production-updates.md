@@ -1,4 +1,4 @@
-# ADR 0008: Atomic production updates are part of fleet authority
+# ADR 0011: Atomic production updates are part of fleet authority
 
 ## Status
 
@@ -35,8 +35,10 @@ path:
 8. atomically commits or restores the previous binary/config/mode/plist tuple.
 
 The updater plist is rewritten to the new immutable `fleetctl` on every commit,
-so reboot and subsequent checks use the installed generation. The prior release
-remains available for local rollback.
+so reboot and subsequent checks use the installed generation. A transactional
+`current` link gives humans and agents a stable CLI path while launchd continues
+to execute exact immutable paths. The prior release remains available for local
+rollback.
 
 ## Consequences
 

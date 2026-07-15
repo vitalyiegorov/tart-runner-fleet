@@ -6,9 +6,15 @@ an unavailable daemon when the versioned API can answer the question.
 
 ```sh
 ROOT="$HOME/Library/Application Support/tart-runner-fleet"
-FLEETCTL="$ROOT/releases/<installed-version>/fleetctl"
+FLEETCTL="$ROOT/current/fleetctl"
 ENDPOINT="unix://$ROOT/state/fleetd.sock"
 ```
+
+`current` is an atomically replaced convenience link to the committed immutable
+generation. Launchd continues to execute the exact versioned release path. The
+link is therefore safe for interactive and agent use without weakening
+rollback or executable identity. Confirm it against
+`state/installed-generation.json` when auditing an update.
 
 ## Daily cockpit
 
@@ -79,6 +85,10 @@ Run the same idempotent forward-only check on demand:
 is also safe: the five-minute updater retries after the fleet becomes quiescent.
 Never bypass readiness, checksum, version, or mode checks to force an update.
 
+The updater LaunchAgent is a periodic one-shot process. Between invocations,
+`launchctl` may report it as `not running`; that is healthy when its last exit
+status is 0 and its program path belongs to the committed generation.
+
 ## Incident workflow
 
 1. Capture `status`, `doctor`, bounded logs, runner/job state, and `tart list`.
@@ -93,5 +103,4 @@ Never bypass readiness, checksum, version, or mode checks to force an update.
 
 See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for first promotion and rollback,
 [`docs/CLI.md`](docs/CLI.md) for the complete command contract, and
-[`AGENTS.md`](AGENTS.md) for the coding-agent safety rules.
-
+[`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) for the agent cockpit.

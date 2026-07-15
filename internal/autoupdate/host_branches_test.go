@@ -652,3 +652,61 @@ func TestAtomicWriteReportsEveryDurabilityFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAtomicSymlinkReportsEveryDurabilityFailure(t *testing.T) {
+	for _, stage := range []string{"create", "close", "remove", "symlink", "rename", "open dir", "dir sync", "dir close"} {
+		t.Run(stage, func(t *testing.T) {
+			file := &failingAtomicFile{stage: stage}
+			if strings.HasPrefix(stage, "dir ") {
+				file = &failingAtomicFile{}
+			}
+			removeCalls := 0
+			ops := atomicSymlinkOps{
+				createTemp: func(string, string) (atomicWriteFile, error) {
+					if stage == "create" {
+						return nil, errors.New(stage)
+					}
+					return file, nil
+				},
+				remove: func(string) error {
+					removeCalls++
+					if stage == "remove" && removeCalls == 1 {
+						return errors.New(stage)
+					}
+					return nil
+				},
+				symlink: func(string, string) error {
+					if stage == "symlink" {
+						return errors.New(stage)
+					}
+					return nil
+				},
+				rename: func(string, string) error {
+					if stage == "rename" {
+						return errors.New(stage)
+					}
+					return nil
+				},
+				openDirectory: func(string) (atomicSyncCloser, error) {
+					if stage == "open dir" {
+						return nil, errors.New(stage)
+					}
+					return &failingAtomicFile{stage: stage}, nil
+				},
+			}
+			if err := atomicSymlinkWith("/releases/v2", "/root/current", ops); err == nil {
+				t.Fatalf("%s failure ignored", stage)
+			}
+		})
+	}
+	file := &failingAtomicFile{}
+	ops := atomicSymlinkOps{
+		createTemp: func(string, string) (atomicWriteFile, error) { return file, nil },
+		remove: func(string) error { return nil }, symlink: func(string, string) error { return nil },
+		rename: func(string, string) error { return nil },
+		openDirectory: func(string) (atomicSyncCloser, error) { return file, nil },
+	}
+	if err := atomicSymlinkWith("/releases/v2", "/root/current", ops); err != nil {
+		t.Fatal(err)
+	}
+}

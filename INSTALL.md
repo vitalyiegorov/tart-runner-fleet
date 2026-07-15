@@ -130,6 +130,8 @@ Adoption installs a separate updater LaunchAgent. It runs at login and every
 five minutes, follows normal forward-only production releases, defers while any
 queue/VM/retry/dead operation exists, verifies all artifacts and config, and
 atomically rolls back if the new exact version and mode do not become ready.
+It also publishes `$ROOT/current` as an atomic convenience link to the committed
+immutable release. Launchd still executes the exact versioned path.
 
 ## 6. Prove reboot recovery
 
@@ -137,13 +139,16 @@ After installation, log out/in or reboot once and run:
 
 ```sh
 ENDPOINT="unix://$HOME/Library/Application Support/tart-runner-fleet/state/fleetd.sock"
+FLEETCTL="$HOME/Library/Application Support/tart-runner-fleet/current/fleetctl"
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater
-"$RELEASE_DIR/fleetctl" status --endpoint "$ENDPOINT" --require-ready --output json
-"$RELEASE_DIR/fleetctl" doctor --endpoint "$ENDPOINT" --output json
+"$FLEETCTL" status --endpoint "$ENDPOINT" --require-ready --output json
+"$FLEETCTL" doctor --endpoint "$ENDPOINT" --output json
 ```
 
 Success means both LaunchAgents are loaded, the daemon reports the exact
 installed version in `authority` mode, observations are fresh, and the updater's
 last exit status is zero. If any proof fails, restore the previous immutable
 generation locally; do not delete uncertain VMs or start a second authority.
+For repeated monitoring and incident handoff, continue with
+[`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md).

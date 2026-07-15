@@ -18,6 +18,7 @@ import (
 
 const (
 	InstalledGenerationFile         = "installed-generation.json"
+	CurrentGenerationLink          = "current"
 	UpdateJournalFile               = "update-transaction.json"
 	CanonicalPlist                  = "com.vitalyiegorov.tart-runner-fleet.plist"
 	UpdaterPlist                    = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
@@ -295,6 +296,9 @@ func (h *LocalHost) Commit(ctx context.Context, candidate Generation) error {
 			return fmt.Errorf("bootstrap automatic updater: %w", err)
 		}
 	}
+	if err := atomicSymlink(candidate.ReleaseDir, filepath.Join(h.rootDir, CurrentGenerationLink)); err != nil {
+		return err
+	}
 	body, _ := json.Marshal(candidate)
 	if err := atomicWrite(filepath.Join(h.stateDir, InstalledGenerationFile), body, 0o600); err != nil {
 		return err
@@ -372,6 +376,13 @@ func (h *LocalHost) Rollback(ctx context.Context, current Generation) error {
 			return err
 		}
 	} else if err := os.Remove(updaterPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	body, _ := json.Marshal(current)
+	if err := atomicWrite(filepath.Join(h.stateDir, InstalledGenerationFile), body, 0o600); err != nil {
+		return err
+	}
+	if err := atomicSymlink(current.ReleaseDir, filepath.Join(h.rootDir, CurrentGenerationLink)); err != nil {
 		return err
 	}
 	return h.clearTransaction()
@@ -495,6 +506,60 @@ type atomicWriteOps struct {
 	remove        func(string) error
 	rename        func(string, string) error
 	openDirectory func(string) (atomicSyncCloser, error)
+}
+
+type atomicSymlinkOps struct {
+	createTemp    func(string, string) (atomicWriteFile, error)
+	remove        func(string) error
+	symlink       func(string, string) error
+	rename        func(string, string) error
+	openDirectory func(string) (atomicSyncCloser, error)
+}
+
+func atomicSymlink(target, path string) error {
+	return atomicSymlinkWith(target, path, atomicSymlinkOps{
+		createTemp: func(directory, pattern string) (atomicWriteFile, error) {
+			return os.CreateTemp(directory, pattern)
+		},
+		remove: os.Remove, symlink: os.Symlink, rename: os.Rename,
+		openDirectory: func(path string) (atomicSyncCloser, error) { return os.Open(path) }, // #nosec G304 -- parent of trusted current-generation link.
+	})
+}
+
+func atomicSymlinkWith(target, path string, ops atomicSymlinkOps) error {
+	temporary, err := ops.createTemp(filepath.Dir(path), ".fleet-current-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	remove := true
+	defer func() {
+		if remove {
+			_ = ops.remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := ops.remove(temporaryPath); err != nil {
+		return err
+	}
+	if err := ops.symlink(target, temporaryPath); err != nil {
+		return err
+	}
+	if err := ops.rename(temporaryPath, path); err != nil {
+		return err
+	}
+	remove = false
+	directory, err := ops.openDirectory(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
 }
 
 func atomicWriteWith(path string, body []byte, mode os.FileMode, ops atomicWriteOps) error {

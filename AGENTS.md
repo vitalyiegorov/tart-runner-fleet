@@ -46,15 +46,20 @@ Prefer the versioned JSON interface; do not scrape human tables or open the
 database while the daemon is running.
 
 ```sh
-fleetctl status --output json
-fleetctl doctor --output json
-fleetctl queues --output json
-fleetctl instances --output json
-fleetctl operations --output json
+ROOT="$HOME/Library/Application Support/tart-runner-fleet"
+FLEETCTL="$ROOT/current/fleetctl"
+ENDPOINT="unix://$ROOT/state/fleetd.sock"
+"$FLEETCTL" status --endpoint "$ENDPOINT" --output json
+"$FLEETCTL" doctor --endpoint "$ENDPOINT" --output json
+"$FLEETCTL" queues --endpoint "$ENDPOINT" --output json
+"$FLEETCTL" instances --endpoint "$ENDPOINT" --output json
+"$FLEETCTL" operations --endpoint "$ENDPOINT" --output json
 ```
 
 Interpret exit `4` as unavailable and exit `5` as coherent but degraded. Never
 turn either condition into an empty queue or an authorization to clean runners.
+The full copy-paste monitoring and incident procedure is in
+[`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md).
 
 ## Before editing
 
