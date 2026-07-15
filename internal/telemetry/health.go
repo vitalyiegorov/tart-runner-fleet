@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"errors"
+	"math"
 	"sort"
 	"sync"
 	"time"
@@ -69,6 +70,17 @@ type ObservationMetric struct {
 	ObservedAt time.Time
 }
 
+type HostPressureMetric struct {
+	AvailableMemoryMiB int64
+	FreeDiskGiB        int64
+	SwapUsedMiB        int64
+	SwapOuts           int64
+	CPUIdlePercent     float64
+	LoadAverage        float64
+	AdmissionAllowed   bool
+	AdmissionReason    string
+}
+
 // Snapshot is an immutable point-in-time copy suitable for rendering.
 type Snapshot struct {
 	Revision           uint64
@@ -81,6 +93,7 @@ type Snapshot struct {
 	Observations       map[string]ObservationMetric
 	OperationRetries   int
 	DeadOperations     int
+	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
 
@@ -110,6 +123,7 @@ type Health struct {
 	observations       map[string]ObservationMetric
 	operationRetries   int
 	deadOperations     int
+	hostPressure       HostPressureMetric
 	revision           uint64
 }
 
@@ -248,6 +262,29 @@ func (h *Health) SetOperations(retries, dead int) error {
 	return nil
 }
 
+func (h *Health) SetHostPressure(metric HostPressureMetric) error {
+	if metric.AvailableMemoryMiB < 0 || metric.FreeDiskGiB < 0 || metric.SwapUsedMiB < 0 || metric.SwapOuts < 0 ||
+		metric.CPUIdlePercent < 0 || metric.CPUIdlePercent > 100 || metric.LoadAverage < 0 ||
+		math.IsNaN(metric.CPUIdlePercent) || math.IsInf(metric.CPUIdlePercent, 0) ||
+		math.IsNaN(metric.LoadAverage) || math.IsInf(metric.LoadAverage, 0) || !validAdmissionReason(metric.AdmissionReason) {
+		return errInvalidMetric
+	}
+	h.mu.Lock()
+	h.revision++
+	h.hostPressure = metric
+	h.mu.Unlock()
+	return nil
+}
+
+func validAdmissionReason(reason string) bool {
+	switch reason {
+	case "capacity available", "disk reserve", "memory reserve", "swap pressure", "cpu pressure":
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *Health) SetMode(mode Mode) error {
 	if mode != ModeIdle && mode != ModeLinux && mode != ModeMacOS && mode != ModeMaintenance {
 		return errInvalidMode
@@ -267,7 +304,7 @@ func (h *Health) Snapshot() Snapshot {
 		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
 		Mode: h.mode, Queues: cloneMap(h.queues), Instances: cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
-		DeadOperations: h.deadOperations, ObservationTTL: h.criticalObservationTTL,
+		DeadOperations: h.deadOperations, HostPressure: h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }
 

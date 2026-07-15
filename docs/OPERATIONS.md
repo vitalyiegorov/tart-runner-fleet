@@ -46,6 +46,20 @@ Observe validates configuration, migrates/quick-checks the private SQLite WAL,
 reconciles durable instance metadata with Tart and host pressure, computes
 fail-closed plans, and exposes local health. It performs no GitHub/Tart mutation.
 
+Host admission uses two layers. Exact profile vectors enforce CPU, memory, and
+slot envelopes first. A fresh macOS probe then preserves `minFreeDiskGb` and
+`minAvailableMemoryMb`, defers while swap exceeds `maxSwapUsedMb`, and treats
+CPU as pressured only when both `maxLoadAverage` is exceeded and idle CPU falls
+below `minCpuIdlePercent`. Missing values decode to the safe defaults in
+`config/fleet.example.json`. Inspect the evidence through `fleetctl status` or
+the bounded `fleet_host_*` metrics; do not infer pressure from queue age alone.
+
+Pressure stops new admission, never an active job. Owned ephemeral runners
+still follow durable drain, deregistration, stop, and delete operations with
+indefinite bounded cleanup retries. Bases and unknown VMs are never pressure-
+deleted. Recover disk by resolving visible owned cleanup failures, not by
+blindly pruning Tart state.
+
 ```sh
 fleetd run \
   --mode observe \

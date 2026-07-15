@@ -49,19 +49,19 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 	valid := Default()
 	tests := map[string]func(*Config){
-		"missing base":           func(c *Config) { c.Linux.BaseVM = "" },
-		"duplicate profile":      func(c *Config) { c.Linux.Profiles = append(c.Linux.Profiles, c.Linux.Profiles[0]) },
-		"profile exceeds host":   func(c *Config) { c.Linux.Profiles[0].Resources.CPU = c.Linux.Capacity.CPU + 1 },
-		"negative profile disk":  func(c *Config) { c.Linux.Profiles[0].DiskGiB = -1 },
-		"invalid repository":     func(c *Config) { c.Targets[0].Slug = "bad" },
-		"duplicate repository":   func(c *Config) { c.Targets = append(c.Targets, c.Targets[0]) },
-		"zero timeout":           func(c *Config) { c.Timeouts.GitHub = 0 },
-		"unsafe disk reserve":    func(c *Config) { c.Guards.MinFreeDiskGiB = 0 },
+		"missing base":            func(c *Config) { c.Linux.BaseVM = "" },
+		"duplicate profile":       func(c *Config) { c.Linux.Profiles = append(c.Linux.Profiles, c.Linux.Profiles[0]) },
+		"profile exceeds host":    func(c *Config) { c.Linux.Profiles[0].Resources.CPU = c.Linux.Capacity.CPU + 1 },
+		"negative profile disk":   func(c *Config) { c.Linux.Profiles[0].DiskGiB = -1 },
+		"invalid repository":      func(c *Config) { c.Targets[0].Slug = "bad" },
+		"duplicate repository":    func(c *Config) { c.Targets = append(c.Targets, c.Targets[0]) },
+		"zero timeout":            func(c *Config) { c.Timeouts.GitHub = 0 },
+		"unsafe disk reserve":     func(c *Config) { c.Guards.MinFreeDiskGiB = 0 },
 		"negative memory reserve": func(c *Config) { c.Guards.MinAvailableMemoryMiB = -1 },
 		"negative swap ceiling":   func(c *Config) { c.Guards.MaxSwapUsedMiB = -1 },
 		"negative load ceiling":   func(c *Config) { c.Guards.MaxLoadAverage = -1 },
 		"invalid cpu idle floor":  func(c *Config) { c.Guards.MinCPUIdlePercent = 101 },
-		"too many linux runners": func(c *Config) { c.Linux.MaxInstances = 5 },
+		"too many linux runners":  func(c *Config) { c.Linux.MaxInstances = 5 },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -10,7 +10,7 @@ passthroughs do not exist.
 
 | Command | Purpose |
 | --- | --- |
-| `status` | Complete controller, host-mode, queue, instance, observation, and operation summary |
+| `status` | Complete controller, host pressure/admission, queue, instance, observation, and operation summary |
 | `queues` | Jobs and oldest age by bounded profile |
 | `instances` | VM count, vCPU, and memory by bounded profile |
 | `operations` | Retrying and dead durable-operation counts |
@@ -46,6 +46,8 @@ rejected.
 - JSON timestamps are UTC RFC3339 and all list fields are arrays, never `null`.
 - Human rows and JSON arrays are deterministically sorted by bounded profile or
   observation name.
+- Human status shows free disk, reclaimable memory, swap, CPU idle, load, and
+  the latest admission decision; JSON and Prometheus expose the same units.
 - The JSON compatibility promise is identified by `apiVersion: fleet.v1`.
 - Tables use compact ages for reading; automation must use numeric age fields.
 - No token, private key, JIT configuration, operation payload, or unbounded

@@ -216,7 +216,9 @@ func defaultDependencies() dependencies {
 				Tart:     &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
 				Host:     &macos.Probe{Timeout: cfg.Timeouts.Tart},
 				Capacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
-				Guards:   macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB)}}
+				Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
+					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
+					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent}}
 		},
 		listen:      net.Listen,
 		adminListen: adminapi.Listen,
@@ -867,6 +869,13 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 		mode = telemetry.ModeMacOS
 	}
 	_ = e.health.SetMode(mode)
+	pressure := result.Host.Pressure
+	if pressure.AdmissionReason != "" {
+		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
+			FreeDiskGiB: pressure.FreeDiskGB, SwapUsedMiB: pressure.SwapUsedMB, SwapOuts: pressure.SwapOuts,
+			CPUIdlePercent: pressure.CPUIdlePercent, LoadAverage: pressure.LoadAverage,
+			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason})
+	}
 }
 
 type wallClock struct{}

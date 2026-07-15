@@ -88,11 +88,15 @@ func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards 
 		return domain.Unavailable[domain.Host]("host probe freshness is invalid")
 	}
 	decision := guards.Evaluate(snapshot, macos.Request{})
+	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
+		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts, CPUIdlePercent: snapshot.CPUidlePercent,
+		LoadAverage: snapshot.LoadAverage, AdmissionAllowed: decision.Allowed, AdmissionReason: decision.Reason}
 	if !decision.Allowed {
-		observation := domain.Fresh(domain.Host{}, snapshot.ObservedAt)
+		observation := domain.Fresh(domain.Host{Pressure: pressure}, snapshot.ObservedAt)
 		observation.Reason = decision.Reason
 		return observation
 	}
 	availableMemory := max(0, min(int(snapshot.AvailableMemoryMB-guards.MinAvailableMemoryMB), capacity.MemoryMB))
-	return domain.Fresh(domain.Host{Available: domain.Resources{CPU: capacity.CPU, MemoryMB: availableMemory, Slots: capacity.Slots}}, snapshot.ObservedAt)
+	return domain.Fresh(domain.Host{Available: domain.Resources{CPU: capacity.CPU, MemoryMB: availableMemory, Slots: capacity.Slots},
+		Pressure: pressure}, snapshot.ObservedAt)
 }

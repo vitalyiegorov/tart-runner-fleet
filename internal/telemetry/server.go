@@ -152,6 +152,11 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Ready:  adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
 			Queues: queues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations},
+			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: snapshot.HostPressure.AvailableMemoryMiB,
+				FreeDiskGiB: snapshot.HostPressure.FreeDiskGiB, SwapUsedMiB: snapshot.HostPressure.SwapUsedMiB,
+				SwapOuts: snapshot.HostPressure.SwapOuts, CPUIdlePercent: snapshot.HostPressure.CPUIdlePercent,
+				LoadAverage: snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
+				AdmissionReason: snapshot.HostPressure.AdmissionReason},
 		}}
 }
 
@@ -238,6 +243,25 @@ func renderMetrics(snapshot Snapshot) string {
 	fmt.Fprintf(&output, "fleet_operation_retries %d\n", snapshot.OperationRetries)
 	writeHelpType("fleet_operations_dead", "Dead durable operation count.", "gauge")
 	fmt.Fprintf(&output, "fleet_operations_dead %d\n", snapshot.DeadOperations)
+
+	writeHelpType("fleet_host_available_memory_mib", "Host reclaimable memory available for admission in MiB.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_available_memory_mib %d\n", snapshot.HostPressure.AvailableMemoryMiB)
+	writeHelpType("fleet_host_free_disk_gib", "Host filesystem free space in GiB.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_free_disk_gib %d\n", snapshot.HostPressure.FreeDiskGiB)
+	writeHelpType("fleet_host_swap_used_mib", "Host swap currently used in MiB.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_swap_used_mib %d\n", snapshot.HostPressure.SwapUsedMiB)
+	writeHelpType("fleet_host_swapouts_total", "Cumulative host swap-out page count.", "counter")
+	fmt.Fprintf(&output, "fleet_host_swapouts_total %d\n", snapshot.HostPressure.SwapOuts)
+	writeHelpType("fleet_host_cpu_idle_percent", "Host CPU idle percentage at the latest admission snapshot.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_cpu_idle_percent %s\n", strconv.FormatFloat(snapshot.HostPressure.CPUIdlePercent, 'f', -1, 64))
+	writeHelpType("fleet_host_load_average", "Host one-minute load average at the latest admission snapshot.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_load_average %s\n", strconv.FormatFloat(snapshot.HostPressure.LoadAverage, 'f', -1, 64))
+	writeHelpType("fleet_host_admission_allowed", "Whether latest host pressure permits new VM admission.", "gauge")
+	allowed := 0
+	if snapshot.HostPressure.AdmissionAllowed {
+		allowed = 1
+	}
+	fmt.Fprintf(&output, "fleet_host_admission_allowed %d\n", allowed)
 
 	writeHelpType("fleet_observation_fresh", "Whether a bounded critical observation is fresh.", "gauge")
 	writeHelpType("fleet_observation_age_seconds", "Age of a bounded critical observation.", "gauge")
