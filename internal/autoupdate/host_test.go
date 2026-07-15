@@ -185,6 +185,39 @@ func TestLocalHostRetriesTransientLaunchdBootstrapDuringRollback(t *testing.T) {
 	}
 }
 
+func TestLocalHostRetriesTransientLaunchdBootstrapDuringActivation(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	command.bootstrapFailures = 1
+	if err := host.Activate(context.Background(), candidate); err != nil {
+		t.Fatalf("transient launchd activation failure was not recovered: %v", err)
+	}
+	var bootstraps int
+	for _, call := range command.calls {
+		if strings.Contains(call, "launchctl bootstrap") {
+			bootstraps++
+		}
+	}
+	if bootstraps != 2 {
+		t.Fatalf("launchd bootstrap attempts=%d want=2\ncalls:\n%s", bootstraps, strings.Join(command.calls, "\n"))
+	}
+}
+
+func TestLocalHostStopsBootstrapRecoveryWhenContextIsCanceled(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	command.bootstrapFailures = launchdBootstrapAttempts
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := host.Activate(ctx, candidate); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled launchd recovery error=%v", err)
+	}
+}
+
 func TestLocalHostRejectsTamperedOrMismatchedReleaseBeforeLaunchd(t *testing.T) {
 	host, command, _, candidate, _ := hostFixture(t)
 	if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, "fleetd"), []byte("tampered"), 0o700); err != nil {
