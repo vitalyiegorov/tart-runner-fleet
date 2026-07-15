@@ -31,6 +31,22 @@ rollback or executable identity. Confirm it against
 Exit `4` means unavailable. Exit `5` means coherent but degraded. Neither means
 zero demand and neither authorizes cleanup.
 
+## Operational objective
+
+Operate for maximum **useful** utilization: the highest sustainable completion
+throughput within the configured CPU, memory, slot, repository, profile, disk,
+and host-pressure limits. A high VM count is not success if capacity is
+overcommitted, one repository monopolizes the host, or old large work starves.
+Conversely, an idle resource vector while compatible work is queued is a
+scheduling defect worth investigating.
+
+For young work, dominant resource share is the generic completion-cost proxy,
+so smaller vectors are considered before larger vectors and exact packing
+maximizes the admitted job count. Aging eventually overrides that optimization
+with global FIFO. This deliberately improves throughput without turning a
+continuous stream of small jobs into starvation for a builder or other large
+job.
+
 ## Resource model
 
 The example configuration exposes these bounded profiles:
@@ -60,9 +76,9 @@ hidden default.
    are considered first and exact packing maximizes admitted job count.
 5. Compatible small Linux work may use one durable backfill budget while a
    macOS handoff is draining; it cannot postpone the handoff indefinitely.
-5. A single deterministic state machine owns each instance from planned clone
+6. A single deterministic state machine owns each instance from planned clone
    through registration, assignment, drain, deregistration, stop, and deletion.
-6. External effects are durable, leased, idempotent, and retried with bounded
+7. External effects are durable, leased, idempotent, and retried with bounded
    backoff; restart resumes state instead of guessing from process presence.
 
 ## Automatic updates

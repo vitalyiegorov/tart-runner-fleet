@@ -13,10 +13,13 @@ jobs waited. A same-platform backfill could fill a second Maestro slot only when
 another Maestro job existed; it could not use the residual capacity for queued
 Linux work.
 
-The fleet's primary objective is bounded maximum utilization. Platform identity
-is not itself a resource. CPU, memory, VM slots, per-repository concurrency,
-profile concurrency, fresh host pressure, and lifecycle ownership are the
-admission constraints.
+The fleet's primary objective is bounded maximum useful utilization: maximize
+the sustainable rate of completed CI work while respecting every configured
+resource, fairness, ownership, and recovery constraint. Raw VM count or CPU
+occupancy alone is not the objective. Platform identity is not itself a
+resource. CPU, memory, VM slots, per-repository concurrency, profile
+concurrency, fresh host pressure, and lifecycle ownership are the admission
+constraints.
 
 Young jobs also need a generic throughput policy. Profile names are deployment
 details and must not encode priority. Resource size is an available deterministic
@@ -45,6 +48,11 @@ For young work, ordering is:
 The exact allocator still maximizes admitted job count. Once a demand crosses
 the aging threshold it leaves this optimization and joins absolute global FIFO,
 so large jobs cannot starve.
+
+This establishes the policy order explicitly: hard safety constraints first,
+then maximum-cardinality packing, then deterministic throughput and fairness
+tie-breakers. No utilization improvement may bypass fresh-state, ownership,
+pressure, lifecycle, or resource-envelope checks.
 
 ## Consequences
 
