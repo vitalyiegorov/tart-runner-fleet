@@ -86,6 +86,12 @@ func (r ControlRouter) SafeToDeregister(ctx context.Context, instance operations
 		registered, registrationErr := binding.Source.Registered(ctx, instance.ID)
 		return !registered, registrationErr
 	}
+	if instance.DrainPhase == operations.DrainPhaseInactiveRecovery {
+		registered, registrationErr := binding.Source.Registered(ctx, instance.ID)
+		if registrationErr != nil || registered {
+			return false, registrationErr
+		}
+	}
 	record, err := r.demand(ctx, binding, instance)
 	if err != nil {
 		return false, err

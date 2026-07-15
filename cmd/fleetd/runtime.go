@@ -171,7 +171,7 @@ type dependencies struct {
 	openStore   func(context.Context, string) (runtimeStore, error)
 	loadKey     func(context.Context, string, string, string) (*credentials.Secret, error)
 	newScaleSet func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
-	inventory   func(runtimeStore, config.Config) app.Inventory
+	inventory   func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory
 	listen      func(string, string) (net.Listener, error)
 	adminListen func(string) (net.Listener, error)
 	cursor      func(context.Context, runtimeStore, int64) (int64, error)
@@ -211,11 +211,13 @@ func defaultDependencies() dependencies {
 		newScaleSet: func(ctx context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 			return githubscaleset.NewGitHubAppScaleSet(ctx, cfg)
 		},
-		inventory: func(store runtimeStore, cfg config.Config) app.Inventory {
+		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver) app.Inventory {
 			return app.ProductionInventory{Store: store,
-				Tart:     &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
-				Host:     &macos.Probe{Timeout: cfg.Timeouts.Tart},
-				Capacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
+				Tart:                       &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
+				Host:                       &macos.Probe{Timeout: cfg.Timeouts.Tart},
+				Recovery:                   recovery,
+				RecoveryConfirmationMaxAge: deletionConfirmationMaxAge,
+				Capacity:                   domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
 				Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent}}
@@ -402,12 +404,16 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			}
 		}
 	}
-	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg), Config: schedulerConfig,
+	control := &lifecycle.ControlRouter{State: store, Demand: store, Sources: controls, Now: d.now}
+	var recovery app.RecoveryObserver
+	if opts.Mode != reconcile.Observe {
+		recovery = control
+	}
+	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
-		control := &lifecycle.ControlRouter{State: store, Demand: store, Sources: controls, Now: d.now}
 		vm := d.newVM(store, cfg, control)
 		diskGiB := profileDiskFloors(cfg)
 		worker = operationRunner{worker: operations.Worker{

@@ -68,14 +68,15 @@ const (
 )
 
 type Operation struct {
-	ID        string
-	Kind      OperationKind
-	Demand    domain.DemandKey
-	Instance  string
-	Profile   domain.ProfileID
-	Route     domain.Route
-	DependsOn []string
-	Recovery  bool `json:"recovery,omitempty"`
+	ID                string
+	Kind              OperationKind
+	Demand            domain.DemandKey
+	Instance          string
+	Profile           domain.ProfileID
+	Route             domain.Route
+	DependsOn         []string
+	Recovery          bool `json:"recovery,omitempty"`
+	ConfirmedInactive bool `json:"confirmedInactive,omitempty"`
 }
 
 type PlanStatus string
@@ -105,7 +106,7 @@ func PlanTick(in Input) Plan {
 
 	demands := normalizedDemands(in)
 	plan := Plan{Status: PlanReady, Next: in.Prior}
-	if recoveries := stoppedAssignmentRecoveries(in.Instances.Value); len(recoveries) > 0 {
+	if recoveries := assignmentRecoveries(in.Instances.Value); len(recoveries) > 0 {
 		plan.Operations = recoveries
 		return finish(plan)
 	}
@@ -139,14 +140,18 @@ func PlanTick(in Input) Plan {
 	return finish(plan)
 }
 
-func stoppedAssignmentRecoveries(instances []domain.Instance) []Operation {
+func assignmentRecoveries(instances []domain.Instance) []Operation {
 	var recoveries []Operation
 	for _, instance := range sortedInstances(instances) {
-		if instance.Power != domain.InstancePowerStopped ||
-			(instance.State != domain.InstanceAssigned && instance.State != domain.InstanceRunning) {
+		if instance.State != domain.InstanceAssigned && instance.State != domain.InstanceRunning {
 			continue
 		}
-		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route, Recovery: true}
+		confirmedInactive := instance.Power == domain.InstancePowerRunning && instance.RecoveryReady
+		if instance.Power != domain.InstancePowerStopped && !confirmedInactive {
+			continue
+		}
+		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
+			Recovery: true, ConfirmedInactive: confirmedInactive}
 		operation.ID = stableID("op", operation)
 		recoveries = append(recoveries, operation)
 	}

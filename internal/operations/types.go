@@ -142,7 +142,10 @@ type Transition struct {
 	Operation       Operation
 }
 
-const DrainPhaseStoppedRecovery = 2
+const (
+	DrainPhaseStoppedRecovery  = 2
+	DrainPhaseInactiveRecovery = 3
+)
 
 type Lease struct {
 	Name      string
