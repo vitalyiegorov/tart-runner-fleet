@@ -220,7 +220,7 @@ func TestLocalHostStopsBootstrapRecoveryWhenContextIsCanceled(t *testing.T) {
 	if err := host.Prepare(context.Background(), current, candidate); err != nil {
 		t.Fatal(err)
 	}
-	command.bootstrapFailures = launchdBootstrapAttempts
+	command.bootstrapFailures = minimumLaunchdBootstrapAttempts
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := host.Activate(ctx, candidate); !errors.Is(err, context.Canceled) {
