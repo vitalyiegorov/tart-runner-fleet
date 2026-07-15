@@ -14,13 +14,14 @@ import (
 )
 
 type fakeCommand struct {
-	calls      []string
-	ready      string
-	current    string
-	readyErr   error
-	currentErr error
-	bootstrap  error
-	fail       map[string]error
+	calls             []string
+	ready             string
+	current           string
+	readyErr          error
+	currentErr        error
+	bootstrap         error
+	bootstrapFailures int
+	fail              map[string]error
 }
 
 func (c *fakeCommand) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -39,6 +40,10 @@ func (c *fakeCommand) Run(_ context.Context, name string, args ...string) ([]byt
 	}
 	if strings.Contains(call, "launchctl bootstrap") && c.bootstrap != nil {
 		return nil, c.bootstrap
+	}
+	if strings.Contains(call, "launchctl bootstrap") && c.bootstrapFailures > 0 {
+		c.bootstrapFailures--
+		return nil, errors.New("transient launchd bootstrap failure")
 	}
 	return nil, nil
 }
@@ -157,6 +162,56 @@ func TestLocalHostRestoresTheOldBootGenerationOnFailure(t *testing.T) {
 	installed, readErr := host.Current(context.Background())
 	if readErr != nil || installed != current {
 		t.Fatalf("installed=%+v err=%v", installed, readErr)
+	}
+}
+
+func TestLocalHostRetriesTransientLaunchdBootstrapDuringRollback(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	command.bootstrapFailures = 1
+	if err := host.Rollback(context.Background(), current); err != nil {
+		t.Fatalf("transient launchd rollback failure was not recovered: %v", err)
+	}
+	requireBootstrapAttempts(t, command, 2)
+}
+
+func TestLocalHostRetriesTransientLaunchdBootstrapDuringActivation(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	command.bootstrapFailures = 1
+	if err := host.Activate(context.Background(), candidate); err != nil {
+		t.Fatalf("transient launchd activation failure was not recovered: %v", err)
+	}
+	requireBootstrapAttempts(t, command, 2)
+}
+
+func requireBootstrapAttempts(t *testing.T, command *fakeCommand, want int) {
+	t.Helper()
+	var bootstraps int
+	for _, call := range command.calls {
+		if strings.Contains(call, "launchctl bootstrap") {
+			bootstraps++
+		}
+	}
+	if bootstraps != want {
+		t.Fatalf("launchd bootstrap attempts=%d want=%d\ncalls:\n%s", bootstraps, want, strings.Join(command.calls, "\n"))
+	}
+}
+
+func TestLocalHostStopsBootstrapRecoveryWhenContextIsCanceled(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	command.bootstrapFailures = launchdBootstrapAttempts
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := host.Activate(ctx, candidate); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled launchd recovery error=%v", err)
 	}
 }
 

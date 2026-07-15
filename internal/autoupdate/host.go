@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	InstalledGenerationFile = "installed-generation.json"
-	UpdateJournalFile       = "update-transaction.json"
-	CanonicalPlist          = "com.vitalyiegorov.tart-runner-fleet.plist"
-	UpdaterPlist            = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
-	updateBackupFile        = "update-previous.plist"
-	updateBackupUpdaterFile = "update-previous-updater.plist"
+	InstalledGenerationFile  = "installed-generation.json"
+	UpdateJournalFile        = "update-transaction.json"
+	CanonicalPlist           = "com.vitalyiegorov.tart-runner-fleet.plist"
+	UpdaterPlist             = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
+	updateBackupFile         = "update-previous.plist"
+	updateBackupUpdaterFile  = "update-previous-updater.plist"
+	launchdBootstrapAttempts = 3
 )
 
 var (
@@ -244,7 +245,7 @@ func (h *LocalHost) Activate(ctx context.Context, candidate Generation) error {
 	}
 	label := serviceLabel(candidate.Mode)
 	_, _ = h.command.Run(ctx, "launchctl", "bootout", h.domain+"/"+label)
-	if _, err := h.command.Run(ctx, "launchctl", "bootstrap", h.domain, canonical); err != nil {
+	if err := h.bootstrapService(ctx, canonical); err != nil {
 		return err
 	}
 	_, err = h.command.Run(ctx, "launchctl", "kickstart", "-k", h.domain+"/"+label)
@@ -290,7 +291,7 @@ func (h *LocalHost) Commit(ctx context.Context, candidate Generation) error {
 	}
 	updaterLabel := h.domain + "/com.vitalyiegorov.tart-runner-fleet.updater"
 	if _, err := h.command.Run(ctx, "launchctl", "print", updaterLabel); err != nil {
-		if _, err := h.command.Run(ctx, "launchctl", "bootstrap", h.domain, updaterPath); err != nil {
+		if err := h.bootstrapService(ctx, updaterPath); err != nil {
 			return fmt.Errorf("bootstrap automatic updater: %w", err)
 		}
 	}
@@ -355,7 +356,7 @@ func (h *LocalHost) Rollback(ctx context.Context, current Generation) error {
 	if err := atomicWrite(canonical, backup, 0o600); err != nil {
 		return err
 	}
-	if _, err := h.command.Run(ctx, "launchctl", "bootstrap", h.domain, canonical); err != nil {
+	if err := h.bootstrapService(ctx, canonical); err != nil {
 		return err
 	}
 	if _, err := h.command.Run(ctx, "launchctl", "kickstart", "-k", h.domain+"/"+serviceLabel(current.Mode)); err != nil {
@@ -374,6 +375,28 @@ func (h *LocalHost) Rollback(ctx context.Context, current Generation) error {
 		return err
 	}
 	return h.clearTransaction()
+}
+
+// bootstrapService absorbs the short unload-to-load race launchd can expose
+// after bootout. Retrying this single idempotent boundary is safe; the rest of
+// activation and rollback remains fail-closed and is never replayed.
+func (h *LocalHost) bootstrapService(ctx context.Context, plist string) error {
+	var last error
+	for attempt := 0; attempt < launchdBootstrapAttempts; attempt++ {
+		if _, err := h.command.Run(ctx, "launchctl", "bootstrap", h.domain, plist); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+		if attempt+1 < launchdBootstrapAttempts {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(h.readyDelay):
+			}
+		}
+	}
+	return last
 }
 
 func (h *LocalHost) readJournal() (updateJournal, error) {
