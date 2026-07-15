@@ -59,6 +59,10 @@ optional fields may be added within `fleet.v1`; removals, renames, changed enum
 semantics, or changed units require a new API version. Clients reject unknown
 API versions rather than guessing.
 
+`hostMode` is one of `idle`, `linux`, `macos`, or `mixed`. `mixed` means live
+Linux and macOS instances share the configured host resource envelope; it does
+not weaken ownership, freshness, or host-pressure admission checks.
+
 ## Snapshot semantics
 
 The response is copied from one mutex-protected telemetry snapshot. It cannot

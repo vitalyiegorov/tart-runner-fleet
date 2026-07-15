@@ -43,6 +43,7 @@ const (
 	ModeIdle        Mode = "idle"
 	ModeLinux       Mode = "linux"
 	ModeMacOS       Mode = "macos"
+	ModeMixed       Mode = "mixed"
 	ModeMaintenance Mode = "maintenance"
 )
 
@@ -286,7 +287,7 @@ func validAdmissionReason(reason string) bool {
 }
 
 func (h *Health) SetMode(mode Mode) error {
-	if mode != ModeIdle && mode != ModeLinux && mode != ModeMacOS && mode != ModeMaintenance {
+	if mode != ModeIdle && mode != ModeLinux && mode != ModeMacOS && mode != ModeMixed && mode != ModeMaintenance {
 		return errInvalidMode
 	}
 	h.mu.Lock()

@@ -105,8 +105,9 @@ fairness or safety decisions.
   memory, swap, CPU-idle, load, and decision telemetry;
 - fail closed when GitHub, Tart, or host observations are stale/unavailable;
 - no Linux/macOS overlap beyond configured, proven resource envelopes;
-- aged global FIFO with bounded control-plane priority for young work, with
-  aging as an absolute starvation guard;
+- aged global FIFO with bounded control-plane priority and throughput-first
+  dominant-resource ordering for young work, with aging as an absolute
+  starvation guard;
 - a durable one-shot smallest-tier backfill budget during blocked macOS
   handoff;
 - ephemeral runners and two-phase drain before deletion;

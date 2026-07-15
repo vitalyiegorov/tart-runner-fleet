@@ -107,7 +107,7 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 	health.RecordTick(false)
 	clock.Advance(time.Second)
 	health.RecordTick(true)
-	if err := health.SetMode(ModeMacOS); err != nil {
+	if err := health.SetMode(ModeMixed); err != nil {
 		t.Fatal(err)
 	}
 	if err := health.SetQueue("linux-small", 7, clock.Now().Add(-45*time.Second)); err != nil {
@@ -135,7 +135,7 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 	if second.Queues["linux-small"].Count != 7 || second.Instances["linux-small"].MemoryMiB != 12_288 || second.Observations["github"].Freshness != ObservationFresh {
 		t.Fatalf("snapshot aliases state: %+v", second)
 	}
-	if second.LastSuccessfulTick != clock.Now() || second.Mode != ModeMacOS || second.OperationRetries != 4 || second.DeadOperations != 2 ||
+	if second.LastSuccessfulTick != clock.Now() || second.Mode != ModeMixed || second.OperationRetries != 4 || second.DeadOperations != 2 ||
 		second.HostPressure.FreeDiskGiB != 200 || !second.HostPressure.AdmissionAllowed {
 		t.Fatalf("snapshot=%+v", second)
 	}

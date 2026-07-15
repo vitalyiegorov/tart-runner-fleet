@@ -122,16 +122,16 @@ func PlanTick(in Input) Plan {
 	switch ordered[0].Platform {
 	case domain.PlatformMacOS:
 		plan.Next.LinuxHandoff = nil
-		if mode == domain.HostLinux {
-			plan = planMacHandoff(in, plan, linux, macos)
+		if mode == domain.HostLinux || mode == domain.HostMixed {
+			plan = planMacWithCoexistence(in, plan, linux, macos)
 		} else {
 			plan.Next.MacHandoff = nil
 			plan = planMacOS(in, plan, macos)
 		}
 	case domain.PlatformLinux:
 		plan.Next.MacHandoff = retainedMacHandoff(in.Prior.MacHandoff, macos)
-		if mode == domain.HostMacOS {
-			plan = planLinuxHandoff(in, plan, linux, macos)
+		if mode == domain.HostMacOS || mode == domain.HostMixed {
+			plan = planLinuxWithCoexistence(in, plan, linux, macos)
 		} else {
 			plan.Next.LinuxHandoff = nil
 			plan = planLinux(in, plan, linux)
@@ -245,7 +245,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		return plan
 	}
 
-	ordered := youngPriorityOrder(young, in.Prior.DRRCursor, in.Config.RepoSchedulingClasses)
+	ordered := youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)
 	selected := exactSelect(ordered, free, baseCounts, in.Config)
 	for _, candidate := range selected {
 		plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
@@ -356,7 +356,7 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 		}
 	}
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, candidates)
-	ordered := append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config.RepoSchedulingClasses)...)
+	ordered := append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)...)
 	counts := cloneCounts(baseCounts)
 	for _, demand := range alreadySelected {
 		counts[demand.Key.Repo]++
@@ -382,23 +382,89 @@ func splitAged(now time.Time, age time.Duration, demands []domain.Demand) (aged,
 
 func priorityOrder(in Input, demands []domain.Demand) []domain.Demand {
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
-	return append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config.RepoSchedulingClasses)...)
+	return append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)...)
 }
 
 // youngPriorityOrder implements two bounded lanes. Control-plane work can
 // bypass only young standard work; aged global FIFO is assembled by
 // priorityOrder before either lane and therefore remains absolute.
-func youngPriorityOrder(demands []domain.Demand, cursor string, classes map[string]domain.SchedulingClass) []domain.Demand {
+func youngPriorityOrder(demands []domain.Demand, cursor string, config Config) []domain.Demand {
 	controlPlane := make([]domain.Demand, 0, len(demands))
 	standard := make([]domain.Demand, 0, len(demands))
 	for _, demand := range demands {
-		if classes[demand.Key.Repo] == domain.SchedulingControlPlane {
+		if config.RepoSchedulingClasses[demand.Key.Repo] == domain.SchedulingControlPlane {
 			controlPlane = append(controlPlane, demand)
 		} else {
 			standard = append(standard, demand)
 		}
 	}
-	return append(fairOrder(controlPlane, cursor), fairOrder(standard, cursor)...)
+	return append(throughputOrder(controlPlane, cursor, config), throughputOrder(standard, cursor, config)...)
+}
+
+type throughputBucket struct {
+	event     int
+	resources domain.Resources
+	demands   []domain.Demand
+}
+
+// throughputOrder is a bounded shortest-resource-first policy for young work.
+// Aging is applied before this function, so a large job becomes globally FIFO
+// before this optimization can starve it. Within an event/resource band the
+// existing deterministic repository round-robin remains authoritative.
+func throughputOrder(demands []domain.Demand, cursor string, config Config) []domain.Demand {
+	var buckets []throughputBucket
+	for _, demand := range demands {
+		resources := config.Profiles[demand.Profile].Resources
+		bucket := -1
+		for index := range buckets {
+			if buckets[index].event == eventRank(demand.Event) && buckets[index].resources == resources {
+				bucket = index
+				break
+			}
+		}
+		if bucket < 0 {
+			buckets = append(buckets, throughputBucket{event: eventRank(demand.Event), resources: resources})
+			bucket = len(buckets) - 1
+		}
+		buckets[bucket].demands = append(buckets[bucket].demands, demand)
+	}
+	sort.Slice(buckets, func(i, j int) bool {
+		if buckets[i].event != buckets[j].event {
+			return buckets[i].event < buckets[j].event
+		}
+		return resourceCostLess(buckets[i].resources, buckets[j].resources, config.LinuxCapacity)
+	})
+	var ordered []domain.Demand
+	for _, bucket := range buckets {
+		ordered = append(ordered, fairOrder(bucket.demands, cursor)...)
+	}
+	return ordered
+}
+
+func resourceCostLess(a, b, capacity domain.Resources) bool {
+	an, ad := dominantShare(a, capacity)
+	bn, bd := dominantShare(b, capacity)
+	if an*bd != bn*ad {
+		return an*bd < bn*ad
+	}
+	if a.CPU != b.CPU {
+		return a.CPU < b.CPU
+	}
+	if a.MemoryMB != b.MemoryMB {
+		return a.MemoryMB < b.MemoryMB
+	}
+	return a.Slots < b.Slots
+}
+
+func dominantShare(resources, capacity domain.Resources) (int64, int64) {
+	numerator, denominator := int64(resources.CPU), int64(max(capacity.CPU, 1))
+	for _, share := range [][2]int{{resources.MemoryMB, max(capacity.MemoryMB, 1)}, {resources.Slots, max(capacity.Slots, 1)}} {
+		nextNumerator, nextDenominator := int64(share[0]), int64(share[1])
+		if nextNumerator*denominator > numerator*nextDenominator {
+			numerator, denominator = nextNumerator, nextDenominator
+		}
+	}
+	return numerator, denominator
 }
 
 func fairOrder(demands []domain.Demand, cursor string) []domain.Demand {
@@ -538,6 +604,7 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 	handoff := macHandoffFor(in.Prior.MacHandoff, macDemands[0], in.Now)
 	var drains []Operation
 	allIdle := true
+	filtered := append([]domain.Instance(nil), in.Instances.Value...)
 	for _, instance := range sortedInstances(in.Instances.Value) {
 		if instance.Platform != domain.PlatformLinux || !instance.ConsumesHostResources() {
 			continue
@@ -547,11 +614,14 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 			continue
 		}
 		drains = append(drains, drainOperation(instance))
+		filtered = removeInstance(filtered, instance.ID)
 	}
 	plan.Operations = append(plan.Operations, drains...)
 	if allIdle {
 		plan.Next.MacHandoff = nil
-		plan = appendMacSpawns(in, plan, macDemands, operationIDs(drains))
+		nextInput := in
+		nextInput.Instances = domain.Fresh(filtered, in.Instances.ObservedAt)
+		plan = appendMacSpawns(nextInput, plan, macDemands, operationIDs(drains))
 		return plan
 	}
 	plan.Next.MacHandoff = &handoff
@@ -563,6 +633,35 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 		}
 	}
 	return plan
+}
+
+func planMacWithCoexistence(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
+	attempted := planMacOS(in, plan, macDemands)
+	if containsSpawn(attempted.Operations) {
+		attempted.Next.MacHandoff = nil
+		return attempted
+	}
+	// An existing macOS profile switch has to complete before Linux capacity
+	// can be considered for the target profile.
+	if len(attempted.Operations) > len(plan.Operations) || !macProfileCanGrow(in, chosenMacProfile(in, macDemands)) {
+		return attempted
+	}
+	return planMacHandoff(in, attempted, linuxDemands, macDemands)
+}
+
+func macProfileCanGrow(in Input, target domain.ProfileID) bool {
+	profile := in.Config.Profiles[target]
+	active := 0
+	for _, instance := range in.Instances.Value {
+		if !instance.ConsumesHostResources() || instance.Platform != domain.PlatformMacOS {
+			continue
+		}
+		if instance.Profile != target {
+			return false
+		}
+		active++
+	}
+	return active < macProfileLimit(profile)
 }
 
 func macHandoffFor(prior *MacHandoff, demand domain.Demand, now time.Time) MacHandoff {
@@ -703,6 +802,16 @@ func planLinuxHandoff(in Input, plan Plan, demands, macDemands []domain.Demand) 
 	return plan
 }
 
+func planLinuxWithCoexistence(in Input, plan Plan, demands, macDemands []domain.Demand) Plan {
+	remaining := consumeCompatibleIdle(demands, in.Instances.Value)
+	attempted := planLinux(in, plan, demands)
+	if len(remaining) == 0 || containsSpawn(attempted.Operations) {
+		attempted.Next.LinuxHandoff = nil
+		return attempted
+	}
+	return planLinuxHandoff(in, attempted, demands, macDemands)
+}
+
 func linuxHandoffFor(prior *LinuxHandoff, demand domain.Demand, now time.Time) LinuxHandoff {
 	if prior != nil && prior.Demand == demand.Key {
 		return *prior
@@ -713,7 +822,7 @@ func linuxHandoffFor(prior *LinuxHandoff, demand domain.Demand, now time.Time) L
 func activeMacProfile(instances []domain.Instance) (domain.ProfileID, bool) {
 	var selected domain.ProfileID
 	for _, instance := range instances {
-		if !instance.Live() || instance.Platform != domain.PlatformMacOS {
+		if !instance.ConsumesHostResources() || instance.Platform != domain.PlatformMacOS {
 			continue
 		}
 		if selected != "" && selected != instance.Profile {
@@ -747,6 +856,7 @@ func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
 	profile := chosenMacProfile(in, demands)
 	var drains []Operation
 	allSwitchable := true
+	filtered := append([]domain.Instance(nil), in.Instances.Value...)
 	for _, instance := range sortedInstances(in.Instances.Value) {
 		if instance.Platform != domain.PlatformMacOS || !instance.ConsumesHostResources() || instance.Profile == profile {
 			continue
@@ -756,10 +866,13 @@ func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
 			continue
 		}
 		drains = append(drains, drainOperation(instance))
+		filtered = removeInstance(filtered, instance.ID)
 	}
 	plan.Operations = append(plan.Operations, drains...)
 	if allSwitchable {
-		plan = appendMacSpawns(in, plan, demandsForProfile(demands, profile), operationIDs(drains))
+		nextInput := in
+		nextInput.Instances = domain.Fresh(filtered, in.Instances.ObservedAt)
+		plan = appendMacSpawns(nextInput, plan, demandsForProfile(demands, profile), operationIDs(drains))
 	}
 	return plan
 }
@@ -783,23 +896,12 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		return plan
 	}
 	profile := in.Config.Profiles[demands[0].Profile]
-	limit := profile.MaxActive
-	if profile.ID == "maestro" && (limit <= 0 || limit > 2) {
-		limit = 2
-	}
-	if limit <= 0 {
-		limit = 1
-	}
+	limit := macProfileLimit(profile)
 	active := 0
-	free := in.Host.Value.Available
+	free := linuxFree(in)
 	for _, instance := range in.Instances.Value {
 		if instance.ConsumesHostResources() && instance.Platform == domain.PlatformMacOS && instance.Profile == profile.ID {
 			active++
-			var ok bool
-			free, ok = free.Sub(instance.Resources)
-			if !ok {
-				return plan
-			}
 		}
 	}
 	available := limit - active
@@ -822,6 +924,17 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		plan.Next.DRRCursor = selected[len(selected)-1].Key.Repo
 	}
 	return plan
+}
+
+func macProfileLimit(profile domain.Profile) int {
+	limit := profile.MaxActive
+	if profile.ID == "maestro" && (limit <= 0 || limit > 2) {
+		limit = 2
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	return limit
 }
 
 func sortedInstances(instances []domain.Instance) []domain.Instance {
