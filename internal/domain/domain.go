@@ -189,16 +189,17 @@ func (s InstanceState) CanTransitionTo(next InstanceState) bool {
 }
 
 type Instance struct {
-	ID        string
-	Repo      string
-	Platform  Platform
-	Profile   ProfileID
-	Route     Route
-	Resources Resources
-	State     InstanceState
-	Power     InstancePower
-	Attempts  int
-	RetryAt   time.Time
+	ID            string
+	Repo          string
+	Platform      Platform
+	Profile       ProfileID
+	Route         Route
+	Resources     Resources
+	State         InstanceState
+	Power         InstancePower
+	RecoveryReady bool
+	Attempts      int
+	RetryAt       time.Time
 }
 
 type InstancePower string

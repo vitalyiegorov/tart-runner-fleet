@@ -32,6 +32,15 @@ type fakeHost struct{ value macos.Snapshot }
 
 func (f fakeHost) Snapshot(context.Context) macos.Snapshot { return f.value }
 
+type fakeRecoveryObserver struct {
+	confirmation operations.DeletionConfirmation
+	err          error
+}
+
+func (f fakeRecoveryObserver) ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error) {
+	return f.confirmation, f.err
+}
+
 func inventoryInstance(state operations.State) operations.Instance {
 	return operations.Instance{ID: "trf-small-1", Repo: "o/r", Platform: domain.PlatformLinux, Profile: "small", Route: "tiered",
 		Resources: domain.Resources{CPU: 2, MemoryMB: 4096, Slots: 1}, Demand: domain.DemandKey{Repo: "o/r", RunID: 1, Attempt: 1, JobID: 1},
@@ -68,6 +77,24 @@ func TestProductionInventoryMarksStoppedOwnedRunner(t *testing.T) {
 	instances, _ := inv.Observe(context.Background())
 	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].Power != domain.InstancePowerStopped {
 		t.Fatalf("stopped instance = %#v", instances)
+	}
+}
+
+func TestProductionInventoryMarksRunningCompletedRunnerRecoverableFromFreshEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	confirmation := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
+	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
+		Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Recovery: fakeRecoveryObserver{confirmation: confirmation}, RecoveryConfirmationMaxAge: time.Minute,
+		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+	instances, _ := inv.Observe(context.Background())
+	if !instances.Usable() || len(instances.Value) != 1 || !instances.Value[0].RecoveryReady {
+		t.Fatalf("fresh completed recovery evidence = %#v", instances)
+	}
+	inv.Recovery = fakeRecoveryObserver{err: errors.New("unavailable")}
+	instances, _ = inv.Observe(context.Background())
+	if !instances.Usable() || instances.Value[0].RecoveryReady {
+		t.Fatalf("unavailable evidence inferred inactive = %#v", instances)
 	}
 }
 

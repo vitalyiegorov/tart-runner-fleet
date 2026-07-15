@@ -210,6 +210,17 @@ func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
 		t.Fatalf("recovery intent = %#v", intent)
 	}
 	store.applied = nil
+	instance.State = operations.StateRunning
+	store.instances[instance.ID] = instance
+	recovery.ConfirmedInactive = true
+	if applied, err := controller.Commit(context.Background(), readyPlan(recovery), "", controllerNow); err != nil || !applied {
+		t.Fatalf("inactive recovery commit = %v, %v", applied, err)
+	}
+	intent = store.applied[0].Instances[0]
+	if intent.ExpectedState != operations.StateRunning || intent.Instance.DrainPhase != operations.DrainPhaseInactiveRecovery {
+		t.Fatalf("inactive recovery intent = %#v", intent)
+	}
+	store.applied = nil
 	recovery.Recovery = false
 	if _, err := controller.Commit(context.Background(), readyPlan(recovery), "", controllerNow); err == nil {
 		t.Fatal("ordinary drain accepted an assigned instance")

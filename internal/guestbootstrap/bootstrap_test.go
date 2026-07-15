@@ -347,12 +347,13 @@ func TestSecureDirectoryPropagatesDirectoryCreationFailure(t *testing.T) {
 
 func TestExecLauncherStartsDetachedProcess(t *testing.T) {
 	root := t.TempDir()
+	direct := ""
 	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer log.Close()
-	process, err := (ExecLauncher{SudoPath: "/usr/bin/true", ShutdownPath: "/usr/bin/true"}).Start(context.Background(), ProcessSpec{
+	process, err := (ExecLauncher{SystemdRunPath: &direct, SudoPath: "/usr/bin/true", ShutdownPath: "/usr/bin/true"}).Start(context.Background(), ProcessSpec{
 		Path: "/usr/bin/true", Dir: root, Env: os.Environ(), Log: log,
 	})
 	if err != nil {
@@ -368,6 +369,7 @@ func TestExecLauncherStartsDetachedProcess(t *testing.T) {
 
 func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
 	root := t.TempDir()
+	direct := ""
 	runnerMarker := filepath.Join(root, "runner-finished")
 	shutdownMarker := filepath.Join(root, "shutdown-requested")
 	runner := filepath.Join(root, "run.sh")
@@ -387,7 +389,7 @@ func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer log.Close()
-	process, err := (ExecLauncher{ShellPath: "/bin/sh", SudoPath: sudo, ShutdownPath: shutdown}).Start(context.Background(), ProcessSpec{
+	process, err := (ExecLauncher{SystemdRunPath: &direct, ShellPath: "/bin/sh", SudoPath: sudo, ShutdownPath: shutdown}).Start(context.Background(), ProcessSpec{
 		Path: runner, Dir: root, Env: append(os.Environ(), "RUNNER_MARKER="+runnerMarker, "SHUTDOWN_MARKER="+shutdownMarker), Log: log,
 	})
 	if err != nil || process == nil {
@@ -409,6 +411,138 @@ func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("detached supervisor did not request guest shutdown after runner exit")
+}
+
+func TestExecLauncherMovesSupervisorIntoManagedScopeWithoutJITInArguments(t *testing.T) {
+	root := t.TempDir()
+	boundaryArgs := filepath.Join(root, "boundary-args")
+	runnerMarker := filepath.Join(root, "runner-finished")
+	shutdownMarker := filepath.Join(root, "shutdown-requested")
+	boundary := filepath.Join(root, "systemd-run")
+	runner := filepath.Join(root, "run.sh")
+	sudo := filepath.Join(root, "sudo")
+	shutdown := filepath.Join(root, "shutdown")
+	for path, body := range map[string]string{
+		boundary: "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BOUNDARY_ARGS\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+		runner:   "#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n",
+		sudo:     "#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER\"\n",
+		shutdown: "#!/bin/sh\nexit 0\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	const jit = "secret-jit-must-not-enter-argv"
+	process, err := (ExecLauncher{
+		SystemdRunPath: &boundary,
+		ShellPath:      "/bin/sh",
+		SudoPath:       sudo,
+		ShutdownPath:   shutdown,
+	}).Start(context.Background(), ProcessSpec{
+		Path: runner,
+		Dir:  root,
+		Env: append(os.Environ(),
+			"ACTIONS_RUNNER_INPUT_JITCONFIG="+jit,
+			"BOUNDARY_ARGS="+boundaryArgs,
+			"RUNNER_MARKER="+runnerMarker,
+			"SHUTDOWN_MARKER="+shutdownMarker,
+		),
+		Log: log,
+	})
+	if err != nil || process == nil {
+		t.Fatalf("start managed supervisor = %v, %v", process, err)
+	}
+	if err := process.Release(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		args, argsErr := os.ReadFile(boundaryArgs)
+		_, runnerErr := os.Stat(runnerMarker)
+		_, shutdownErr := os.Stat(shutdownMarker)
+		if argsErr == nil && runnerErr == nil && shutdownErr == nil {
+			arguments := string(args)
+			for _, required := range []string{"--scope\n", "--collect\n", "--unit=tart-runner-fleet-runner\n", "--\n", "/bin/sh\n"} {
+				if !strings.Contains(arguments, required) {
+					t.Fatalf("managed boundary arguments %q do not contain %q", arguments, required)
+				}
+			}
+			if strings.Contains(arguments, jit) {
+				t.Fatalf("JIT secret leaked into managed boundary arguments: %q", arguments)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("managed supervisor did not survive through runner completion and guest shutdown request")
+}
+
+func TestExecLauncherFailsClosedWhenManagedScopeNeverStartsSupervisor(t *testing.T) {
+	root := t.TempDir()
+	boundary := filepath.Join(root, "systemd-run")
+	if err := os.WriteFile(boundary, []byte("#!/bin/sh\nsleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	process, err := (ExecLauncher{
+		SystemdRunPath: &boundary,
+		ReadyTimeout:   20 * time.Millisecond,
+		SudoPath:       "/usr/bin/true",
+		ShutdownPath:   "/usr/bin/true",
+	}).Start(context.Background(), ProcessSpec{
+		Path: "/usr/bin/true", Dir: root, Env: os.Environ(), Log: log,
+	})
+	if process != nil || !errors.Is(err, ErrStart) {
+		t.Fatalf("scope startup timeout = %v, %v", process, err)
+	}
+}
+
+func TestExecLauncherPropagatesManagedBoundaryStartFailure(t *testing.T) {
+	root := t.TempDir()
+	boundary := filepath.Join(root, "systemd-run")
+	if err := os.WriteFile(boundary, []byte("not an executable image"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	process, err := (ExecLauncher{
+		SystemdRunPath: &boundary,
+		SudoPath:       "/usr/bin/true",
+		ShutdownPath:   "/usr/bin/true",
+	}).Start(context.Background(), ProcessSpec{
+		Path: "/usr/bin/true", Dir: root, Env: os.Environ(), Log: log,
+	})
+	if process != nil || err == nil {
+		t.Fatalf("invalid scope executable start = %v, %v", process, err)
+	}
+}
+
+func TestWaitSupervisorReadyRejectsCancellationAndInvalidMarker(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	marker := filepath.Join(root, "marker")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitSupervisorReady(ctx, marker, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled readiness error=%v", err)
+	}
+	if err := waitSupervisorReady(context.Background(), root, time.Second); err == nil {
+		t.Fatal("directory accepted as supervisor readiness marker")
+	}
 }
 
 func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
@@ -436,10 +570,12 @@ func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
 		t.Fatal("missing working directory started")
 	}
 	for name, launcher := range map[string]ExecLauncher{
-		"relative shell":   {ShellPath: "bin/sh"},
-		"missing shell":    {ShellPath: "/definitely/missing-shell"},
-		"missing sudo":     {SudoPath: "/definitely/missing-sudo"},
-		"missing shutdown": {ShutdownPath: "/definitely/missing-shutdown"},
+		"relative systemd-run": {SystemdRunPath: stringPointer("usr/bin/systemd-run")},
+		"missing systemd-run":  {SystemdRunPath: stringPointer("/definitely/missing-systemd-run")},
+		"relative shell":       {ShellPath: "bin/sh"},
+		"missing shell":        {ShellPath: "/definitely/missing-shell"},
+		"missing sudo":         {SudoPath: "/definitely/missing-sudo"},
+		"missing shutdown":     {ShutdownPath: "/definitely/missing-shutdown"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := launcher.Start(context.Background(), ProcessSpec{Path: "/usr/bin/true", Dir: t.TempDir(), Log: log}); !errors.Is(err, ErrStart) {
@@ -448,6 +584,8 @@ func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
 		})
 	}
 }
+
+func stringPointer(value string) *string { return &value }
 
 type errorReader struct{ err error }
 

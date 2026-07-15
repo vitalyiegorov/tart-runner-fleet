@@ -87,6 +87,22 @@ func TestStoppedAssignedRunnerIsRecoveredBeforeNewAdmission(t *testing.T) {
 	}
 }
 
+func TestRunningCompletedEphemeralRunnerRecoversOnlyWithFreshInactiveEvidence(t *testing.T) {
+	instance := domain.Instance{ID: "completed", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+	queued := demand("b/repo", 9, time.Minute, "small")
+	withoutEvidence := PlanTick(input([]domain.Demand{queued}, []domain.Instance{instance}, State{}))
+	if len(withoutEvidence.Operations) != 1 || withoutEvidence.Operations[0].Kind != OperationSpawn {
+		t.Fatalf("unconfirmed running instance recovery = %#v", withoutEvidence)
+	}
+	instance.RecoveryReady = true
+	plan := PlanTick(input([]domain.Demand{queued}, []domain.Instance{instance}, State{}))
+	if len(plan.Operations) != 1 || plan.Operations[0].Kind != OperationDrain || plan.Operations[0].Instance != instance.ID ||
+		!plan.Operations[0].Recovery || !plan.Operations[0].ConfirmedInactive {
+		t.Fatalf("confirmed inactive running recovery = %#v", plan)
+	}
+}
+
 func TestStoppedDrainingOrphanCannotStarveUnrelatedCapacity(t *testing.T) {
 	orphan := domain.Instance{ID: "orphan", Repo: "a/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
 		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, State: domain.InstanceDraining, Power: domain.InstancePowerStopped}

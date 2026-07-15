@@ -21,13 +21,18 @@ type TartInventory interface {
 type HostInventory interface {
 	Snapshot(context.Context) macos.Snapshot
 }
+type RecoveryObserver interface {
+	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
+}
 
 type ProductionInventory struct {
-	Store    LiveInstanceStore
-	Tart     TartInventory
-	Host     HostInventory
-	Capacity domain.Resources
-	Guards   macos.Guardrails
+	Store                      LiveInstanceStore
+	Tart                       TartInventory
+	Host                       HostInventory
+	Recovery                   RecoveryObserver
+	RecoveryConfirmationMaxAge time.Duration
+	Capacity                   domain.Resources
+	Guards                     macos.Guardrails
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
@@ -65,8 +70,16 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		} else if exists {
 			power = domain.InstancePowerStopped
 		}
+		recoveryReady := false
+		if power == domain.InstancePowerRunning && p.Recovery != nil &&
+			(instance.State == operations.StateAssigned || instance.State == operations.StateRunning) {
+			confirmation, confirmationErr := p.Recovery.ConfirmDeletion(ctx, instance.ID)
+			if confirmationErr == nil {
+				recoveryReady = confirmation.Safe(now, p.recoveryConfirmationMaxAge())
+			}
+		}
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Platform: instance.Platform, Profile: instance.Profile,
-			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power})
+			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {
@@ -74,6 +87,13 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		}
 	}
 	return domain.Fresh(result, now), host
+}
+
+func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {
+	if p.RecoveryConfirmationMaxAge <= 0 {
+		return 30 * time.Second
+	}
+	return p.RecoveryConfirmationMaxAge
 }
 
 func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails) domain.Observation[domain.Host] {
