@@ -34,10 +34,19 @@ path:
    readiness evidence; and
 8. atomically commits or restores the previous binary/config/mode/plist tuple.
 
-The updater plist is rewritten to the new immutable `fleetctl` on every commit,
-and an already-loaded updater job is unloaded and bootstrapped from that plist.
+The updater plist is rewritten to the new immutable `fleetctl` on every commit.
+An updater must never `bootout` its own launchd job: launchd terminates the
+caller before it can bootstrap the replacement. When the updater is already
+loaded, the commit first bootstraps a distinct retrying handoff LaunchAgent.
+That job waits until the candidate manifest is durable and the update journal
+is cleared, then unloads the updater, bootstraps the rewritten plist, and
+verifies launchd's loaded program names the exact candidate release. A failed
+commit or rollback never satisfies that gate. The handoff retries failed
+replacement attempts and is safely replaced by the next update.
+
 This keeps launchd's cached program, the durable plist, and the installed
-manifest on the same generation; rewriting the file alone is not sufficient.
+manifest on the same generation without allowing a process to terminate its
+own commit. Rewriting the file alone is not sufficient.
 A transactional `current` link gives humans and agents a stable CLI path while
 launchd continues to execute exact immutable paths. The prior release remains
 available for local rollback.
@@ -49,5 +58,7 @@ available for local rollback.
 - Deleting or reordering GitHub releases cannot automatically downgrade the
   controller.
 - The launchd user must have authenticated `gh` access to the release repository.
+- The updater handoff is a separate, credential-free one-shot job; it receives
+  only validated local generation paths and exact confirmation arguments.
 - Update failures are visible and fail closed; they never silently switch
   authority back to observe mode.

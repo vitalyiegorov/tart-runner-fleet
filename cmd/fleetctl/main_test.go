@@ -56,7 +56,10 @@ type errorWriter struct{}
 
 func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("broken output") }
 
-type fakeUpdateCommand struct{ calls []string }
+type fakeUpdateCommand struct {
+	calls       []string
+	launchPrint string
+}
 
 func (c *fakeUpdateCommand) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := name + " " + strings.Join(args, " ")
@@ -66,6 +69,9 @@ func (c *fakeUpdateCommand) Run(_ context.Context, name string, args ...string) 
 	}
 	if strings.Contains(call, "status --require-ready") {
 		return []byte(`{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":true}}}`), nil
+	}
+	if strings.Contains(call, "launchctl print") {
+		return []byte(c.launchPrint), nil
 	}
 	return nil, nil
 }
@@ -123,6 +129,14 @@ func TestGuardedAutomaticUpdateAdoptionAndIdempotentLatest(t *testing.T) {
 	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
 		t.Fatalf("adopt code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+	command.launchPrint = "program = " + release + "/fleetctl"
+	args = append([]string{"update", "finish-updater-handoff"}, common...)
+	args = append(args, "--release-dir", release, "--confirm", "automatic-updater-handoff")
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess || !strings.Contains(stdout.String(), "v2") {
+		t.Fatalf("handoff code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
 	args = append([]string{"update", "apply-latest"}, common...)
 	args = append(args, "--confirm", "automatic-release-update")
 	stdout.Reset()
@@ -172,6 +186,8 @@ func TestUpdateCommandFailureModes(t *testing.T) {
 		{name: "invalid host", args: []string{"update", "apply-latest", "--repo", "bad", "--confirm", "automatic-release-update"}, code: exitFailure},
 		{name: "adopt missing release", args: append(append([]string{"update", "adopt"}, base...), "--confirm", "adopt-current-generation"), code: exitUsage},
 		{name: "adopt failure", args: append(append([]string{"update", "adopt"}, base...), "--release-dir", filepath.Join(root, "releases", "missing"), "--confirm", "adopt-current-generation"), code: exitFailure},
+		{name: "handoff missing release", args: append(append([]string{"update", "finish-updater-handoff"}, base...), "--confirm", "automatic-updater-handoff"), code: exitUsage},
+		{name: "handoff wrong confirmation", args: append(append([]string{"update", "finish-updater-handoff"}, base...), "--release-dir", filepath.Join(root, "releases", "v2"), "--confirm", "automatic-release-update"), code: exitUnsafe},
 		{name: "latest rejects release dir", args: append(append([]string{"update", "apply-latest"}, base...), "--release-dir", "/x", "--confirm", "automatic-release-update"), code: exitUsage},
 		{name: "latest source failure", args: append(append([]string{"update", "apply-latest"}, base...), "--confirm", "automatic-release-update"), code: exitFailure},
 	}
@@ -191,9 +207,14 @@ func TestUpdateCommandFailureModes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(state, autoupdate.InstalledGenerationFile), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_ = release
-	args := append(append([]string{"update", "apply-latest"}, base...), "--confirm", "automatic-release-update")
+	handoffArgs := append(append([]string{"update", "finish-updater-handoff"}, base...), "--release-dir", release, "--confirm", "automatic-updater-handoff")
 	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), handoffArgs, &stdout, &stderr, deps); code != exitFailure || !strings.Contains(stderr.String(), "finish automatic updater handoff") {
+		t.Fatalf("handoff failure code=%d stderr=%q", code, stderr.String())
+	}
+	args := append(append([]string{"update", "apply-latest"}, base...), "--confirm", "automatic-release-update")
+	stdout.Reset()
+	stderr.Reset()
 	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitFailure || !strings.Contains(stderr.String(), "apply production release") {
 		t.Fatalf("apply code=%d stderr=%q", code, stderr.String())
 	}

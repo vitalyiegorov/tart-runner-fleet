@@ -209,6 +209,9 @@ remains authority long enough to build and verify its successor. CI tests this
 self-hosting capacity invariant on every change; upgrades never replace the
 running controller before the successor has completed Required CI. See the
 two-generation bootstrap procedure in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Automatic upgrades also use a distinct retrying launchd handoff: the updater
+commits the verified generation, and the handoff replaces and verifies the
+loaded updater executable without letting the updater terminate its own commit.
 
 The controller target uses `"schedulingClass": "control-plane"`. That class
 receives the next compatible quantum ahead of only *young* standard work across

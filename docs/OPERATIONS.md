@@ -196,9 +196,12 @@ the previous generation on any failure. Updates are strictly forward-only.
 Both generated plists use `RunAtLoad`; the daemon additionally uses
 restart-on-failure `KeepAlive`, while the updater uses a five-minute
 `StartInterval`. Every committed update rewrites the updater to the new immutable
-`fleetctl` and reloads the already-loaded updater job, so the plist on disk and
-launchd's cached `ProgramArguments` advance together. A later timer invocation,
-login, or reboot therefore cannot regress to an older updater.
+`fleetctl`. If the updater is already loaded, a distinct retrying handoff job
+waits for the durable commit, unloads the old updater, bootstraps the rewritten
+plist, and verifies launchd loaded the exact committed executable. The updater
+never boots out itself. The plist on disk and launchd's cached
+`ProgramArguments` therefore advance together, and a later timer invocation,
+login, or reboot cannot regress to an older updater.
 
 Activation and rollback use bounded launchd bootstrap recovery for the brief
 unload-to-load transition. Production allows a five-minute readiness budget so
@@ -219,6 +222,12 @@ Exit status 0 does not make a stale loaded program healthy. A one-time migration
 from a release that predates updater-job reload may require a controlled
 `bootout`/`bootstrap` after verifying the new plist; subsequent updates must
 maintain parity automatically.
+
+During an update, a short-lived
+`com.vitalyiegorov.tart-runner-fleet.updater-handoff` job is expected. It fails
+closed while the update journal exists, retries replacement failures, and is
+healthy only when the normal updater's loaded program matches the installed
+generation. Do not delete it to hide a parity failure.
 
 To run the same idempotent check manually:
 

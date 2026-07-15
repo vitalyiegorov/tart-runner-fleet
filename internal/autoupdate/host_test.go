@@ -21,6 +21,8 @@ type fakeCommand struct {
 	currentErr        error
 	bootstrap         error
 	bootstrapFailures int
+	launchPrint       string
+	printFailures     int
 	fail              map[string]error
 }
 
@@ -37,6 +39,13 @@ func (c *fakeCommand) Run(_ context.Context, name string, args ...string) ([]byt
 			return []byte(c.current), c.currentErr
 		}
 		return []byte(c.ready), c.readyErr
+	}
+	if strings.Contains(call, "launchctl print") {
+		if c.printFailures > 0 {
+			c.printFailures--
+			return nil, errors.New("launchd job not loaded")
+		}
+		return []byte(c.launchPrint), nil
 	}
 	if strings.Contains(call, "launchctl bootstrap") && c.bootstrap != nil {
 		return nil, c.bootstrap
@@ -136,6 +145,9 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 		!strings.Contains(string(updater), "<key>RunAtLoad</key><true/>") {
 		t.Fatalf("updater plist=%q err=%v", updater, err)
 	}
+	if !strings.Contains(string(updater), "<string>--config</string>") || !strings.Contains(string(updater), "<string>"+candidate.ConfigPath+"</string>") {
+		t.Fatalf("updater did not preserve config path: %s", updater)
+	}
 	for _, want := range []string{
 		"<key>EnvironmentVariables</key>",
 		"<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
@@ -152,25 +164,191 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 	}
 }
 
-func TestLocalHostReloadsAnAlreadyLoadedUpdaterAfterCommit(t *testing.T) {
+func TestLocalHostHandsALoadedUpdaterReloadToAnIndependentLaunchdJob(t *testing.T) {
 	host, command, _, candidate, _ := hostFixture(t)
 
 	if err := host.Commit(context.Background(), candidate); err != nil {
 		t.Fatal(err)
 	}
 
-	updaterPath := filepath.Join(host.launchAgentsDir, UpdaterPlist)
+	handoffPath := filepath.Join(host.launchAgentsDir, "com.vitalyiegorov.tart-runner-fleet.updater-handoff.plist")
 	want := []string{
 		"launchctl print gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
-		"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
-		"launchctl bootstrap gui/501 " + updaterPath,
+		"launchctl bootstrap gui/501 " + handoffPath,
 	}
 	joined := strings.Join(command.calls, "\n")
 	for _, call := range want {
 		if !strings.Contains(joined, call) {
-			t.Fatalf("loaded updater kept its stale executable; missing %q in calls:\n%s", call, joined)
+			t.Fatalf("loaded updater reload was not delegated; missing %q in calls:\n%s", call, joined)
 		}
 	}
+	for _, forbidden := range []string{
+		"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
+		"launchctl bootstrap gui/501 " + filepath.Join(host.launchAgentsDir, UpdaterPlist),
+	} {
+		for _, call := range command.calls {
+			if call == forbidden {
+				t.Fatalf("updater attempted to terminate or replace itself via %q:\n%s", forbidden, joined)
+			}
+		}
+	}
+	handoff, err := os.ReadFile(handoffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{candidate.ReleaseDir + "/fleetctl", "finish-updater-handoff", "automatic-updater-handoff"} {
+		if !strings.Contains(string(handoff), value) {
+			t.Fatalf("handoff plist missing %q: %s", value, handoff)
+		}
+	}
+}
+
+func TestLocalHostUpdaterHandoffWaitsForTheDurableCommit(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := host.FinishUpdaterHandoff(context.Background(), candidate); !errors.Is(err, ErrBusy) {
+		t.Fatalf("handoff raced an open transaction: %v", err)
+	}
+	if strings.Contains(strings.Join(command.calls, "\n"), "launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater") {
+		t.Fatalf("handoff touched the updater before commit: %v", command.calls)
+	}
+}
+
+func TestLocalHostUpdaterHandoffReloadsAndVerifiesTheExactGeneration(t *testing.T) {
+	host, command, _, candidate, _ := hostFixture(t)
+	installed, _ := json.Marshal(candidate)
+	if err := os.WriteFile(filepath.Join(host.stateDir, InstalledGenerationFile), installed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updaterPath := filepath.Join(host.launchAgentsDir, UpdaterPlist)
+	if err := os.WriteFile(updaterPath, host.renderUpdater(candidate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command.launchPrint = "program = " + candidate.ReleaseDir + "/fleetctl"
+
+	if err := host.FinishUpdaterHandoff(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(command.calls, "\n")
+	for _, want := range []string{
+		"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
+		"launchctl bootstrap gui/501 " + updaterPath,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("handoff missing %q:\n%s", want, joined)
+		}
+	}
+	if count := strings.Count(joined, "launchctl print gui/501/com.vitalyiegorov.tart-runner-fleet.updater"); count != 2 {
+		t.Fatalf("handoff did not verify the replacement, print count=%d:\n%s", count, joined)
+	}
+}
+
+func TestLocalHostUpdaterHandoffRejectsGenerationOrPlistDrift(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		writeCurrent  bool
+		writeExpected bool
+	}{
+		{name: "installed generation", writeExpected: true},
+		{name: "updater plist", writeCurrent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host, command, _, candidate, _ := hostFixture(t)
+			if test.writeCurrent {
+				body, _ := json.Marshal(candidate)
+				if err := os.WriteFile(filepath.Join(host.stateDir, InstalledGenerationFile), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.writeExpected {
+				if err := os.WriteFile(filepath.Join(host.launchAgentsDir, UpdaterPlist), host.renderUpdater(candidate), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := host.FinishUpdaterHandoff(context.Background(), candidate); !errors.Is(err, ErrInvalidGeneration) {
+				t.Fatalf("drift accepted: %v", err)
+			}
+			if strings.Contains(strings.Join(command.calls, "\n"), "launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater") {
+				t.Fatal("drifted handoff touched updater")
+			}
+		})
+	}
+}
+
+func TestLocalHostUpdaterHandoffRecoversAnUnloadedUpdater(t *testing.T) {
+	host, command, _, candidate, _ := committedHandoffFixture(t)
+	command.printFailures = 1
+	command.launchPrint = "program = " + candidate.ReleaseDir + "/fleetctl"
+
+	if err := host.FinishUpdaterHandoff(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(command.calls, "\n"), "launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater") {
+		t.Fatal("unloaded updater was booted out")
+	}
+}
+
+func TestLocalHostUpdaterHandoffFailsClosedAtLaunchdBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*fakeCommand)
+	}{
+		{name: "bootout", configure: func(command *fakeCommand) {
+			command.launchPrint = "program = /old/fleetctl"
+			command.fail = map[string]error{"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater": errors.New("denied")}
+		}},
+		{name: "bootstrap", configure: func(command *fakeCommand) {
+			command.launchPrint = "program = /old/fleetctl"
+			command.bootstrap = errors.New("denied")
+		}},
+		{name: "verification", configure: func(command *fakeCommand) {
+			command.launchPrint = "program = /stale/fleetctl"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host, command, _, candidate, _ := committedHandoffFixture(t)
+			test.configure(command)
+			if err := host.FinishUpdaterHandoff(context.Background(), candidate); err == nil {
+				t.Fatal("launchd handoff failure accepted")
+			}
+		})
+	}
+}
+
+func TestLocalHostUpdaterHandoffRejectsInvalidCandidateAndJournalState(t *testing.T) {
+	t.Run("candidate", func(t *testing.T) {
+		host, _, _, candidate, _ := hostFixture(t)
+		candidate.ReleaseDir = filepath.Join(host.rootDir, "elsewhere", candidate.Version)
+		if err := host.FinishUpdaterHandoff(context.Background(), candidate); !errors.Is(err, ErrInvalidGeneration) {
+			t.Fatalf("invalid candidate=%v", err)
+		}
+	})
+	t.Run("journal stat", func(t *testing.T) {
+		host, _, _, candidate, _ := hostFixture(t)
+		journal := filepath.Join(host.stateDir, UpdateJournalFile)
+		if err := os.Symlink(journal, journal); err != nil {
+			t.Fatal(err)
+		}
+		if err := host.FinishUpdaterHandoff(context.Background(), candidate); err == nil {
+			t.Fatal("unreadable journal state accepted")
+		}
+	})
+}
+
+func committedHandoffFixture(t *testing.T) (*LocalHost, *fakeCommand, Generation, Generation, string) {
+	t.Helper()
+	host, command, current, candidate, canonical := hostFixture(t)
+	installed, _ := json.Marshal(candidate)
+	if err := os.WriteFile(filepath.Join(host.stateDir, InstalledGenerationFile), installed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(host.launchAgentsDir, UpdaterPlist), host.renderUpdater(candidate), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return host, command, current, candidate, canonical
 }
 
 func TestLocalHostRestoresTheOldBootGenerationOnFailure(t *testing.T) {

@@ -152,8 +152,8 @@ func (execCommand) Run(ctx context.Context, name string, args ...string) ([]byte
 }
 
 func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
-	if len(args) == 0 || (args[0] != "adopt" && args[0] != "apply-latest") {
-		fmt.Fprintln(stderr, "usage: fleetctl update adopt|apply-latest [guarded flags]")
+	if len(args) == 0 || (args[0] != "adopt" && args[0] != "apply-latest" && args[0] != "finish-updater-handoff") {
+		fmt.Fprintln(stderr, "usage: fleetctl update adopt|apply-latest|finish-updater-handoff [guarded flags]")
 		return exitUsage
 	}
 	operation := args[0]
@@ -176,8 +176,11 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		return exitUsage
 	}
 	wantConfirm := "automatic-release-update"
-	if operation == "adopt" {
+	switch operation {
+	case "adopt":
 		wantConfirm = "adopt-current-generation"
+	case "finish-updater-handoff":
+		wantConfirm = "automatic-updater-handoff"
 	}
 	if *confirm != wantConfirm {
 		fmt.Fprintf(stderr, "unsafe update: require --confirm %s\n", wantConfirm)
@@ -202,6 +205,20 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 			return exitFailure
 		}
 		fmt.Fprintf(stdout, "automatic production updates enabled for %s\n", candidate.Version)
+		return exitSuccess
+	}
+	if operation == "finish-updater-handoff" {
+		if *releaseDir == "" {
+			fmt.Fprintln(stderr, "finish-updater-handoff requires --release-dir")
+			return exitUsage
+		}
+		candidate := autoupdate.Generation{Version: filepath.Base(filepath.Clean(*releaseDir)), Mode: *mode,
+			ReleaseDir: *releaseDir, ConfigPath: *configPath, Endpoint: *endpoint}
+		if err := host.FinishUpdaterHandoff(ctx, candidate); err != nil {
+			fmt.Fprintf(stderr, "finish automatic updater handoff: %v\n", err)
+			return exitFailure
+		}
+		fmt.Fprintf(stdout, "automatic updater handoff complete: %s\n", candidate.Version)
 		return exitSuccess
 	}
 	if *releaseDir != "" {
