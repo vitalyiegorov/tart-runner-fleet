@@ -174,15 +174,7 @@ func TestLocalHostRetriesTransientLaunchdBootstrapDuringRollback(t *testing.T) {
 	if err := host.Rollback(context.Background(), current); err != nil {
 		t.Fatalf("transient launchd rollback failure was not recovered: %v", err)
 	}
-	var bootstraps int
-	for _, call := range command.calls {
-		if strings.Contains(call, "launchctl bootstrap") {
-			bootstraps++
-		}
-	}
-	if bootstraps != 2 {
-		t.Fatalf("launchd bootstrap attempts=%d want=2\ncalls:\n%s", bootstraps, strings.Join(command.calls, "\n"))
-	}
+	requireBootstrapAttempts(t, command, 2)
 }
 
 func TestLocalHostRetriesTransientLaunchdBootstrapDuringActivation(t *testing.T) {
@@ -194,14 +186,19 @@ func TestLocalHostRetriesTransientLaunchdBootstrapDuringActivation(t *testing.T)
 	if err := host.Activate(context.Background(), candidate); err != nil {
 		t.Fatalf("transient launchd activation failure was not recovered: %v", err)
 	}
+	requireBootstrapAttempts(t, command, 2)
+}
+
+func requireBootstrapAttempts(t *testing.T, command *fakeCommand, want int) {
+	t.Helper()
 	var bootstraps int
 	for _, call := range command.calls {
 		if strings.Contains(call, "launchctl bootstrap") {
 			bootstraps++
 		}
 	}
-	if bootstraps != 2 {
-		t.Fatalf("launchd bootstrap attempts=%d want=2\ncalls:\n%s", bootstraps, strings.Join(command.calls, "\n"))
+	if bootstraps != want {
+		t.Fatalf("launchd bootstrap attempts=%d want=%d\ncalls:\n%s", bootstraps, want, strings.Join(command.calls, "\n"))
 	}
 }
 
