@@ -124,7 +124,7 @@ func TestFailedInstanceRetrySemantics(t *testing.T) {
 	}
 }
 
-func TestHostModeDerivesFromLiveInstancesAndRejectsOverlap(t *testing.T) {
+func TestHostModeDerivesFromLiveInstancesIncludingMixedCapacity(t *testing.T) {
 	linux := Instance{ID: "linux", Platform: PlatformLinux, State: InstanceRunning}
 	mac := Instance{ID: "mac", Platform: PlatformMacOS, State: InstanceOnlineIdle}
 
@@ -137,13 +137,16 @@ func TestHostModeDerivesFromLiveInstancesAndRejectsOverlap(t *testing.T) {
 	if mode, err := DeriveHostMode([]Instance{mac}); err != nil || mode != HostMacOS {
 		t.Fatalf("mac mode = %s, %v", mode, err)
 	}
-	if _, err := DeriveHostMode([]Instance{linux, mac}); err == nil {
-		t.Fatal("live Linux/macOS overlap must be rejected")
+	if mode, err := DeriveHostMode([]Instance{linux, mac}); err != nil || mode != HostMixed {
+		t.Fatalf("mixed mode = %s, %v", mode, err)
 	}
 	terminal := Instance{ID: "done", Platform: PlatformLinux, State: InstanceDeleted}
+	if mode, err := DeriveHostMode([]Instance{terminal}); err != nil || mode != HostIdle {
+		t.Fatalf("terminal mode = %s, %v", mode, err)
+	}
 	unknown := Instance{ID: "unknown", Platform: Platform("other"), State: InstanceOnlineIdle}
-	if mode, err := DeriveHostMode([]Instance{terminal, unknown}); err != nil || mode != HostIdle {
-		t.Fatalf("terminal/unknown mode = %s, %v", mode, err)
+	if _, err := DeriveHostMode([]Instance{unknown}); err == nil {
+		t.Fatal("unknown live platform accepted")
 	}
 }
 

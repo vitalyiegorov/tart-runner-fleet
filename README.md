@@ -7,6 +7,35 @@ The daemon supports observe, shadow, an exact one-scope/one-profile canary, and
 full authority. Promotion is an operator action; the incumbent remains an
 immediate rollback until the dedicated real-runner canary is green.
 
+## Core value: maximum useful utilization
+
+The fleet exists to turn the Mac's bounded CPU, memory, disk, and VM slots into
+the largest sustainable rate of completed CI work. The goal is not merely to
+keep VMs running: it is to minimize stranded capacity and queue time while
+never exceeding resource envelopes, weakening ownership, or scheduling from
+stale observations.
+
+The scheduler therefore follows four ordered principles:
+
+1. **Admit only proven-safe work.** Fresh GitHub, Tart, lifecycle, and host
+   observations plus exact CPU, memory, slot, repository, and profile limits
+   are hard constraints.
+2. **Pack the host across platforms.** Linux and macOS may coexist whenever
+   their combined vectors fit; a platform label alone never strands usable
+   capacity.
+3. **Optimize throughput generically.** Among young jobs in the same scheduling
+   lane, lower dominant resource share is considered first and the exact
+   allocator chooses the maximum-cardinality feasible set. Profile names such
+   as `small` or `large` do not encode policy.
+4. **Bound every optimization with fairness.** Deterministic repository
+   round-robin prevents one source from monopolizing a resource band, while
+   aging promotes old work to global FIFO so large jobs cannot starve.
+
+In short: maximize useful work per host, subject to non-negotiable safety,
+fairness, and recovery guarantees. See
+[`ADR 0012`](docs/adr/0012-shared-cross-platform-capacity.md) for the decision
+and trade-offs.
+
 ## Operator experience
 
 `fleetctl` is the stable interface for humans and automation. It communicates
@@ -105,8 +134,9 @@ fairness or safety decisions.
   memory, swap, CPU-idle, load, and decision telemetry;
 - fail closed when GitHub, Tart, or host observations are stale/unavailable;
 - no Linux/macOS overlap beyond configured, proven resource envelopes;
-- aged global FIFO with bounded control-plane priority for young work, with
-  aging as an absolute starvation guard;
+- aged global FIFO with bounded control-plane priority and throughput-first
+  dominant-resource ordering for young work, with aging as an absolute
+  starvation guard;
 - a durable one-shot smallest-tier backfill budget during blocked macOS
   handoff;
 - ephemeral runners and two-phase drain before deletion;

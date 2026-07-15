@@ -280,8 +280,8 @@ func renderMetrics(snapshot Snapshot) string {
 		fmt.Fprintf(&output, "fleet_observation_age_seconds{observation=%s} %s\n", label, seconds(age))
 	}
 
-	writeHelpType("fleet_mode", "Current mutually exclusive host mode.", "gauge")
-	for _, mode := range []Mode{ModeIdle, ModeLinux, ModeMacOS, ModeMaintenance} {
+	writeHelpType("fleet_mode", "Current host allocation mode.", "gauge")
+	for _, mode := range []Mode{ModeIdle, ModeLinux, ModeMacOS, ModeMixed, ModeMaintenance} {
 		value := 0
 		if snapshot.Mode == mode {
 			value = 1

@@ -1069,6 +1069,10 @@ func TestEngineTickerRecordsBoundedMetricsAndModes(t *testing.T) {
 	if health.Snapshot().Mode != telemetry.ModeMacOS {
 		t.Fatalf("mode=%s", health.Snapshot().Mode)
 	}
+	ticker.recordMetrics(app.TickResult{HostMode: domain.HostMixed})
+	if health.Snapshot().Mode != telemetry.ModeMixed {
+		t.Fatalf("mixed mode=%s", health.Snapshot().Mode)
+	}
 }
 
 type staleInventory struct{ now time.Time }

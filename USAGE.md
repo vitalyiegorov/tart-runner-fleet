@@ -31,6 +31,22 @@ rollback or executable identity. Confirm it against
 Exit `4` means unavailable. Exit `5` means coherent but degraded. Neither means
 zero demand and neither authorizes cleanup.
 
+## Operational objective
+
+Operate for maximum **useful** utilization: the highest sustainable completion
+throughput within the configured CPU, memory, slot, repository, profile, disk,
+and host-pressure limits. A high VM count is not success if capacity is
+overcommitted, one repository monopolizes the host, or old large work starves.
+Conversely, an idle resource vector while compatible work is queued is a
+scheduling defect worth investigating.
+
+For young work, dominant resource share is the generic completion-cost proxy,
+so smaller vectors are considered before larger vectors and exact packing
+maximizes the admitted job count. Aging eventually overrides that optimization
+with global FIFO. This deliberately improves throughput without turning a
+continuous stream of small jobs into starvation for a builder or other large
+job.
+
 ## Resource model
 
 The example configuration exposes these bounded profiles:
@@ -43,10 +59,12 @@ The example configuration exposes these bounded profiles:
 | macOS builder | 8 | 12 GiB | 1 |
 | macOS Maestro | 4 | 7 GiB | 2 |
 
-Linux and macOS never overlap. Two Maestro VMs may run together; the exclusive
-builder runs alone. Linux mixes sizes up to the configured CPU, memory,
-instance, repository, and host-pressure bounds. Values come from `fleet.json`,
-so treat the table as the example contract rather than a hidden default.
+Linux and macOS share one CPU, memory, slot, repository, and host-pressure
+envelope. A Maestro VM may therefore run beside Linux jobs when their combined
+resource vectors fit. Two Maestro VMs may run together; the 8-vCPU builder
+exhausts the configured CPU envelope and consequently runs alone. Values come
+from `fleet.json`, so treat the table as the example contract rather than a
+hidden default.
 
 ## Scheduling principles
 
@@ -54,11 +72,13 @@ so treat the table as the example contract rather than a hidden default.
 2. Aged work wins global FIFO and cannot starve.
 3. Young control-plane work may receive one bounded priority quantum so the
    manager can build its successor.
-4. Compatible small Linux work may use one durable backfill budget while a
+4. Within each young scheduling lane, lower dominant-resource-share profiles
+   are considered first and exact packing maximizes admitted job count.
+5. Compatible small Linux work may use one durable backfill budget while a
    macOS handoff is draining; it cannot postpone the handoff indefinitely.
-5. A single deterministic state machine owns each instance from planned clone
+6. A single deterministic state machine owns each instance from planned clone
    through registration, assignment, drain, deregistration, stop, and deletion.
-6. External effects are durable, leased, idempotent, and retried with bounded
+7. External effects are durable, leased, idempotent, and retried with bounded
    backoff; restart resumes state instead of guessing from process presence.
 
 ## Automatic updates
@@ -102,5 +122,6 @@ status is 0 and its program path belongs to the committed generation.
    Linux and macOS load and audit complete cleanup.
 
 See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for first promotion and rollback,
-[`docs/CLI.md`](docs/CLI.md) for the complete command contract, and
-[`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) for the agent cockpit.
+[`docs/CLI.md`](docs/CLI.md) for the complete command contract,
+[`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) for the agent cockpit, and
+[`AGENTS.md`](AGENTS.md) for the coding-agent safety rules.

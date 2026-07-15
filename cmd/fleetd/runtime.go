@@ -873,6 +873,8 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 		mode = telemetry.ModeLinux
 	case domain.HostMacOS:
 		mode = telemetry.ModeMacOS
+	case domain.HostMixed:
+		mode = telemetry.ModeMixed
 	}
 	_ = e.health.SetMode(mode)
 	pressure := result.Host.Pressure

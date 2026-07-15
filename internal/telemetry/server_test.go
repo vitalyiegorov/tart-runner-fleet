@@ -24,7 +24,7 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_ = health.SetMode(ModeLinux)
+	_ = health.SetMode(ModeMixed)
 	_ = health.SetQueue("linux-small", 2, clock.Now().Add(-9*time.Second))
 	_ = health.SetInstances("linux-small", 2, 4, 8192)
 	health.SetOperations(3, 1)
@@ -45,7 +45,7 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 	}
 	if status.APIVersion != adminapi.APIVersion || status.Kind != "Status" || status.Revision == 0 ||
 		status.Data.ControllerVersion != "v1.2.3" || status.Data.ControllerMode != "shadow" ||
-		status.Data.HostMode != "linux" || !status.Data.Live.OK || !status.Data.Ready.OK ||
+		status.Data.HostMode != "mixed" || !status.Data.Live.OK || !status.Data.Ready.OK ||
 		len(status.Data.Queues) != 1 || status.Data.Queues[0].Profile != "linux-small" ||
 		len(status.Data.Instances) != 1 || len(status.Data.Observations) != 3 ||
 		status.Data.Operations.Retrying != 3 || status.Data.Operations.Dead != 1 || status.Data.HostPressure.FreeDiskGiB != 203 ||
@@ -74,7 +74,7 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 		`fleet_host_cpu_idle_percent 54`, `fleet_host_load_average 3`,
 		`fleet_host_admission_allowed 1`,
 		`fleet_observation_fresh{observation="github"} 1`,
-		`fleet_mode{mode="linux"} 1`,
+		`fleet_mode{mode="mixed"} 1`,
 		`fleet_last_successful_tick_timestamp_seconds 1700000000`,
 	} {
 		if !strings.Contains(metrics, want) {

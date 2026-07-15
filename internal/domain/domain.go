@@ -242,6 +242,7 @@ const (
 	HostIdle  HostMode = "idle"
 	HostLinux HostMode = "linux"
 	HostMacOS HostMode = "macos"
+	HostMixed HostMode = "mixed"
 )
 
 func DeriveHostMode(instances []Instance) (HostMode, error) {
@@ -255,10 +256,12 @@ func DeriveHostMode(instances []Instance) (HostMode, error) {
 			linux = true
 		case PlatformMacOS:
 			macos = true
+		default:
+			return "", errors.New("unknown live instance platform")
 		}
 	}
 	if linux && macos {
-		return "", errors.New("live Linux and macOS instances overlap")
+		return HostMixed, nil
 	}
 	if linux {
 		return HostLinux, nil
