@@ -39,6 +39,7 @@ type TickResult struct {
 	Demands   []domain.Demand
 	Instances []domain.Instance
 	HostMode  domain.HostMode
+	Host      domain.Host
 }
 
 func (e Engine) Tick(ctx context.Context) (TickResult, error) {
@@ -79,5 +80,5 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...),
-		Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode}, err
+		Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value}, err
 }

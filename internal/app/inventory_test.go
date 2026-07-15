@@ -54,6 +54,10 @@ func TestProductionInventoryFreshSnapshot(t *testing.T) {
 	if !host.Usable() || host.Value.Available.CPU != 8 || host.Value.Available.MemoryMB != 9952 || host.Value.Available.Slots != 4 {
 		t.Fatalf("host = %#v", host)
 	}
+	if host.Value.Pressure.FreeDiskGB != 100 || host.Value.Pressure.AvailableMemoryMB != 12000 ||
+		host.Value.Pressure.CPUIdlePercent != 80 || host.Value.Pressure.AdmissionReason != "capacity available" {
+		t.Fatalf("host pressure = %#v", host.Value.Pressure)
+	}
 }
 
 func TestProductionInventoryMarksStoppedOwnedRunner(t *testing.T) {
@@ -75,6 +79,9 @@ func TestProductionInventoryKnownPressureReturnsFreshZeroCapacity(t *testing.T) 
 	_, host := inv.Observe(context.Background())
 	if !host.Usable() || host.Value.Available != (domain.Resources{}) || host.Reason != "disk reserve" {
 		t.Fatalf("host = %#v", host)
+	}
+	if host.Value.Pressure.AdmissionAllowed || host.Value.Pressure.AdmissionReason != "disk reserve" || host.Value.Pressure.FreeDiskGB != 1 {
+		t.Fatalf("pressure = %#v", host.Value.Pressure)
 	}
 }
 

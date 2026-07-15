@@ -205,6 +205,7 @@ func healthyStatus() adminapi.StatusEnvelope {
 		Warnings: []adminapi.Warning{}, Data: adminapi.Status{ControllerVersion: "v1", ControllerMode: "shadow", HostMode: "linux",
 			LastSuccessfulTick: now.Add(-2 * time.Second), Live: adminapi.Check{OK: true, Reasons: []string{}},
 			Ready:        adminapi.Check{OK: true, Reasons: []string{}},
+			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: 8192, FreeDiskGiB: 200, CPUIdlePercent: 60, LoadAverage: 3, AdmissionAllowed: true, AdmissionReason: "capacity available"},
 			Queues:       []adminapi.Queue{{Profile: "linux-small", Jobs: 3, OldestAgeSeconds: 61}},
 			Instances:    []adminapi.Instance{{Profile: "linux-small", Count: 2, CPU: 2, MemoryMiB: 4096}},
 			Observations: []adminapi.Observation{{Name: "scheduler", Freshness: "fresh", AgeSeconds: 2}},
@@ -213,6 +214,9 @@ func healthyStatus() adminapi.StatusEnvelope {
 }
 
 func TestOperatorCommandsHumanAndJSON(t *testing.T) {
+	if admissionState(false) != "deferred" {
+		t.Fatal("blocked admission rendered as allowed")
+	}
 	status := healthyStatus()
 	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
 		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
@@ -223,7 +227,7 @@ func TestOperatorCommandsHumanAndJSON(t *testing.T) {
 		wantCode int
 		contains []string
 	}{
-		{name: "status", args: []string{"status"}, contains: []string{"READY", "shadow", "QUEUES", "linux-small", "1m1s"}},
+		{name: "status", args: []string{"status"}, contains: []string{"READY", "shadow", "HOST PRESSURE", "disk 200 GiB", "memory 8192 MiB", "QUEUES", "linux-small", "1m1s"}},
 		{name: "status json", args: []string{"status", "--output", "json"}, contains: []string{`"apiVersion": "fleet.v1"`, `"revision": 9`}},
 		{name: "queues", args: []string{"queues"}, contains: []string{"PROFILE", "linux-small", "3"}},
 		{name: "queues json", args: []string{"queues", "-o", "json"}, contains: []string{`"profile": "linux-small"`}},

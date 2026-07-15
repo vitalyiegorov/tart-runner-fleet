@@ -117,6 +117,10 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	health.SetOperations(4, 2)
+	if err := health.SetHostPressure(HostPressureMetric{AvailableMemoryMiB: 8192, FreeDiskGiB: 200, SwapUsedMiB: 32,
+		SwapOuts: 4, CPUIdlePercent: 60, LoadAverage: 3, AdmissionAllowed: true, AdmissionReason: "capacity available"}); err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"github", "host", "tart"} {
 		if err := health.RecordObservation(name, ObservationFresh); err != nil {
 			t.Fatal(err)
@@ -131,7 +135,8 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 	if second.Queues["linux-small"].Count != 7 || second.Instances["linux-small"].MemoryMiB != 12_288 || second.Observations["github"].Freshness != ObservationFresh {
 		t.Fatalf("snapshot aliases state: %+v", second)
 	}
-	if second.LastSuccessfulTick != clock.Now() || second.Mode != ModeMacOS || second.OperationRetries != 4 || second.DeadOperations != 2 {
+	if second.LastSuccessfulTick != clock.Now() || second.Mode != ModeMacOS || second.OperationRetries != 4 || second.DeadOperations != 2 ||
+		second.HostPressure.FreeDiskGiB != 200 || !second.HostPressure.AdmissionAllowed {
 		t.Fatalf("snapshot=%+v", second)
 	}
 }
@@ -148,6 +153,8 @@ func TestHealthRejectsInvalidUpdatesWithoutEchoingValues(t *testing.T) {
 		health.SetInstances(secret, 1, 1, 1),
 		health.SetInstances("linux-small", -1, 1, 1),
 		health.SetOperations(-1, 0),
+		health.SetHostPressure(HostPressureMetric{AvailableMemoryMiB: -1}),
+		health.SetHostPressure(HostPressureMetric{AdmissionReason: secret}),
 		health.SetMode(Mode(secret)),
 	}
 	for _, err := range cases {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -76,8 +77,19 @@ type Timeouts struct {
 }
 
 type Guards struct {
-	MinFreeDiskGiB int
+	MinFreeDiskGiB        int
+	MinAvailableMemoryMiB int
+	MaxSwapUsedMiB        int
+	MaxLoadAverage        float64
+	MinCPUIdlePercent     float64
 }
+
+const (
+	defaultMinAvailableMemoryMiB = 1024
+	defaultMaxSwapUsedMiB        = 2048
+	defaultMaxLoadAverage        = 9
+	defaultMinCPUIdlePercent     = 5
+)
 
 const (
 	ScopeRepository   = "repository"
@@ -154,6 +166,10 @@ type wireConfig struct {
 	LinuxReservationAgeSecs   int       `json:"linuxReservationAgeSeconds"`
 	LinuxProfiles             []Profile `json:"linuxProfiles"`
 	MinFreeDiskGiB            int       `json:"minFreeDiskGb"`
+	MinAvailableMemoryMiB     int       `json:"minAvailableMemoryMb,omitempty"`
+	MaxSwapUsedMiB            int       `json:"maxSwapUsedMb,omitempty"`
+	MaxLoadAverage            float64   `json:"maxLoadAverage,omitempty"`
+	MinCPUIdlePercent         float64   `json:"minCpuIdlePercent,omitempty"`
 	GitHubTimeoutSeconds      int       `json:"githubTimeoutSeconds"`
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
@@ -187,7 +203,7 @@ func Decode(r io.Reader) (Config, error) {
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized()},
 		GitHub:   w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45), Boot: secondsOr(w.BootTimeoutSeconds, 180)},
-		Guards:   Guards{MinFreeDiskGiB: w.MinFreeDiskGiB}, Targets: normalizeTargets(w.Targets),
+		Guards:   normalizeGuards(w), Targets: normalizeTargets(w.Targets),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -231,7 +247,9 @@ func Encode(w io.Writer, cfg Config) error {
 		PollSeconds: pollSeconds, MaxLinuxWhenMacOSIdle: cfg.Linux.MaxInstances,
 		MaxLinuxCPU: cfg.Linux.Capacity.CPU, MaxLinuxMemoryMiB: cfg.Linux.Capacity.MemoryMiB,
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
-		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, GitHubTimeoutSeconds: githubSeconds,
+		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
+		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
+		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, GitHubTimeoutSeconds: githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
 	}
@@ -289,6 +307,24 @@ func secondsOr(value, fallback int) time.Duration {
 	return time.Duration(value) * time.Second
 }
 
+func normalizeGuards(w wireConfig) Guards {
+	guards := Guards{MinFreeDiskGiB: w.MinFreeDiskGiB, MinAvailableMemoryMiB: w.MinAvailableMemoryMiB,
+		MaxSwapUsedMiB: w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent}
+	if guards.MinAvailableMemoryMiB == 0 {
+		guards.MinAvailableMemoryMiB = defaultMinAvailableMemoryMiB
+	}
+	if guards.MaxSwapUsedMiB == 0 {
+		guards.MaxSwapUsedMiB = defaultMaxSwapUsedMiB
+	}
+	if guards.MaxLoadAverage == 0 {
+		guards.MaxLoadAverage = defaultMaxLoadAverage
+	}
+	if guards.MinCPUIdlePercent == 0 {
+		guards.MinCPUIdlePercent = defaultMinCPUIdlePercent
+	}
+	return guards
+}
+
 func normalizeProfiles(in []Profile) []Profile {
 	out := make([]Profile, len(in))
 	for i, p := range in {
@@ -318,8 +354,10 @@ func Default() Config {
 			Builder: Profile{ID: "builder", Label: "macos-builder", Resources: Resources{CPU: 8, MemoryMiB: 12288}, MaxActive: 1},
 			Maestro: Profile{ID: "maestro", Label: "macos-maestro", Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 2}},
 		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute},
-		Guards:   Guards{MinFreeDiskGiB: 60},
-		Targets:  []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
+		Guards: Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: defaultMinAvailableMemoryMiB,
+			MaxSwapUsedMiB: defaultMaxSwapUsedMiB, MaxLoadAverage: defaultMaxLoadAverage,
+			MinCPUIdlePercent: defaultMinCPUIdlePercent},
+		Targets: []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
 	}
 }
 
@@ -364,6 +402,12 @@ func (c Config) Validate() error {
 	}
 	if c.Guards.MinFreeDiskGiB <= 0 {
 		return errors.New("disk reserve must be positive")
+	}
+	if c.Guards.MinAvailableMemoryMiB < 0 || c.Guards.MaxSwapUsedMiB < 0 || c.Guards.MaxLoadAverage < 0 ||
+		math.IsNaN(c.Guards.MaxLoadAverage) || math.IsInf(c.Guards.MaxLoadAverage, 0) ||
+		c.Guards.MinCPUIdlePercent < 0 || c.Guards.MinCPUIdlePercent > 100 ||
+		math.IsNaN(c.Guards.MinCPUIdlePercent) || math.IsInf(c.Guards.MinCPUIdlePercent, 0) {
+		return errors.New("host pressure guards are invalid")
 	}
 	seenProfiles := map[string]struct{}{}
 	for _, raw := range c.Linux.Profiles {
