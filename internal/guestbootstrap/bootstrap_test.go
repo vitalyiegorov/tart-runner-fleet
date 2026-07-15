@@ -506,6 +506,29 @@ func TestExecLauncherFailsClosedWhenManagedScopeNeverStartsSupervisor(t *testing
 	}
 }
 
+func TestExecLauncherPropagatesManagedBoundaryStartFailure(t *testing.T) {
+	root := t.TempDir()
+	boundary := filepath.Join(root, "systemd-run")
+	if err := os.WriteFile(boundary, []byte("not an executable image"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	process, err := (ExecLauncher{
+		SystemdRunPath: &boundary,
+		SudoPath:       "/usr/bin/true",
+		ShutdownPath:   "/usr/bin/true",
+	}).Start(context.Background(), ProcessSpec{
+		Path: "/usr/bin/true", Dir: root, Env: os.Environ(), Log: log,
+	})
+	if process != nil || err == nil {
+		t.Fatalf("invalid scope executable start = %v, %v", process, err)
+	}
+}
+
 func TestWaitSupervisorReadyRejectsCancellationAndInvalidMarker(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())

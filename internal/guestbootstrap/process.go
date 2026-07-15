@@ -61,11 +61,10 @@ func (l ExecLauncher) Start(ctx context.Context, spec ProcessSpec) (Process, err
 		return nil, ErrStart
 	}
 	readyPath := ready.Name()
-	if closeErr := ready.Close(); closeErr != nil {
+	defer func() {
+		_ = ready.Close()
 		_ = os.Remove(readyPath)
-		return nil, ErrStart
-	}
-	defer func() { _ = os.Remove(readyPath) }()
+	}()
 	// Deliberately do not use CommandContext: the runner must survive the
 	// short-lived bootstrap helper. On Linux, systemd-run first moves the
 	// supervisor into a transient scope outside the Tart guest-agent exec
