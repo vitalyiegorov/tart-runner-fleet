@@ -25,13 +25,15 @@ import (
 )
 
 const (
-	exitSuccess     = 0
-	exitFailure     = 1
-	exitUsage       = 2
-	exitNotFound    = 3
-	exitUnavailable = 4
-	exitDegraded    = 5
-	exitUnsafe      = 6
+	exitSuccess         = 0
+	exitFailure         = 1
+	exitUsage           = 2
+	exitNotFound        = 3
+	exitUnavailable     = 4
+	exitDegraded        = 5
+	exitUnsafe          = 6
+	updateReadyAttempts = 30
+	updateReadyDelay    = 2 * time.Second
 )
 
 var version = "dev"
@@ -183,7 +185,7 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 	}
 	host, err := autoupdate.NewLocalHost(autoupdate.LocalHostConfig{RootDir: *root, StateDir: *stateDir,
 		LaunchAgentsDir: *launchAgentsDir, Domain: *domain, Repository: *repository, UpdateInterval: *interval,
-		ReadyAttempts: 30, ReadyDelay: 2 * time.Second}, deps.command)
+		ReadyAttempts: updateReadyAttempts, ReadyDelay: updateReadyDelay}, deps.command)
 	if err != nil {
 		fmt.Fprintf(stderr, "configure updater: %v\n", err)
 		return exitFailure

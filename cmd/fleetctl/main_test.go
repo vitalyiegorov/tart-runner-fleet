@@ -199,6 +199,12 @@ func TestUpdateCommandFailureModes(t *testing.T) {
 	}
 }
 
+func TestProductionUpdateReadinessBudgetCoversScaleSetInitialization(t *testing.T) {
+	if budget := time.Duration(updateReadyAttempts) * updateReadyDelay; budget < 5*time.Minute {
+		t.Fatalf("production update readiness budget=%s want at least 5m", budget)
+	}
+}
+
 func healthyStatus() adminapi.StatusEnvelope {
 	now := time.Date(2026, 7, 12, 20, 0, 0, 0, time.UTC)
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: now, Revision: 9,
