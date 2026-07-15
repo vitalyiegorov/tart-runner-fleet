@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -363,6 +364,47 @@ func TestExecLauncherStartsDetachedProcess(t *testing.T) {
 	if err := process.Release(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
+	root := t.TempDir()
+	runnerMarker := filepath.Join(root, "runner-finished")
+	shutdownMarker := filepath.Join(root, "shutdown-requested")
+	runner := filepath.Join(root, "run.sh")
+	sudo := filepath.Join(root, "sudo")
+	if err := os.WriteFile(runner, []byte("#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	process, err := (ExecLauncher{ShellPath: "/bin/sh", SudoPath: sudo, ShutdownPath: "/sbin/shutdown"}).Start(context.Background(), ProcessSpec{
+		Path: runner, Dir: root, Env: append(os.Environ(), "RUNNER_MARKER="+runnerMarker, "SHUTDOWN_MARKER="+shutdownMarker), Log: log,
+	})
+	if err != nil || process == nil {
+		t.Fatalf("start supervisor = %v, %v", process, err)
+	}
+	if err := process.Release(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runnerResult, runnerErr := os.ReadFile(runnerMarker)
+		shutdownResult, shutdownErr := os.ReadFile(shutdownMarker)
+		if runnerErr == nil && shutdownErr == nil {
+			if string(runnerResult) != "finished" || string(shutdownResult) != "-n /sbin/shutdown -h now" {
+				t.Fatalf("runner/shutdown = %q/%q", runnerResult, shutdownResult)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("detached supervisor did not request guest shutdown after runner exit")
 }
 
 func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
