@@ -291,10 +291,13 @@ func (h *LocalHost) Commit(ctx context.Context, candidate Generation) error {
 		return err
 	}
 	updaterLabel := h.domain + "/com.vitalyiegorov.tart-runner-fleet.updater"
-	if _, err := h.command.Run(ctx, "launchctl", "print", updaterLabel); err != nil {
-		if err := h.bootstrapService(ctx, updaterPath); err != nil {
-			return fmt.Errorf("bootstrap automatic updater: %w", err)
+	if _, err := h.command.Run(ctx, "launchctl", "print", updaterLabel); err == nil {
+		if _, err := h.command.Run(ctx, "launchctl", "bootout", updaterLabel); err != nil {
+			return fmt.Errorf("unload automatic updater: %w", err)
 		}
+	}
+	if err := h.bootstrapService(ctx, updaterPath); err != nil {
+		return fmt.Errorf("bootstrap automatic updater: %w", err)
 	}
 	if err := atomicSymlink(candidate.ReleaseDir, filepath.Join(h.rootDir, CurrentGenerationLink)); err != nil {
 		return err

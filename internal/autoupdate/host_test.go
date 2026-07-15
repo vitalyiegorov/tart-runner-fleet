@@ -152,6 +152,27 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 	}
 }
 
+func TestLocalHostReloadsAnAlreadyLoadedUpdaterAfterCommit(t *testing.T) {
+	host, command, _, candidate, _ := hostFixture(t)
+
+	if err := host.Commit(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	updaterPath := filepath.Join(host.launchAgentsDir, UpdaterPlist)
+	want := []string{
+		"launchctl print gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
+		"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
+		"launchctl bootstrap gui/501 " + updaterPath,
+	}
+	joined := strings.Join(command.calls, "\n")
+	for _, call := range want {
+		if !strings.Contains(joined, call) {
+			t.Fatalf("loaded updater kept its stale executable; missing %q in calls:\n%s", call, joined)
+		}
+	}
+}
+
 func TestLocalHostRestoresTheOldBootGenerationOnFailure(t *testing.T) {
 	host, command, current, candidate, canonical := hostFixture(t)
 	command.readyErr = errors.New("offline")

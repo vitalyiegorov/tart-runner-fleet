@@ -381,6 +381,13 @@ func TestPrepareActivateCommitAndRollbackFilesystemFailures(t *testing.T) {
 			t.Fatal("initial updater was not bootstrapped")
 		}
 	})
+	t.Run("updater reload bootout", func(t *testing.T) {
+		host, command, _, candidate, _ := hostFixture(t)
+		command.fail = map[string]error{"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater": errors.New("denied")}
+		if err := host.Commit(context.Background(), candidate); err == nil {
+			t.Fatal("loaded updater bootout failure ignored")
+		}
+	})
 	t.Run("commit cleanup", func(t *testing.T) {
 		host, _, _, candidate, _ := hostFixture(t)
 		journal := filepath.Join(host.stateDir, UpdateJournalFile)
