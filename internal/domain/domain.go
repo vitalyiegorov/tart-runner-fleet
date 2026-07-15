@@ -270,6 +270,21 @@ func DeriveHostMode(instances []Instance) (HostMode, error) {
 
 type Host struct {
 	Available Resources
+	Pressure  HostPressure
+}
+
+// HostPressure is the bounded, credential-free host snapshot used to explain
+// admission decisions. It deliberately carries no process, repository, VM, or
+// job labels, so it is safe to expose through the operator API and metrics.
+type HostPressure struct {
+	AvailableMemoryMB int64
+	FreeDiskGB        int64
+	SwapUsedMB        int64
+	SwapOuts          int64
+	CPUIdlePercent    float64
+	LoadAverage       float64
+	AdmissionAllowed  bool
+	AdmissionReason   string
 }
 
 type Reservation struct {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
@@ -836,6 +837,19 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 	}
 }
 
+func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
+	cfg := config.Default()
+	cfg.Guards = config.Guards{MinFreeDiskGiB: 70, MinAvailableMemoryMiB: 1536, MaxSwapUsedMiB: 3072, MaxLoadAverage: 8.5, MinCPUIdlePercent: 7.5}
+	production, ok := defaultDependencies().inventory(nil, cfg).(app.ProductionInventory)
+	if !ok {
+		t.Fatal("production inventory adapter type changed")
+	}
+	want := macos.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
+	if production.Guards != want {
+		t.Fatalf("wired guards = %+v, want %+v", production.Guards, want)
+	}
+}
+
 func TestRunRejectsUnselectedCanaryAndHeldAuthority(t *testing.T) {
 	d := testDependencies(t)
 	if err := runWithDependencies(context.Background(), options{Mode: reconcile.Canary}, d); err == nil {
@@ -1027,14 +1041,18 @@ func TestEngineTickerRecordsBoundedMetricsAndModes(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	ticker := engineTicker{health: health, profiles: []string{"small", "maestro"}}
-	ticker.recordMetrics(app.TickResult{HostMode: domain.HostLinux, Demands: []domain.Demand{
+	ticker.recordMetrics(app.TickResult{HostMode: domain.HostLinux, Host: domain.Host{Pressure: domain.HostPressure{
+		AvailableMemoryMB: 8192, FreeDiskGB: 200, CPUIdlePercent: 50, LoadAverage: 3,
+		AdmissionAllowed: true, AdmissionReason: "capacity available",
+	}}, Demands: []domain.Demand{
 		{Profile: "small", CreatedAt: now.Add(-time.Minute)}, {Profile: "small", CreatedAt: now.Add(-2 * time.Minute)},
 	}, Instances: []domain.Instance{
 		{Profile: "small", State: domain.InstanceRunning, Resources: domain.Resources{CPU: 2, MemoryMB: 4096}},
 		{Profile: "maestro", State: domain.InstanceDeleted, Resources: domain.Resources{CPU: 4, MemoryMB: 7168}},
 	}})
 	snapshot := health.Snapshot()
-	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 {
+	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 ||
+		snapshot.HostPressure.FreeDiskGiB != 200 || !snapshot.HostPressure.AdmissionAllowed {
 		t.Fatalf("snapshot=%#v", snapshot)
 	}
 	ticker.recordMetrics(app.TickResult{HostMode: domain.HostMacOS})

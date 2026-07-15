@@ -35,6 +35,16 @@ in-memory revision so future watch clients can use conditional polling.
     "lastSuccessfulTick": "2026-07-12T20:00:00Z",
     "live": {"ok": true, "reasons": []},
     "ready": {"ok": true, "reasons": []},
+    "hostPressure": {
+      "availableMemoryMiB": 10240,
+      "freeDiskGiB": 203,
+      "swapUsedMiB": 0,
+      "swapOuts": 0,
+      "cpuIdlePercent": 54,
+      "loadAverage": 3,
+      "admissionAllowed": true,
+      "admissionReason": "capacity available"
+    },
     "queues": [],
     "instances": [],
     "observations": [],
@@ -55,6 +65,12 @@ The response is copied from one mutex-protected telemetry snapshot. It cannot
 mix queue data from one reconciliation tick with instance data being updated by
 another goroutine. Profiles and observation names are bounded configuration
 values, never repository/job metric labels.
+
+The host-pressure snapshot is the exact credential-free evidence used for the
+latest admission decision. Prometheus exports the same bounded values as
+`fleet_host_*` metrics without repository, VM, runner, or job labels. A stale
+or unavailable probe still fails scheduling closed through the scheduler
+observation; it never fabricates a healthy pressure sample.
 
 The first interface exposes aggregate state needed for safe operation. Exact
 demand, instance, operation, reservation, and plan read models will be added as

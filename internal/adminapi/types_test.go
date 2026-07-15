@@ -11,7 +11,8 @@ func TestStatusEnvelopeJSONContract(t *testing.T) {
 	status := StatusEnvelope{APIVersion: APIVersion, Kind: "Status", GeneratedAt: now, Revision: 7, Data: Status{
 		ControllerVersion: "v1", ControllerMode: "observe", HostMode: "idle",
 		Live: Check{OK: true}, Ready: Check{Reasons: []string{"tick_missing"}},
-		Queues: []Queue{}, Instances: []Instance{}, Observations: []Observation{}, Operations: OperationSummary{},
+		HostPressure: HostPressure{AvailableMemoryMiB: 8192, FreeDiskGiB: 200, AdmissionAllowed: true, AdmissionReason: "capacity available"},
+		Queues:       []Queue{}, Instances: []Instance{}, Observations: []Observation{}, Operations: OperationSummary{},
 	}, Warnings: []Warning{}}
 	encoded, err := json.Marshal(status)
 	if err != nil {

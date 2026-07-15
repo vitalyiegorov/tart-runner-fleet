@@ -34,6 +34,18 @@ type Status struct {
 	Instances          []Instance       `json:"instances"`
 	Observations       []Observation    `json:"observations"`
 	Operations         OperationSummary `json:"operations"`
+	HostPressure       HostPressure     `json:"hostPressure"`
+}
+
+type HostPressure struct {
+	AvailableMemoryMiB int64   `json:"availableMemoryMiB"`
+	FreeDiskGiB        int64   `json:"freeDiskGiB"`
+	SwapUsedMiB        int64   `json:"swapUsedMiB"`
+	SwapOuts           int64   `json:"swapOuts"`
+	CPUIdlePercent     float64 `json:"cpuIdlePercent"`
+	LoadAverage        float64 `json:"loadAverage"`
+	AdmissionAllowed   bool    `json:"admissionAllowed"`
+	AdmissionReason    string  `json:"admissionReason"`
 }
 
 type Check struct {

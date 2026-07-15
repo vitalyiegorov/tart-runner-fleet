@@ -42,6 +42,11 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	if !status.Data.Ready.OK {
 		fmt.Fprintf(output, "blocked: %s\n", joinReasons(status.Data.Ready))
 	}
+	fmt.Fprintln(output, "\nHOST PRESSURE")
+	pressure := status.Data.HostPressure
+	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
+		pressure.FreeDiskGiB, pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pressure.CPUIdlePercent,
+		pressure.LoadAverage, admissionState(pressure.AdmissionAllowed), pressure.AdmissionReason)
 	fmt.Fprintln(output, "\nQUEUES")
 	renderQueues(output, status.Data.Queues)
 	fmt.Fprintln(output, "\nINSTANCES")
@@ -50,6 +55,13 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	fmt.Fprintf(output, "retrying %d  dead %d\n", status.Data.Operations.Retrying, status.Data.Operations.Dead)
 	fmt.Fprintln(output, "\nOBSERVATIONS")
 	renderObservations(output, status.Data.Observations)
+}
+
+func admissionState(allowed bool) string {
+	if allowed {
+		return "allowed"
+	}
+	return "deferred"
 }
 
 func renderQueues(output io.Writer, queues []adminapi.Queue) {

@@ -101,6 +101,8 @@ fairness or safety decisions.
 - durable SQLite WAL state and idempotent operation outbox;
 - official GitHub Actions Scale Set protocol for demand and JIT registration;
 - explicit host-mode and instance state machines;
+- bounded host-pressure admission with operator-visible disk, reclaimable
+  memory, swap, CPU-idle, load, and decision telemetry;
 - fail closed when GitHub, Tart, or host observations are stale/unavailable;
 - no Linux/macOS overlap beyond configured, proven resource envelopes;
 - aged global FIFO with bounded control-plane priority for young work, with
