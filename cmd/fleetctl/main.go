@@ -32,7 +32,7 @@ const (
 	exitUnavailable     = 4
 	exitDegraded        = 5
 	exitUnsafe          = 6
-	updateReadyAttempts = 30
+	updateReadyAttempts = 150
 	updateReadyDelay    = 2 * time.Second
 )
 
