@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,7 +126,7 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 	reservationJSON, _ := json.Marshal(plan.Next.Reservation)
 	drrJSON, _ := json.Marshal(map[string]string{"cursor": plan.Next.DRRCursor})
 	durable := operations.Plan{
-		ID: durablePlanID(c.Mode, plan.ID), ExpectedSchedulerVersion: prior.Version, CreatedAt: now.UTC(),
+		ID: durablePlanID(c.Mode, plan.ID, prior.Version), ExpectedSchedulerVersion: prior.Version, CreatedAt: now.UTC(),
 		Scheduler: operations.SchedulerState{Version: prior.Version + 1, Data: stateJSON, Reservations: reservationJSON, DeficitRoundRobin: drrJSON, ObservationCursor: cursor},
 	}
 	if c.Mode == Shadow {
@@ -188,7 +189,11 @@ func instanceName(operation scheduler.Operation) string {
 	return "trf-" + strings.ToLower(string(operation.Profile)) + "-" + hex.EncodeToString(sum[:8])
 }
 
-func durablePlanID(mode Mode, schedulerID string) string {
-	sum := sha256.Sum256([]byte(string(mode) + "\x00" + schedulerID))
+func durablePlanID(mode Mode, schedulerID string, schedulerVersion int64) string {
+	// The deterministic scheduler may return to an earlier logical plan after
+	// one or more committed transitions. Scope durable idempotency to the
+	// expected generation so retrying the same transition remains a no-op while
+	// a later recurrence receives a distinct plan record.
+	sum := sha256.Sum256([]byte(string(mode) + "\x00" + strconv.FormatInt(schedulerVersion, 10) + "\x00" + schedulerID))
 	return "commit-" + hex.EncodeToString(sum[:12])
 }

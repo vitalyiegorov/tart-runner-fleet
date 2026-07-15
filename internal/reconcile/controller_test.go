@@ -97,6 +97,32 @@ func TestControllerSkipsIdenticalNoOpPlanReplay(t *testing.T) {
 	}
 }
 
+// Regression: a deterministic scheduler plan may legitimately recur after an
+// intervening state transition. Durable plan identity must distinguish the
+// scheduler generation or SQLite rejects the later transition as a conflicting
+// duplicate and every subsequent authority tick fails closed.
+func TestControllerScopesRecurringPlanIdentityToSchedulerGeneration(t *testing.T) {
+	store := &fakeStore{state: operations.SchedulerState{Version: 4}}
+	controller := Controller{Store: store, ControllerID: "controller", Mode: Shadow}
+	plan := readyPlan()
+
+	if applied, err := controller.Commit(context.Background(), plan, "", controllerNow); err != nil || !applied {
+		t.Fatalf("first Commit() = %v, %v", applied, err)
+	}
+	first := store.applied[0]
+
+	// Simulate an intervening committed generation before the exact logical
+	// plan returns. The fake store intentionally exposes translated identities.
+	store.state = operations.SchedulerState{Version: first.Scheduler.Version}
+	if applied, err := controller.Commit(context.Background(), plan, "", controllerNow.Add(time.Second)); err != nil || !applied {
+		t.Fatalf("recurring Commit() = %v, %v", applied, err)
+	}
+	second := store.applied[1]
+	if first.ID == second.ID {
+		t.Fatalf("recurring plan reused durable identity %q across scheduler versions %d and %d", first.ID, first.ExpectedSchedulerVersion, second.ExpectedSchedulerVersion)
+	}
+}
+
 func TestSchedulerStateMatchRequiresEveryDurableFieldAndValidJSON(t *testing.T) {
 	next := scheduler.State{DRRCursor: "owner/repo"}
 	stateJSON, _ := json.Marshal(next)
