@@ -152,23 +152,39 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 	}
 }
 
-func TestLocalHostReloadsAnAlreadyLoadedUpdaterAfterCommit(t *testing.T) {
+func TestLocalHostHandsALoadedUpdaterReloadToAnIndependentLaunchdJob(t *testing.T) {
 	host, command, _, candidate, _ := hostFixture(t)
 
 	if err := host.Commit(context.Background(), candidate); err != nil {
 		t.Fatal(err)
 	}
 
-	updaterPath := filepath.Join(host.launchAgentsDir, UpdaterPlist)
+	handoffPath := filepath.Join(host.launchAgentsDir, "com.vitalyiegorov.tart-runner-fleet.updater-handoff.plist")
 	want := []string{
 		"launchctl print gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
-		"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
-		"launchctl bootstrap gui/501 " + updaterPath,
+		"launchctl bootstrap gui/501 " + handoffPath,
 	}
 	joined := strings.Join(command.calls, "\n")
 	for _, call := range want {
 		if !strings.Contains(joined, call) {
-			t.Fatalf("loaded updater kept its stale executable; missing %q in calls:\n%s", call, joined)
+			t.Fatalf("loaded updater reload was not delegated; missing %q in calls:\n%s", call, joined)
+		}
+	}
+	for _, forbidden := range []string{
+		"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater",
+		"launchctl bootstrap gui/501 " + filepath.Join(host.launchAgentsDir, UpdaterPlist),
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("updater attempted to terminate or replace itself via %q:\n%s", forbidden, joined)
+		}
+	}
+	handoff, err := os.ReadFile(handoffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{candidate.ReleaseDir + "/fleetctl", "finish-updater-handoff", "automatic-updater-handoff"} {
+		if !strings.Contains(string(handoff), value) {
+			t.Fatalf("handoff plist missing %q: %s", value, handoff)
 		}
 	}
 }
