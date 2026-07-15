@@ -163,7 +163,12 @@ tag releases independently rebuild each macOS ARM64 binary twice, compare both
 binaries and their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256
 manifests. Releases also contain secret-safe ARM64 guest bootstrap helpers for
 Linux and macOS; install the matching helper at
-`/usr/local/libexec/tart-runner-fleet-bootstrap` in each immutable base VM.
+`/usr/local/libexec/tart-runner-fleet-bootstrap` in each immutable base VM. The
+helper supervises the one-job ephemeral listener and powers the guest off after
+the listener exits, allowing the durable ownership-safe cleanup state machine
+to reclaim its resources even if a broker completion message is lost.
+Controller and base helper must come from the same verified release; see
+[`ADR 0010`](docs/adr/0010-ephemeral-guest-shutdown.md).
 
 The controller is itself a permanent fleet target. Its three parallel CI jobs
 exactly fill the Linux envelope, while the installed release or pinned incumbent
