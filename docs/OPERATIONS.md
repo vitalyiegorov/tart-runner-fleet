@@ -223,6 +223,16 @@ from a release that predates updater-job reload may require a controlled
 `bootout`/`bootstrap` after verifying the new plist; subsequent updates must
 maintain parity automatically.
 
+If a legacy updater terminated itself after writing a newer plist, leave the
+transaction journal and rollback files intact. First require a quiescent fleet,
+download `fleetctl` and `SHA256SUMS` from the latest normal production release,
+and verify the binary against that release. Run the verified binary as an
+independent operator process with `update apply-latest`; because the updater is
+not loaded, the guarded commit can bootstrap the corrected updater without
+terminating its caller. Never delete the journal or edit the installed manifest
+to force convergence. The update must either publish one complete generation
+and remove the journal itself, or roll back to the recorded generation.
+
 During an update, a short-lived
 `com.vitalyiegorov.tart-runner-fleet.updater-handoff` job is expected. It fails
 closed while the update journal exists, retries replacement failures, and is
