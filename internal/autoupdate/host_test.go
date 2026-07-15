@@ -189,6 +189,19 @@ func TestLocalHostRetriesTransientLaunchdBootstrapDuringActivation(t *testing.T)
 	requireBootstrapAttempts(t, command, 2)
 }
 
+func TestLocalHostToleratesProlongedLaunchdBootstrapTransition(t *testing.T) {
+	host, command, current, candidate, _ := hostFixture(t)
+	host.readyAttempts = 6
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	command.bootstrapFailures = 5
+	if err := host.Rollback(context.Background(), current); err != nil {
+		t.Fatalf("prolonged launchd rollback transition was not recovered: %v", err)
+	}
+	requireBootstrapAttempts(t, command, 6)
+}
+
 func requireBootstrapAttempts(t *testing.T, command *fakeCommand, want int) {
 	t.Helper()
 	var bootstraps int
