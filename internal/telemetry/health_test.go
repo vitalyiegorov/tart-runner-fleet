@@ -154,6 +154,7 @@ func TestHealthRejectsInvalidUpdatesWithoutEchoingValues(t *testing.T) {
 		health.SetInstances("linux-small", -1, 1, 1),
 		health.SetOperations(-1, 0),
 		health.SetHostPressure(HostPressureMetric{AvailableMemoryMiB: -1}),
+		health.SetHostPressure(HostPressureMetric{AdmissionReason: secret}),
 		health.SetMode(Mode(secret)),
 	}
 	for _, err := range cases {
