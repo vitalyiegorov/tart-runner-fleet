@@ -35,10 +35,12 @@ path:
 8. atomically commits or restores the previous binary/config/mode/plist tuple.
 
 The updater plist is rewritten to the new immutable `fleetctl` on every commit,
-so reboot and subsequent checks use the installed generation. A transactional
-`current` link gives humans and agents a stable CLI path while launchd continues
-to execute exact immutable paths. The prior release remains available for local
-rollback.
+and an already-loaded updater job is unloaded and bootstrapped from that plist.
+This keeps launchd's cached program, the durable plist, and the installed
+manifest on the same generation; rewriting the file alone is not sufficient.
+A transactional `current` link gives humans and agents a stable CLI path while
+launchd continues to execute exact immutable paths. The prior release remains
+available for local rollback.
 
 ## Consequences
 
