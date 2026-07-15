@@ -22,6 +22,7 @@ const (
 	UpdateJournalFile               = "update-transaction.json"
 	CanonicalPlist                  = "com.vitalyiegorov.tart-runner-fleet.plist"
 	UpdaterPlist                    = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
+	UpdaterHandoffPlist             = "com.vitalyiegorov.tart-runner-fleet.updater-handoff.plist"
 	updateBackupFile                = "update-previous.plist"
 	updateBackupUpdaterFile         = "update-previous-updater.plist"
 	minimumLaunchdBootstrapAttempts = 3
@@ -292,11 +293,20 @@ func (h *LocalHost) Commit(ctx context.Context, candidate Generation) error {
 	}
 	updaterLabel := h.domain + "/com.vitalyiegorov.tart-runner-fleet.updater"
 	if _, err := h.command.Run(ctx, "launchctl", "print", updaterLabel); err == nil {
-		if _, err := h.command.Run(ctx, "launchctl", "bootout", updaterLabel); err != nil {
-			return fmt.Errorf("unload automatic updater: %w", err)
+		// A loaded updater may be the process executing this commit. Asking
+		// launchd to boot it out here terminates the caller before it can
+		// bootstrap the replacement. Delegate that boundary to a distinct,
+		// retrying one-shot job which waits for the durable commit first.
+		handoffPath := filepath.Join(h.launchAgentsDir, UpdaterHandoffPlist)
+		if err := atomicWrite(handoffPath, h.renderUpdaterHandoff(candidate), 0o600); err != nil {
+			return err
 		}
-	}
-	if err := h.bootstrapService(ctx, updaterPath); err != nil {
+		handoffLabel := h.domain + "/com.vitalyiegorov.tart-runner-fleet.updater-handoff"
+		_, _ = h.command.Run(ctx, "launchctl", "bootout", handoffLabel)
+		if err := h.bootstrapService(ctx, handoffPath); err != nil {
+			return fmt.Errorf("bootstrap automatic updater handoff: %w", err)
+		}
+	} else if err := h.bootstrapService(ctx, updaterPath); err != nil {
 		return fmt.Errorf("bootstrap automatic updater: %w", err)
 	}
 	if err := atomicSymlink(candidate.ReleaseDir, filepath.Join(h.rootDir, CurrentGenerationLink)); err != nil {
@@ -307,6 +317,45 @@ func (h *LocalHost) Commit(ctx context.Context, candidate Generation) error {
 		return err
 	}
 	return h.clearTransaction()
+}
+
+// FinishUpdaterHandoff reloads the periodic updater from an independent
+// launchd process. It refuses to act until Commit has durably published the
+// exact candidate and cleared its transaction, so a failed commit or rollback
+// cannot strand launchd on the wrong executable.
+func (h *LocalHost) FinishUpdaterHandoff(ctx context.Context, candidate Generation) error {
+	if err := candidate.validate(); err != nil || !safeVersion.MatchString(candidate.Version) ||
+		filepath.Clean(candidate.ReleaseDir) != filepath.Join(h.rootDir, "releases", candidate.Version) {
+		return ErrInvalidGeneration
+	}
+	if _, err := os.Stat(filepath.Join(h.stateDir, UpdateJournalFile)); err == nil {
+		return ErrBusy
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	current, err := h.Current(ctx)
+	if err != nil || current != candidate {
+		return ErrInvalidGeneration
+	}
+	updaterPath := filepath.Join(h.launchAgentsDir, UpdaterPlist)
+	updater, err := os.ReadFile(updaterPath) // #nosec G304 -- fixed LaunchAgents path.
+	if err != nil || string(updater) != string(h.renderUpdater(candidate)) {
+		return ErrInvalidGeneration
+	}
+	updaterLabel := h.domain + "/com.vitalyiegorov.tart-runner-fleet.updater"
+	if _, err := h.command.Run(ctx, "launchctl", "print", updaterLabel); err == nil {
+		if _, err := h.command.Run(ctx, "launchctl", "bootout", updaterLabel); err != nil {
+			return fmt.Errorf("unload automatic updater: %w", err)
+		}
+	}
+	if err := h.bootstrapService(ctx, updaterPath); err != nil {
+		return fmt.Errorf("bootstrap automatic updater: %w", err)
+	}
+	loaded, err := h.command.Run(ctx, "launchctl", "print", updaterLabel)
+	if err != nil || !strings.Contains(string(loaded), candidate.ReleaseDir+"/fleetctl") {
+		return fmt.Errorf("verify automatic updater generation: %w", ErrInvalidGeneration)
+	}
+	return nil
 }
 
 func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) error {
@@ -367,6 +416,11 @@ func (h *LocalHost) Rollback(ctx context.Context, current Generation) error {
 		return err
 	}
 	if _, err := h.command.Run(ctx, "launchctl", "kickstart", "-k", h.domain+"/"+serviceLabel(current.Mode)); err != nil {
+		return err
+	}
+	handoffPath := filepath.Join(h.launchAgentsDir, UpdaterHandoffPlist)
+	_, _ = h.command.Run(ctx, "launchctl", "bootout", h.domain+"/com.vitalyiegorov.tart-runner-fleet.updater-handoff")
+	if err := os.Remove(handoffPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	updaterPath := filepath.Join(h.launchAgentsDir, UpdaterPlist)
@@ -430,7 +484,23 @@ func (h *LocalHost) readJournal() (updateJournal, error) {
 }
 
 func (h *LocalHost) clearTransaction() error {
-	for _, path := range []string{filepath.Join(h.stateDir, UpdateJournalFile), filepath.Join(h.stateDir, updateBackupFile), filepath.Join(h.stateDir, updateBackupUpdaterFile)} {
+	// Validate every cleanup target before removing any rollback evidence, then
+	// remove the journal last. The handoff treats journal absence as the durable
+	// commit marker and must never observe it before cleanup is complete.
+	paths := []string{filepath.Join(h.stateDir, updateBackupFile), filepath.Join(h.stateDir, updateBackupUpdaterFile), filepath.Join(h.stateDir, UpdateJournalFile)}
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("invalid update transaction artifact %s", filepath.Base(path))
+		}
+	}
+	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -441,7 +511,7 @@ func (h *LocalHost) clearTransaction() error {
 func (h *LocalHost) renderUpdater(candidate Generation) []byte {
 	values := []string{filepath.Join(candidate.ReleaseDir, "fleetctl"), "update", "apply-latest", "--repo", h.repository,
 		"--root", h.rootDir, "--state-dir", h.stateDir, "--launch-agents-dir", h.launchAgentsDir,
-		"--mode", candidate.Mode, "--endpoint", candidate.Endpoint, "--domain", h.domain,
+		"--mode", candidate.Mode, "--config", candidate.ConfigPath, "--endpoint", candidate.Endpoint, "--domain", h.domain,
 		"--confirm", "automatic-release-update"}
 	var arguments strings.Builder
 	for _, value := range values {
@@ -465,6 +535,35 @@ func (h *LocalHost) renderUpdater(candidate Generation) []byte {
   <key>StandardErrorPath</key><string>%s/update.stderr.log</string>
 </dict></plist>
 `, arguments.String(), seconds, xmlEscape(h.stateDir), xmlEscape(h.stateDir)))
+}
+
+func (h *LocalHost) renderUpdaterHandoff(candidate Generation) []byte {
+	values := []string{filepath.Join(candidate.ReleaseDir, "fleetctl"), "update", "finish-updater-handoff",
+		"--repo", h.repository, "--root", h.rootDir, "--state-dir", h.stateDir,
+		"--launch-agents-dir", h.launchAgentsDir, "--mode", candidate.Mode, "--config", candidate.ConfigPath,
+		"--endpoint", candidate.Endpoint, "--domain", h.domain, "--release-dir", candidate.ReleaseDir,
+		"--interval", h.updateInterval.String(), "--confirm", "automatic-updater-handoff"}
+	var arguments strings.Builder
+	for _, value := range values {
+		arguments.WriteString("    <string>" + xmlEscape(value) + "</string>\n")
+	}
+	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.vitalyiegorov.tart-runner-fleet.updater-handoff</string>
+  <key>ProgramArguments</key><array>
+%s  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>%s/update.stdout.log</string>
+  <key>StandardErrorPath</key><string>%s/update.stderr.log</string>
+</dict></plist>
+`, arguments.String(), xmlEscape(h.stateDir), xmlEscape(h.stateDir)))
 }
 
 func xmlEscape(value string) string {

@@ -381,11 +381,11 @@ func TestPrepareActivateCommitAndRollbackFilesystemFailures(t *testing.T) {
 			t.Fatal("initial updater was not bootstrapped")
 		}
 	})
-	t.Run("updater reload bootout", func(t *testing.T) {
+	t.Run("updater handoff bootstrap", func(t *testing.T) {
 		host, command, _, candidate, _ := hostFixture(t)
-		command.fail = map[string]error{"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater": errors.New("denied")}
+		command.fail = map[string]error{"launchctl bootstrap gui/501 " + filepath.Join(host.launchAgentsDir, UpdaterHandoffPlist): errors.New("denied")}
 		if err := host.Commit(context.Background(), candidate); err == nil {
-			t.Fatal("loaded updater bootout failure ignored")
+			t.Fatal("loaded updater handoff failure ignored")
 		}
 	})
 	t.Run("commit cleanup", func(t *testing.T) {
@@ -394,6 +394,19 @@ func TestPrepareActivateCommitAndRollbackFilesystemFailures(t *testing.T) {
 		replacePathWithNonEmptyDirectory(t, journal)
 		if err := host.Commit(context.Background(), candidate); err == nil {
 			t.Fatal("cleanup failure ignored")
+		}
+	})
+	t.Run("cleanup preserves commit marker on invalid backup", func(t *testing.T) {
+		host, _, current, candidate, _ := hostFixture(t)
+		if err := host.Prepare(context.Background(), current, candidate); err != nil {
+			t.Fatal(err)
+		}
+		replacePathWithNonEmptyDirectory(t, filepath.Join(host.stateDir, updateBackupUpdaterFile))
+		if err := host.clearTransaction(); err == nil {
+			t.Fatal("invalid rollback backup accepted")
+		}
+		if info, err := os.Stat(filepath.Join(host.stateDir, UpdateJournalFile)); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("commit marker removed before cleanup completed: info=%v err=%v", info, err)
 		}
 	})
 	t.Run("rollback boundaries", func(t *testing.T) {
@@ -523,6 +536,15 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 			t.Fatal("unwritable updater accepted")
 		}
 	})
+	t.Run("commit updater handoff", func(t *testing.T) {
+		host, _, _, candidate, _ := hostFixture(t)
+		if err := os.Mkdir(filepath.Join(host.launchAgentsDir, UpdaterHandoffPlist), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := host.Commit(context.Background(), candidate); err == nil {
+			t.Fatal("unwritable updater handoff accepted")
+		}
+	})
 	t.Run("commit current generation link", func(t *testing.T) {
 		host, _, _, candidate, _ := hostFixture(t)
 		current := filepath.Join(host.rootDir, CurrentGenerationLink)
@@ -548,6 +570,17 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 		}
 		if err := host.Rollback(context.Background(), current); err == nil {
 			t.Fatal("unwritable updater restore accepted")
+		}
+	})
+	t.Run("rollback updater handoff cleanup", func(t *testing.T) {
+		host, _, current, candidate, _ := hostFixture(t)
+		if err := host.Prepare(context.Background(), current, candidate); err != nil {
+			t.Fatal(err)
+		}
+		handoff := filepath.Join(host.launchAgentsDir, UpdaterHandoffPlist)
+		replacePathWithNonEmptyDirectory(t, handoff)
+		if err := host.Rollback(context.Background(), current); err == nil {
+			t.Fatal("unremovable updater handoff accepted")
 		}
 	})
 	t.Run("rollback installed generation", func(t *testing.T) {

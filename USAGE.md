@@ -112,6 +112,12 @@ Cross-check that path against both `state/installed-generation.json` and the
 updater plist: an on-disk plist update does not prove launchd discarded a cached
 older executable.
 
+An already-loaded updater is replaced by a separate retrying
+`updater-handoff` LaunchAgent after the generation commit becomes durable. The
+updater never boots out itself. Treat a persistent handoff failure or any
+manifest/plist/loaded-program mismatch as an update failure, even when the fleet
+authority remains ready.
+
 ## Incident workflow
 
 1. Capture `status`, `doctor`, bounded logs, runner/job state, and `tart list`.

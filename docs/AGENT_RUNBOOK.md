@@ -69,10 +69,14 @@ Treat the updater as current only when `installed-generation.json`, the updater
 plist, and `launchctl print`'s loaded `program` all name the same immutable
 release. Last exit 0 is necessary but not sufficient if launchd still caches an
 older executable. A committed update reloads the updater job so this parity is
-automatic.
+automatic. Reload is delegated to the separate
+`com.vitalyiegorov.tart-runner-fleet.updater-handoff` one-shot; the updater must
+never boot out itself. The handoff waits for a cleared transaction, retries
+failures, and verifies the exact loaded program before succeeding.
 
 ```sh
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater
+launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater-handoff
 tail -n 100 "$STATE/update.stdout.log"
 tail -n 100 "$STATE/update.stderr.log"
 ```
