@@ -124,6 +124,10 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 	if err != nil || current != candidate {
 		t.Fatalf("installed=%+v err=%v", current, err)
 	}
+	currentLink, err := os.Readlink(filepath.Join(host.rootDir, "current"))
+	if err != nil || currentLink != candidate.ReleaseDir {
+		t.Fatalf("current link=%q want=%q err=%v", currentLink, candidate.ReleaseDir, err)
+	}
 	if _, err := os.Stat(filepath.Join(host.stateDir, UpdateJournalFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("journal survived commit: %v", err)
 	}
@@ -162,6 +166,10 @@ func TestLocalHostRestoresTheOldBootGenerationOnFailure(t *testing.T) {
 	installed, readErr := host.Current(context.Background())
 	if readErr != nil || installed != current {
 		t.Fatalf("installed=%+v err=%v", installed, readErr)
+	}
+	currentLink, readErr := os.Readlink(filepath.Join(host.rootDir, "current"))
+	if readErr != nil || currentLink != current.ReleaseDir {
+		t.Fatalf("rollback current link=%q want=%q err=%v", currentLink, current.ReleaseDir, readErr)
 	}
 }
 

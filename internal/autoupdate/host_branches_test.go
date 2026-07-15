@@ -384,15 +384,7 @@ func TestPrepareActivateCommitAndRollbackFilesystemFailures(t *testing.T) {
 	t.Run("commit cleanup", func(t *testing.T) {
 		host, _, _, candidate, _ := hostFixture(t)
 		journal := filepath.Join(host.stateDir, UpdateJournalFile)
-		if err := os.Remove(journal); err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(journal, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(journal, "child"), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		replacePathWithNonEmptyDirectory(t, journal)
 		if err := host.Commit(context.Background(), candidate); err == nil {
 			t.Fatal("cleanup failure ignored")
 		}
@@ -524,6 +516,14 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 			t.Fatal("unwritable updater accepted")
 		}
 	})
+	t.Run("commit current generation link", func(t *testing.T) {
+		host, _, _, candidate, _ := hostFixture(t)
+		current := filepath.Join(host.rootDir, CurrentGenerationLink)
+		replacePathWithNonEmptyDirectory(t, current)
+		if err := host.Commit(context.Background(), candidate); err == nil {
+			t.Fatal("unwritable current generation link accepted")
+		}
+	})
 	t.Run("rollback updater write", func(t *testing.T) {
 		host, _, current, candidate, _ := hostFixture(t)
 		updater := filepath.Join(host.launchAgentsDir, UpdaterPlist)
@@ -543,6 +543,16 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 			t.Fatal("unwritable updater restore accepted")
 		}
 	})
+	t.Run("rollback installed generation", func(t *testing.T) {
+		host, _, current, candidate, _ := hostFixture(t)
+		if err := host.Prepare(context.Background(), current, candidate); err != nil {
+			t.Fatal(err)
+		}
+		replaceFileWithDirectory(t, filepath.Join(host.stateDir, InstalledGenerationFile))
+		if err := host.Rollback(context.Background(), current); err == nil {
+			t.Fatal("unwritable installed generation accepted")
+		}
+	})
 	t.Run("invalid journal", func(t *testing.T) {
 		host, _, _, _, _ := hostFixture(t)
 		if err := os.WriteFile(filepath.Join(host.stateDir, UpdateJournalFile), []byte(`{`), 0o600); err != nil {
@@ -560,6 +570,19 @@ func replaceFileWithDirectory(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replacePathWithNonEmptyDirectory(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -649,6 +672,65 @@ func TestAtomicWriteReportsEveryDurabilityFailure(t *testing.T) {
 		createTemp: func(string, string) (atomicWriteFile, error) { return file, nil }, remove: func(string) error { return nil },
 		rename: func(string, string) error { return nil }, openDirectory: func(string) (atomicSyncCloser, error) { return file, nil }}
 	if err := atomicWriteWith("/target/file", []byte("body"), 0o600, ops); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAtomicSymlinkReportsEveryDurabilityFailure(t *testing.T) {
+	for _, stage := range []string{"create", "close", "remove", "symlink", "rename", "open dir", "dir sync", "dir close"} {
+		t.Run(stage, func(t *testing.T) {
+			file := &failingAtomicFile{stage: stage}
+			if strings.HasPrefix(stage, "dir ") {
+				file = &failingAtomicFile{}
+			}
+			removeCalls := 0
+			ops := atomicSymlinkOps{
+				createTemp: func(string, string) (atomicWriteFile, error) {
+					if stage == "create" {
+						return nil, errors.New(stage)
+					}
+					return file, nil
+				},
+				remove: func(string) error {
+					removeCalls++
+					if stage == "remove" && removeCalls == 1 {
+						return errors.New(stage)
+					}
+					return nil
+				},
+				symlink: func(string, string) error {
+					if stage == "symlink" {
+						return errors.New(stage)
+					}
+					return nil
+				},
+				rename: func(string, string) error {
+					if stage == "rename" {
+						return errors.New(stage)
+					}
+					return nil
+				},
+				openDirectory: func(string) (atomicSyncCloser, error) {
+					if stage == "open dir" {
+						return nil, errors.New(stage)
+					}
+					return &failingAtomicFile{stage: stage}, nil
+				},
+			}
+			if err := atomicSymlinkWith("/releases/v2", "/root/current", ops); err == nil {
+				t.Fatalf("%s failure ignored", stage)
+			}
+		})
+	}
+	file := &failingAtomicFile{}
+	ops := atomicSymlinkOps{
+		createTemp:    func(string, string) (atomicWriteFile, error) { return file, nil },
+		remove:        func(string) error { return nil },
+		symlink:       func(string, string) error { return nil },
+		rename:        func(string, string) error { return nil },
+		openDirectory: func(string) (atomicSyncCloser, error) { return file, nil },
+	}
+	if err := atomicSymlinkWith("/releases/v2", "/root/current", ops); err != nil {
 		t.Fatal(err)
 	}
 }

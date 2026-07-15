@@ -23,8 +23,8 @@ are no GitHub-hosted fallback runners.
 
 Self-hosting uses a two-generation rule to avoid circular upgrades:
 
-1. Generation N (currently the pinned shell incumbent) remains installed under
-   launchd and owns scheduling while generation N+1 is proposed.
+1. Generation N remains installed under launchd and owns scheduling while
+   generation N+1 is proposed.
 2. Generation N provisions the ephemeral Linux runners that execute N+1's
    complete Required CI and reproducible release build.
 3. N+1 is installed as a versioned, immutable candidate outside its source
@@ -197,6 +197,19 @@ Both generated plists use `RunAtLoad`; the daemon additionally uses
 restart-on-failure `KeepAlive`, while the updater uses a five-minute
 `StartInterval`. Every committed update rewrites the updater to the new immutable
 `fleetctl`, so a later login or reboot cannot regress to an older updater.
+
+Activation and rollback use bounded launchd bootstrap recovery for the brief
+unload-to-load transition. Production allows a five-minute readiness budget so
+all configured Scale Set sessions can start sequentially on a busy control
+plane without accepting an unready generation. A successful commit also
+atomically points `$ROOT/current` at the immutable release; LaunchAgents never
+execute through that convenience link.
+
+The updater itself is a periodic one-shot process. It is expected to be `not running`
+between invocations. Treat that state as healthy only when launchd
+reports exit status 0, the program path is the committed immutable `fleetctl`,
+and bounded updater logs contain no newer error. Process absence alone is not a
+failure and process presence alone is not readiness.
 
 To run the same idempotent check manually:
 
