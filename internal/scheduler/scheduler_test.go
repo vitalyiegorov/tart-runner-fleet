@@ -210,12 +210,74 @@ func TestCurrentLiveResourcesAreAccounted(t *testing.T) {
 	}
 }
 
-func TestLinuxAndMacOSNeverOverlap(t *testing.T) {
+func TestBuilderExhaustsSharedEnvelopeAndRemainsExclusive(t *testing.T) {
 	linuxJob := demand("a/repo", 1, time.Minute, "small")
 	mac := domain.Instance{ID: "mac", Repo: "b/repo", Platform: domain.PlatformMacOS, Profile: "builder", Route: "macos-builder", Resources: testConfig().Profiles["builder"].Resources, State: domain.InstanceRunning}
 	plan := PlanTick(input([]domain.Demand{linuxJob}, []domain.Instance{mac}, State{}))
 	if len(spawnedKeys(plan)) != 0 {
-		t.Fatalf("spawned Linux alongside macOS: %#v", plan)
+		t.Fatalf("spawned Linux beyond the shared envelope: %#v", plan)
+	}
+}
+
+func TestRunningMaestroBackfillsLinuxIntoSharedEnvelope(t *testing.T) {
+	running := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+	large := demand("a/repo", 1, 4*time.Minute, "large")
+	medium := demand("b/repo", 2, 3*time.Minute, "medium")
+	smallA := demand("a/repo", 3, 2*time.Minute, "small")
+	smallC := demand("c/repo", 4, time.Minute, "small")
+	in := input([]domain.Demand{large, medium, smallA, smallC}, []domain.Instance{running}, State{})
+
+	plan := PlanTick(in)
+	want := []domain.DemandKey{smallA.Key, smallC.Key, medium.Key}
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mixed-platform throughput packing = %#v, want %#v", got, want)
+	}
+	reversed := input([]domain.Demand{smallC, smallA, medium, large}, []domain.Instance{running}, State{})
+	if again := PlanTick(reversed); !reflect.DeepEqual(plan, again) {
+		t.Fatalf("mixed-platform plan changed with input order:\nfirst=%#v\nagain=%#v", plan, again)
+	}
+}
+
+func TestQueuedMaestroUsesResidualCapacityAlongsideLinux(t *testing.T) {
+	running := domain.Instance{
+		ID: "linux-1", Repo: "a/repo", Platform: domain.PlatformLinux,
+		Profile: "medium", Route: "tiered", Resources: testConfig().Profiles["medium"].Resources,
+		State: domain.InstanceRunning,
+	}
+	maestro := demand("b/repo", 1, time.Minute, "maestro")
+	plan := PlanTick(input([]domain.Demand{maestro}, []domain.Instance{running}, State{}))
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("residual macOS admission = %#v", plan)
+	}
+}
+
+func TestYoungThroughputPrefersSmallWhenOnlyOneSlotFits(t *testing.T) {
+	large := demand("a/repo", 1, 4*time.Minute, "large")
+	small := demand("b/repo", 2, time.Minute, "small")
+	in := input([]domain.Demand{large, small}, nil, State{})
+	in.Config.LinuxCapacity = domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}
+	in.Host = domain.Fresh(domain.Host{Available: in.Config.LinuxCapacity}, testNow)
+
+	plan := PlanTick(in)
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{small.Key}) {
+		t.Fatalf("throughput-first single slot = %#v, want small", got)
+	}
+}
+
+func TestAgedLargeRetainsFIFOAheadOfYoungSmall(t *testing.T) {
+	large := demand("a/repo", 1, 6*time.Minute, "large")
+	small := demand("b/repo", 2, time.Minute, "small")
+	in := input([]domain.Demand{small, large}, nil, State{})
+	in.Config.LinuxCapacity = domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}
+	in.Host = domain.Fresh(domain.Host{Available: in.Config.LinuxCapacity}, testNow)
+
+	plan := PlanTick(in)
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{large.Key}) {
+		t.Fatalf("aging starvation guard = %#v, want aged large", got)
 	}
 }
 
