@@ -65,6 +65,12 @@ uses bounded launchd bootstrap recovery, and gives production activation a
 five-minute readiness budget. It atomically commits or restores the complete
 generation.
 
+Treat the updater as current only when `installed-generation.json`, the updater
+plist, and `launchctl print`'s loaded `program` all name the same immutable
+release. Last exit 0 is necessary but not sufficient if launchd still caches an
+older executable. A committed update reloads the updater job so this parity is
+automatic.
+
 ```sh
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater
 tail -n 100 "$STATE/update.stdout.log"

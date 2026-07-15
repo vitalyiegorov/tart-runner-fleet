@@ -196,7 +196,9 @@ the previous generation on any failure. Updates are strictly forward-only.
 Both generated plists use `RunAtLoad`; the daemon additionally uses
 restart-on-failure `KeepAlive`, while the updater uses a five-minute
 `StartInterval`. Every committed update rewrites the updater to the new immutable
-`fleetctl`, so a later login or reboot cannot regress to an older updater.
+`fleetctl` and reloads the already-loaded updater job, so the plist on disk and
+launchd's cached `ProgramArguments` advance together. A later timer invocation,
+login, or reboot therefore cannot regress to an older updater.
 
 Activation and rollback use bounded launchd bootstrap recovery for the brief
 unload-to-load transition. Production allows a five-minute readiness budget so
@@ -210,6 +212,13 @@ between invocations. Treat that state as healthy only when launchd
 reports exit status 0, the program path is the committed immutable `fleetctl`,
 and bounded updater logs contain no newer error. Process absence alone is not a
 failure and process presence alone is not readiness.
+
+After every commit, compare all three generation identities: the installed
+manifest, the updater plist on disk, and `launchctl print`'s loaded `program`.
+Exit status 0 does not make a stale loaded program healthy. A one-time migration
+from a release that predates updater-job reload may require a controlled
+`bootout`/`bootstrap` after verifying the new plist; subsequent updates must
+maintain parity automatically.
 
 To run the same idempotent check manually:
 

@@ -107,7 +107,10 @@ Never bypass readiness, checksum, version, or mode checks to force an update.
 
 The updater LaunchAgent is a periodic one-shot process. Between invocations,
 `launchctl` may report it as `not running`; that is healthy when its last exit
-status is 0 and its program path belongs to the committed generation.
+status is 0 and its loaded program path belongs to the committed generation.
+Cross-check that path against both `state/installed-generation.json` and the
+updater plist: an on-disk plist update does not prove launchd discarded a cached
+older executable.
 
 ## Incident workflow
 
