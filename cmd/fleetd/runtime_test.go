@@ -51,7 +51,10 @@ type keyRunner struct {
 
 func (r keyRunner) Run(context.Context, string, ...string) ([]byte, error) { return r.out, r.err }
 
-type fakeSource struct{ closed atomic.Int32 }
+type fakeSource struct {
+	closed         atomic.Int32
+	directJITCalls atomic.Int32
+}
 
 func (*fakeSource) Handle(ctx context.Context, _ func(context.Context, githubscaleset.Demand) error) error {
 	<-ctx.Done()
@@ -61,6 +64,10 @@ func (f *fakeSource) Close(context.Context) error                    { f.closed.
 func (*fakeSource) Registered(context.Context, string) (bool, error) { return true, nil }
 func (*fakeSource) AcquireAndGenerateJIT(context.Context, int64, string, string) (*githubscaleset.JITSecret, error) {
 	return githubscaleset.NewJITSecret("jit"), nil
+}
+func (f *fakeSource) GenerateJIT(context.Context, string, string) (*githubscaleset.JITSecret, error) {
+	f.directJITCalls.Add(1)
+	return githubscaleset.NewJITSecret("direct-jit"), nil
 }
 func (*fakeSource) Deregister(context.Context, string) error { return nil }
 
@@ -533,6 +540,17 @@ func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
 		t.Fatalf("jit=%v err=%v", jit, err)
 	}
 	jit.Destroy()
+	direct, ok := any(source).(interface {
+		GenerateJIT(context.Context, string, string) (*githubscaleset.JITSecret, error)
+	})
+	if !ok {
+		t.Fatal("recovering source dropped direct JIT generation")
+	}
+	directJIT, err := direct.GenerateJIT(context.Background(), "runner", "_work")
+	if err != nil || directJIT == nil || initial.directJITCalls.Load() != 1 {
+		t.Fatalf("direct jit=%v err=%v calls=%d", directJIT, err, initial.directJITCalls.Load())
+	}
+	directJIT.Destroy()
 	if err := source.Deregister(context.Background(), "runner"); err != nil {
 		t.Fatal(err)
 	}
@@ -547,6 +565,9 @@ func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
 	}
 	if _, err := source.AcquireAndGenerateJIT(context.Background(), 1, "runner", "_work"); err == nil {
 		t.Fatal("closed recovering source generated JIT configuration")
+	}
+	if _, err := direct.GenerateJIT(context.Background(), "runner", "_work"); err == nil {
+		t.Fatal("closed recovering source generated direct JIT configuration")
 	}
 	if err := source.Deregister(context.Background(), "runner"); err == nil {
 		t.Fatal("closed recovering source deregistered a runner")

@@ -42,6 +42,7 @@ const canaryDemandLabel = "tart-fleet-canary"
 type scaleSetSource interface {
 	app.MessageSource
 	lifecycle.ScaleSetControl
+	GenerateJIT(context.Context, string, string) (*githubscaleset.JITSecret, error)
 	Close(context.Context) error
 }
 
@@ -132,6 +133,15 @@ func (s *recoveringScaleSetSource) AcquireAndGenerateJIT(ctx context.Context, re
 	}
 	defer release()
 	return source.AcquireAndGenerateJIT(ctx, requestID, name, workFolder)
+}
+
+func (s *recoveringScaleSetSource) GenerateJIT(ctx context.Context, name, workFolder string) (*githubscaleset.JITSecret, error) {
+	source, release, err := s.acquire()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return source.GenerateJIT(ctx, name, workFolder)
 }
 
 func (s *recoveringScaleSetSource) Deregister(ctx context.Context, name string) error {
