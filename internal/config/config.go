@@ -476,6 +476,11 @@ func (c Config) validateLegacyAuthority() error {
 		return errors.New("complete GitHub App and Keychain configuration is required")
 	}
 	profiles := make(map[string]struct{}, len(c.Linux.Profiles)+2)
+	capacities := c.authorityProfileCapacities()
+	targetCapacity := 0
+	for _, target := range c.Targets {
+		targetCapacity += target.MaxActive
+	}
 	for _, profile := range c.Linux.Profiles {
 		profiles[profile.ID] = struct{}{}
 	}
@@ -486,7 +491,8 @@ func (c Config) validateLegacyAuthority() error {
 	seen := make(map[string]struct{}, len(c.GitHub.ScaleSets))
 	for _, scaleSet := range c.GitHub.ScaleSets {
 		_, known := profiles[scaleSet.Profile]
-		if !known || scaleSet.ID <= 0 || scaleSet.MaxCapacity < 0 {
+		runtimeCapacity := min(capacities[scaleSet.Profile], targetCapacity)
+		if !known || scaleSet.ID <= 0 || scaleSet.MaxCapacity <= runtimeCapacity {
 			return fmt.Errorf("invalid scale set for profile %q", scaleSet.Profile)
 		}
 		if _, duplicate := seen[scaleSet.Profile]; duplicate {
@@ -537,9 +543,12 @@ func (c Config) validateMultiScopeAuthority() error {
 	}
 
 	profiles := c.authorityProfiles()
+	capacities := c.authorityProfileCapacities()
 	targets := make(map[string]string, len(c.Targets))
+	targetCapacities := make(map[string]int, len(c.Targets))
 	for _, target := range c.Targets {
 		targets[folded(target.Slug)] = target.Slug
+		targetCapacities[folded(target.Slug)] = target.MaxActive
 	}
 	assignedTargets := make(map[string]string, len(targets))
 	scopeNames := make(map[string]struct{}, len(github.Scopes))
@@ -568,7 +577,7 @@ func (c Config) validateMultiScopeAuthority() error {
 		if err := validateScopeTargets(scope, parsed, targets, assignedTargets); err != nil {
 			return err
 		}
-		if err := validateScopeScaleSets(scope, profiles); err != nil {
+		if err := validateScopeScaleSets(scope, profiles, capacities, targetCapacities); err != nil {
 			return err
 		}
 	}
@@ -597,6 +606,21 @@ func (c Config) authorityProfiles() map[string]string {
 		profiles[c.MacOS.Maestro.ID] = c.MacOS.Maestro.Label
 	}
 	return profiles
+}
+
+func (c Config) authorityProfileCapacities() map[string]int {
+	capacities := make(map[string]int, len(c.Linux.Profiles)+2)
+	for _, profile := range c.Linux.Profiles {
+		limit := c.Linux.MaxInstances
+		limit = min(limit, c.Linux.Capacity.CPU/profile.Resources.CPU)
+		limit = min(limit, c.Linux.Capacity.MemoryMiB/profile.Resources.MemoryMiB)
+		capacities[profile.ID] = limit
+	}
+	if c.MacOS.Enabled {
+		capacities[c.MacOS.Builder.ID] = c.MacOS.Builder.MaxActive
+		capacities[c.MacOS.Maestro.ID] = c.MacOS.Maestro.MaxActive
+	}
+	return capacities
 }
 
 func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {
@@ -657,13 +681,22 @@ func validateScopeTargets(scope GitHubScope, parsed *url.URL, targets, assigned 
 	return nil
 }
 
-func validateScopeScaleSets(scope GitHubScope, profiles map[string]string) error {
+func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capacities, targetCapacities map[string]int) error {
 	seenProfiles := make(map[string]struct{}, len(scope.ScaleSets))
 	seenNames := make(map[string]struct{}, len(scope.ScaleSets))
+	scopeCapacity := 0
+	for _, target := range scope.Targets {
+		scopeCapacity += targetCapacities[folded(target)]
+	}
 	for _, scaleSet := range scope.ScaleSets {
 		route, known := profiles[scaleSet.Profile]
 		if !known || strings.TrimSpace(scaleSet.Name) == "" || scaleSet.ID < 0 || scaleSet.MaxCapacity < 0 {
 			return fmt.Errorf("invalid scale set for profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)
+		}
+		runtimeCapacity := min(capacities[scaleSet.Profile], scopeCapacity)
+		if scaleSet.MaxCapacity <= runtimeCapacity {
+			return fmt.Errorf("scale set %q in GitHub scope %q requires queue lookahead: maxCapacity=%d, runtime capacity=%d",
+				scaleSet.Name, scope.Name, scaleSet.MaxCapacity, runtimeCapacity)
 		}
 		if _, duplicate := seenProfiles[scaleSet.Profile]; duplicate {
 			return fmt.Errorf("duplicate scale set profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)

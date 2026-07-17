@@ -128,6 +128,14 @@ scope for organization repositories. Every target belongs to exactly one scope;
 every scope has exactly one scale set for each enabled profile. Numeric scale-set
 IDs may collide across installations because durable state uses a scoped key.
 
+Set every scale set's `maxCapacity` one higher than the maximum number of
+runners that its profile can execute: `5` for small, `5` for medium, `3` for
+large, `2` for builder, and `3` for Maestro under the default 8-CPU/16-GiB
+profile vectors. The extra slot is delivery-only queue lookahead. The scheduler
+still enforces the configured repository, profile, CPU, memory, and VM limits.
+Validate the migrated file with the candidate `fleetctl` before restarting the
+authority service.
+
 Provisioning is explicit, drift-failing, and plan-first:
 
 ```sh

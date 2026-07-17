@@ -33,6 +33,12 @@ Wrap every official scale-set source in one atomically replaceable source:
   component state;
 - cancellation never starts recovery, so normal shutdown remains deterministic.
 
+Each scale set also reserves one delivery-only queue lookahead above the
+maximum runner concurrency for its profile. `maxCapacity` must therefore be
+strictly greater than the resource-bounded runtime capacity. This lets GitHub
+deliver and persist a queued successor while all executable slots are occupied;
+it does not increase scheduler `maxActive`, host CPU, memory, or VM slots.
+
 The scheduler stays fail closed until the replacement completes a successful
 poll. No unavailable observation is treated as an empty queue.
 
@@ -43,3 +49,8 @@ healthy Tart runners. During a broad network outage, recovery attempts are
 bounded and retain the service loop's retry backoff. If broker-side cleanup
 cannot complete, the source remains unavailable and retries safely rather than
 creating overlapping consumers.
+
+One successor per profile remains visible to queue-SLO monitoring instead of
+being hidden behind GitHub's scale-set capacity head of line. Existing
+configurations whose `maxCapacity` equals executable capacity must be migrated
+before authority validates under this decision.

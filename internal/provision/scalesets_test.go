@@ -48,8 +48,11 @@ func provisionConfig() config.Config {
 	cfg := config.Default()
 	cfg.Targets = []config.Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4}}
 	sets := make([]config.ScaleSet, 0, 5)
-	for _, value := range []struct{ profile, route string }{{"small", "linux-small"}, {"medium", "linux-medium"}, {"large", "linux-large"}, {"builder", "macos-builder"}, {"maestro", "macos-maestro"}} {
-		sets = append(sets, config.ScaleSet{Profile: value.profile, Name: "repo-" + value.profile, MaxCapacity: 1, Labels: []string{"self-hosted", value.route}})
+	for _, value := range []struct {
+		profile, route string
+		capacity       int
+	}{{"small", "linux-small", 5}, {"medium", "linux-medium", 5}, {"large", "linux-large", 3}, {"builder", "macos-builder", 2}, {"maestro", "macos-maestro", 3}} {
+		sets = append(sets, config.ScaleSet{Profile: value.profile, Name: "repo-" + value.profile, MaxCapacity: value.capacity, Labels: []string{"self-hosted", value.route}})
 	}
 	cfg.GitHub = config.GitHub{SessionOwner: "host", App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
 		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}},
