@@ -29,8 +29,8 @@
   "targets": [
     { "type": "repo", "slug": "vitalyiegorov/tart-runner-fleet", "maxActive": 3, "schedulingClass": "control-plane" },
     { "type": "repo", "slug": "vitalyiegorov/knee-doctor", "maxActive": 4 },
-    { "type": "repo", "slug": "budgie-at/budgie", "maxActive": 2, "defaultLinuxProfile": "large", "runnerLabels": ["self-hosted", "linux-ci", "linux-burst"] },
+    { "type": "repo", "slug": "budgie-at/budgie", "maxActive": 4, "defaultLinuxProfile": "large", "runnerLabels": ["self-hosted", "linux-ci", "linux-burst"] },
     { "type": "repo", "slug": "vitalyiegorov/hotel-provence", "maxActive": 4 },
-    { "type": "repo", "slug": "vitalyiegorov/suuudokuuu", "maxActive": 3 }
+    { "type": "repo", "slug": "vitalyiegorov/suuudokuuu", "maxActive": 4 }
   ]
 }
