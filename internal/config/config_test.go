@@ -97,6 +97,27 @@ func TestDefaultIsValidAndCloneIsIndependent(t *testing.T) {
 	}
 }
 
+func TestAutomaticTargetCapacityIsExplicitAndExclusive(t *testing.T) {
+	cfg := Default()
+	cfg.Targets[0].MaxActive = 0
+	cfg.Targets[0].AutoMaxActive = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("automatic target capacity rejected: %v", err)
+	}
+
+	manualAndAutomatic := cfg.Clone()
+	manualAndAutomatic.Targets[0].MaxActive = 2
+	if err := manualAndAutomatic.Validate(); err == nil {
+		t.Fatal("target accepted both automatic and manual capacity")
+	}
+
+	implicitAutomatic := cfg.Clone()
+	implicitAutomatic.Targets[0].AutoMaxActive = false
+	if err := implicitAutomatic.Validate(); err == nil {
+		t.Fatal("zero target capacity accepted without explicit automatic mode")
+	}
+}
+
 func TestDecodeRejectsMalformedUnknownTrailingAndInvalid(t *testing.T) {
 	tests := map[string]string{
 		"malformed":       `{`,

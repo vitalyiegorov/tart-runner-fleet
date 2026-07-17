@@ -413,13 +413,40 @@ func TestOldestAgedMacProfileWinsWithoutPermanentBuilderPriority(t *testing.T) {
 	}
 }
 
-func TestMaestroIsCappedAtTwoAndFairAcrossRepos(t *testing.T) {
-	a1 := demand("a/repo", 1, time.Minute, "maestro")
+func TestMaestroReturnsToConfiguredWidthAfterWaveAges(t *testing.T) {
+	a1 := demand("a/repo", 1, 10*time.Minute, "maestro")
 	a2 := demand("a/repo", 2, 50*time.Second, "maestro")
 	b1 := demand("b/repo", 3, 40*time.Second, "maestro")
 	plan := PlanTick(input([]domain.Demand{a1, a2, b1}, nil, State{}))
-	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{a1.Key, b1.Key}) {
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{a1.Key, a2.Key}) {
 		t.Fatalf("maestro allocation = %#v", got)
+	}
+}
+
+func TestYoungMaestroWavePreservesProfileSwitchWindow(t *testing.T) {
+	first := demand("a/repo", 1, time.Minute, "maestro")
+	second := demand("b/repo", 2, 50*time.Second, "maestro")
+
+	initial := input([]domain.Demand{first, second}, nil, State{})
+	if got := spawnedKeys(PlanTick(initial)); !reflect.DeepEqual(got, []domain.DemandKey{first.Key}) {
+		t.Fatalf("initial young wave = %#v, want one discovery runner", got)
+	}
+
+	running := domain.Instance{ID: "maestro-1", Repo: first.Key.Repo, Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning}
+	whileYoung := input([]domain.Demand{second}, []domain.Instance{running}, State{})
+	if got := spawnedKeys(PlanTick(whileYoung)); len(got) != 0 {
+		t.Fatalf("young sibling consumed switch window: %#v", got)
+	}
+
+	afterWindow := whileYoung
+	afterWindow.Now = testNow.Add(testConfig().FairnessAge)
+	afterWindow.Demands = domain.Fresh(afterWindow.Demands.Value, afterWindow.Now)
+	afterWindow.Instances = domain.Fresh(afterWindow.Instances.Value, afterWindow.Now)
+	afterWindow.Host = domain.Fresh(afterWindow.Host.Value, afterWindow.Now)
+	if got := spawnedKeys(PlanTick(afterWindow)); !reflect.DeepEqual(got, []domain.DemandKey{second.Key}) {
+		t.Fatalf("aged sibling did not recover full throughput: %#v", got)
 	}
 }
 

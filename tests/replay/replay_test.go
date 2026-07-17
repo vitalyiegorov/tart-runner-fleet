@@ -128,10 +128,25 @@ func TestIncidentReplayMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("maestro caps at two and spreads repos", func(t *testing.T) {
-		a1, a2, b1 := job("a/repo", 1, time.Minute, "maestro"), job("a/repo", 2, 50*time.Second, "maestro"), job("b/repo", 3, 40*time.Second, "maestro")
-		if keys := spawnKeys(plan([]domain.Demand{a1, a2, b1}, nil, nil)); !reflect.DeepEqual(keys, []domain.DemandKey{a1.Key, b1.Key}) {
+	t.Run("maestro returns to configured width after wave ages", func(t *testing.T) {
+		a1, a2, b1 := job("a/repo", 1, 10*time.Minute, "maestro"), job("a/repo", 2, 50*time.Second, "maestro"), job("b/repo", 3, 40*time.Second, "maestro")
+		if keys := spawnKeys(plan([]domain.Demand{a1, a2, b1}, nil, nil)); !reflect.DeepEqual(keys, []domain.DemandKey{a1.Key, a2.Key}) {
 			t.Fatalf("maestro allocation regressed: %#v", keys)
+		}
+	})
+
+	t.Run("fresh maestro wave preserves builder discovery window", func(t *testing.T) {
+		first, second := job("a/repo", 1, time.Minute, "maestro"), job("b/repo", 2, 50*time.Second, "maestro")
+		if keys := spawnKeys(plan([]domain.Demand{first, second}, nil, nil)); !reflect.DeepEqual(keys, []domain.DemandKey{first.Key}) {
+			t.Fatalf("fresh Maestro wave consumed the switch window: %#v", keys)
+		}
+
+		builder := job("c/repo", 3, 30*time.Minute, "builder")
+		running := domain.Instance{ID: "maestro-1", Repo: first.Key.Repo, Platform: domain.PlatformMacOS,
+			Profile: "maestro", Route: profiles["maestro"].Route, Resources: profiles["maestro"].Resources,
+			State: domain.InstanceRunning}
+		if got := plan([]domain.Demand{second, builder}, []domain.Instance{running}, nil); len(got.Operations) != 0 {
+			t.Fatalf("late builder demand admitted another Maestro: %#v", got)
 		}
 	})
 }

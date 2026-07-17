@@ -27,7 +27,11 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 	caps := make(map[string]int, len(cfg.Targets))
 	classes := make(map[string]domain.SchedulingClass, len(cfg.Targets))
 	for _, target := range cfg.Targets {
-		caps[target.Slug] = target.MaxActive
+		cap := target.MaxActive
+		if target.AutoMaxActive {
+			cap = cfg.Linux.MaxInstances
+		}
+		caps[target.Slug] = cap
 		class := target.SchedulingClass
 		if class == "" {
 			class = domain.SchedulingStandard

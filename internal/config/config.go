@@ -42,6 +42,7 @@ type Target struct {
 	Type                string                 `json:"type"`
 	Slug                string                 `json:"slug"`
 	MaxActive           int                    `json:"maxActive"`
+	AutoMaxActive       bool                   `json:"autoMaxActive,omitempty"`
 	SchedulingClass     domain.SchedulingClass `json:"schedulingClass,omitempty"`
 	DefaultLinuxProfile string                 `json:"defaultLinuxProfile,omitempty"`
 	RunnerLabels        []string               `json:"runnerLabels,omitempty"`
@@ -425,7 +426,8 @@ func (c Config) Validate() error {
 	}
 	seenTargets := map[string]struct{}{}
 	for _, target := range c.Targets {
-		if target.Type != "repo" || strings.Count(target.Slug, "/") != 1 || target.MaxActive <= 0 {
+		validCapacity := (!target.AutoMaxActive && target.MaxActive > 0) || (target.AutoMaxActive && target.MaxActive == 0)
+		if target.Type != "repo" || strings.Count(target.Slug, "/") != 1 || !validCapacity {
 			return fmt.Errorf("invalid target %q", target.Slug)
 		}
 		schedulingClass := target.normalized().SchedulingClass

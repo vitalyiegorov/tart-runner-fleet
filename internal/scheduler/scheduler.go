@@ -896,7 +896,7 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		return plan
 	}
 	profile := in.Config.Profiles[demands[0].Profile]
-	limit := macProfileLimit(profile)
+	limit := macWaveLimit(in, profile, demands)
 	active := 0
 	free := linuxFree(in)
 	for _, instance := range in.Instances.Value {
@@ -924,6 +924,24 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		plan.Next.DRRCursor = selected[len(selected)-1].Key.Repo
 	}
 	return plan
+}
+
+// macWaveLimit preserves one runner slot while a fresh multi-runner macOS
+// wave is still inside the global fairness window. This gives an incompatible
+// profile (for example builder while Maestro is active) time to surface before
+// the host commits to another long-running job. Once any queued sibling ages
+// past that same window, the configured profile limit is restored, so an
+// uncontended wave automatically returns to full throughput.
+func macWaveLimit(in Input, profile domain.Profile, demands []domain.Demand) int {
+	limit := macProfileLimit(profile)
+	if limit <= 1 {
+		return limit
+	}
+	aged, _ := splitAged(in.Now, in.Config.FairnessAge, demands)
+	if len(aged) == 0 {
+		return 1
+	}
+	return limit
 }
 
 func macProfileLimit(profile domain.Profile) int {

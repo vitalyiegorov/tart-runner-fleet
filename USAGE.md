@@ -66,6 +66,12 @@ exhausts the configured CPU envelope and consequently runs alone. Values come
 from `fleet.json`, so treat the table as the example contract rather than a
 hidden default.
 
+Application targets may set `"autoMaxActive": true` with `"maxActive": 0`.
+The runtime then derives their repository cap from the fleet's configured
+global slot envelope; CPU, memory, profile, and host-pressure checks remain
+hard bounds. Keep an explicit positive cap for the fleet control plane or any
+repository that requires a deliberate reservation.
+
 ## Scheduling principles
 
 1. Fresh observations are mandatory; unavailable data fails closed.
@@ -76,9 +82,12 @@ hidden default.
    are considered first and exact packing maximizes admitted job count.
 5. Compatible small Linux work may use one durable backfill budget while a
    macOS handoff is draining; it cannot postpone the handoff indefinitely.
-6. A single deterministic state machine owns each instance from planned clone
+6. A fresh multi-runner macOS wave starts with one discovery runner. If no
+   incompatible older profile appears, queued siblings age through the normal
+   fairness window and automatically restore the profile's full safe width.
+7. A single deterministic state machine owns each instance from planned clone
    through registration, assignment, drain, deregistration, stop, and deletion.
-7. External effects are durable, leased, idempotent, and retried with bounded
+8. External effects are durable, leased, idempotent, and retried with bounded
    backoff; restart resumes state instead of guessing from process presence.
 
 ## Automatic updates

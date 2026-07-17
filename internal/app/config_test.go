@@ -51,6 +51,16 @@ func TestBuildSchedulerConfigWithoutMacOS(t *testing.T) {
 	}
 }
 
+func TestBuildSchedulerConfigResolvesAutomaticTargetCapacity(t *testing.T) {
+	cfg := config.Default()
+	cfg.Linux.MaxInstances = 3
+	cfg.Targets = []config.Target{{Type: "repo", Slug: "o/auto", AutoMaxActive: true}}
+	got := BuildSchedulerConfig(cfg)
+	if got.RepoCaps["o/auto"] != 3 {
+		t.Fatalf("automatic repository cap = %d, want fleet slots 3", got.RepoCaps["o/auto"])
+	}
+}
+
 func TestBuildBindingsUseScopedDurableIdentityAndTargets(t *testing.T) {
 	cfg := config.Default()
 	cfg.GitHub = config.GitHub{App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
