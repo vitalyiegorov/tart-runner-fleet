@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -312,6 +313,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		for _, binding := range bindings {
 			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.StoreKey))
 		}
+		for scope := range bindingsByScope(bindings) {
+			criticalObservations = append(criticalObservations, "github-rest-"+scope)
+		}
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
 		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute})
@@ -404,6 +408,32 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				controls[key] = lifecycle.SourceBinding{StoreKey: binding.StoreKey, Source: source}
 			}
+		}
+		for scope, scopeBindings := range bindingsByScope(bindings) {
+			settings, err := sourceSettingsFor(cfg, scopeBindings[0])
+			if err != nil {
+				return err
+			}
+			apiBase, err := githubscaleset.APIBaseURL(settings.configURL)
+			if err != nil {
+				return err
+			}
+			tokens, err := githubscaleset.NewInstallationTokenSource(githubscaleset.InstallationTokenConfig{
+				APIBaseURL: apiBase, ClientID: settings.clientID, InstallationID: settings.installationID,
+				PrivateKey: privateKey, Timeout: cfg.Timeouts.GitHub,
+			})
+			if err != nil {
+				return err
+			}
+			observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: apiBase,
+				Repositories: repositoriesForBindings(scopeBindings, cfg.Targets), HTTP: http.DefaultClient,
+				Tokens: tokens, Timeout: cfg.Timeouts.GitHub})
+			if err != nil {
+				return err
+			}
+			ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
+				observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
+				observation: "github-rest-" + scope, now: d.now})
 		}
 	}
 	control := &lifecycle.ControlRouter{State: store, Demand: store, Sources: controls, Now: d.now}
@@ -782,6 +812,97 @@ type boundIngester struct {
 	observation string
 }
 
+type restQueueIngester struct {
+	coordinator app.DemandCoordinator
+	bindings    []app.Binding
+	observer    *githubscaleset.Observer
+	interval    time.Duration
+	health      *telemetry.Health
+	observation string
+	now         func() time.Time
+	previous    *githubscaleset.Snapshot
+	next        time.Time
+}
+
+func (r *restQueueIngester) Ingest(ctx context.Context) error {
+	_, err := r.IngestChanged(ctx)
+	return err
+}
+
+func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
+	if r == nil || r.observer == nil || r.now == nil || r.interval <= 0 {
+		return false, operations.ErrInvalid
+	}
+	now := r.now().UTC()
+	if wait := r.next.Sub(now); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+		now = r.now().UTC()
+	}
+	r.next = now.Add(r.interval)
+	observation := r.observer.Refresh(ctx, r.previous)
+	if observation.Err != nil {
+		if r.health != nil && r.observation != "" {
+			_ = r.health.RecordObservation(r.observation, telemetry.ObservationUnavailable)
+		}
+		return false, observation.Err
+	}
+	r.previous = observation.Snapshot
+	changed, err := r.coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	if r.health != nil && r.observation != "" {
+		freshness := telemetry.ObservationFresh
+		if err != nil {
+			freshness = telemetry.ObservationUnavailable
+		}
+		_ = r.health.RecordObservation(r.observation, freshness)
+	}
+	return changed, err
+}
+
+func bindingsByScope(bindings []app.Binding) map[string][]app.Binding {
+	grouped := make(map[string][]app.Binding)
+	for _, binding := range bindings {
+		scope := binding.Scope
+		if scope == "" {
+			scope = legacyScopeName
+		}
+		grouped[scope] = append(grouped[scope], binding)
+	}
+	return grouped
+}
+
+func repositoriesForBindings(bindings []app.Binding, targets []config.Target) []githubscaleset.Repository {
+	seen := map[string]struct{}{}
+	var repositories []githubscaleset.Repository
+	add := func(slug string) {
+		parts := strings.Split(slug, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return
+		}
+		if _, exists := seen[slug]; exists {
+			return
+		}
+		seen[slug] = struct{}{}
+		repositories = append(repositories, githubscaleset.Repository{Owner: parts[0], Name: parts[1]})
+	}
+	for _, binding := range bindings {
+		for _, target := range binding.Targets {
+			add(target)
+		}
+	}
+	if len(repositories) == 0 {
+		for _, target := range targets {
+			add(target.Slug)
+		}
+	}
+	return repositories
+}
+
 func (b boundIngester) Ingest(ctx context.Context) error {
 	_, err := b.IngestChanged(ctx)
 	return err
@@ -852,6 +973,12 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 			metric.oldest = demand.CreatedAt
 		}
 		queues[string(demand.Profile)] = metric
+	}
+	for profile, summary := range result.Queues {
+		queues[string(profile)] = struct {
+			count  int
+			oldest time.Time
+		}{count: summary.Count, oldest: summary.Oldest}
 	}
 	for _, instance := range result.Instances {
 		if !instance.Live() {

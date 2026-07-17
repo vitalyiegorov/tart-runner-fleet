@@ -70,13 +70,15 @@ func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 	for _, repo := range o.repos {
 		var runPage struct {
 			Runs []struct {
-				ID     int64  `json:"id"`
-				Status string `json:"status"`
+				ID        int64     `json:"id"`
+				Attempt   int       `json:"run_attempt"`
+				Status    string    `json:"status"`
+				CreatedAt time.Time `json:"created_at"`
 			} `json:"workflow_runs"`
 		}
 		if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runPage, func() {
 			for _, r := range runPage.Runs {
-				s.runs[r.ID] = WorkflowRun{ID: r.ID, Repository: repo, Status: r.Status}
+				s.runs[r.ID] = WorkflowRun{ID: r.ID, Repository: repo, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.CreatedAt.UTC()}
 			}
 			runPage.Runs = nil
 		}); err != nil {
@@ -90,13 +92,25 @@ func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 				Jobs []struct {
 					ID           int64 `json:"id"`
 					Name, Status string
-					Labels       []string `json:"labels"`
+					Labels       []string  `json:"labels"`
+					CreatedAt    time.Time `json:"created_at"`
+					StartedAt    time.Time `json:"started_at"`
+					CompletedAt  time.Time `json:"completed_at"`
 				} `json:"jobs"`
 			}
 			path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), run.ID)
 			if err := o.pages(ctx, path, &jobPage, func() {
 				for _, j := range jobPage.Jobs {
-					job := WorkflowJob{ID: j.ID, RunID: run.ID, Repository: repo, Name: j.Name, Status: j.Status, Labels: append([]string(nil), j.Labels...)}
+					queuedAt := j.CreatedAt
+					if queuedAt.IsZero() {
+						queuedAt = j.StartedAt
+					}
+					if queuedAt.IsZero() {
+						queuedAt = run.CreatedAt
+					}
+					job := WorkflowJob{ID: j.ID, RunID: run.ID, Repository: repo, Name: j.Name, Status: j.Status,
+						Labels: append([]string(nil), j.Labels...), RunAttempt: run.Attempt, CreatedAt: queuedAt.UTC(),
+						StartedAt: j.StartedAt.UTC(), CompletedAt: j.CompletedAt.UTC()}
 					s.jobs[j.ID] = job
 					if j.Status == "queued" || j.Status == "waiting" || j.Status == "pending" {
 						s.queued = append(s.queued, j.ID)
@@ -186,6 +200,10 @@ func (o *Observer) resolve(path string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !u.IsAbs() && strings.HasPrefix(u.Path, "/") && o.base.Path != "" && o.base.Path != "/" &&
+		!strings.HasPrefix(u.Path, strings.TrimRight(o.base.Path, "/")+"/") {
+		u.Path = strings.TrimRight(o.base.Path, "/") + u.Path
+	}
 	return o.base.ResolveReference(u), nil
 }
 func (o *Observer) next(link string) (*url.URL, error) {
@@ -195,11 +213,10 @@ func (o *Observer) next(link string) (*url.URL, error) {
 			continue
 		}
 		raw := strings.Trim(strings.TrimSpace(bits[0]), "<>")
-		u, err := url.Parse(raw)
+		u, err := o.resolve(raw)
 		if err != nil {
 			return nil, err
 		}
-		u = o.base.ResolveReference(u)
 		if u.Scheme != o.base.Scheme || u.Host != o.base.Host {
 			return nil, errors.New("pagination URL escaped GitHub API origin")
 		}

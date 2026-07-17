@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,187 @@ func demandEvent(kind operations.DemandEventKind, requestID int64) operations.De
 	return operations.DemandEvent{
 		Kind: kind, RunnerRequestID: requestID, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
 		JobID: "job-uuid", EventName: "push", Labels: []string{"self-hosted", "linux"}, QueueTime: time.Unix(100, 0).UTC(),
+	}
+}
+
+// Regression for Budgie PR #597: GitHub rotated the scale-set request and
+// protocol job UUID while the same REST workflow job remained queued. Queue
+// age is a property of the logical job, not the latest broker delivery.
+func TestDemandInboxPreservesOriginalAgeAcrossRotatedProtocolIdentities(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	original := time.Date(2026, 7, 17, 9, 47, 52, 0, time.UTC)
+	for i, delivered := range []time.Time{
+		time.Date(2026, 7, 17, 10, 41, 0, 0, time.UTC),
+		time.Date(2026, 7, 17, 10, 46, 0, 0, time.UTC),
+		time.Date(2026, 7, 17, 10, 51, 0, 0, time.UTC),
+	} {
+		event := demandEvent(operations.DemandJobAvailable, int64(700+i))
+		event.JobID = fmt.Sprintf("rotated-%d", i)
+		event.DisplayName = "Build iOS E2E app"
+		event.WorkflowRef = "budgie-at/budgie/.github/workflows/e2e.yml@refs/pull/597/merge"
+		event.QueueTime = delivered
+		if _, err := store.ApplyDemandBatch(ctx, 7155, int64(i+1), []operations.DemandEvent{event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observation := operations.GitHubJobObservation{WorkflowJobID: 16146281234, Owner: "owner", Repository: "repo",
+		WorkflowRunID: 77, RunAttempt: 3, DisplayName: "Build iOS E2E app",
+		WorkflowRef: "budgie-at/budgie/.github/workflows/e2e.yml@refs/pull/597/merge",
+		Labels:      []string{"self-hosted", "linux"}, Status: "queued", CreatedAt: original}
+	if _, err := store.ReconcileGitHubJobs(ctx, 7155, time.Date(2026, 7, 17, 10, 52, 0, 0, time.UTC), []operations.GitHubJobObservation{observation}); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.ActiveDemands(ctx, 7155)
+	if err != nil || len(active) != 3 {
+		t.Fatalf("active = %#v, %v", active, err)
+	}
+	for _, record := range active {
+		if record.FirstQueueTime != original || record.RunAttempt != 3 || record.WorkflowJobID != 16146281234 {
+			t.Fatalf("rotated demand lost canonical identity: %#v", record)
+		}
+	}
+}
+
+func TestDemandInboxDoesNotGuessAmongSameNameMatrixJobs(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	event := demandEvent(operations.DemandJobAvailable, 10)
+	event.DisplayName = "E2E (${{ matrix.shard }})"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	jobs := []operations.GitHubJobObservation{
+		{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 2, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC()},
+		{WorkflowJobID: 101, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 3, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(51, 0).UTC()},
+	}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), jobs); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 10)
+	if err != nil || record.WorkflowJobID != 0 || record.RunAttempt != 0 || record.FirstQueueTime != jobs[0].CreatedAt {
+		t.Fatalf("ambiguous correlation guessed identity: %#v, %v", record, err)
+	}
+}
+
+func TestGitHubQueueSnapshotReplacementAndStatisticsMonotonicity(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	job := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 1,
+		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now.Add(-time.Minute)}
+	if changed, err := store.ReconcileGitHubJobs(ctx, 1, now, []operations.GitHubJobObservation{job}); err != nil || !changed {
+		t.Fatalf("initial snapshot = %v, %v", changed, err)
+	}
+	if jobs, err := store.QueuedGitHubJobs(ctx, 1); err != nil || len(jobs) != 1 || jobs[0].WorkflowJobID != 100 {
+		t.Fatalf("queued snapshot = %#v, %v", jobs, err)
+	}
+	if changed, err := store.ReconcileGitHubJobs(ctx, 1, now.Add(time.Second), nil); err != nil || !changed {
+		t.Fatalf("empty replacement = %v, %v", changed, err)
+	}
+	if jobs, err := store.QueuedGitHubJobs(ctx, 1); err != nil || len(jobs) != 0 {
+		t.Fatalf("completed queue was not cleared = %#v, %v", jobs, err)
+	}
+
+	newer := operations.DemandStatistics{MessageID: 9, Available: 2, Assigned: 1, Registered: 2, Idle: 1, ObservedAt: now}
+	if changed, err := store.PutDemandStatistics(ctx, 1, newer); err != nil || !changed {
+		t.Fatalf("new statistics = %v, %v", changed, err)
+	}
+	older := newer
+	older.MessageID = 8
+	older.Available = 99
+	if changed, err := store.PutDemandStatistics(ctx, 1, older); err != nil || changed {
+		t.Fatalf("older statistics = %v, %v", changed, err)
+	}
+	got, err := store.DemandStatistics(ctx, 1)
+	if err != nil || got.MessageID != 9 || got.Available != 2 || got.ObservedAt != now {
+		t.Fatalf("statistics regressed = %#v, %v", got, err)
+	}
+}
+
+func TestCanonicalQueuePersistenceFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	job := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 1,
+		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now}
+	for _, point := range []string{"githubjobs.begin", "githubjobs.count", "githubjobs.replace", "githubjobs.upsert", "githubjobs.group", "githubjobs.project", "githubjobs.commit"} {
+		t.Run(point, func(t *testing.T) {
+			store := testStore(t)
+			store.injectFault = func(candidate string) error {
+				if candidate == point {
+					return errors.New("injected")
+				}
+				return nil
+			}
+			if changed, err := store.ReconcileGitHubJobs(ctx, 1, now, []operations.GitHubJobObservation{job}); err == nil || changed {
+				t.Fatalf("fault %s ignored: %v, %v", point, changed, err)
+			}
+		})
+	}
+	store := testStore(t)
+	statistics := operations.DemandStatistics{MessageID: 1, Available: 1}
+	store.injectFault = func(point string) error { return errors.New(point) }
+	if _, err := store.PutDemandStatistics(ctx, 1, statistics); err == nil {
+		t.Fatal("statistics write failure ignored")
+	}
+	if _, err := store.DemandStatistics(ctx, 1); err == nil {
+		t.Fatal("statistics read failure ignored")
+	}
+	if _, err := store.QueuedGitHubJobs(ctx, 1); err == nil {
+		t.Fatal("queued jobs read failure ignored")
+	}
+	store.injectFault = nil
+	if _, err := store.PutDemandStatistics(ctx, 0, statistics); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid statistics scale set = %v", err)
+	}
+	if _, err := store.PutDemandStatistics(ctx, 1, operations.DemandStatistics{}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid statistics = %v", err)
+	}
+	if _, err := store.DemandStatistics(ctx, 0); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid statistics read = %v", err)
+	}
+	if _, err := store.DemandStatistics(ctx, 1); !errors.Is(err, operations.ErrNotFound) {
+		t.Fatalf("missing statistics = %v", err)
+	}
+	if _, err := store.ReconcileGitHubJobs(ctx, 0, now, nil); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid GitHub scale set = %v", err)
+	}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Time{}, nil); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid observation time = %v", err)
+	}
+	invalid := job
+	invalid.WorkflowJobID = 0
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, now, []operations.GitHubJobObservation{invalid}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid GitHub job = %v", err)
+	}
+	if _, err := store.QueuedGitHubJobs(ctx, 0); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid queued read = %v", err)
+	}
+	var nanos nanosTime
+	if err := nanos.Scan("bad"); err == nil {
+		t.Fatal("invalid timestamp scan accepted")
+	}
+	if key := demandLogicalKey("", "repo", 1, "job", "", nil, ""); key != "" {
+		t.Fatalf("invalid logical key = %q", key)
+	}
+}
+
+func TestQueuedGitHubJobsRejectsCorruptLabels(t *testing.T) {
+	store := testStore(t)
+	now := time.Now().UTC().UnixNano()
+	if _, err := store.db.Exec(`INSERT INTO github_job_observations(scale_set_id,workflow_job_id,owner,repository,workflow_run_id,run_attempt,display_name,workflow_ref,labels,status,created_at,observed_at)
+		VALUES(1,1,'o','r',1,1,'job','','{','queued',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.QueuedGitHubJobs(context.Background(), 1); err == nil {
+		t.Fatal("corrupt queued labels accepted")
+	}
+	if _, err := store.db.Exec(`INSERT INTO github_job_observations(scale_set_id,workflow_job_id,owner,repository,workflow_run_id,run_attempt,display_name,workflow_ref,labels,status,created_at,observed_at)
+		VALUES(2,'not-an-integer','o','r',1,1,'job','','[]','queued',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.QueuedGitHubJobs(context.Background(), 2); err == nil {
+		t.Fatal("corrupt queued row accepted")
 	}
 }
 
@@ -158,7 +340,7 @@ func TestDemandInboxValidationAndEmptySnapshot(t *testing.T) {
 }
 
 func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
-	for _, point := range []string{"inbox.begin", "inbox.load", "inbox.demand.load", "inbox.project", "inbox.record", "inbox.cursor", "inbox.commit"} {
+	for _, point := range []string{"inbox.begin", "inbox.load", "inbox.demand.load", "inbox.group", "inbox.group.load", "inbox.project", "inbox.record", "inbox.cursor", "inbox.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)
 			store.injectFault = func(candidate string) error {
@@ -226,6 +408,21 @@ func TestDemandInboxCorruptProjectionFailsClosed(t *testing.T) {
 	}
 	if _, err := scanDemand(scanError{sql.ErrNoRows}); !errors.Is(err, operations.ErrNotFound) {
 		t.Fatalf("demand not found mapping: %v", err)
+	}
+}
+
+func TestDemandRecordFallsBackToProtocolQueueTimeForLegacyRows(t *testing.T) {
+	store := testStore(t)
+	event := demandEvent(operations.DemandJobAvailable, 1)
+	if _, err := store.ApplyDemandBatch(context.Background(), 1, 1, []operations.DemandEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE runner_demands SET first_queue_time=0 WHERE scale_set_id=1 AND runner_request_id=1`); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(context.Background(), 1, 1)
+	if err != nil || record.FirstQueueTime != event.QueueTime {
+		t.Fatalf("legacy queue fallback = %#v, %v", record, err)
 	}
 }
 

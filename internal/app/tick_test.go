@@ -47,6 +47,12 @@ type fakeInventory struct {
 	host      domain.Observation[domain.Host]
 }
 
+type queueSummaryErrorStore struct{ *fakeDemandStore }
+
+func (s queueSummaryErrorStore) QueuedGitHubJobs(context.Context, int64) ([]operations.GitHubJobObservation, error) {
+	return nil, errors.New("REST inventory down")
+}
+
 func (f fakeInventory) Observe(context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
 	return f.instances, f.host
 }
@@ -75,6 +81,9 @@ func TestEngineTickPlansAndCommitsFreshSnapshot(t *testing.T) {
 	}
 	if result.Host != host {
 		t.Fatalf("Tick() host = %#v, want %#v", result.Host, host)
+	}
+	if result.Queues["small"].Count != 1 || result.Queues["small"].Oldest != now.Add(-time.Minute) {
+		t.Fatalf("Tick() queues = %#v", result.Queues)
 	}
 }
 
@@ -113,6 +122,18 @@ func TestEngineTickValidationAndBoundaryErrors(t *testing.T) {
 				t.Fatal("Tick() unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestEngineTickFailsClosedWhenCanonicalQueueSummaryIsUnavailable(t *testing.T) {
+	now := time.Now().UTC()
+	store := &tickStore{}
+	queueStore := queueSummaryErrorStore{fakeDemandStore: &fakeDemandStore{}}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: queueStore}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(domain.Host{Available: tickConfig().LinuxCapacity}, now),
+	}, Config: tickConfig(), Bindings: []Binding{{ScaleSetID: 1, Profile: tickConfig().Profiles["small"]}}, ControllerID: "c", Mode: reconcile.Observe}
+	if _, err := engine.Tick(context.Background()); err == nil {
+		t.Fatal("tick accepted an unavailable canonical queue inventory")
 	}
 }
 

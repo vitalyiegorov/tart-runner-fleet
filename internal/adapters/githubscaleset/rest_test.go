@@ -39,11 +39,11 @@ func TestObserverPaginatesIndexesAndPreservesQueuedSibling(t *testing.T) {
 		auth = r.Header.Get("Authorization") == "Bearer app-token" && r.Header.Get("X-GitHub-Api-Version") != ""
 		switch r.URL.Path + "?" + r.URL.RawQuery {
 		case "/repos/o/r/actions/runs?per_page=100":
-			return response(200, `{"workflow_runs":[{"id":10,"status":"in_progress"}]}`, `<https://api.test/repos/o/r/actions/runs?page=2&per_page=100>; rel="next"`), nil
+			return response(200, `{"workflow_runs":[{"id":10,"run_attempt":3,"status":"in_progress","created_at":"2026-07-17T09:47:50Z"}]}`, `<https://api.test/repos/o/r/actions/runs?page=2&per_page=100>; rel="next"`), nil
 		case "/repos/o/r/actions/runs?page=2&per_page=100":
 			return response(200, `{"workflow_runs":[{"id":11,"status":"completed"}]}`, ""), nil
 		case "/repos/o/r/actions/runs/10/jobs?filter=all&per_page=100":
-			return response(200, `{"jobs":[{"id":101,"name":"running","status":"in_progress","labels":["self-hosted"]},{"id":102,"name":"sibling","status":"queued","labels":["macos"]}]}`, `</repos/o/r/actions/runs/10/jobs?filter=all&page=2&per_page=100>; rel="next"`), nil
+			return response(200, `{"jobs":[{"id":101,"name":"running","status":"in_progress","labels":["self-hosted"],"started_at":"2026-07-17T09:49:00Z"},{"id":102,"name":"sibling","status":"queued","labels":["macos"],"started_at":"2026-07-17T09:47:52Z"}]}`, `</repos/o/r/actions/runs/10/jobs?filter=all&page=2&per_page=100>; rel="next"`), nil
 		case "/repos/o/r/actions/runs/10/jobs?filter=all&page=2&per_page=100":
 			return response(200, `{"jobs":[{"id":103,"name":"waiting","status":"waiting"}]}`, ""), nil
 		case "/repos/o/r/actions/runners?per_page=100":
@@ -71,12 +71,16 @@ func TestObserverPaginatesIndexesAndPreservesQueuedSibling(t *testing.T) {
 		t.Fatalf("queued siblings lost: %+v", queued)
 	}
 	run, _ := obs.Snapshot.Run(10)
-	if run.Status != "in_progress" {
+	if run.Status != "in_progress" || run.Attempt != 3 || !run.CreatedAt.Equal(time.Date(2026, 7, 17, 9, 47, 50, 0, time.UTC)) {
 		t.Fatal("run index")
 	}
 	job, _ := obs.Snapshot.Job(102)
-	if job.RunID != 10 {
+	if job.RunID != 10 || job.RunAttempt != 3 || !job.CreatedAt.Equal(time.Date(2026, 7, 17, 9, 47, 52, 0, time.UTC)) {
 		t.Fatal("job index")
+	}
+	waiting, _ := obs.Snapshot.Job(103)
+	if !waiting.CreatedAt.Equal(run.CreatedAt) {
+		t.Fatalf("missing job timestamp did not fall back to run creation: %#v", waiting)
 	}
 	runner, _ := obs.Snapshot.Runner(201)
 	if !runner.Busy || runner.Labels[0] != "arm64" {
@@ -154,6 +158,14 @@ func TestObserverValidationPaginationSafetyAndStatuses(t *testing.T) {
 	}
 	if (realClock{}).Now().IsZero() {
 		t.Fatal("real clock")
+	}
+	enterprise, _ := NewObserver(ObserverConfig{BaseURL: "https://github.example/api/v3", HTTP: goodHTTP, Tokens: goodToken})
+	if resolved, err := enterprise.resolve("/repos/o/r/actions/runs"); err != nil || resolved.Path != "/api/v3/repos/o/r/actions/runs" {
+		t.Fatalf("enterprise API path = %v, %v", resolved, err)
+	}
+	if resolved, err := enterprise.next(`<https://github.example/api/v3/repos/o/r/actions/runs?page=2>; rel="next"`); err != nil ||
+		resolved.Path != "/api/v3/repos/o/r/actions/runs" {
+		t.Fatalf("enterprise pagination = %v, %v", resolved, err)
 	}
 }
 

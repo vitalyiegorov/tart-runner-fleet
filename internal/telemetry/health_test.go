@@ -141,6 +141,28 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 	}
 }
 
+func TestReadyIncludesQueueSLOBreachAndIncident(t *testing.T) {
+	health, clock := newTestHealth(t)
+	health.RecordTick(true)
+	for _, name := range []string{"github", "host", "tart"} {
+		if err := health.RecordObservation(name, ObservationFresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := health.SetQueue("linux-small", 1, clock.Now().Add(-11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if ready := health.Ready(); ready.OK || !contains(ready.Reasons, "queue_slo_breached") || contains(ready.Reasons, "queue_incident") {
+		t.Fatalf("SLO readiness = %+v", ready)
+	}
+	if err := health.SetQueue("linux-small", 1, clock.Now().Add(-31*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if ready := health.Ready(); ready.OK || !contains(ready.Reasons, "queue_incident") {
+		t.Fatalf("incident readiness = %+v", ready)
+	}
+}
+
 func TestHealthRejectsInvalidUpdatesWithoutEchoingValues(t *testing.T) {
 	health, clock := newTestHealth(t)
 	secret := "ghp_do-not-leak"
@@ -196,6 +218,9 @@ func TestNewHealthValidationAndDefaults(t *testing.T) {
 		{ReadyTickTTL: -1},
 		{ReadyTickTTL: time.Minute, LiveTickTTL: time.Second},
 		{CriticalObservationTTL: -1},
+		{QueueSLO: -1},
+		{QueueIncidentSLO: -1},
+		{QueueSLO: time.Hour, QueueIncidentSLO: time.Minute},
 		{Profiles: []string{"x", "x"}},
 		{CriticalObservations: []string{"x", "x"}},
 		{Profiles: []string{""}},

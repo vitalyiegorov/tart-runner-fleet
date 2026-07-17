@@ -25,15 +25,21 @@ type WorkflowRun struct {
 	ID         int64
 	Repository Repository
 	Status     string
+	Attempt    int
+	CreatedAt  time.Time
 }
 
 type WorkflowJob struct {
-	ID         int64
-	RunID      int64
-	Repository Repository
-	Name       string
-	Status     string
-	Labels     []string
+	ID          int64
+	RunID       int64
+	Repository  Repository
+	Name        string
+	Status      string
+	Labels      []string
+	RunAttempt  int
+	CreatedAt   time.Time
+	StartedAt   time.Time
+	CompletedAt time.Time
 }
 
 type Runner struct {
@@ -151,10 +157,24 @@ func (*JITSecret) MarshalBinary() ([]byte, error) {
 func (*JITSecret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
 
 type Demand struct {
-	MessageID int
-	Assigned  int
-	Running   int
-	Events    []JobEvent
+	MessageID  int
+	Statistics DemandStatistics
+	// Assigned and Running remain for source compatibility. New admission
+	// decisions use the complete Statistics snapshot.
+	Assigned int
+	Running  int
+	Events   []JobEvent
+}
+
+type DemandStatistics struct {
+	MessageID  int
+	Available  int
+	Acquired   int
+	Assigned   int
+	Running    int
+	Registered int
+	Busy       int
+	Idle       int
 }
 
 type JobEventKind string
@@ -175,6 +195,8 @@ type JobEvent struct {
 	Repository      string
 	WorkflowRunID   int64
 	JobID           string
+	DisplayName     string
+	WorkflowRef     string
 	EventName       string
 	Labels          []string
 	QueueTime       time.Time

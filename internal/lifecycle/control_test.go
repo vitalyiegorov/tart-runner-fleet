@@ -97,6 +97,12 @@ func TestControlRouterResolvesRegistrationAndFreshDrainState(t *testing.T) {
 func TestControlRouterFailsClosedForUnknownOrActiveDemand(t *testing.T) {
 	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
 	router := ControlRouter{State: state}
+	if err := router.ResetRegistration(context.Background(), "missing"); err == nil {
+		t.Fatal("unknown runner registration reset accepted")
+	}
+	if _, err := router.AcquireAndGenerateJIT(context.Background(), 1, "missing", "_work"); err == nil {
+		t.Fatal("unknown runner JIT request accepted")
+	}
 	if _, err := router.Registered(context.Background(), state.instance.ID); !errors.Is(err, operations.ErrUncertain) {
 		t.Fatalf("unknown source = %v", err)
 	}

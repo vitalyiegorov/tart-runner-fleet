@@ -13,14 +13,136 @@ import (
 )
 
 type fakeDemandStore struct {
-	batches    []operations.DemandEvent
-	records    []operations.DemandRecord
-	scaleSetID int64
-	cursor     int64
-	applied    bool
-	err        error
-	projected  []operations.DemandEvent
-	projectErr error
+	batches     []operations.DemandEvent
+	records     []operations.DemandRecord
+	scaleSetID  int64
+	cursor      int64
+	applied     bool
+	err         error
+	projected   []operations.DemandEvent
+	projectErr  error
+	statistics  operations.DemandStatistics
+	statsWrites int
+	githubJobs  map[int64][]operations.GitHubJobObservation
+}
+
+type noStatisticsStore struct{ inner *fakeDemandStore }
+
+func (s noStatisticsStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+	return s.inner.ApplyDemandBatch(ctx, scaleSetID, messageID, events)
+}
+func (s noStatisticsStore) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operations.DemandRecord, error) {
+	return s.inner.ActiveDemands(ctx, scaleSetID)
+}
+
+type statisticsReadErrorStore struct{ *fakeDemandStore }
+
+func (s statisticsReadErrorStore) DemandStatistics(context.Context, int64) (operations.DemandStatistics, error) {
+	return operations.DemandStatistics{}, errors.New("statistics down")
+}
+
+func (f *fakeDemandStore) ReconcileGitHubJobs(_ context.Context, scaleSetID int64, _ time.Time, jobs []operations.GitHubJobObservation) (bool, error) {
+	if f.githubJobs == nil {
+		f.githubJobs = map[int64][]operations.GitHubJobObservation{}
+	}
+	f.githubJobs[scaleSetID] = append([]operations.GitHubJobObservation(nil), jobs...)
+	return len(jobs) > 0, f.err
+}
+
+func (f *fakeDemandStore) QueuedGitHubJobs(_ context.Context, scaleSetID int64) ([]operations.GitHubJobObservation, error) {
+	return append([]operations.GitHubJobObservation(nil), f.githubJobs[scaleSetID]...), f.err
+}
+
+func (f *fakeDemandStore) PutDemandStatistics(_ context.Context, _ int64, statistics operations.DemandStatistics) (bool, error) {
+	f.statistics = statistics
+	f.statsWrites++
+	return true, f.err
+}
+
+type fakeQueueSnapshot struct {
+	at   time.Time
+	jobs []githubscaleset.WorkflowJob
+}
+
+func (f fakeQueueSnapshot) ObservedAt() time.Time { return f.at }
+func (f fakeQueueSnapshot) QueuedJobs() []githubscaleset.WorkflowJob {
+	return append([]githubscaleset.WorkflowJob(nil), f.jobs...)
+}
+
+func TestRESTQueueReconciliationUsesScopeAndProfileRoute(t *testing.T) {
+	store := &fakeDemandStore{}
+	at := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	snapshot := fakeQueueSnapshot{at: at, jobs: []githubscaleset.WorkflowJob{
+		{ID: 101, RunID: 11, RunAttempt: 2, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
+			Name: "Build iOS E2E app", Status: "queued", Labels: []string{"self-hosted", "macos-builder"}, CreatedAt: at.Add(-time.Hour)},
+		{ID: 102, RunID: 12, RunAttempt: 1, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
+			Name: "Maestro", Status: "queued", Labels: []string{"self-hosted", "macos-maestro"}, CreatedAt: at.Add(-time.Minute)},
+	}}
+	bindings := []Binding{
+		{StoreKey: 201, ScaleSetID: 1, Scope: "budgie", Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}},
+		{StoreKey: 202, ScaleSetID: 2, Scope: "budgie", Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS}},
+	}
+	changed, err := (DemandCoordinator{Store: store}).ReconcileQueuedJobs(context.Background(), bindings, snapshot)
+	if err != nil || !changed || len(store.githubJobs[201]) != 1 || store.githubJobs[201][0].WorkflowJobID != 101 ||
+		len(store.githubJobs[202]) != 1 || store.githubJobs[202][0].WorkflowJobID != 102 {
+		t.Fatalf("REST routing = %#v, changed=%v err=%v", store.githubJobs, changed, err)
+	}
+}
+
+func TestRESTQueueReconciliationValidationAndStoreFailure(t *testing.T) {
+	now := time.Now().UTC()
+	valid := Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "linux-small", Platform: domain.PlatformLinux}}
+	snapshot := fakeQueueSnapshot{at: now}
+	if _, err := (DemandCoordinator{}).ReconcileQueuedJobs(context.Background(), []Binding{valid}, snapshot); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("missing REST store = %v", err)
+	}
+	store := &fakeDemandStore{}
+	if _, err := (DemandCoordinator{Store: store}).ReconcileQueuedJobs(context.Background(), []Binding{{}}, snapshot); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid REST binding = %v", err)
+	}
+	if _, err := (DemandCoordinator{Store: store}).ReconcileQueuedJobs(context.Background(), []Binding{valid}, fakeQueueSnapshot{}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid REST snapshot = %v", err)
+	}
+	store.err = errors.New("store")
+	if changed, err := (DemandCoordinator{Store: store}).ReconcileQueuedJobs(context.Background(), []Binding{valid}, snapshot); err == nil || changed {
+		t.Fatalf("REST store failure = %v, %v", changed, err)
+	}
+	if containsFold([]string{"one"}, "two") {
+		t.Fatal("label mismatch accepted")
+	}
+}
+
+func TestQueueSummaryIncludesRESTOnlyBacklogWithoutMakingItExecutable(t *testing.T) {
+	oldest := time.Date(2026, 7, 17, 9, 47, 52, 0, time.UTC)
+	store := &fakeDemandStore{githubJobs: map[int64][]operations.GitHubJobObservation{3: {
+		{WorkflowJobID: 100, CreatedAt: oldest}, {WorkflowJobID: 101, CreatedAt: oldest.Add(time.Minute)},
+	}}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
+	executable := []domain.Demand{{CreatedAt: oldest.Add(10 * time.Minute)}}
+	summary, err := (DemandCoordinator{Store: store}).QueueSummary(context.Background(), binding, executable)
+	if err != nil || summary.Count != 2 || summary.Oldest != oldest || len(executable) != 1 {
+		t.Fatalf("queue summary = %#v, %v", summary, err)
+	}
+}
+
+func TestQueueSummaryPropagatesObservationFailure(t *testing.T) {
+	store := &fakeDemandStore{err: errors.New("down")}
+	binding := Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "linux-small", Platform: domain.PlatformLinux}}
+	if _, err := (DemandCoordinator{Store: store}).QueueSummary(context.Background(), binding, nil); err == nil {
+		t.Fatal("queue observation failure ignored")
+	}
+}
+
+func TestQueueSummaryWorksWithoutRESTInventory(t *testing.T) {
+	oldest := time.Now().UTC().Add(-time.Minute)
+	summary, err := (DemandCoordinator{Store: noStatisticsStore{inner: &fakeDemandStore{}}}).QueueSummary(context.Background(), Binding{}, []domain.Demand{{CreatedAt: oldest}})
+	if err != nil || summary.Count != 1 || summary.Oldest != oldest {
+		t.Fatalf("protocol-only summary = %#v, %v", summary, err)
+	}
+}
+
+func (f *fakeDemandStore) DemandStatistics(context.Context, int64) (operations.DemandStatistics, error) {
+	return f.statistics, f.err
 }
 
 func (f *fakeDemandStore) ProjectDemandEvent(_ context.Context, _ int64, event operations.DemandEvent) error {
@@ -61,25 +183,103 @@ func (f *fakeMessages) Handle(ctx context.Context, commit func(context.Context, 
 
 func TestIngestCommitsSanitizedConcreteEvents(t *testing.T) {
 	queue := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
-	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 7, Events: []githubscaleset.JobEvent{{
-		Kind: githubscaleset.JobAvailable, RunnerRequestID: 11, Owner: "owner", Repository: "repo", WorkflowRunID: 22,
-		JobID: "uuid", EventName: "pull_request", Labels: []string{"self-hosted", "linux-small"}, QueueTime: queue,
-	}}}}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 7,
+		Statistics: githubscaleset.DemandStatistics{MessageID: 7, Available: 1, Assigned: 1, Running: 0}, Events: []githubscaleset.JobEvent{{
+			Kind: githubscaleset.JobAvailable, RunnerRequestID: 11, Owner: "owner", Repository: "repo", WorkflowRunID: 22,
+			JobID: "uuid", DisplayName: "build", WorkflowRef: "owner/repo/.github/workflows/ci.yml@refs/pull/1/merge",
+			EventName: "pull_request", Labels: []string{"self-hosted", "linux-small"}, QueueTime: queue,
+		}}}}
 	store := &fakeDemandStore{applied: true}
 	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
 	if err := (DemandCoordinator{Store: store}).IngestOnce(context.Background(), binding, source); err != nil {
 		t.Fatal(err)
 	}
-	if !source.committed || store.cursor != 7 || len(store.batches) != 1 {
+	if !source.committed || store.cursor != 7 || len(store.batches) != 1 || store.statsWrites != 1 || store.statistics.Available != 1 {
 		t.Fatalf("commit = %v cursor=%d events=%#v", source.committed, store.cursor, store.batches)
 	}
 	got := store.batches[0]
-	if got.Kind != operations.DemandJobAvailable || got.RunnerRequestID != 11 || !reflect.DeepEqual(got.Labels, []string{"self-hosted", "linux-small"}) {
+	if got.Kind != operations.DemandJobAvailable || got.RunnerRequestID != 11 || got.DisplayName != "build" || got.WorkflowRef == "" || !reflect.DeepEqual(got.Labels, []string{"self-hosted", "linux-small"}) {
 		t.Fatalf("event = %#v", got)
 	}
 	source.demand.Events[0].Labels[0] = "mutated"
 	if store.batches[0].Labels[0] != "self-hosted" {
 		t.Fatal("stored conversion aliases source")
+	}
+}
+
+func TestQueuedDemandsUsesOfficialStatisticsAsAdmissionBound(t *testing.T) {
+	queue := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1}, records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "repo", WorkflowRunID: 9, QueueTime: queue.Add(time.Second), FirstQueueTime: queue.Add(time.Second)},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue, FirstQueueTime: queue},
+	}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 1 || got[0].Key.JobID != 1 {
+		t.Fatalf("statistics admission bound = %#v, %v", got, err)
+	}
+}
+
+func TestAssignedStatisticsDoNotAuthorizeStaleAvailableRequests(t *testing.T) {
+	queue := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 2}, records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
+	}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("assigned count admitted stale available request: %#v, %v", got, err)
+	}
+}
+
+func TestQueuedDemandsPropagatesStatisticsReadFailure(t *testing.T) {
+	queue := time.Now().UTC()
+	store := statisticsReadErrorStore{fakeDemandStore: &fakeDemandStore{records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
+	}}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	if _, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding); err == nil {
+		t.Fatal("statistics read failure ignored")
+	}
+}
+
+func TestPreassignedStatisticsAuthorizeOnlySyntheticRequests(t *testing.T) {
+	queue := time.Now().UTC()
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 1}, records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1 << 62, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1<<62 + 1, Owner: "owner", Repository: "repo", WorkflowRunID: 9, QueueTime: queue},
+	}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 1 || got[0].Key.JobID != 1<<62 {
+		t.Fatalf("preassigned bound = %#v, %v", got, err)
+	}
+}
+
+func TestRunningStatisticsCannotMakePreassignedCapacityNegative(t *testing.T) {
+	queue := time.Now().UTC()
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 1, Running: 2}, records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 1 << 62, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
+	}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("negative preassigned capacity admitted demand: %#v, %v", got, err)
+	}
+}
+
+func TestQueuedDemandsCollapsesRotatedAliasesToNewestRequestAndOriginalAge(t *testing.T) {
+	original := time.Date(2026, 7, 17, 9, 47, 52, 0, time.UTC)
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1}, records: []operations.DemandRecord{
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 700, Owner: "budgie-at", Repository: "budgie", WorkflowRunID: 77,
+			LogicalKey: "canonical", QueueTime: original.Add(time.Hour), FirstQueueTime: original, UpdatedAt: original.Add(time.Hour)},
+		{Status: operations.DemandJobAvailable, RunnerRequestID: 701, Owner: "budgie-at", Repository: "budgie", WorkflowRunID: 77,
+			LogicalKey: "canonical", QueueTime: original.Add(2 * time.Hour), FirstQueueTime: original, RunAttempt: 3, UpdatedAt: original.Add(2 * time.Hour)},
+	}}
+	binding := Binding{ScaleSetID: 3, Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
+	got, err := (DemandCoordinator{Store: store}).QueuedDemands(context.Background(), binding)
+	if err != nil || len(got) != 1 || got[0].Key.JobID != 701 || got[0].Key.Attempt != 3 || got[0].CreatedAt != original {
+		t.Fatalf("canonical demand = %#v, %v", got, err)
 	}
 }
 
@@ -97,6 +297,18 @@ func TestIngestResultPreservesDurableChangeAcrossAcknowledgementFailure(t *testi
 	changed, err = (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source)
 	if changed || err != nil {
 		t.Fatalf("duplicate IngestOnceResult() = %v, %v", changed, err)
+	}
+}
+
+func TestIngestRequiresAndPersistsOfficialStatistics(t *testing.T) {
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 7, Statistics: githubscaleset.DemandStatistics{MessageID: 7}}}
+	if _, err := (DemandCoordinator{Store: noStatisticsStore{inner: &fakeDemandStore{}}}).IngestOnceResult(context.Background(), binding, source); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("missing statistics persistence = %v", err)
+	}
+	store := &fakeDemandStore{err: errors.New("write")}
+	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err == nil {
+		t.Fatal("statistics persistence failure ignored")
 	}
 }
 

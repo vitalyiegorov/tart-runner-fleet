@@ -95,6 +95,10 @@ func (s *ScaleSet) Next(ctx context.Context) (*PendingMessage, error) {
 	}
 	d := Demand{MessageID: m.MessageID}
 	if m.Statistics != nil {
+		d.Statistics = DemandStatistics{MessageID: m.MessageID, Available: m.Statistics.TotalAvailableJobs,
+			Acquired: m.Statistics.TotalAcquiredJobs, Assigned: m.Statistics.TotalAssignedJobs,
+			Running: m.Statistics.TotalRunningJobs, Registered: m.Statistics.TotalRegisteredRunners,
+			Busy: m.Statistics.TotalBusyRunners, Idle: m.Statistics.TotalIdleRunners}
 		d.Assigned = m.Statistics.TotalAssignedJobs
 		d.Running = m.Statistics.TotalRunningJobs
 	}
@@ -181,7 +185,7 @@ func eventFromBase(kind JobEventKind, v scaleset.JobMessageBase) JobEvent {
 		queueTime = firstTime(v.ScaleSetAssignTime, v.RunnerAssignTime, v.FinishTime)
 	}
 	event := JobEvent{Kind: kind, RunnerRequestID: v.RunnerRequestID, Owner: v.OwnerName, Repository: v.RepositoryName,
-		WorkflowRunID: v.WorkflowRunID, JobID: v.JobID, EventName: v.EventName,
+		WorkflowRunID: v.WorkflowRunID, JobID: v.JobID, DisplayName: v.JobDisplayName, WorkflowRef: v.JobWorkflowRef, EventName: v.EventName,
 		Labels: append([]string(nil), v.RequestLabels...), QueueTime: queueTime}
 	if event.RunnerRequestID > 0 && IsPreassignedRequestID(event.RunnerRequestID) {
 		// The reserved namespace can only be generated locally.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
@@ -27,6 +29,116 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
+
+type runtimeDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f runtimeDoerFunc) Do(request *http.Request) (*http.Response, error) { return f(request) }
+
+func runtimeResponse(body string) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+func TestRESTQueueIngesterPollsPersistsWaitsAndReportsFailures(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	doer := runtimeDoerFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/repos/budgie-at/budgie/actions/runs":
+			return runtimeResponse(`{"workflow_runs":[{"id":10,"run_attempt":2,"status":"in_progress","created_at":"2026-07-17T09:47:50Z"}]}`), nil
+		case "/repos/budgie-at/budgie/actions/runs/10/jobs":
+			return runtimeResponse(`{"jobs":[{"id":101,"name":"Build iOS E2E app","status":"queued","labels":["self-hosted","macos-builder"],"started_at":"2026-07-17T09:47:52Z"}]}`), nil
+		case "/repos/budgie-at/budgie/actions/runners":
+			return runtimeResponse(`{"runners":[]}`), nil
+		default:
+			t.Fatalf("unexpected REST path %q", request.URL.Path)
+			return nil, nil
+		}
+	})
+	observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test",
+		Repositories: []githubscaleset.Repository{{Owner: "budgie-at", Name: "budgie"}}, HTTP: doer,
+		Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := app.Binding{ScaleSetID: 1, Targets: []string{"budgie-at/budgie"},
+		Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}, CriticalObservations: []string{"github-rest-legacy"}})
+	ingester := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding},
+		observer: observer, interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
+	changed, err := ingester.IngestChanged(ctx)
+	if err != nil || !changed {
+		t.Fatalf("first ingest = %v, %v", changed, err)
+	}
+	jobs, err := store.QueuedGitHubJobs(ctx, 1)
+	if err != nil || len(jobs) != 1 || jobs[0].WorkflowJobID != 101 {
+		t.Fatalf("persisted jobs = %#v, %v", jobs, err)
+	}
+	now = now.Add(2 * time.Second)
+	if err := ingester.Ingest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationFresh {
+		t.Fatal("fresh REST observation not reported")
+	}
+	timed := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding},
+		observer: observer, interval: time.Second, now: time.Now, next: time.Now().Add(time.Millisecond)}
+	if _, err := timed.IngestChanged(ctx); err != nil {
+		t.Fatalf("timed poll = %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := ingester.IngestChanged(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait = %v", err)
+	}
+	broken, _ := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test",
+		Repositories: []githubscaleset.Repository{{Owner: "budgie-at", Name: "budgie"}}, HTTP: runtimeDoerFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("down")
+		}), Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
+	ingester = &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding}, observer: broken,
+		interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
+	if _, err := ingester.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable {
+		t.Fatalf("REST failure = %v observation=%#v", err, health.Snapshot().Observations)
+	}
+	closed, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closed.Close()
+	ingester = &restQueueIngester{coordinator: app.DemandCoordinator{Store: closed}, bindings: []app.Binding{binding}, observer: observer,
+		interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
+	if _, err := ingester.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable {
+		t.Fatalf("REST persistence failure = %v", err)
+	}
+	if _, err := (*restQueueIngester)(nil).IngestChanged(ctx); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("nil ingester = %v", err)
+	}
+}
+
+func TestRESTBindingGroupingAndRepositorySelection(t *testing.T) {
+	bindings := []app.Binding{
+		{Scope: "scope", Targets: []string{"o/r", "invalid", "o/r"}},
+		{Scope: "scope", Targets: []string{"o/other"}},
+		{},
+	}
+	grouped := bindingsByScope(bindings)
+	if len(grouped["scope"]) != 2 || len(grouped[legacyScopeName]) != 1 {
+		t.Fatalf("grouped = %#v", grouped)
+	}
+	repositories := repositoriesForBindings(grouped["scope"], nil)
+	if len(repositories) != 2 || repositories[0].Owner != "o" || repositories[1].Name != "other" {
+		t.Fatalf("repositories = %#v", repositories)
+	}
+	repositories = repositoriesForBindings(grouped[legacyScopeName], []config.Target{{Slug: "fallback/repo"}})
+	if len(repositories) != 1 || repositories[0].Owner != "fallback" {
+		t.Fatalf("fallback repositories = %#v", repositories)
+	}
+}
 
 type runtimeInventory struct{}
 
@@ -55,6 +167,13 @@ func (r keyRunner) Run(context.Context, string, ...string) ([]byte, error) { ret
 type fakeSource struct {
 	closed         atomic.Int32
 	directJITCalls atomic.Int32
+}
+
+type closeErrorSource struct{ fakeSource }
+
+func (s *closeErrorSource) Close(context.Context) error {
+	s.closed.Add(1)
+	return errors.New("close failed")
 }
 
 func (*fakeSource) Handle(ctx context.Context, _ func(context.Context, githubscaleset.Demand) error) error {
@@ -960,6 +1079,47 @@ func TestRunCleansPartialScaleSetsAndDetectsHealthDeath(t *testing.T) {
 	}
 }
 
+func TestRunJoinsStartupAndCleanupFailures(t *testing.T) {
+	d := testDependencies(t)
+	var first *closeErrorSource
+	calls := 0
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		calls++
+		if calls == 1 {
+			first = &closeErrorSource{}
+			return first, nil
+		}
+		return nil, errors.New("open failed")
+	}
+	err := runWithDependencies(context.Background(), options{Mode: reconcile.Shadow, ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "x.db")}, d)
+	if err == nil || !strings.Contains(err.Error(), "open failed") || !strings.Contains(err.Error(), "scale-set session cleanup failed") || first.closed.Load() != 1 {
+		t.Fatalf("joined startup cleanup error = %v, closed=%d", err, first.closed.Load())
+	}
+}
+
+func TestCloseScaleSetSourcesHonorsCancellationWhileDispatching(t *testing.T) {
+	started := make(chan struct{}, scaleSetCloseConcurrency)
+	release := make(chan struct{})
+	sources := make([]scaleSetSource, scaleSetCloseConcurrency+1)
+	for i := range sources {
+		sources[i] = &contextIgnoringCloseSource{started: started, release: release}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- closeScaleSetSources(ctx, sources)
+	}()
+	for range scaleSetCloseConcurrency {
+		<-started
+	}
+	cancel()
+	err := <-result
+	close(release)
+	if !errors.Is(err, errScaleSetClose) {
+		t.Fatalf("cancelled close = %v", err)
+	}
+}
+
 func TestDefaultDependenciesAndHelpers(t *testing.T) {
 	d := defaultDependencies()
 	ctx := context.Background()
@@ -1071,12 +1231,15 @@ func TestEngineTickerRecordsBoundedMetricsAndModes(t *testing.T) {
 		AdmissionAllowed: true, AdmissionReason: "capacity available",
 	}}, Demands: []domain.Demand{
 		{Profile: "small", CreatedAt: now.Add(-time.Minute)}, {Profile: "small", CreatedAt: now.Add(-2 * time.Minute)},
+	}, Queues: map[domain.ProfileID]app.QueueSummary{
+		"maestro": {Count: 3, Oldest: now.Add(-3 * time.Minute)},
 	}, Instances: []domain.Instance{
 		{Profile: "small", State: domain.InstanceRunning, Resources: domain.Resources{CPU: 2, MemoryMB: 4096}},
 		{Profile: "maestro", State: domain.InstanceDeleted, Resources: domain.Resources{CPU: 4, MemoryMB: 7168}},
 	}})
 	snapshot := health.Snapshot()
-	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 ||
+	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) ||
+		snapshot.Queues["maestro"].Count != 3 || snapshot.Queues["maestro"].OldestEnqueuedAt != now.Add(-3*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 ||
 		snapshot.HostPressure.FreeDiskGiB != 200 || !snapshot.HostPressure.AdmissionAllowed {
 		t.Fatalf("snapshot=%#v", snapshot)
 	}
@@ -1120,6 +1283,11 @@ func TestCanaryBindingSelectionIsExactAndLegacyCompatible(t *testing.T) {
 	selected, err = selectRuntimeBindings(legacy, options{Mode: reconcile.Canary, CanaryScope: legacyScopeName, CanaryProfile: "small"})
 	if err != nil || len(selected) != 1 {
 		t.Fatalf("legacy selected=%#v err=%v", selected, err)
+	}
+	alreadyLabelled := []app.Binding{{StoreKey: 8, ScaleSetID: 8, Scope: "scope", RequiredLabels: []string{canaryDemandLabel}, Profile: domain.Profile{ID: "small"}}}
+	selected, err = selectRuntimeBindings(alreadyLabelled, options{Mode: reconcile.Canary, CanaryScope: "scope", CanaryProfile: "small"})
+	if err != nil || len(selected) != 1 || len(selected[0].RequiredLabels) != 1 {
+		t.Fatalf("existing canary label duplicated: %#v, %v", selected, err)
 	}
 }
 
