@@ -499,11 +499,11 @@ func (f *fakeProvisioner) Ensure(_ context.Context, spec githubscaleset.ScaleSet
 func fleetProvisionConfig() config.Config {
 	cfg := config.Default()
 	cfg.Targets = []config.Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4}}
-	sets := []config.ScaleSet{{Profile: "small", Name: "repo-small", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-small"}},
-		{Profile: "medium", Name: "repo-medium", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-medium"}},
-		{Profile: "large", Name: "repo-large", MaxCapacity: 1, Labels: []string{"self-hosted", "linux-large"}},
-		{Profile: "builder", Name: "repo-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
-		{Profile: "maestro", Name: "repo-maestro", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-maestro"}}}
+	sets := []config.ScaleSet{{Profile: "small", Name: "repo-small", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-small"}},
+		{Profile: "medium", Name: "repo-medium", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-medium"}},
+		{Profile: "large", Name: "repo-large", MaxCapacity: 3, Labels: []string{"self-hosted", "linux-large"}},
+		{Profile: "builder", Name: "repo-builder", MaxCapacity: 2, Labels: []string{"self-hosted", "macos-builder"}},
+		{Profile: "maestro", Name: "repo-maestro", MaxCapacity: 3, Labels: []string{"self-hosted", "macos-maestro"}}}
 	cfg.GitHub = config.GitHub{SessionOwner: "host", App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
 		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}}, Scopes: []config.GitHubScope{{Name: "repo", Kind: config.ScopeRepository,
 			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"}, ScaleSets: sets}}}

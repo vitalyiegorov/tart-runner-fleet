@@ -315,7 +315,7 @@ func writeConfig(t *testing.T, shadow bool) string {
 	t.Helper()
 	github := ""
 	if shadow {
-		github = `,"github":{"configUrl":"https://github.com/owner","owner":"owner","clientId":"client","installationId":1,"keychainService":"fleet","keychainAccount":"app","scaleSets":[{"profile":"small","id":1,"maxCapacity":4},{"profile":"medium","id":2,"maxCapacity":4},{"profile":"large","id":3,"maxCapacity":2},{"profile":"builder","id":4,"maxCapacity":1},{"profile":"maestro","id":5,"maxCapacity":2}]}`
+		github = `,"github":{"configUrl":"https://github.com/owner","owner":"owner","clientId":"client","installationId":1,"keychainService":"fleet","keychainAccount":"app","scaleSets":[{"profile":"small","id":1,"maxCapacity":5},{"profile":"medium","id":2,"maxCapacity":5},{"profile":"large","id":3,"maxCapacity":3},{"profile":"builder","id":4,"maxCapacity":2},{"profile":"maestro","id":5,"maxCapacity":3}]}`
 	}
 	raw := `{"baseVm":"linux","vmPrefix":"gha","pollSeconds":1,"maxLinuxWhenMacosIdle":4,"maxLinuxCpu":8,"maxLinuxMemoryMb":16384,"linuxReservationAgeSeconds":300,"minFreeDiskGb":1,"linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":50},{"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096,"diskGb":50},{"id":"large","label":"linux-large","cpu":4,"memoryMb":8192,"diskGb":50}],"macosBurst":{"enabled":true,"baseVm":"mac","vmPrefix":"gha-mac","builder":{"id":"builder","label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},"maestro":{"id":"maestro","label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2}},"targets":[{"type":"repo","slug":"owner/repo","maxActive":4}]` + github + `}`
 	path := filepath.Join(t.TempDir(), "fleet.json")
@@ -335,11 +335,11 @@ func writeMultiScopeConfig(t *testing.T) string {
 		Scopes: []config.GitHubScope{{Name: "personal-repo", Kind: config.ScopeRepository,
 			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"},
 			ScaleSets: []config.ScaleSet{
-				{Profile: "small", Name: "repo-small", ID: 11, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-small"}},
-				{Profile: "medium", Name: "repo-medium", ID: 12, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-medium"}},
-				{Profile: "large", Name: "repo-large", ID: 13, MaxCapacity: 2, Labels: []string{"self-hosted", "linux-large"}},
-				{Profile: "builder", Name: "repo-builder", ID: 14, MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
-				{Profile: "maestro", Name: "repo-maestro", ID: 15, MaxCapacity: 2, Labels: []string{"self-hosted", "macos-maestro"}},
+				{Profile: "small", Name: "repo-small", ID: 11, MaxCapacity: 5, Labels: []string{"self-hosted", "linux-small"}},
+				{Profile: "medium", Name: "repo-medium", ID: 12, MaxCapacity: 5, Labels: []string{"self-hosted", "linux-medium"}},
+				{Profile: "large", Name: "repo-large", ID: 13, MaxCapacity: 3, Labels: []string{"self-hosted", "linux-large"}},
+				{Profile: "builder", Name: "repo-builder", ID: 14, MaxCapacity: 2, Labels: []string{"self-hosted", "macos-builder"}},
+				{Profile: "maestro", Name: "repo-maestro", ID: 15, MaxCapacity: 3, Labels: []string{"self-hosted", "macos-maestro"}},
 			}}},
 	}
 	var encoded bytes.Buffer

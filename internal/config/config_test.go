@@ -162,8 +162,8 @@ func TestValidateAuthority(t *testing.T) {
 	valid := Default()
 	valid.GitHub = GitHub{ConfigURL: "https://github.com/owner", Owner: "owner", ClientID: "client", InstallationID: 42,
 		KeychainService: "fleet", KeychainAccount: "app", ScaleSets: []ScaleSet{
-			{Profile: "small", ID: 1, MaxCapacity: 4}, {Profile: "medium", ID: 2, MaxCapacity: 4}, {Profile: "large", ID: 3, MaxCapacity: 2},
-			{Profile: "builder", ID: 4, MaxCapacity: 1}, {Profile: "maestro", ID: 5, MaxCapacity: 2},
+			{Profile: "small", ID: 1, MaxCapacity: 5}, {Profile: "medium", ID: 2, MaxCapacity: 5}, {Profile: "large", ID: 3, MaxCapacity: 3},
+			{Profile: "builder", ID: 4, MaxCapacity: 2}, {Profile: "maestro", ID: 5, MaxCapacity: 3},
 		}}
 	if err := valid.ValidateAuthority(); err != nil {
 		t.Fatalf("ValidateAuthority() = %v", err)
@@ -260,7 +260,7 @@ func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
           "name":"knee-doctor","kind":"repository",
           "configUrl":"https://github.com/vitalyiegorov/knee-doctor",
           "installation":"personal","targets":["vitalyiegorov/knee-doctor"],
-          "scaleSets":[{"profile":"small","name":"fleet-knee-linux-small","maxCapacity":4,
+          "scaleSets":[{"profile":"small","name":"fleet-knee-linux-small","maxCapacity":5,
             "labels":["self-hosted","linux-tiered","linux-small"]}]
         }]
       },
@@ -415,6 +415,32 @@ func TestValidateAuthorityRejectsAmbiguousOrUnsafeMultiScopeConfiguration(t *tes
 	}
 }
 
+func TestValidateAuthorityRequiresScaleSetQueueLookahead(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	for index := range cfg.GitHub.Scopes[1].ScaleSets {
+		set := &cfg.GitHub.Scopes[1].ScaleSets[index]
+		if set.Profile == "builder" {
+			set.MaxCapacity = cfg.MacOS.Builder.MaxActive
+		}
+	}
+
+	err := cfg.ValidateAuthority()
+	if err == nil || !strings.Contains(err.Error(), "queue lookahead") {
+		t.Fatalf("ValidateAuthority() error = %v, want queue lookahead rejection", err)
+	}
+}
+
+func TestScaleSetQueueLookaheadUsesScopedRuntimeCapacity(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	cfg.Targets[0].MaxActive = 1
+	for index := range cfg.GitHub.Scopes[0].ScaleSets {
+		cfg.GitHub.Scopes[0].ScaleSets[index].MaxCapacity = 2
+	}
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("one-runner scope lookahead was rejected: %v", err)
+	}
+}
+
 func TestPathPartsRejectsRoot(t *testing.T) {
 	if parts := pathParts("///"); parts != nil {
 		t.Fatalf("pathParts(root) = %v", parts)
@@ -444,10 +470,10 @@ func multiScopeAuthorityConfig() Config {
 
 func profileScaleSets(scope string) []ScaleSet {
 	return []ScaleSet{
-		{Profile: "small", Name: "fleet-" + scope + "-linux-small", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}},
-		{Profile: "medium", Name: "fleet-" + scope + "-linux-medium", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-medium"}},
-		{Profile: "large", Name: "fleet-" + scope + "-linux-large", MaxCapacity: 2, Labels: []string{"self-hosted", "linux-tiered", "linux-large"}},
-		{Profile: "builder", Name: "fleet-" + scope + "-macos-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-builder"}},
-		{Profile: "maestro", Name: "fleet-" + scope + "-macos-maestro", MaxCapacity: 2, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"}},
+		{Profile: "small", Name: "fleet-" + scope + "-linux-small", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}},
+		{Profile: "medium", Name: "fleet-" + scope + "-linux-medium", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-tiered", "linux-medium"}},
+		{Profile: "large", Name: "fleet-" + scope + "-linux-large", MaxCapacity: 3, Labels: []string{"self-hosted", "linux-tiered", "linux-large"}},
+		{Profile: "builder", Name: "fleet-" + scope + "-macos-builder", MaxCapacity: 2, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-builder"}},
+		{Profile: "maestro", Name: "fleet-" + scope + "-macos-maestro", MaxCapacity: 3, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"}},
 	}
 }
