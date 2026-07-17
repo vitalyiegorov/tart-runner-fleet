@@ -22,14 +22,21 @@ func TestExampleConfigCanBuildItsSuccessor(t *testing.T) {
 	}
 
 	selfCap := 0
+	applicationCaps := map[string]int{}
 	for _, target := range cfg.Targets {
 		if target.Slug == selfRepository {
 			selfCap = target.MaxActive
-			break
+			continue
 		}
+		applicationCaps[target.Slug] = target.MaxActive
 	}
 	if selfCap < 3 {
 		t.Fatalf("%s must allow the three-job CI fanout, cap=%d", selfRepository, selfCap)
+	}
+	for repository, cap := range applicationCaps {
+		if cap != cfg.Linux.MaxInstances {
+			t.Errorf("%s application cap=%d, want fleet capacity=%d", repository, cap, cfg.Linux.MaxInstances)
+		}
 	}
 
 	profiles := make(map[string]Profile, len(cfg.Linux.Profiles))
