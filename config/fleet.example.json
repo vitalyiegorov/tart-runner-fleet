@@ -21,6 +21,7 @@
   ],
   "macosBurst": {
     "enabled": true,
+    "admissionPolicy": "shared",
     "baseVm": "macos-tartelet-base",
     "vmPrefix": "gha-macos",
     "rootDiskOptions": "sync=none",

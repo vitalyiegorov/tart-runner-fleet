@@ -20,9 +20,9 @@ The scheduler therefore follows four ordered principles:
 1. **Admit only proven-safe work.** Fresh GitHub, Tart, lifecycle, and host
    observations plus exact CPU, memory, slot, repository, and profile limits
    are hard constraints.
-2. **Pack the host across platforms.** Linux and macOS may coexist whenever
-   their combined vectors fit; a platform label alone never strands usable
-   capacity.
+2. **Choose cross-platform admission explicitly.** The default `shared` policy
+   packs Linux and macOS whenever their combined vectors fit. Experiments that
+   need a fully isolated macOS cohort may opt into `macos-exclusive`.
 3. **Optimize throughput generically.** Among young jobs in the same scheduling
    lane, lower dominant resource share is considered first and the exact
    allocator chooses the maximum-cardinality feasible set. Profile names such
@@ -33,8 +33,9 @@ The scheduler therefore follows four ordered principles:
 
 In short: maximize useful work per host, subject to non-negotiable safety,
 fairness, and recovery guarantees. See
-[`ADR 0012`](docs/adr/0012-shared-cross-platform-capacity.md) for the decision
-and trade-offs.
+[`ADR 0012`](docs/adr/0012-shared-cross-platform-capacity.md) and its opt-in
+amendment in [`ADR 0014`](docs/adr/0014-opt-in-macos-exclusive-admission.md)
+for the decisions and trade-offs.
 
 ## Operator experience
 

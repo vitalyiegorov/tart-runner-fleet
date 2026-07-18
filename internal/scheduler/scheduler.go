@@ -18,6 +18,7 @@ type Config struct {
 	RepoCaps              map[string]int
 	RepoSchedulingClasses map[string]domain.SchedulingClass
 	Profiles              map[domain.ProfileID]domain.Profile
+	MacOSExclusive        bool
 }
 
 type State struct {
@@ -119,6 +120,9 @@ func PlanTick(in Input) Plan {
 
 	ordered := priorityOrder(in, demands)
 	linux, macos := partition(ordered)
+	if in.Config.MacOSExclusive {
+		return finish(planExclusiveAdmission(in, plan, linux, macos))
+	}
 	switch ordered[0].Platform {
 	case domain.PlatformMacOS:
 		plan.Next.LinuxHandoff = nil
@@ -138,6 +142,81 @@ func PlanTick(in Input) Plan {
 		}
 	}
 	return finish(plan)
+}
+
+func planExclusiveAdmission(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
+	activeProfile, activeProfileOK := activeMacProfile(in.Instances.Value)
+	hasActiveMac := hasConsumingPlatform(in.Instances.Value, domain.PlatformMacOS)
+	if hasActiveMac && !activeProfileOK {
+		// Multiple live macOS profiles violate the single-cohort invariant. Do
+		// not guess which profile to drain or admit; observation must converge.
+		return plan
+	}
+	if len(macDemands) > 0 {
+		plan.Next.LinuxHandoff = nil
+		target := chosenMacProfile(in, macDemands)
+		if hasActiveMac && len(demandsForProfile(macDemands, activeProfile)) > 0 {
+			target = activeProfile
+		}
+		macDemands = macProfileFirst(in, macDemands, target)
+		return planExclusiveMacHandoff(in, plan, macDemands)
+	}
+	plan.Next.MacHandoff = nil
+	if hasActiveMac {
+		return planLinuxHandoff(in, plan, linuxDemands, nil)
+	}
+	plan.Next.LinuxHandoff = nil
+	return planLinux(in, plan, linuxDemands)
+}
+
+func planExclusiveMacHandoff(in Input, plan Plan, macDemands []domain.Demand) Plan {
+	target := macDemands[0].Profile
+	if in.Prior.MacHandoff != nil && in.Prior.MacHandoff.Profile == target {
+		macDemands = stableMacHandoffOrder(in.Prior.MacHandoff, macDemands)
+	}
+	handoff := macHandoffFor(in.Prior.MacHandoff, macDemands[0], in.Now)
+	var drains []Operation
+	allForeignIdle := true
+	filtered := append([]domain.Instance(nil), in.Instances.Value...)
+	for _, instance := range sortedInstances(in.Instances.Value) {
+		if !instance.ConsumesHostResources() || (instance.Platform == domain.PlatformMacOS && instance.Profile == target) {
+			continue
+		}
+		if instance.State != domain.InstanceOnlineIdle {
+			allForeignIdle = false
+			continue
+		}
+		drains = append(drains, drainOperation(instance))
+		filtered = removeInstance(filtered, instance.ID)
+	}
+	plan.Operations = append(plan.Operations, drains...)
+	if !allForeignIdle {
+		plan.Next.MacHandoff = &handoff
+		return plan
+	}
+	plan.Next.MacHandoff = nil
+	nextInput := in
+	nextInput.Instances = domain.Fresh(filtered, in.Instances.ObservedAt)
+	return appendMacSpawns(nextInput, plan, demandsForProfile(macDemands, target), operationIDs(drains))
+}
+
+func macProfileFirst(in Input, demands []domain.Demand, profile domain.ProfileID) []domain.Demand {
+	selected := priorityOrder(in, demandsForProfile(demands, profile))
+	for _, demand := range priorityOrder(in, demands) {
+		if demand.Profile != profile {
+			selected = append(selected, demand)
+		}
+	}
+	return selected
+}
+
+func hasConsumingPlatform(instances []domain.Instance, platform domain.Platform) bool {
+	for _, instance := range instances {
+		if instance.Platform == platform && instance.ConsumesHostResources() {
+			return true
+		}
+	}
+	return false
 }
 
 func assignmentRecoveries(instances []domain.Instance) []Operation {
