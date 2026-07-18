@@ -117,6 +117,11 @@ func TestRESTQueueReconciliationUsesScaleSetLabelCompatibility(t *testing.T) {
 		len(store.githubJobs[204]) != 0 {
 		t.Fatalf("REST routing = %#v, changed=%v err=%v", store.githubJobs, changed, err)
 	}
+	guarded := bindings[2]
+	guarded.RequiredLabels = []string{"tart-fleet-canary"}
+	if guarded.matchesRESTLabels([]string{"self-hosted", "linux-ci"}) {
+		t.Fatal("REST routing bypassed the exact-scope canary label guard")
+	}
 }
 
 func TestRESTQueueReconciliationValidationAndStoreFailure(t *testing.T) {
