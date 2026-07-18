@@ -118,6 +118,9 @@ func TestInstallationTokenSourceFailureResponsesAndEarlyRefresh(t *testing.T) {
 		{"status", doerFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("denied"))}, nil
 		})},
+		{"status close", doerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusUnauthorized, Header: http.Header{}, Body: closeErrorBody{Reader: strings.NewReader("denied")}}, nil
+		})},
 		{"decode", doerFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("{"))}, nil
 		})},

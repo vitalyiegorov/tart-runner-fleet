@@ -143,6 +143,12 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 
 func TestQueueSLOIsIndependentFromAuthorityReadiness(t *testing.T) {
 	health, clock := newTestHealth(t)
+	if err := health.SetQueue("builder", 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if queue := health.QueueHealth(); !queue.OK {
+		t.Fatalf("idle queue health = %+v", queue)
+	}
 	health.RecordTick(true)
 	for _, name := range []string{"github", "host", "tart"} {
 		if err := health.RecordObservation(name, ObservationFresh); err != nil {

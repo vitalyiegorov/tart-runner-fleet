@@ -62,23 +62,34 @@ func TestDemandInboxPreservesOriginalAgeAcrossRotatedProtocolIdentities(t *testi
 }
 
 func TestDemandInboxDoesNotGuessAmongSameNameMatrixJobs(t *testing.T) {
-	store := testStore(t)
-	ctx := context.Background()
-	event := demandEvent(operations.DemandJobAvailable, 10)
-	event.DisplayName = "E2E (${{ matrix.shard }})"
-	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
-		t.Fatal(err)
-	}
-	jobs := []operations.GitHubJobObservation{
-		{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 3, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true},
-		{WorkflowJobID: 101, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 3, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(51, 0).UTC(), QueueTimeExact: true},
-	}
-	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), jobs); err != nil {
-		t.Fatal(err)
-	}
-	record, err := store.DemandRecord(ctx, 1, 10)
-	if err != nil || record.WorkflowJobID != 0 || record.RunAttempt != 3 || record.FirstQueueTime != jobs[0].CreatedAt {
-		t.Fatalf("ambiguous correlation guessed identity: %#v, %v", record, err)
+	for _, test := range []struct {
+		name        string
+		attempts    [2]int
+		wantAttempt int
+	}{
+		{name: "common attempt is shared", attempts: [2]int{3, 3}, wantAttempt: 3},
+		{name: "conflicting attempts remain unknown", attempts: [2]int{3, 4}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := testStore(t)
+			ctx := context.Background()
+			event := demandEvent(operations.DemandJobAvailable, 10)
+			event.DisplayName = "E2E (${{ matrix.shard }})"
+			if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
+				t.Fatal(err)
+			}
+			jobs := []operations.GitHubJobObservation{
+				{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: test.attempts[0], DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true},
+				{WorkflowJobID: 101, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: test.attempts[1], DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(51, 0).UTC(), QueueTimeExact: true},
+			}
+			if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), jobs); err != nil {
+				t.Fatal(err)
+			}
+			record, err := store.DemandRecord(ctx, 1, 10)
+			if err != nil || record.WorkflowJobID != 0 || record.RunAttempt != test.wantAttempt || record.FirstQueueTime != jobs[0].CreatedAt {
+				t.Fatalf("ambiguous correlation invented identity: %#v, %v", record, err)
+			}
+		})
 	}
 }
 
@@ -175,6 +186,16 @@ func TestCanonicalQueuePersistenceFailsClosed(t *testing.T) {
 		t.Fatal("queued jobs read failure ignored")
 	}
 	store.injectFault = nil
+	store.injectRows = func(point string) rowsScanner {
+		if point == "githubjobs.queued" {
+			return &injectedRows{rowsErr: errors.New("iterate")}
+		}
+		return nil
+	}
+	if _, err := store.QueuedGitHubJobs(ctx, 1); err == nil {
+		t.Fatal("queued jobs iteration failure ignored")
+	}
+	store.injectRows = nil
 	if _, err := store.PutDemandStatistics(ctx, 0, statistics); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("invalid statistics scale set = %v", err)
 	}

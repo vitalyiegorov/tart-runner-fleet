@@ -50,7 +50,7 @@ func TestObserverPaginatesIndexesAndPreservesQueuedSibling(t *testing.T) {
 		case "/repos/o/r/actions/runs/10/jobs?filter=latest&per_page=100":
 			return response(200, `{"jobs":[{"id":101,"name":"running","status":"in_progress","labels":["self-hosted"],"started_at":"2026-07-17T09:49:00Z"},{"id":102,"name":"sibling","status":"queued","labels":["macos"],"started_at":"2026-07-17T09:47:52Z"}]}`, `</repos/o/r/actions/runs/10/jobs?filter=latest&page=2&per_page=100>; rel="next"`), nil
 		case "/repos/o/r/actions/runs/10/jobs?filter=latest&page=2&per_page=100":
-			return response(200, `{"jobs":[{"id":103,"name":"waiting","status":"waiting"}]}`, ""), nil
+			return response(200, `{"jobs":[{"id":103,"name":"waiting","status":"waiting"},{"id":104,"name":"second","status":"queued","started_at":"2026-07-17T09:48:00Z"}]}`, ""), nil
 		case "/repos/o/r/actions/runners?per_page=100":
 			return response(200, `{"runners":[{"id":201,"name":"tart","status":"online","busy":true,"labels":[{"name":"arm64"}]}]}`, `</repos/o/r/actions/runners?page=2&per_page=100>; rel="next"`), nil
 		case "/repos/o/r/actions/runners?page=2&per_page=100":
@@ -72,7 +72,7 @@ func TestObserverPaginatesIndexesAndPreservesQueuedSibling(t *testing.T) {
 		t.Fatalf("pagination missed: %v", seen)
 	}
 	queued := obs.Snapshot.QueuedJobs()
-	if len(queued) != 1 || queued[0].ID != 102 || !queued[0].QueueTimeExact {
+	if len(queued) != 2 || queued[0].ID != 102 || queued[1].ID != 104 || !queued[0].QueueTimeExact {
 		t.Fatalf("queued siblings lost: %+v", queued)
 	}
 	run, _ := obs.Snapshot.Run(10)

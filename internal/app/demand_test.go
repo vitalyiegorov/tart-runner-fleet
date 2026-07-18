@@ -42,6 +42,12 @@ func (s statisticsReadErrorStore) DemandStatistics(context.Context, int64) (oper
 	return operations.DemandStatistics{}, errors.New("statistics down")
 }
 
+type statisticsNotFoundStore struct{ *fakeDemandStore }
+
+func (s statisticsNotFoundStore) DemandStatistics(context.Context, int64) (operations.DemandStatistics, error) {
+	return operations.DemandStatistics{}, operations.ErrNotFound
+}
+
 func (f *fakeDemandStore) ReconcileGitHubJobs(_ context.Context, scaleSetID int64, _ time.Time, jobs []operations.GitHubJobObservation) (bool, error) {
 	if f.githubJobs == nil {
 		f.githubJobs = map[int64][]operations.GitHubJobObservation{}
@@ -268,12 +274,12 @@ func TestQueuedDemandsFailsClosedWithoutFreshOfficialStatistics(t *testing.T) {
 		wantReason string
 	}{
 		{name: "missing store", store: noStatisticsStore{inner: &fakeDemandStore{records: []operations.DemandRecord{record}}}, wantReason: "unavailable"},
-		{name: "missing snapshot", store: &fakeDemandStore{records: []operations.DemandRecord{record}}, wantReason: "stale or invalid"},
+		{name: "missing snapshot", store: statisticsNotFoundStore{fakeDemandStore: &fakeDemandStore{records: []operations.DemandRecord{record}}}, wantReason: "not observed"},
 		{name: "stale snapshot", store: &fakeDemandStore{records: []operations.DemandRecord{record}, statistics: operations.DemandStatistics{
 			MessageID: 9, Available: 1, ObservedAt: now.Add(-3 * time.Minute)}}, wantReason: "stale or invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := (DemandCoordinator{Store: test.store, Now: func() time.Time { return now }}).QueuedDemands(context.Background(), binding)
+			_, err := (DemandCoordinator{Store: test.store, Now: func() time.Time { return now }, StatisticsMaxAge: time.Minute}).QueuedDemands(context.Background(), binding)
 			if !errors.Is(err, operations.ErrUncertain) || !strings.Contains(err.Error(), test.wantReason) {
 				t.Fatalf("QueuedDemands() error = %v", err)
 			}

@@ -294,6 +294,11 @@ func TestDegradedUnavailableAndUsageExitCodes(t *testing.T) {
 	degraded := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
 		return fakeClient{status: status, live: adminapi.Check{OK: true}, ready: status.Data.Ready}, nil
 	}}
+	queueStatus := healthyStatus()
+	queueStatus.Data.QueueSLO = &adminapi.Check{OK: false, Reasons: []string{"queue_slo_breached"}}
+	queueDegraded := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
+		return fakeClient{status: queueStatus, live: queueStatus.Data.Live, ready: queueStatus.Data.Ready}, nil
+	}}
 	unavailable := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
 		return fakeClient{}, errors.New("offline")
 	}}
@@ -308,6 +313,7 @@ func TestDegradedUnavailableAndUsageExitCodes(t *testing.T) {
 		text string
 	}{
 		{name: "require ready", args: []string{"status", "--require-ready"}, deps: degraded, code: exitDegraded, text: "NOT READY"},
+		{name: "queue degraded", args: []string{"status"}, deps: queueDegraded, code: exitSuccess, text: "DEGRADED"},
 		{name: "health degraded", args: []string{"health"}, deps: degraded, code: exitDegraded, text: "successful_tick_expired"},
 		{name: "doctor degraded", args: []string{"doctor"}, deps: degraded, code: exitDegraded, text: "FAIL"},
 		{name: "offline", args: []string{"status"}, deps: unavailable, code: exitUnavailable, text: "offline"},
