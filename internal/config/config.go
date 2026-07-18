@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -63,11 +64,13 @@ type Linux struct {
 }
 
 type MacOS struct {
-	Enabled  bool
-	BaseVM   string
-	VMPrefix string
-	Builder  Profile
-	Maestro  Profile
+	Enabled             bool
+	BaseVM              string
+	VMPrefix            string
+	Builder             Profile
+	Maestro             Profile
+	RootDiskOptions     string
+	SharedDirectoryPath string
 }
 
 type Timeouts struct {
@@ -174,11 +177,13 @@ type wireConfig struct {
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
 	MacOSBurst                struct {
-		Enabled  bool    `json:"enabled"`
-		BaseVM   string  `json:"baseVm"`
-		VMPrefix string  `json:"vmPrefix"`
-		Builder  Profile `json:"builder"`
-		Maestro  Profile `json:"maestro"`
+		Enabled             bool    `json:"enabled"`
+		BaseVM              string  `json:"baseVm"`
+		VMPrefix            string  `json:"vmPrefix"`
+		Builder             Profile `json:"builder"`
+		Maestro             Profile `json:"maestro"`
+		RootDiskOptions     string  `json:"rootDiskOptions,omitempty"`
+		SharedDirectoryPath string  `json:"sharedDirectoryPath,omitempty"`
 	} `json:"macosBurst"`
 	GitHub  GitHub   `json:"github"`
 	Targets []Target `json:"targets"`
@@ -200,7 +205,8 @@ func Decode(r io.Reader) (Config, error) {
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles)},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
-			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized()},
+			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
+			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath},
 		GitHub:   w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45), Boot: secondsOr(w.BootTimeoutSeconds, 180)},
 		Guards:   normalizeGuards(w), Targets: normalizeTargets(w.Targets),
@@ -258,6 +264,8 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
+	wire.MacOSBurst.RootDiskOptions = cfg.MacOS.RootDiskOptions
+	wire.MacOSBurst.SharedDirectoryPath = cfg.MacOS.SharedDirectoryPath
 
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
@@ -402,6 +410,13 @@ func (c Config) Validate() error {
 	}
 	if c.Guards.MinFreeDiskGiB <= 0 {
 		return errors.New("disk reserve must be positive")
+	}
+	if c.MacOS.RootDiskOptions != "" && c.MacOS.RootDiskOptions != "sync=none" &&
+		c.MacOS.RootDiskOptions != "sync=fsync" && c.MacOS.RootDiskOptions != "sync=full" {
+		return errors.New("macOS root disk options must be sync=none, sync=fsync, or sync=full")
+	}
+	if c.MacOS.SharedDirectoryPath != "" && !filepath.IsAbs(c.MacOS.SharedDirectoryPath) {
+		return errors.New("macOS shared directory path must be absolute")
 	}
 	if c.Guards.MinAvailableMemoryMiB < 0 || c.Guards.MaxSwapUsedMiB < 0 || c.Guards.MaxLoadAverage < 0 ||
 		math.IsNaN(c.Guards.MaxLoadAverage) || math.IsInf(c.Guards.MaxLoadAverage, 0) ||
