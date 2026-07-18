@@ -853,6 +853,24 @@ func TestMacProfileBusySwitchWaitsAndActiveProfileCaps(t *testing.T) {
 	}
 }
 
+func TestConfiguredMaestroLimitFourIsHonoredWithinHostEnvelope(t *testing.T) {
+	demands := []domain.Demand{
+		demand("a/repo", 1, time.Minute, "maestro"),
+		demand("a/repo", 2, time.Minute, "maestro"),
+		demand("a/repo", 3, time.Minute, "maestro"),
+		demand("a/repo", 4, time.Minute, "maestro"),
+	}
+	in := input(demands, nil, State{})
+	profile := in.Config.Profiles["maestro"]
+	profile.Resources = domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}
+	profile.MaxActive = 4
+	in.Config.Profiles["maestro"] = profile
+
+	if got := spawnedKeys(PlanTick(in)); len(got) != 4 {
+		t.Fatalf("configured four-runner Maestro plan spawned %d jobs: %#v", len(got), got)
+	}
+}
+
 func TestNoStarvationAfterAgePromotion(t *testing.T) {
 	scheduled := demand("a/repo", 1, 6*time.Minute, "small")
 	scheduled.Event = domain.EventSchedule
