@@ -47,9 +47,12 @@ git tag -s v1.2.3 -m 'v1.2.3'
 git push origin v1.2.3
 ```
 
-The tag workflow independently repeats all release verification and publishes
-the result. Never use `workflow_dispatch` as a substitute for pushing the
-reviewed tag; dispatch builds an artifact but intentionally does not publish.
+The tag workflow requires an annotated tag whose signature GitHub reports as
+verified, proves that its target belongs to `main`, independently repeats all
+release verification, and then publishes the result. Lightweight, unsigned,
+or invalidly signed promoted tags fail closed. Never use `workflow_dispatch`
+as a substitute for pushing the reviewed tag; dispatch builds an artifact but
+intentionally does not publish.
 
 ## Release notes
 

@@ -58,6 +58,10 @@ use ordinary `vMAJOR.MINOR.PATCH` tags:
 - increment `PATCH` for backwards-compatible fixes;
 - use a prerelease suffix such as `-rc.1` before promotion.
 
+Promoted versions must be created as annotated signed tags. The release
+workflow accepts them only when GitHub verifies the signature and the tag
+targets a commit on `main`.
+
 GitHub generates release notes from merged pull requests. The PR metadata
 workflow derives exactly one release category from the Conventional Commit
 title, and `.github/release.yml` renders Breaking changes, Features, Fixes,
