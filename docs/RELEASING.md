@@ -69,6 +69,15 @@ Use `release-skip` only for changes that truly have no value in release history.
 Generated GitHub releases are the canonical changelog; a manually maintained
 second changelog would drift from the artifacts actually deployed.
 
+The repository accepts squash merges only, so the validated PR title becomes
+the single commit entering `main`. GitHub's commit-metadata rules are not
+available on the repository's current plan; validating the squash subject in
+both the unprivileged CI workflow and the non-checkout metadata workflow gives
+the protected branch the same Conventional Commit invariant. The same plan
+limitation applies to tag-name metadata rules, so `build-release.sh` and the tag
+workflow reject non-SemVer release identifiers while the live ruleset makes
+every `v*` tag immutable.
+
 ## Verification
 
 Download the release assets and verify the manifest before installation:

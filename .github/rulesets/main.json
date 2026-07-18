@@ -33,15 +33,6 @@
           {"context": "Required CI"}
         ]
       }
-    },
-    {
-      "type": "commit_message_pattern",
-      "parameters": {
-        "name": "Conventional Commit subject",
-        "negate": false,
-        "operator": "regex",
-        "pattern": "^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\\([a-z0-9][a-z0-9._/-]*\\))?!?: [a-z0-9].*[^.]$"
-      }
     }
   ]
 }
