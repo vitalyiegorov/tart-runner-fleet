@@ -861,6 +861,18 @@ func TestProjectDemandEventUsesDurableRecordAndUniqueOwnedInstance(t *testing.T)
 			t.Fatalf("named completion after VM deletion = %v", err)
 		}
 	}
+	misalignedStore := testStore(t)
+	misaligned := demandEvent(operations.DemandJobStarted, 93)
+	misaligned.RunnerName = "named-target"
+	if _, err := misalignedStore.ApplyDemandBatch(ctx, 7, 1, []operations.DemandEvent{misaligned}); err != nil {
+		t.Fatal(err)
+	}
+	if err := misalignedStore.CreateInstance(ctx, runnerDemandInstance(misaligned.RunnerName, 94)); err != nil {
+		t.Fatal(err)
+	}
+	if err := misalignedStore.ProjectDemandEvent(ctx, 7, misaligned); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("named runner without reservation error = %v", err)
+	}
 
 	duplicateStore, duplicate := newStoreWithDemand(t, operations.DemandJobAssigned)
 	for _, id := range []string{"one", "two"} {
