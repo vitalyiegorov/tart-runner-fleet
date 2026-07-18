@@ -171,6 +171,7 @@ func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 		"authority": {"--mode=authority", "com.vitalyiegorov.tart-runner-fleet.authority", "<key>ExitTimeOut</key>", "<integer>30</integer>", "<key>AbandonProcessGroup</key>", "<true/>"},
 	}
 	for mode, required := range templates {
+		required = append(required, "--config=__STATE_DIR__/fleet.json")
 		path := prefix + "." + mode + ".plist"
 		if mode == "observe" {
 			path = prefix + ".plist"
