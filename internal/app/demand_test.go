@@ -48,12 +48,19 @@ func (s statisticsNotFoundStore) DemandStatistics(context.Context, int64) (opera
 	return operations.DemandStatistics{}, operations.ErrNotFound
 }
 
-func (f *fakeDemandStore) ReconcileGitHubJobs(_ context.Context, scaleSetID int64, _ time.Time, jobs []operations.GitHubJobObservation) (bool, error) {
+func (f *fakeDemandStore) ReconcileGitHubJobSnapshot(_ context.Context, _ time.Time, snapshot map[int64][]operations.GitHubJobObservation) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
 	if f.githubJobs == nil {
 		f.githubJobs = map[int64][]operations.GitHubJobObservation{}
 	}
-	f.githubJobs[scaleSetID] = append([]operations.GitHubJobObservation(nil), jobs...)
-	return len(jobs) > 0, f.err
+	changed := false
+	for scaleSetID, jobs := range snapshot {
+		f.githubJobs[scaleSetID] = append([]operations.GitHubJobObservation(nil), jobs...)
+		changed = changed || len(jobs) > 0
+	}
+	return changed, nil
 }
 
 func (f *fakeDemandStore) QueuedGitHubJobs(_ context.Context, scaleSetID int64) ([]operations.GitHubJobObservation, error) {
@@ -76,22 +83,38 @@ func (f fakeQueueSnapshot) QueuedJobs() []githubscaleset.WorkflowJob {
 	return append([]githubscaleset.WorkflowJob(nil), f.jobs...)
 }
 
-func TestRESTQueueReconciliationUsesScopeAndProfileRoute(t *testing.T) {
+func TestRESTQueueReconciliationUsesScaleSetLabelCompatibility(t *testing.T) {
 	store := &fakeDemandStore{}
 	at := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	snapshot := fakeQueueSnapshot{at: at, jobs: []githubscaleset.WorkflowJob{
 		{ID: 101, RunID: 11, RunAttempt: 2, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
-			Name: "Build iOS E2E app", Status: "queued", Labels: []string{"self-hosted", "macos-builder"}, CreatedAt: at.Add(-time.Hour), QueueTimeExact: true},
+			Name: "Build iOS E2E app", Status: "queued", Labels: []string{"self-hosted", "macOS", "ARM64", "macos-tartelet"}, CreatedAt: at.Add(-time.Hour), QueueTimeExact: true},
 		{ID: 102, RunID: 12, RunAttempt: 1, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
 			Name: "Maestro", Status: "queued", Labels: []string{"self-hosted", "macos-maestro"}, CreatedAt: at.Add(-time.Minute), QueueTimeExact: true},
+		{ID: 103, RunID: 13, RunAttempt: 1, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
+			Name: "Code quality", Status: "queued", Labels: []string{"self-hosted", "linux-ci"}, CreatedAt: at.Add(-time.Minute), QueueTimeExact: true},
+		{ID: 104, RunID: 14, RunAttempt: 1, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
+			Name: "Named scale set", Status: "queued", Labels: []string{"self-hosted", "trf-budgie-large"}, CreatedAt: at.Add(-time.Minute), QueueTimeExact: true},
 	}}
 	bindings := []Binding{
-		{StoreKey: 201, ScaleSetID: 1, Scope: "budgie", Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}},
-		{StoreKey: 202, ScaleSetID: 2, Scope: "budgie", Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS}},
+		{StoreKey: 201, ScaleSetID: 1, Scope: "budgie", Targets: []string{"budgie-at/budgie"},
+			ScaleSetLabels: []string{"self-hosted", "macOS", "ARM64", "macos-builder", "macos-tartelet"},
+			Profile:        domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}},
+		{StoreKey: 202, ScaleSetID: 2, Scope: "budgie", Targets: []string{"budgie-at/budgie"},
+			ScaleSetLabels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"},
+			Profile:        domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS}},
+		{StoreKey: 203, ScaleSetID: 3, Scope: "budgie", Targets: []string{"budgie-at/budgie"},
+			ScaleSetLabels: []string{"self-hosted", "linux-tiered", "linux-large", "linux-ci", "linux-burst", "trf-budgie-large"},
+			Profile:        domain.Profile{ID: "large", Route: "linux-large", Platform: domain.PlatformLinux}},
+		{StoreKey: 204, ScaleSetID: 4, Scope: "budgie", Targets: []string{"budgie-at/budgie"},
+			ScaleSetLabels: []string{"self-hosted", "linux-tiered", "linux-small"},
+			Profile:        domain.Profile{ID: "small", Route: "linux-small", Platform: domain.PlatformLinux}},
 	}
 	changed, err := (DemandCoordinator{Store: store}).ReconcileQueuedJobs(context.Background(), bindings, snapshot)
 	if err != nil || !changed || len(store.githubJobs[201]) != 1 || store.githubJobs[201][0].WorkflowJobID != 101 ||
-		len(store.githubJobs[202]) != 1 || store.githubJobs[202][0].WorkflowJobID != 102 {
+		len(store.githubJobs[202]) != 1 || store.githubJobs[202][0].WorkflowJobID != 102 ||
+		len(store.githubJobs[203]) != 2 || store.githubJobs[203][0].WorkflowJobID != 103 || store.githubJobs[203][1].WorkflowJobID != 104 ||
+		len(store.githubJobs[204]) != 0 {
 		t.Fatalf("REST routing = %#v, changed=%v err=%v", store.githubJobs, changed, err)
 	}
 }
@@ -116,6 +139,33 @@ func TestRESTQueueReconciliationValidationAndStoreFailure(t *testing.T) {
 	}
 	if containsFold([]string{"one"}, "two") {
 		t.Fatal("label mismatch accepted")
+	}
+}
+
+func TestRESTQueueReconciliationFailsClosedOnUnroutableOrAmbiguousSelfHostedJob(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	job := githubscaleset.WorkflowJob{ID: 501, RunID: 50, RunAttempt: 1,
+		Repository: githubscaleset.Repository{Owner: "owner", Name: "repo"}, Name: "quality", Status: "queued",
+		Labels: []string{"self-hosted", "linux-burst"}, CreatedAt: now.Add(-time.Minute), QueueTimeExact: true}
+	snapshot := fakeQueueSnapshot{at: now, jobs: []githubscaleset.WorkflowJob{job}}
+	bindings := []Binding{
+		{ScaleSetID: 1, Targets: []string{"owner/repo"}, ScaleSetLabels: []string{"self-hosted", "linux-small"},
+			Profile: domain.Profile{ID: "small", Route: "linux-small", Platform: domain.PlatformLinux}},
+		{ScaleSetID: 2, Targets: []string{"owner/repo"}, ScaleSetLabels: []string{"self-hosted", "linux-large"},
+			Profile: domain.Profile{ID: "large", Route: "linux-large", Platform: domain.PlatformLinux}},
+	}
+	coordinator := DemandCoordinator{Store: &fakeDemandStore{}, StrictJobRouting: true}
+	if _, err := coordinator.ReconcileQueuedJobs(context.Background(), bindings, snapshot); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("unroutable self-hosted job = %v", err)
+	}
+	bindings[0].ScaleSetLabels = append(bindings[0].ScaleSetLabels, "linux-burst")
+	bindings[1].ScaleSetLabels = append(bindings[1].ScaleSetLabels, "linux-burst")
+	if _, err := coordinator.ReconcileQueuedJobs(context.Background(), bindings, snapshot); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("ambiguous self-hosted job = %v", err)
+	}
+	job.Labels = []string{"ubuntu-latest"}
+	if _, err := coordinator.ReconcileQueuedJobs(context.Background(), bindings, fakeQueueSnapshot{at: now, jobs: []githubscaleset.WorkflowJob{job}}); err != nil {
+		t.Fatalf("GitHub-hosted job affected fleet routing: %v", err)
 	}
 }
 

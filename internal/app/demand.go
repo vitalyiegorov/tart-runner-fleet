@@ -24,7 +24,7 @@ type DemandStatisticsStore interface {
 }
 
 type GitHubJobStore interface {
-	ReconcileGitHubJobs(context.Context, int64, time.Time, []operations.GitHubJobObservation) (bool, error)
+	ReconcileGitHubJobSnapshot(context.Context, time.Time, map[int64][]operations.GitHubJobObservation) (bool, error)
 	QueuedGitHubJobs(context.Context, int64) ([]operations.GitHubJobObservation, error)
 }
 
@@ -46,6 +46,7 @@ type Binding struct {
 	ScaleSetID     int64
 	Scope          string
 	Targets        []string
+	ScaleSetLabels []string
 	RequiredLabels []string
 	Profile        domain.Profile
 }
@@ -67,7 +68,7 @@ func (b Binding) accepts(repo string) bool {
 		return true
 	}
 	for _, target := range b.Targets {
-		if target == repo {
+		if strings.EqualFold(target, repo) {
 			return true
 		}
 	}
@@ -90,11 +91,32 @@ func (b Binding) acceptsLabels(labels []string) bool {
 	return true
 }
 
+// matchesRESTLabels mirrors GitHub's scale-set label compatibility rule: a
+// queued job is eligible when every label it requests is advertised by the
+// scale set. RequiredLabels is an additional controller-side isolation guard
+// used by exact-scope canaries. Bindings constructed by older callers without
+// ScaleSetLabels retain the narrow profile-route fallback.
+func (b Binding) matchesRESTLabels(labels []string) bool {
+	if !b.acceptsLabels(labels) {
+		return false
+	}
+	if len(b.ScaleSetLabels) == 0 {
+		return containsFold(labels, string(b.Profile.Route))
+	}
+	for _, requested := range labels {
+		if !containsFold(b.ScaleSetLabels, requested) {
+			return false
+		}
+	}
+	return true
+}
+
 type DemandCoordinator struct {
 	Store            DemandStore
 	Projector        DemandProjector
 	Now              func() time.Time
 	StatisticsMaxAge time.Duration
+	StrictJobRouting bool
 }
 
 const defaultStatisticsMaxAge = 2 * time.Minute
@@ -152,30 +174,39 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 	if !ok || snapshot == nil || snapshot.ObservedAt().IsZero() {
 		return false, operations.ErrInvalid
 	}
-	queued := snapshot.QueuedJobs()
-	changed := false
+	observations := make(map[int64][]operations.GitHubJobObservation, len(bindings))
 	for _, binding := range bindings {
 		if !binding.valid() {
 			return false, operations.ErrInvalid
 		}
-		observations := make([]operations.GitHubJobObservation, 0)
-		for _, job := range queued {
-			if !binding.accepts(job.Repository.Owner+"/"+job.Repository.Name) || !binding.acceptsLabels(job.Labels) ||
-				!containsFold(job.Labels, string(binding.Profile.Route)) {
+		observations[binding.durableKey()] = nil
+	}
+	for _, job := range snapshot.QueuedJobs() {
+		var matched *Binding
+		for i := range bindings {
+			binding := &bindings[i]
+			if !binding.accepts(job.Repository.Owner+"/"+job.Repository.Name) || !binding.matchesRESTLabels(job.Labels) {
 				continue
 			}
-			observations = append(observations, operations.GitHubJobObservation{WorkflowJobID: job.ID,
-				Owner: job.Repository.Owner, Repository: job.Repository.Name, WorkflowRunID: job.RunID,
-				RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
-				Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
+			if matched != nil {
+				return false, fmt.Errorf("GitHub job %d matches scale sets %d and %d: %w",
+					job.ID, matched.ScaleSetID, binding.ScaleSetID, operations.ErrConflict)
+			}
+			matched = binding
 		}
-		applied, err := store.ReconcileGitHubJobs(ctx, binding.durableKey(), snapshot.ObservedAt(), observations)
-		changed = changed || applied
-		if err != nil {
-			return changed, err
+		if matched == nil {
+			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") {
+				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
+			}
+			continue
 		}
+		key := matched.durableKey()
+		observations[key] = append(observations[key], operations.GitHubJobObservation{WorkflowJobID: job.ID,
+			Owner: job.Repository.Owner, Repository: job.Repository.Name, WorkflowRunID: job.RunID,
+			RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
+			Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
 	}
-	return changed, nil
+	return store.ReconcileGitHubJobSnapshot(ctx, snapshot.ObservedAt(), observations)
 }
 
 func containsFold(values []string, want string) bool {

@@ -28,7 +28,11 @@ releasable phases:
    job identity and queue health; it never grants runner acquisition, JIT,
    deregistration, or deletion authority. API failure retains the last durable
    snapshot and is reported as stale or unavailable rather than as an empty
-   queue.
+   queue. Profile routing mirrors GitHub's label-subset match against the
+   effective scale-set labels, including the automatically advertised scale-set
+   name and configured aliases. An unmatched or multiply matched self-hosted
+   job makes the observation unavailable. All profiles in one scope replace
+   their prior REST snapshot in a single transaction.
 2. Keep the official scale-set protocol as the mutation authority, with its
    commit-before-ack cursor, at-least-once delivery, complete aggregate
    statistics, in-place session recovery, and secret boundaries.

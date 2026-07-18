@@ -354,7 +354,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		_ = adminServer.Shutdown(shutdown)
 	}()
 
-	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute}
+	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
+		StrictJobRouting: opts.Mode != reconcile.Canary}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
@@ -581,6 +582,8 @@ func selectRuntimeBindings(bindings []app.Binding, opts options) ([]app.Binding,
 			bindingScope = legacyScopeName
 		}
 		if bindingScope == scope && binding.Profile.ID == profile {
+			binding.Targets = append([]string(nil), binding.Targets...)
+			binding.ScaleSetLabels = append([]string(nil), binding.ScaleSetLabels...)
 			binding.RequiredLabels = append([]string(nil), binding.RequiredLabels...)
 			if !containsString(binding.RequiredLabels, canaryDemandLabel) {
 				binding.RequiredLabels = append(binding.RequiredLabels, canaryDemandLabel)

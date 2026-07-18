@@ -164,6 +164,42 @@ func TestGitHubQueueSnapshotReplacementAndStatisticsMonotonicity(t *testing.T) {
 	}
 }
 
+func TestGitHubQueueScopeSnapshotRollsBackEveryProfile(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	job := func(id int64, name string) operations.GitHubJobObservation {
+		return operations.GitHubJobObservation{WorkflowJobID: id, Owner: "owner", Repository: "repo", WorkflowRunID: id,
+			RunAttempt: 1, DisplayName: name, Labels: []string{"self-hosted", name}, Status: "queued",
+			CreatedAt: now.Add(-time.Minute), QueueTimeExact: true}
+	}
+	initial := map[int64][]operations.GitHubJobObservation{1: {job(101, "linux-small")}, 2: {job(202, "linux-large")}}
+	if changed, err := store.ReconcileGitHubJobSnapshot(ctx, now, initial); err != nil || !changed {
+		t.Fatalf("initial scope snapshot = %v, %v", changed, err)
+	}
+	replaces := 0
+	store.injectFault = func(point string) error {
+		if point == "githubjobs.replace" {
+			replaces++
+			if replaces == 2 {
+				return errors.New("second profile failed")
+			}
+		}
+		return nil
+	}
+	replacement := map[int64][]operations.GitHubJobObservation{1: nil, 2: {job(203, "linux-large")}}
+	if changed, err := store.ReconcileGitHubJobSnapshot(ctx, now.Add(time.Minute), replacement); err == nil || changed {
+		t.Fatalf("partial scope failure = %v, %v", changed, err)
+	}
+	store.injectFault = nil
+	for scaleSetID, wantID := range map[int64]int64{1: 101, 2: 202} {
+		jobs, err := store.QueuedGitHubJobs(ctx, scaleSetID)
+		if err != nil || len(jobs) != 1 || jobs[0].WorkflowJobID != wantID {
+			t.Fatalf("profile %d lost prior snapshot after rollback: %#v, %v", scaleSetID, jobs, err)
+		}
+	}
+}
+
 func TestCanonicalQueuePersistenceFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)

@@ -525,23 +525,59 @@ func (s *Store) DemandStatistics(ctx context.Context, scaleSetID int64) (operati
 	return statistics, nil
 }
 
-// ReconcileGitHubJobs enriches broker demand with REST's stable numeric job
-// identity and original creation time. Ambiguous same-name matrix jobs share
-// age and attempt but never receive a guessed numeric identity.
+// ReconcileGitHubJobs preserves the single-scale-set API used by focused store
+// tests and maintenance tools. Production reconciliation commits the complete
+// scope through ReconcileGitHubJobSnapshot below.
 func (s *Store) ReconcileGitHubJobs(ctx context.Context, scaleSetID int64, observedAt time.Time, jobs []operations.GitHubJobObservation) (bool, error) {
-	if scaleSetID <= 0 || observedAt.IsZero() {
+	return s.ReconcileGitHubJobSnapshot(ctx, observedAt, map[int64][]operations.GitHubJobObservation{scaleSetID: jobs})
+}
+
+// ReconcileGitHubJobSnapshot enriches broker demand with REST's stable numeric
+// job identity and original creation time. Every profile in one REST scope is
+// replaced in one transaction, so an injected write failure retains the entire
+// previous scope snapshot. Ambiguous same-name matrix jobs share age and
+// attempt but never receive a guessed numeric identity.
+func (s *Store) ReconcileGitHubJobSnapshot(ctx context.Context, observedAt time.Time,
+	snapshot map[int64][]operations.GitHubJobObservation,
+) (bool, error) {
+	if observedAt.IsZero() || len(snapshot) == 0 {
 		return false, operations.ErrInvalid
 	}
-	for _, job := range jobs {
-		if !job.Valid() {
+	keys := make([]int64, 0, len(snapshot))
+	for scaleSetID, jobs := range snapshot {
+		if scaleSetID <= 0 {
 			return false, operations.ErrInvalid
 		}
+		for _, job := range jobs {
+			if !job.Valid() {
+				return false, operations.ErrInvalid
+			}
+		}
+		keys = append(keys, scaleSetID)
 	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	tx, err := s.beginTx(ctx, "githubjobs.begin")
 	if err != nil {
 		return false, fmt.Errorf("begin GitHub job reconciliation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	changed := false
+	for _, scaleSetID := range keys {
+		applied, err := s.reconcileGitHubJobsTx(ctx, tx, scaleSetID, observedAt, snapshot[scaleSetID])
+		if err != nil {
+			return false, err
+		}
+		changed = changed || applied
+	}
+	if err := s.commit(tx, "githubjobs.commit"); err != nil {
+		return false, fmt.Errorf("commit GitHub job reconciliation: %w", err)
+	}
+	return changed, nil
+}
+
+func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetID int64, observedAt time.Time,
+	jobs []operations.GitHubJobObservation,
+) (bool, error) {
 	var previousCount int
 	if err := s.txRow(ctx, tx, "githubjobs.count", `SELECT COUNT(*) FROM github_job_observations WHERE scale_set_id=?`, scaleSetID).Scan(&previousCount); err != nil {
 		return false, fmt.Errorf("count prior GitHub jobs: %w", err)
@@ -609,9 +645,6 @@ func (s *Store) ReconcileGitHubJobs(ctx context.Context, scaleSetID int64, obser
 			observedAt.UTC().UnixNano(), scaleSetID, key); err != nil {
 			return false, fmt.Errorf("project GitHub job correlation: %w", err)
 		}
-	}
-	if err := s.commit(tx, "githubjobs.commit"); err != nil {
-		return false, fmt.Errorf("commit GitHub job reconciliation: %w", err)
 	}
 	return previousCount > 0 || len(jobs) > 0, nil
 }

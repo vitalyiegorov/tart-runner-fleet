@@ -578,6 +578,14 @@ snapshot; caching is a performance optimization, not a correctness dependency.
 6. After canary and shadow prove complete visibility, remove inflated capacity
    and set each production scale set to its truthful executable maximum.
 
+REST-to-profile routing must use GitHub's actual scale-set compatibility rule:
+every requested job label is present in the effective scale-set label set. The
+effective set includes configured aliases and the automatically advertised
+scale-set name. A self-hosted job that matches no scale set or more than one
+scale set is uncertain, not invisible or duplicated. Replacing a scope's
+per-profile REST cache is one transaction so a persistence failure retains the
+complete previous snapshot.
+
 Mandatory replays:
 
 - one GitHub job delivered under three request IDs retains one record and its
@@ -590,6 +598,10 @@ Mandatory replays:
   after the delivery window;
 - an API error never clears the queue;
 - workflow-concurrency waiting is not reported as runner waiting;
+- alias-only and scale-set-name jobs map to exactly one profile, while
+  unmatched or ambiguous self-hosted jobs fail closed;
+- an injected write failure while replacing any profile retains the previous
+  REST snapshot for every profile in the scope;
 - terminal reconciliation cannot delete a busy or ambiguously owned runner.
 
 ### Phase 2: scheduler v2
