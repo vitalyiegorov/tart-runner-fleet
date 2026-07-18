@@ -1,4 +1,4 @@
-# ADR 0013: Canonical job inventory and truthful capacity
+# ADR 0014: Canonical job inventory and truthful capacity
 
 ## Status
 
