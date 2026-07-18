@@ -21,7 +21,8 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
       ],
       "macosBurst":{"enabled":true,"baseVm":"macos-base","vmPrefix":"gha-macos",
         "builder":{"label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},
-        "maestro":{"label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2}},
+        "maestro":{"label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2},
+        "rootDiskOptions":"sync=none","sharedDirectoryPath":"/private/tmp/ci-shared"},
       "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
     }`
 
@@ -40,6 +41,9 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	}
 	if cfg.MacOS.Maestro.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
 		t.Fatalf("mac/target decode = %+v %+v", cfg.MacOS, cfg.Targets)
+	}
+	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" {
+		t.Fatalf("mac performance decode = %+v", cfg.MacOS)
 	}
 	wantGuards := Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
 	if cfg.Guards != wantGuards {
@@ -64,6 +68,8 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"invalid cpu idle floor":  func(c *Config) { c.Guards.MinCPUIdlePercent = 101 },
 		"invalid load number":     func(c *Config) { c.Guards.MaxLoadAverage = math.NaN() },
 		"too many linux runners":  func(c *Config) { c.Linux.MaxInstances = 5 },
+		"invalid root disk mode":  func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
+		"relative shared path":    func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -282,6 +288,8 @@ func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
 
 func TestEncodeDeterministicallyRoundTripsMultiScopeConfiguration(t *testing.T) {
 	cfg := multiScopeAuthorityConfig()
+	cfg.MacOS.RootDiskOptions = "sync=none"
+	cfg.MacOS.SharedDirectoryPath = "/private/tmp/ci-shared"
 	cfg.GitHub.Scopes[0].ScaleSets[0].ID = 101
 	cfg.GitHub.Scopes[1].ScaleSets[4].ID = 205
 	var first, second bytes.Buffer
@@ -300,6 +308,9 @@ func TestEncodeDeterministicallyRoundTripsMultiScopeConfiguration(t *testing.T) 
 	}
 	if err := roundTrip.ValidateAuthority(); err != nil {
 		t.Fatalf("round-trip ValidateAuthority() = %v", err)
+	}
+	if roundTrip.MacOS.RootDiskOptions != cfg.MacOS.RootDiskOptions || roundTrip.MacOS.SharedDirectoryPath != cfg.MacOS.SharedDirectoryPath {
+		t.Fatalf("round trip lost mac performance options: %+v", roundTrip.MacOS)
 	}
 	if roundTrip.GitHub.Scopes[0].ScaleSets[0].ID != 101 || roundTrip.GitHub.Scopes[1].ScaleSets[4].ID != 205 ||
 		roundTrip.Linux.Profiles[0].Resources != cfg.Linux.Profiles[0].Resources || roundTrip.Timeouts != cfg.Timeouts ||

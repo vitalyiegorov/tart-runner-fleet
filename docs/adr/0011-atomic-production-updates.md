@@ -44,6 +44,13 @@ verifies launchd's loaded program names the exact candidate release. A failed
 commit or rollback never satisfies that gate. The handoff retries failed
 replacement attempts and is safely replaced by the next update.
 
+An operator may also select a different absolute, versioned configuration path
+while keeping the exact installed version, release directory, mode, and
+endpoint. This config-only rollout uses the same quiescence, validation,
+activation, readiness, commit, and rollback transaction as a forward binary
+update. It does not permit a same-version binary substitution or mode/endpoint
+change.
+
 This keeps launchd's cached program, the durable plist, and the installed
 manifest on the same generation without allowing a process to terminate its
 own commit. Rewriting the file alone is not sufficient.

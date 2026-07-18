@@ -860,6 +860,21 @@ func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	}
 }
 
+func TestProductionVMControlWiresMacOSPerformanceOptions(t *testing.T) {
+	cfg := config.Default()
+	cfg.MacOS.RootDiskOptions = "sync=none"
+	cfg.MacOS.SharedDirectoryPath = "/private/tmp/ci-shared"
+	control, ok := defaultDependencies().newVM(nil, cfg, nil).(*tart.Adapter)
+	if !ok {
+		t.Fatal("production VM adapter type changed")
+	}
+	wantPrefixes := []string{"trf-builder-", "trf-maestro-"}
+	if !reflect.DeepEqual(control.MacOSVMPrefixes, wantPrefixes) || control.MacOSRootDiskOptions != "sync=none" ||
+		control.MacOSSharedDirectoryPath != "/private/tmp/ci-shared" {
+		t.Fatalf("wired macOS performance options = %+v", control)
+	}
+}
+
 func TestRunRejectsUnselectedCanaryAndHeldAuthority(t *testing.T) {
 	d := testDependencies(t)
 	if err := runWithDependencies(context.Background(), options{Mode: reconcile.Canary}, d); err == nil {

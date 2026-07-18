@@ -72,7 +72,9 @@ func (c Controller) Apply(ctx context.Context, candidate Generation) error {
 		return ErrModeChange
 	}
 	order, err := compareVersions(current.Version, candidate.Version)
-	if err != nil || order >= 0 {
+	configOnly := current.Version == candidate.Version && current.ReleaseDir == candidate.ReleaseDir &&
+		current.Endpoint == candidate.Endpoint
+	if err != nil || order > 0 || (order == 0 && !configOnly) {
 		return ErrDowngrade
 	}
 	if err := c.Host.Validate(ctx, candidate); err != nil {

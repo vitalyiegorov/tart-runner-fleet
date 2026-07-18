@@ -142,15 +142,18 @@ type VMConfig struct {
 }
 
 type Adapter struct {
-	Runner             Runner
-	Ownership          OwnershipRegistry
-	Confirmation       ConfirmationProvider
-	CommandTimeout     time.Duration
-	StartTimeout       time.Duration
-	ConfirmationMaxAge time.Duration
-	Now                func() time.Time
-	Poller             Poller
-	mu                 sync.Mutex
+	Runner                   Runner
+	Ownership                OwnershipRegistry
+	Confirmation             ConfirmationProvider
+	CommandTimeout           time.Duration
+	StartTimeout             time.Duration
+	ConfirmationMaxAge       time.Duration
+	MacOSVMPrefixes          []string
+	MacOSRootDiskOptions     string
+	MacOSSharedDirectoryPath string
+	Now                      func() time.Time
+	Poller                   Poller
+	mu                       sync.Mutex
 }
 
 type Request struct {
@@ -286,7 +289,16 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 	if vm.Running {
 		return nil
 	}
-	if err := a.runner().Start(ctx, "run", name, "--no-graphics"); err != nil {
+	args := []string{"run", name, "--no-graphics", "--no-audio", "--no-clipboard"}
+	if a.isMacOSVM(name) {
+		if a.MacOSRootDiskOptions != "" {
+			args = append(args, "--root-disk-opts="+a.MacOSRootDiskOptions)
+		}
+		if a.MacOSSharedDirectoryPath != "" {
+			args = append(args, "--dir=ci-shared:"+a.MacOSSharedDirectoryPath)
+		}
+	}
+	if err := a.runner().Start(ctx, args...); err != nil {
 		return err
 	}
 	deadline := a.poller().Now().Add(a.startTimeout())
@@ -303,6 +315,15 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 		}
 	}
 	return &Error{Op: "run", Kind: ErrorTimeout, ExitCode: -1, Err: context.DeadlineExceeded}
+}
+
+func (a *Adapter) isMacOSVM(name string) bool {
+	for _, prefix := range a.MacOSVMPrefixes {
+		if prefix != "" && strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ownership) error {

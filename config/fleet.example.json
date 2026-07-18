@@ -23,6 +23,8 @@
     "enabled": true,
     "baseVm": "macos-tartelet-base",
     "vmPrefix": "gha-macos",
+    "rootDiskOptions": "sync=none",
+    "sharedDirectoryPath": "/Users/runner/ci-shared",
     "builder": { "id": "builder", "label": "macos-builder", "cpu": 8, "memoryMb": 12288, "maxActive": 1 },
     "maestro": { "id": "maestro", "label": "macos-maestro", "cpu": 4, "memoryMb": 7168, "maxActive": 2 }
   },

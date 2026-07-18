@@ -386,10 +386,15 @@ func TestOwnershipConflictListUncertaintyAndNames(t *testing.T) {
 	}
 	runner.listError = nil
 	runner.commands = nil
-	if err := adapter.Start(context.Background(), "vm", ownership); err != nil {
+	registry.data["trf-maestro-1"] = ownership
+	runner.vms["trf-maestro-1"] = VM{Name: "trf-maestro-1"}
+	adapter.MacOSVMPrefixes = []string{"trf-builder-", "trf-maestro-"}
+	adapter.MacOSRootDiskOptions = "sync=none"
+	adapter.MacOSSharedDirectoryPath = "/private/tmp/ci-shared"
+	if err := adapter.Start(context.Background(), "trf-maestro-1", ownership); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"run", "vm", "--no-graphics"}
+	want := []string{"run", "trf-maestro-1", "--no-graphics", "--no-audio", "--no-clipboard", "--root-disk-opts=sync=none", "--dir=ci-shared:/private/tmp/ci-shared"}
 	found := false
 	for _, command := range runner.commands {
 		if reflect.DeepEqual(command, want) {
@@ -398,6 +403,22 @@ func TestOwnershipConflictListUncertaintyAndNames(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("argv mismatch: %#v", runner.commands)
+	}
+	registry.data["trf-small-1"] = ownership
+	runner.vms["trf-small-1"] = VM{Name: "trf-small-1"}
+	runner.commands = nil
+	if err := adapter.Start(context.Background(), "trf-small-1", ownership); err != nil {
+		t.Fatal(err)
+	}
+	linuxWant := []string{"run", "trf-small-1", "--no-graphics", "--no-audio", "--no-clipboard"}
+	found = false
+	for _, command := range runner.commands {
+		if reflect.DeepEqual(command, linuxWant) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("linux argv mismatch: %#v", runner.commands)
 	}
 }
 
