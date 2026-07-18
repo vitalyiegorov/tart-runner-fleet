@@ -17,7 +17,7 @@ legacy heuristic.
 | builder priority | intentionally replaced by global aged FIFO and DRR; mixed-platform no-starvation replay |
 | Maestro max two and cross-repo second slot | Maestro cap/fair-spread tests |
 | API uncertainty | typed Fresh/Stale/Unavailable fail-closed tests |
-| scale-set capacity head-of-line | authority queue-lookahead validation and production incident replay |
+| scale-set capacity head-of-line | canonical REST inventory, official statistics, truthful-capacity validation, and production incident replay |
 | profile keep/switch/no-preemption | busy-profile, idle-switch, and no-extra-tick tests |
 | builder/Maestro host resource envelopes | host-vector admission and configuration tests |
 | UTF-8 runner locale | `operations.RunnerLocaleEnvironment` test |

@@ -128,13 +128,30 @@ scope for organization repositories. Every target belongs to exactly one scope;
 every scope has exactly one scale set for each enabled profile. Numeric scale-set
 IDs may collide across installations because durable state uses a scoped key.
 
-Set every scale set's `maxCapacity` one higher than the maximum number of
-runners that its profile can execute: `5` for small, `5` for medium, `3` for
-large, `2` for builder, and `3` for Maestro under the default 8-CPU/16-GiB
-profile vectors. The extra slot is delivery-only queue lookahead. The scheduler
-still enforces the configured repository, profile, CPU, memory, and VM limits.
-Validate the migrated file with the candidate `fleetctl` before restarting the
-authority service.
+Grant every configured installation read-only **Actions** repository
+permission. The canonical queue observer lists active workflow runs and jobs;
+it does not require repository Administration permission and does not fetch the
+runner inventory used by lifecycle authority. A missing permission returns 403,
+keeps the last durable queue snapshot, and prevents candidate readiness.
+
+The observer is activated only by `github.canonicalJobInventory: true`. With
+the field omitted or false, the release remains backward compatible with the
+existing official scale-set stream and delivery lookahead. With the field
+true, REST freshness becomes readiness-critical and configuration validation
+requires truthful capacity.
+
+Set every scale set's `maxCapacity` to its truthful executable maximum for the
+scope: the smaller of the profile/host capacity and the sum of the scope's
+repository `maxActive` limits. Under the default 8-CPU/16-GiB vectors and one
+repository capped at four, that is `4` for small, `4` for medium, `2` for
+large, `1` for builder, and `2` for Maestro. Do not add a delivery-only slot.
+
+For an existing authority that still uses inflated lookahead, first grant the
+read-only App permission and validate a versioned candidate with
+`canonicalJobInventory: true` and truthful capacity using the candidate
+`fleetctl`. Prove that candidate in observe/shadow and exact-scope canary;
+change live scale-set capacity only while it owns no active job. Keep the
+running authority configuration unchanged until those gates pass.
 
 Provisioning is explicit, drift-failing, and plan-first:
 

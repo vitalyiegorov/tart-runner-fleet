@@ -1,11 +1,12 @@
 # Fleet architecture plan: reliable, work-conserving, low-latency CI
 
-Status: reviewed target. The accompanying change implements the Phase 1
-inventory foundation: complete REST snapshots, official scale-set statistics,
-monotonic canonical queue age, conservative correlation, truthful queue health,
-and fail-closed readiness. Phase 0 ADR consolidation, the remaining Phase 1
-operator surfaces, and later phases remain gated by their incident replays and
-production canaries.
+Status: reviewed target. ADR 0013 records the narrow supersessions, and the
+accompanying change implements the Phase 1 inventory foundation: complete REST
+snapshots, official scale-set statistics, monotonic canonical queue age,
+conservative correlation, truthful queue health, and fail-closed readiness.
+It lands behind `github.canonicalJobInventory`; production activation, the
+remaining Phase 1 operator surfaces, and later phases remain gated by their
+permissions, incident replays, truthful candidate configuration, and canaries.
 
 Scope: one Apple Silicon Mac mini, Tart VMs, GitHub Actions runner scale sets
 

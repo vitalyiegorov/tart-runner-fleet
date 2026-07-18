@@ -167,9 +167,10 @@ func TestMacOSCanBeDisabledWithoutMacConfiguration(t *testing.T) {
 func TestValidateAuthority(t *testing.T) {
 	valid := Default()
 	valid.GitHub = GitHub{ConfigURL: "https://github.com/owner", Owner: "owner", ClientID: "client", InstallationID: 42,
-		KeychainService: "fleet", KeychainAccount: "app", ScaleSets: []ScaleSet{
-			{Profile: "small", ID: 1, MaxCapacity: 5}, {Profile: "medium", ID: 2, MaxCapacity: 5}, {Profile: "large", ID: 3, MaxCapacity: 3},
-			{Profile: "builder", ID: 4, MaxCapacity: 2}, {Profile: "maestro", ID: 5, MaxCapacity: 3},
+		CanonicalJobInventory: true,
+		KeychainService:       "fleet", KeychainAccount: "app", ScaleSets: []ScaleSet{
+			{Profile: "small", ID: 1, MaxCapacity: 4}, {Profile: "medium", ID: 2, MaxCapacity: 4}, {Profile: "large", ID: 3, MaxCapacity: 2},
+			{Profile: "builder", ID: 4, MaxCapacity: 1}, {Profile: "maestro", ID: 5, MaxCapacity: 2},
 		}}
 	if err := valid.ValidateAuthority(); err != nil {
 		t.Fatalf("ValidateAuthority() = %v", err)
@@ -196,6 +197,18 @@ func TestValidateAuthority(t *testing.T) {
 	clone.GitHub.ScaleSets[0].ID = 99
 	if valid.GitHub.ScaleSets[0].ID == 99 {
 		t.Fatal("Clone aliases scale sets")
+	}
+	legacy := valid.Clone()
+	legacy.GitHub.CanonicalJobInventory = false
+	for index := range legacy.GitHub.ScaleSets {
+		legacy.GitHub.ScaleSets[index].MaxCapacity++
+	}
+	if err := legacy.ValidateAuthority(); err != nil {
+		t.Fatalf("legacy lookahead rejected: %v", err)
+	}
+	legacy.GitHub.ScaleSets[0].MaxCapacity--
+	if err := legacy.ValidateAuthority(); err == nil || !strings.Contains(err.Error(), "queue lookahead") {
+		t.Fatalf("legacy authority accepted capacity without lookahead: %v", err)
 	}
 }
 
@@ -260,13 +273,14 @@ func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
       "macosBurst":{"enabled":false},
       "github":{
         "sessionOwner":"fleet-macmini",
+		"canonicalJobInventory":true,
         "app":{"clientId":"Iv1.test","keychainService":"fleet","keychainAccount":"app"},
         "installations":[{"name":"personal","installationId":146307296}],
         "scopes":[{
           "name":"knee-doctor","kind":"repository",
           "configUrl":"https://github.com/vitalyiegorov/knee-doctor",
           "installation":"personal","targets":["vitalyiegorov/knee-doctor"],
-          "scaleSets":[{"profile":"small","name":"fleet-knee-linux-small","maxCapacity":5,
+          "scaleSets":[{"profile":"small","name":"fleet-knee-linux-small","maxCapacity":3,
             "labels":["self-hosted","linux-tiered","linux-small"]}]
         }]
       },
@@ -426,29 +440,55 @@ func TestValidateAuthorityRejectsAmbiguousOrUnsafeMultiScopeConfiguration(t *tes
 	}
 }
 
-func TestValidateAuthorityRequiresScaleSetQueueLookahead(t *testing.T) {
+func TestValidateAuthorityRequiresTruthfulScaleSetCapacity(t *testing.T) {
 	cfg := multiScopeAuthorityConfig()
 	for index := range cfg.GitHub.Scopes[1].ScaleSets {
 		set := &cfg.GitHub.Scopes[1].ScaleSets[index]
 		if set.Profile == "builder" {
-			set.MaxCapacity = cfg.MacOS.Builder.MaxActive
+			set.MaxCapacity = cfg.MacOS.Builder.MaxActive + 1
 		}
 	}
 
 	err := cfg.ValidateAuthority()
-	if err == nil || !strings.Contains(err.Error(), "queue lookahead") {
-		t.Fatalf("ValidateAuthority() error = %v, want queue lookahead rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "truthful capacity") {
+		t.Fatalf("ValidateAuthority() error = %v, want inflated capacity rejection", err)
+	}
+	cfg.GitHub.Scopes[1].ScaleSets[3].MaxCapacity = 0
+	if err := cfg.ValidateAuthority(); err == nil || !strings.Contains(err.Error(), "invalid scale set") {
+		t.Fatalf("zero maxCapacity was accepted: %v", err)
 	}
 }
 
-func TestScaleSetQueueLookaheadUsesScopedRuntimeCapacity(t *testing.T) {
+func TestCanonicalInventoryActivationPreservesDeployableLegacyCapacity(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	cfg.GitHub.CanonicalJobInventory = false
+	for scopeIndex := range cfg.GitHub.Scopes {
+		for setIndex := range cfg.GitHub.Scopes[scopeIndex].ScaleSets {
+			cfg.GitHub.Scopes[scopeIndex].ScaleSets[setIndex].MaxCapacity++
+		}
+	}
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("legacy lookahead rejected before explicit activation: %v", err)
+	}
+	cfg.GitHub.Scopes[0].ScaleSets[0].MaxCapacity--
+	if err := cfg.ValidateAuthority(); err == nil || !strings.Contains(err.Error(), "queue lookahead") {
+		t.Fatalf("dormant canonical inventory accepted capacity without lookahead: %v", err)
+	}
+	cfg.GitHub.Scopes[0].ScaleSets[0].MaxCapacity++
+	cfg.GitHub.CanonicalJobInventory = true
+	if err := cfg.ValidateAuthority(); err == nil || !strings.Contains(err.Error(), "truthful capacity") {
+		t.Fatalf("canonical inventory accepted inflated capacity: %v", err)
+	}
+}
+
+func TestTruthfulScaleSetCapacityUsesScopedRuntimeCapacity(t *testing.T) {
 	cfg := multiScopeAuthorityConfig()
 	cfg.Targets[0].MaxActive = 1
 	for index := range cfg.GitHub.Scopes[0].ScaleSets {
-		cfg.GitHub.Scopes[0].ScaleSets[index].MaxCapacity = 2
+		cfg.GitHub.Scopes[0].ScaleSets[index].MaxCapacity = 1
 	}
 	if err := cfg.ValidateAuthority(); err != nil {
-		t.Fatalf("one-runner scope lookahead was rejected: %v", err)
+		t.Fatalf("one-runner truthful capacity was rejected: %v", err)
 	}
 }
 
@@ -465,8 +505,8 @@ func multiScopeAuthorityConfig() Config {
 		{Type: "repo", Slug: "budgie-at/budgie", MaxActive: 4},
 	}
 	cfg.GitHub = GitHub{
-		SessionOwner: "fleet-macmini",
-		App:          GitHubApp{ClientID: "Iv1.test", KeychainService: "fleet", KeychainAccount: "app"},
+		SessionOwner: "fleet-macmini", CanonicalJobInventory: true,
+		App: GitHubApp{ClientID: "Iv1.test", KeychainService: "fleet", KeychainAccount: "app"},
 		Installations: []GitHubInstallation{
 			{Name: "personal", InstallationID: 146307296},
 			{Name: "budgie", InstallationID: 146307362},
@@ -481,10 +521,10 @@ func multiScopeAuthorityConfig() Config {
 
 func profileScaleSets(scope string) []ScaleSet {
 	return []ScaleSet{
-		{Profile: "small", Name: "fleet-" + scope + "-linux-small", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}},
-		{Profile: "medium", Name: "fleet-" + scope + "-linux-medium", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-tiered", "linux-medium"}},
-		{Profile: "large", Name: "fleet-" + scope + "-linux-large", MaxCapacity: 3, Labels: []string{"self-hosted", "linux-tiered", "linux-large"}},
-		{Profile: "builder", Name: "fleet-" + scope + "-macos-builder", MaxCapacity: 2, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-builder"}},
-		{Profile: "maestro", Name: "fleet-" + scope + "-macos-maestro", MaxCapacity: 3, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"}},
+		{Profile: "small", Name: "fleet-" + scope + "-linux-small", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}},
+		{Profile: "medium", Name: "fleet-" + scope + "-linux-medium", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-medium"}},
+		{Profile: "large", Name: "fleet-" + scope + "-linux-large", MaxCapacity: 2, Labels: []string{"self-hosted", "linux-tiered", "linux-large"}},
+		{Profile: "builder", Name: "fleet-" + scope + "-macos-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-builder"}},
+		{Profile: "maestro", Name: "fleet-" + scope + "-macos-maestro", MaxCapacity: 2, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"}},
 	}
 }

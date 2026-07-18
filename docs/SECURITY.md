@@ -1,6 +1,12 @@
 # Security model
 
 - Authenticate with a narrowly scoped GitHub App, not personal tokens.
+- Grant the App read-only Actions repository permission for canonical workflow
+  job inventory. Queue observation does not require Administration permission;
+  runner acquisition and cleanup remain behind the official scale-set protocol.
+- Keep `github.canonicalJobInventory` disabled until that least-privilege
+  permission is approved for every installation and a truthful-capacity
+  candidate passes shadow and exact-scope canary verification.
 - Load the App key from macOS Keychain when unattended access is available. If
   launchd would trigger an interactive Keychain prompt, use only a user-owned,
   non-symlink regular `privateKeyFile` with exact mode `0600`; file selection

@@ -60,7 +60,7 @@ func TestObserverPaginatesIndexesAndPreservesQueuedSibling(t *testing.T) {
 			return nil, nil
 		}
 	})
-	o, err := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: doer, Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "app-token", nil }), Clock: fixedClock(time.Unix(123, 0)), Timeout: time.Second})
+	o, err := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: doer, Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "app-token", nil }), Clock: fixedClock(time.Unix(123, 0)), Timeout: time.Second, IncludeRunnerInventory: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,6 +174,27 @@ func TestObserverValidationPaginationSafetyAndStatuses(t *testing.T) {
 	}
 }
 
+func TestObserverDefaultsToLeastPrivilegeJobInventory(t *testing.T) {
+	requests := 0
+	doer := doerFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		if strings.Contains(request.URL.Path, "/runners") {
+			t.Fatal("runner inventory requested despite least-privilege configuration")
+		}
+		return response(http.StatusOK, `{"workflow_runs":[]}`, ""), nil
+	})
+	observer, err := NewObserver(ObserverConfig{BaseURL: "https://api.test",
+		Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: doer,
+		Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := observer.Refresh(context.Background(), nil)
+	if observation.Err != nil || observation.Freshness != Fresh || requests != len(activeRunStatuses) {
+		t.Fatalf("least-privilege observation = %#v requests=%d", observation, requests)
+	}
+}
+
 func TestObserverWrapsJobsRunnersAndPaginationErrors(t *testing.T) {
 	token := TokenSourceFunc(func(context.Context) (string, error) { return "t", nil })
 	tests := []struct {
@@ -198,7 +219,7 @@ func TestObserverWrapsJobsRunnersAndPaginationErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o, err := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: tt.do, Tokens: token})
+			o, err := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: tt.do, Tokens: token, IncludeRunnerInventory: true})
 			if err != nil {
 				t.Fatal(err)
 			}

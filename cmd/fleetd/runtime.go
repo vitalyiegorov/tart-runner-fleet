@@ -313,8 +313,10 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		for _, binding := range bindings {
 			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.StoreKey))
 		}
-		for scope := range bindingsByScope(bindings) {
-			criticalObservations = append(criticalObservations, "github-rest-"+scope)
+		if cfg.GitHub.CanonicalJobInventory {
+			for scope := range bindingsByScope(bindings) {
+				criticalObservations = append(criticalObservations, "github-rest-"+scope)
+			}
 		}
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
@@ -409,31 +411,33 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				controls[key] = lifecycle.SourceBinding{StoreKey: binding.StoreKey, Source: source}
 			}
 		}
-		for scope, scopeBindings := range bindingsByScope(bindings) {
-			settings, err := sourceSettingsFor(cfg, scopeBindings[0])
-			if err != nil {
-				return err
+		if cfg.GitHub.CanonicalJobInventory {
+			for scope, scopeBindings := range bindingsByScope(bindings) {
+				settings, err := sourceSettingsFor(cfg, scopeBindings[0])
+				if err != nil {
+					return err
+				}
+				apiBase, err := githubscaleset.APIBaseURL(settings.configURL)
+				if err != nil {
+					return err
+				}
+				tokens, err := githubscaleset.NewInstallationTokenSource(githubscaleset.InstallationTokenConfig{
+					APIBaseURL: apiBase, ClientID: settings.clientID, InstallationID: settings.installationID,
+					PrivateKey: privateKey, Timeout: cfg.Timeouts.GitHub,
+				})
+				if err != nil {
+					return err
+				}
+				observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: apiBase,
+					Repositories: repositoriesForBindings(scopeBindings, cfg.Targets), HTTP: http.DefaultClient,
+					Tokens: tokens, Timeout: cfg.Timeouts.GitHub})
+				if err != nil {
+					return err
+				}
+				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
+					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
+					observation: "github-rest-" + scope, now: d.now})
 			}
-			apiBase, err := githubscaleset.APIBaseURL(settings.configURL)
-			if err != nil {
-				return err
-			}
-			tokens, err := githubscaleset.NewInstallationTokenSource(githubscaleset.InstallationTokenConfig{
-				APIBaseURL: apiBase, ClientID: settings.clientID, InstallationID: settings.installationID,
-				PrivateKey: privateKey, Timeout: cfg.Timeouts.GitHub,
-			})
-			if err != nil {
-				return err
-			}
-			observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: apiBase,
-				Repositories: repositoriesForBindings(scopeBindings, cfg.Targets), HTTP: http.DefaultClient,
-				Tokens: tokens, Timeout: cfg.Timeouts.GitHub})
-			if err != nil {
-				return err
-			}
-			ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
-				observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
-				observation: "github-rest-" + scope, now: d.now})
 		}
 	}
 	control := &lifecycle.ControlRouter{State: store, Demand: store, Sources: controls, Now: d.now}
@@ -848,7 +852,11 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	observation := r.observer.Refresh(ctx, r.previous)
 	if observation.Err != nil {
 		if r.health != nil && r.observation != "" {
-			_ = r.health.RecordObservation(r.observation, telemetry.ObservationUnavailable)
+			freshness := telemetry.ObservationUnavailable
+			if observation.Freshness == githubscaleset.Stale {
+				freshness = telemetry.ObservationStale
+			}
+			_ = r.health.RecordObservation(r.observation, freshness)
 		}
 		return false, observation.Err
 	}
