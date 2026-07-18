@@ -146,7 +146,7 @@ func TestValidationAndPreparationRejectEveryUntrustedBoundary(t *testing.T) {
 	t.Run("template placeholder", func(t *testing.T) {
 		host, _, current, candidate, _ := hostFixture(t)
 		path := filepath.Join(candidate.ReleaseDir, "com.vitalyiegorov.tart-runner-fleet.authority.plist")
-		if err := os.WriteFile(path, []byte("__UNKNOWN__"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("__RELEASE_DIR__/fleetd --config=__STATE_DIR__/fleet.json __UNKNOWN__"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := host.Prepare(context.Background(), current, candidate); !errors.Is(err, ErrInvalidGeneration) {
@@ -495,11 +495,28 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 		host, command, current, candidate, _ := hostFixture(t)
 		current.Mode, candidate.Mode = "observe", "observe"
 		command.current = `{"data":{"controllerVersion":"v1","controllerMode":"observe","queues":[],"instances":[],"operations":{}}}`
-		if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, CanonicalPlist), []byte("__RELEASE_DIR__/fleetd __STATE_DIR__/fleet.json --mode=observe"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, CanonicalPlist), []byte("__RELEASE_DIR__/fleetd --config=__STATE_DIR__/fleet.json --mode=observe"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := host.Prepare(context.Background(), current, candidate); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("config argument cardinality", func(t *testing.T) {
+		for name, template := range map[string]string{
+			"missing":   "__RELEASE_DIR__/fleetd --mode=authority",
+			"duplicate": "__RELEASE_DIR__/fleetd --config=__STATE_DIR__/fleet.json --config=__STATE_DIR__/fleet.json --mode=authority",
+		} {
+			t.Run(name, func(t *testing.T) {
+				host, _, current, candidate, _ := hostFixture(t)
+				path := filepath.Join(candidate.ReleaseDir, "com.vitalyiegorov.tart-runner-fleet.authority.plist")
+				if err := os.WriteFile(path, []byte(template), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := host.Prepare(context.Background(), current, candidate); !errors.Is(err, ErrInvalidGeneration) {
+					t.Fatalf("config argument cardinality accepted: %v", err)
+				}
+			})
 		}
 	})
 	t.Run("prepared path", func(t *testing.T) {

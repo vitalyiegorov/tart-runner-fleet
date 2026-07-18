@@ -164,6 +164,37 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 	}
 }
 
+func TestLocalHostConfigOnlyRolloutRendersCandidateConfigIntoDaemonArguments(t *testing.T) {
+	host, _, current, _, _ := hostFixture(t)
+	candidate := current
+	candidate.ConfigPath = filepath.Join(host.stateDir, "profiles", "maestro-4x4.json")
+	if err := os.MkdirAll(filepath.Dir(candidate.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(candidate.ConfigPath, []byte(`{"valid":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := host.Prepare(context.Background(), current, candidate); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := host.readJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := os.ReadFile(journal.PreparedPlist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--config=" + candidate.ConfigPath
+	if !strings.Contains(string(prepared), want) {
+		t.Fatalf("prepared daemon arguments do not contain candidate config %q: %s", want, prepared)
+	}
+	if strings.Contains(string(prepared), "--config="+filepath.Join(host.stateDir, "fleet.json")) {
+		t.Fatalf("prepared daemon arguments retained default config: %s", prepared)
+	}
+}
+
 func TestLocalHostHandsALoadedUpdaterReloadToAnIndependentLaunchdJob(t *testing.T) {
 	host, command, _, candidate, _ := hostFixture(t)
 

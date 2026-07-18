@@ -26,6 +26,7 @@ const (
 	updateBackupFile                = "update-previous.plist"
 	updateBackupUpdaterFile         = "update-previous-updater.plist"
 	minimumLaunchdBootstrapAttempts = 3
+	defaultConfigTemplateArgument   = "--config=__STATE_DIR__/fleet.json"
 )
 
 var (
@@ -191,7 +192,11 @@ func (h *LocalHost) Prepare(ctx context.Context, current, candidate Generation) 
 	if err != nil {
 		return err
 	}
-	rendered := strings.ReplaceAll(string(template), "__RELEASE_DIR__", candidate.ReleaseDir)
+	if strings.Count(string(template), defaultConfigTemplateArgument) != 1 {
+		return ErrInvalidGeneration
+	}
+	rendered := strings.Replace(string(template), defaultConfigTemplateArgument, "--config="+xmlEscape(candidate.ConfigPath), 1)
+	rendered = strings.ReplaceAll(rendered, "__RELEASE_DIR__", candidate.ReleaseDir)
 	rendered = strings.ReplaceAll(rendered, "__STATE_DIR__", h.stateDir)
 	if strings.Contains(rendered, "__") {
 		return ErrInvalidGeneration

@@ -18,6 +18,13 @@ authority disappeared, and no controller could serve queued work.
 configuration path, controller mode, admin endpoint, daemon LaunchAgent, and
 automatic-updater LaunchAgent.
 
+Preparation materializes the candidate configuration path into the daemon's
+exact `ProgramArguments` before activation. The release template keeps its
+backward-compatible default configuration token so an older installed updater
+can install the fixed release; the fixed updater replaces that token exactly
+once so config-only rollouts change the daemon's actual `--config` argument as
+part of the atomic boot tuple.
+
 An operator adopts the first already-running generation once. A five-minute
 launchd timer then checks GitHub's latest normal production release. The update
 path:
