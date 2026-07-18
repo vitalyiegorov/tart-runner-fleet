@@ -564,7 +564,7 @@ func TestRunObservePollsCanonicalRESTWithoutScaleSetSession(t *testing.T) {
 	var observedOnce sync.Once
 	d.newRESTObserver = func(cfg githubscaleset.ObserverConfig) (queueObserver, error) {
 		if len(cfg.Repositories) != 1 || cfg.Repositories[0].Owner != "owner" || cfg.Repositories[0].Name != "repo" {
-			t.Fatalf("observer repositories = %#v", cfg.Repositories)
+			return nil, errors.New("unexpected observer repositories")
 		}
 		return githubscaleset.NewObserver(githubscaleset.ObserverConfig{
 			BaseURL:      cfg.BaseURL,
