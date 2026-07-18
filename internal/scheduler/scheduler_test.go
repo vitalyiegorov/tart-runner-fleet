@@ -242,6 +242,155 @@ func TestRunningMaestroBackfillsLinuxIntoSharedEnvelope(t *testing.T) {
 	}
 }
 
+func TestMacOSExclusiveIncidentFillsFourRunnerCohortWithoutLinuxBackfill(t *testing.T) {
+	running := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1},
+		State: domain.InstanceRunning,
+	}
+	macA := demand("a/repo", 1, 4*time.Minute, "maestro")
+	macB := demand("b/repo", 2, 3*time.Minute, "maestro")
+	macC := demand("c/repo", 3, 2*time.Minute, "maestro")
+	linuxA := demand("a/repo", 4, 20*time.Minute, "medium")
+	linuxB := demand("b/repo", 5, 19*time.Minute, "medium")
+	in := input([]domain.Demand{linuxB, macC, linuxA, macB, macA}, []domain.Instance{running}, State{})
+	profile := in.Config.Profiles["maestro"]
+	profile.Resources = running.Resources
+	profile.MaxActive = 4
+	in.Config.Profiles["maestro"] = profile
+	in.Config.MacOSExclusive = true
+
+	plan := PlanTick(in)
+	want := []domain.DemandKey{macA.Key, macB.Key, macC.Key}
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, want) {
+		t.Fatalf("exclusive four-runner cohort = %#v, want %#v", got, want)
+	}
+}
+
+func TestMacOSExclusiveExactLiveIncidentSpawnsSecondMaestroNotLinux(t *testing.T) {
+	running := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1},
+		State: domain.InstanceRunning,
+	}
+	queuedMaestro := demand("a/repo", 1, time.Minute, "maestro")
+	linuxA := demand("a/repo", 2, 20*time.Minute, "medium")
+	linuxB := demand("b/repo", 3, 19*time.Minute, "medium")
+	in := input([]domain.Demand{linuxB, queuedMaestro, linuxA}, []domain.Instance{running}, State{})
+	profile := in.Config.Profiles["maestro"]
+	profile.Resources = running.Resources
+	profile.MaxActive = 2
+	in.Config.Profiles["maestro"] = profile
+	in.Config.MacOSExclusive = true
+
+	plan := PlanTick(in)
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{queuedMaestro.Key}) {
+		t.Fatalf("exact live incident admitted Linux or missed second Maestro: %#v", plan)
+	}
+}
+
+func TestMacOSAdmissionPolicyDefaultsToSharedCompatibility(t *testing.T) {
+	running := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+	linux := demand("a/repo", 1, 10*time.Minute, "small")
+	mac := demand("b/repo", 2, time.Minute, "maestro")
+	plan := PlanTick(input([]domain.Demand{mac, linux}, []domain.Instance{running}, State{}))
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{linux.Key}) {
+		t.Fatalf("default shared admission changed = %#v", plan)
+	}
+}
+
+func TestMacOSExclusiveWithoutMacDemandOrActiveCohortRunsLinuxNormally(t *testing.T) {
+	linuxA := demand("a/repo", 1, 2*time.Minute, "small")
+	linuxB := demand("b/repo", 2, time.Minute, "small")
+	in := input([]domain.Demand{linuxA, linuxB}, nil, State{})
+	in.Config.MacOSExclusive = true
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{linuxA.Key, linuxB.Key}) {
+		t.Fatalf("exclusive policy changed Linux-only admission: %#v", got)
+	}
+}
+
+func TestMacOSExclusiveWaitsForBusyLinuxWithoutDrainBackfillThenFills(t *testing.T) {
+	holder := domain.Instance{
+		ID: "linux-holder", Repo: "c/repo", Platform: domain.PlatformLinux,
+		Profile: "medium", Route: "tiered", Resources: testConfig().Profiles["medium"].Resources,
+		State: domain.InstanceRunning,
+	}
+	mac := demand("a/repo", 1, 20*time.Minute, "maestro")
+	agedLinux := demand("b/repo", 2, 10*time.Minute, "small")
+	in := input([]domain.Demand{agedLinux, mac}, []domain.Instance{holder}, State{})
+	in.Config.MacOSExclusive = true
+
+	waiting := PlanTick(in)
+	if len(waiting.Operations) != 0 || waiting.Next.MacHandoff == nil || waiting.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("exclusive busy-Linux handoff = %#v", waiting)
+	}
+	holder.State = domain.InstanceOnlineIdle
+	in.Instances = domain.Fresh([]domain.Instance{holder}, testNow)
+	in.Prior = waiting.Next
+	admitted := PlanTick(in)
+	if len(admitted.Operations) != 2 || admitted.Operations[0].Kind != OperationDrain || admitted.Operations[1].Kind != OperationSpawn ||
+		!reflect.DeepEqual(admitted.Operations[1].DependsOn, []string{admitted.Operations[0].ID}) || admitted.Operations[1].Demand != mac.Key {
+		t.Fatalf("exclusive dependency-safe mac fill = %#v", admitted)
+	}
+}
+
+func TestMacOSExclusiveActiveWithoutDemandBlocksLinuxUntilIdle(t *testing.T) {
+	mac := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+	linux := demand("a/repo", 1, 10*time.Minute, "small")
+	in := input([]domain.Demand{linux}, []domain.Instance{mac}, State{})
+	in.Config.MacOSExclusive = true
+
+	waiting := PlanTick(in)
+	if len(waiting.Operations) != 0 || waiting.Next.LinuxHandoff == nil {
+		t.Fatalf("exclusive active-mac wait = %#v", waiting)
+	}
+	mac.State = domain.InstanceOnlineIdle
+	in.Instances = domain.Fresh([]domain.Instance{mac}, testNow)
+	in.Prior = waiting.Next
+	admitted := PlanTick(in)
+	if len(admitted.Operations) != 2 || admitted.Operations[0].Kind != OperationDrain || admitted.Operations[1].Kind != OperationSpawn ||
+		!reflect.DeepEqual(admitted.Operations[1].DependsOn, []string{admitted.Operations[0].ID}) || admitted.Operations[1].Demand != linux.Key {
+		t.Fatalf("exclusive dependency-safe Linux handoff = %#v", admitted)
+	}
+}
+
+func TestMacOSExclusivePinsActiveProfileUntilItsQueuedCohortIsFilled(t *testing.T) {
+	running := domain.Instance{
+		ID: "maestro-1", Repo: "c/repo", Platform: domain.PlatformMacOS,
+		Profile: "maestro", Route: "macos-maestro", Resources: testConfig().Profiles["maestro"].Resources,
+		State: domain.InstanceRunning,
+	}
+	queuedMaestro := demand("a/repo", 1, time.Minute, "maestro")
+	olderBuilder := demand("b/repo", 2, 20*time.Minute, "builder")
+	in := input([]domain.Demand{olderBuilder, queuedMaestro}, []domain.Instance{running}, State{})
+	in.Config.MacOSExclusive = true
+
+	plan := PlanTick(in)
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{queuedMaestro.Key}) {
+		t.Fatalf("different profile stranded partial active cohort: %#v", plan)
+	}
+}
+
+func TestMacOSExclusiveMixedActiveProfilesFailClosed(t *testing.T) {
+	instances := []domain.Instance{
+		{ID: "builder", Platform: domain.PlatformMacOS, Profile: "builder", Resources: testConfig().Profiles["builder"].Resources, State: domain.InstanceRunning},
+		{ID: "maestro", Platform: domain.PlatformMacOS, Profile: "maestro", Resources: testConfig().Profiles["maestro"].Resources, State: domain.InstanceRunning},
+	}
+	in := input([]domain.Demand{demand("a/repo", 1, time.Minute, "small"), demand("b/repo", 2, time.Minute, "maestro")}, instances, State{})
+	in.Config.MacOSExclusive = true
+	if plan := PlanTick(in); len(plan.Operations) != 0 {
+		t.Fatalf("mixed active macOS profiles did not fail closed: %#v", plan)
+	}
+}
+
 func TestQueuedMaestroUsesResidualCapacityAlongsideLinux(t *testing.T) {
 	running := domain.Instance{
 		ID: "linux-1", Repo: "a/repo", Platform: domain.PlatformLinux,

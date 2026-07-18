@@ -63,8 +63,16 @@ type Linux struct {
 	Profiles     []Profile
 }
 
+type MacOSAdmissionPolicy string
+
+const (
+	MacOSAdmissionShared    MacOSAdmissionPolicy = "shared"
+	MacOSAdmissionExclusive MacOSAdmissionPolicy = "macos-exclusive"
+)
+
 type MacOS struct {
 	Enabled             bool
+	AdmissionPolicy     MacOSAdmissionPolicy
 	BaseVM              string
 	VMPrefix            string
 	Builder             Profile
@@ -177,13 +185,14 @@ type wireConfig struct {
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
 	MacOSBurst                struct {
-		Enabled             bool    `json:"enabled"`
-		BaseVM              string  `json:"baseVm"`
-		VMPrefix            string  `json:"vmPrefix"`
-		Builder             Profile `json:"builder"`
-		Maestro             Profile `json:"maestro"`
-		RootDiskOptions     string  `json:"rootDiskOptions,omitempty"`
-		SharedDirectoryPath string  `json:"sharedDirectoryPath,omitempty"`
+		Enabled             bool                 `json:"enabled"`
+		AdmissionPolicy     MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
+		BaseVM              string               `json:"baseVm"`
+		VMPrefix            string               `json:"vmPrefix"`
+		Builder             Profile              `json:"builder"`
+		Maestro             Profile              `json:"maestro"`
+		RootDiskOptions     string               `json:"rootDiskOptions,omitempty"`
+		SharedDirectoryPath string               `json:"sharedDirectoryPath,omitempty"`
 	} `json:"macosBurst"`
 	GitHub  GitHub   `json:"github"`
 	Targets []Target `json:"targets"`
@@ -204,7 +213,7 @@ func Decode(r io.Reader) (Config, error) {
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles)},
-		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
+		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy), BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath},
 		GitHub:   w.GitHub,
@@ -260,6 +269,9 @@ func Encode(w io.Writer, cfg Config) error {
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
+	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
+		wire.MacOSBurst.AdmissionPolicy = MacOSAdmissionExclusive
+	}
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
@@ -349,6 +361,13 @@ func normalizeTargets(in []Target) []Target {
 	return out
 }
 
+func normalizeMacOSAdmissionPolicy(policy MacOSAdmissionPolicy) MacOSAdmissionPolicy {
+	if policy == "" {
+		return MacOSAdmissionShared
+	}
+	return policy
+}
+
 func Default() Config {
 	return Config{
 		PollInterval: 20 * time.Second, ReservationAge: 5 * time.Minute,
@@ -358,7 +377,7 @@ func Default() Config {
 				{ID: "medium", Label: "linux-medium", Resources: Resources{CPU: 2, MemoryMiB: 4096}, DiskGiB: 50},
 				{ID: "large", Label: "linux-large", Resources: Resources{CPU: 4, MemoryMiB: 8192}, DiskGiB: 50},
 			}},
-		MacOS: MacOS{Enabled: true, BaseVM: "macos-tartelet-base", VMPrefix: "gha-macos",
+		MacOS: MacOS{Enabled: true, AdmissionPolicy: MacOSAdmissionShared, BaseVM: "macos-tartelet-base", VMPrefix: "gha-macos",
 			Builder: Profile{ID: "builder", Label: "macos-builder", Resources: Resources{CPU: 8, MemoryMiB: 12288}, MaxActive: 1},
 			Maestro: Profile{ID: "maestro", Label: "macos-maestro", Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 2}},
 		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute},
@@ -417,6 +436,10 @@ func (c Config) Validate() error {
 	}
 	if c.MacOS.SharedDirectoryPath != "" && !filepath.IsAbs(c.MacOS.SharedDirectoryPath) {
 		return errors.New("macOS shared directory path must be absolute")
+	}
+	policy := normalizeMacOSAdmissionPolicy(c.MacOS.AdmissionPolicy)
+	if policy != MacOSAdmissionShared && policy != MacOSAdmissionExclusive {
+		return fmt.Errorf("invalid macOS admission policy %q", c.MacOS.AdmissionPolicy)
 	}
 	if c.Guards.MinAvailableMemoryMiB < 0 || c.Guards.MaxSwapUsedMiB < 0 || c.Guards.MaxLoadAverage < 0 ||
 		math.IsNaN(c.Guards.MaxLoadAverage) || math.IsInf(c.Guards.MaxLoadAverage, 0) ||

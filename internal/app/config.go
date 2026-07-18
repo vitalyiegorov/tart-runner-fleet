@@ -35,7 +35,8 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		classes[target.Slug] = class
 	}
 	return scheduler.Config{LinuxCapacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
-		FairnessAge: cfg.ReservationAge, RepoCaps: caps, RepoSchedulingClasses: classes, Profiles: profiles}
+		FairnessAge: cfg.ReservationAge, RepoCaps: caps, RepoSchedulingClasses: classes, Profiles: profiles,
+		MacOSExclusive: cfg.MacOS.AdmissionPolicy == config.MacOSAdmissionExclusive}
 }
 
 func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Binding, error) {

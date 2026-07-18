@@ -66,6 +66,14 @@ exhausts the configured CPU envelope and consequently runs alone. Values come
 from `fleet.json`, so treat the table as the example contract rather than a
 hidden default.
 
+`macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
+it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
+experiment that must fill one macOS profile cohort without admitting new Linux
+VMs. In exclusive mode, busy foreign instances are never interrupted: the
+scheduler persists the handoff, drains only idle foreign instances, and makes
+same-tick replacement spawns depend on those drains. An active macOS cohort
+continues to block new Linux admission until its instances become idle.
+
 ## Scheduling principles
 
 1. Fresh observations are mandatory; unavailable data fails closed.
@@ -76,6 +84,8 @@ hidden default.
    are considered first and exact packing maximizes admitted job count.
 5. Compatible small Linux work may use one durable backfill budget while a
    macOS handoff is draining; it cannot postpone the handoff indefinitely.
+   This bounded backfill applies only to the default shared policy; exclusive
+   macOS cohorts do not admit Linux backfill.
 6. A single deterministic state machine owns each instance from planned clone
    through registration, assignment, drain, deregistration, stop, and deletion.
 7. External effects are durable, leased, idempotent, and retried with bounded
