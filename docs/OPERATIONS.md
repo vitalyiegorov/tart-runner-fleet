@@ -255,6 +255,23 @@ fleetctl update apply-latest \
   --confirm automatic-release-update
 ```
 
+To atomically roll out a configuration-only experiment on the installed
+release, write and validate a separate absolute config path, then pass it to the
+same guarded command. The updater refuses until every queue, VM, retry, and dead
+operation is empty, and rollback restores the prior config/plist tuple if the
+daemon does not return ready:
+
+```sh
+fleetctl update apply-latest \
+  --mode authority \
+  --config /absolute/path/to/fleet-experiment.json \
+  --confirm automatic-release-update
+```
+
+Never overwrite the active config in place for an experiment. Config-only
+activation requires the exact installed version, release directory, mode, and
+endpoint; it cannot substitute a same-version binary.
+
 After every install or reboot, require both LaunchAgents and exact daemon
 readiness rather than treating process presence as health:
 

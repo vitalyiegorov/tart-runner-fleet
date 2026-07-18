@@ -73,6 +73,20 @@ func TestApplyPersistsEveryVerifiedUpdateInTheSameMode(t *testing.T) {
 	}
 }
 
+func TestApplyAtomicallyRollsOutConfigWithinTheInstalledRelease(t *testing.T) {
+	current := generation("v1", "authority")
+	candidate := current
+	candidate.ConfigPath = "/state/variants/maestro-4x6.json"
+	host := &fakeHost{current: current}
+	if err := (Controller{Host: host}).Apply(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"current", "validate:v1", "prepare:v1->v1", "activate:v1", "ready:v1", "commit:v1"}
+	if !reflect.DeepEqual(host.events, want) || host.committed != candidate {
+		t.Fatalf("events=%v committed=%+v", host.events, host.committed)
+	}
+}
+
 func TestApplyRollsBackBinaryConfigModeAndBootPlistWhenReadinessFails(t *testing.T) {
 	probeFailure := errors.New("candidate never became ready")
 	host := &fakeHost{current: generation("v1", "authority"), ready: probeFailure}
