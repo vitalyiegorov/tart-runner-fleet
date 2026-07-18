@@ -398,7 +398,13 @@ func TestConfigValidationAndLegacyAlias(t *testing.T) {
 			t.Fatalf("path=%s code=%d stderr=%q", path, code, stderr.String())
 		}
 	}
-	for _, args := range [][]string{{"config"}, {"config", "explain"}, {"config", "validate"}, {"config", "validate", "--output", "yaml", valid}} {
+	for _, mode := range []string{"shadow", "canary", "authority"} {
+		var modeStdout, modeStderr bytes.Buffer
+		if code := executeWith(context.Background(), []string{"config", "validate", "--mode", mode, valid}, &modeStdout, &modeStderr, deps); code != exitFailure || !strings.Contains(modeStderr.String(), "disk floor") {
+			t.Fatalf("mode=%s code=%d stdout=%q stderr=%q", mode, code, modeStdout.String(), modeStderr.String())
+		}
+	}
+	for _, args := range [][]string{{"config"}, {"config", "explain"}, {"config", "validate"}, {"config", "validate", "--output", "yaml", valid}, {"config", "validate", "--mode", "other", valid}} {
 		var stdout, stderr bytes.Buffer
 		if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitUsage {
 			t.Fatalf("args=%v code=%d", args, code)

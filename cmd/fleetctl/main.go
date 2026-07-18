@@ -22,6 +22,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 )
 
 const (
@@ -554,13 +555,19 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 
 func runConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "validate" {
-		fmt.Fprintln(stderr, "usage: fleetctl config validate [--output table|json] <path>")
+		fmt.Fprintln(stderr, "usage: fleetctl config validate [--mode observe|shadow|canary|authority] [--output table|json] <path>")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleetctl config validate", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	mode := flags.String("mode", string(reconcile.Observe), "controller mode: observe, shadow, canary, or authority")
 	output := flags.String("output", "table", "output format: table or json")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 1 || (*output != "table" && *output != "json") {
+		return exitUsage
+	}
+	controllerMode := reconcile.Mode(*mode)
+	if !controllerMode.Valid() {
+		fmt.Fprintln(stderr, "invalid mode: use observe, shadow, canary, or authority")
 		return exitUsage
 	}
 	path := flags.Arg(0)
@@ -571,9 +578,16 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		return exitFailure
 	}
 	defer file.Close()
-	if _, err := config.Decode(file); err != nil {
+	cfg, err := config.Decode(file)
+	if err != nil {
 		fmt.Fprintf(stderr, "invalid config: %v\n", err)
 		return exitFailure
+	}
+	if controllerMode != reconcile.Observe {
+		if err := cfg.ValidateAuthority(); err != nil {
+			fmt.Fprintf(stderr, "invalid config: %v\n", err)
+			return exitFailure
+		}
 	}
 	if *output == "json" {
 		_ = writeJSON(stdout, struct {
@@ -610,7 +624,7 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleetctl queues|instances|operations|observations [--output table|json]
   fleetctl health|doctor [--output table|json]
   fleetctl metrics
-  fleetctl config validate <path>
+  fleetctl config validate [--mode observe|shadow|canary|authority] <path>
   fleetctl version | api-version
 
 GUARDED BOOTSTRAP

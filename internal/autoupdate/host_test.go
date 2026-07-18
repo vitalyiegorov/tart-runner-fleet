@@ -157,7 +157,7 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 		}
 	}
 	joined := strings.Join(command.calls, "\n")
-	for _, want := range []string{"fleetctl config validate", "launchctl bootout", "launchctl bootstrap", "status --require-ready"} {
+	for _, want := range []string{"fleetctl config validate --mode authority", "launchctl bootout", "launchctl bootstrap", "status --require-ready"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in calls:\n%s", want, joined)
 		}
