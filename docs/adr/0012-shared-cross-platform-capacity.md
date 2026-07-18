@@ -34,6 +34,12 @@ Linux and macOS instance before spawning. Existing profile caps remain intact;
 the configured 8-vCPU builder therefore remains exclusive because no residual
 CPU can fit another VM.
 
+macOS profile concurrency is the validated `maxActive` value from configuration;
+the scheduler does not impose a lower profile-name-specific limit. The shared
+CPU, memory, slot, repository, and fresh-host-pressure constraints remain the
+hard admission envelope, so a four-slot Maestro profile can admit four VMs only
+when all four complete resource vectors fit.
+
 When residual capacity cannot admit the selected platform, existing idle-drain,
 durable handoff, and one-shot backfill rules remain in force. Destructive work
 still requires fresh ownership and external-state confirmation.

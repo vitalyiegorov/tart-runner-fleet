@@ -928,9 +928,6 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 
 func macProfileLimit(profile domain.Profile) int {
 	limit := profile.MaxActive
-	if profile.ID == "maestro" && (limit <= 0 || limit > 2) {
-		limit = 2
-	}
 	if limit <= 0 {
 		limit = 1
 	}
