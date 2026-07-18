@@ -85,6 +85,7 @@ is stale. Same-name matrix jobs may share canonical age but never receive a
 guessed numeric job ID. Official statistics bound all acquisition.
 
 The REST observer requires only read-only Actions permission in this phase; it
-does not fetch repository runner inventory. Terminal runner/VM correlation,
-workflow-concurrency classification, ETag caching, scheduler v2, and stable
+does not fetch repository runner inventory. Official lifecycle events correlate
+terminal cleanup to the authoritative runner name as specified by ADR 0015.
+Workflow-concurrency classification, ETag caching, scheduler v2, and stable
 launcher activation remain separately gated work.

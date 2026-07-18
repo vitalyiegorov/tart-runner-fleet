@@ -22,6 +22,16 @@ func demandEvent(kind operations.DemandEventKind, requestID int64) operations.De
 	}
 }
 
+func runnerDemandInstance(id string, requestID int64) operations.Instance {
+	return operations.Instance{
+		ID: id, Repo: "owner/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: domain.Resources{CPU: 4, MemoryMB: 7168, Slots: 1},
+		Demand:    domain.DemandKey{Repo: "owner/repo", RunID: 77, Attempt: 1, JobID: requestID},
+		State:     operations.StateRunning,
+		Ownership: operations.Ownership{ControllerID: "controller", ResourceID: fmt.Sprintf("demand-%d", requestID), OperationID: fmt.Sprintf("spawn-%d", requestID)},
+	}
+}
+
 // Regression for Budgie PR #597: GitHub rotated the scale-set request and
 // protocol job UUID while the same REST workflow job remained queued. Queue
 // age is a property of the logical job, not the latest broker delivery.
@@ -510,6 +520,160 @@ func TestProjectDemandEventDrivesRunnerLifecycleAndQueuesDrain(t *testing.T) {
 	}
 }
 
+// GitHub runner scale sets may assign two acquired requests to the opposite
+// registered runners. RunnerName is the authoritative execution identity; the
+// request used to provision a JIT runner is only a reservation.
+func TestProjectDemandEventAtomicallySwapsCrossAssignedRunnerDemands(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	const scaleSetID = 99
+
+	first := demandEvent(operations.DemandJobAvailable, 101)
+	second := demandEvent(operations.DemandJobAvailable, 102)
+	if _, err := store.ApplyDemandBatch(ctx, scaleSetID, 1, []operations.DemandEvent{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateInstance(ctx, runnerDemandInstance("runner-alpha", 101)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateInstance(ctx, runnerDemandInstance("runner-beta", 102)); err != nil {
+		t.Fatal(err)
+	}
+
+	first.Kind, first.RunnerName = operations.DemandJobStarted, "runner-beta"
+	second.Kind, second.RunnerName = operations.DemandJobStarted, "runner-alpha"
+	for index, event := range []operations.DemandEvent{first, second} {
+		if _, err := store.ApplyDemandBatch(ctx, scaleSetID, int64(index+2), []operations.DemandEvent{event}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ProjectDemandEvent(ctx, scaleSetID, event); err != nil {
+			t.Fatalf("project cross-assigned start %d: %v", event.RunnerRequestID, err)
+		}
+	}
+
+	first.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, scaleSetID, 4, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProjectDemandEvent(ctx, scaleSetID, first); err != nil {
+		t.Fatalf("project cross-assigned completion: %v", err)
+	}
+
+	alpha, alphaErr := store.Instance(ctx, "runner-alpha")
+	beta, betaErr := store.Instance(ctx, "runner-beta")
+	if alphaErr != nil || betaErr != nil {
+		t.Fatalf("load runners: alpha=%v beta=%v", alphaErr, betaErr)
+	}
+	if alpha.State != operations.StateRunning || alpha.Demand.JobID != 102 {
+		t.Fatalf("active runner mapping = %#v", alpha)
+	}
+	if beta.State != operations.StateDraining || beta.Demand.JobID != 101 {
+		t.Fatalf("completed runner mapping = %#v", beta)
+	}
+	if alpha.Ownership.ResourceID != "demand-101" || beta.Ownership.ResourceID != "demand-102" {
+		t.Fatalf("immutable ownership changed: alpha=%#v beta=%#v", alpha.Ownership, beta.Ownership)
+	}
+	alphaDemand, alphaDemandErr := store.DemandRecord(ctx, scaleSetID, alpha.Demand.JobID)
+	betaDemand, betaDemandErr := store.DemandRecord(ctx, scaleSetID, beta.Demand.JobID)
+	if alphaDemandErr != nil || betaDemandErr != nil || alphaDemand.Status != operations.DemandJobStarted || betaDemand.Status != operations.DemandJobCompleted {
+		t.Fatalf("runner safety records: alpha=%#v/%v beta=%#v/%v", alphaDemand, alphaDemandErr, betaDemand, betaDemandErr)
+	}
+	claimed, err := store.Claim(ctx, "worker", 2, time.Now().UTC().Add(time.Minute), time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].ResourceID != beta.ID {
+		t.Fatalf("cross-assigned drain operation = %#v, %v", claimed, err)
+	}
+}
+
+func TestAlignRunnerDemandFailsClosedAndRollsBack(t *testing.T) {
+	ctx := context.Background()
+	source := runnerDemandInstance("runner-alpha", 101)
+	target := runnerDemandInstance("runner-beta", 102)
+
+	store := testStore(t)
+	if _, err := store.alignRunnerDemand(ctx, operations.Instance{}, nil, "", 0); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("invalid alignment error = %v", err)
+	}
+	if _, err := store.alignRunnerDemand(ctx, target, []operations.Instance{target}, "owner/repo", 101); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("missing reservation error = %v", err)
+	}
+	if got, err := store.alignRunnerDemand(ctx, source, []operations.Instance{source}, "owner/repo", 101); err != nil || got.ID != source.ID {
+		t.Fatalf("already aligned runner = %#v, %v", got, err)
+	}
+	duplicate := source
+	duplicate.ID = "runner-duplicate"
+	if _, err := store.alignRunnerDemand(ctx, target, []operations.Instance{source, duplicate, target}, "owner/repo", 101); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("duplicate reservation error = %v", err)
+	}
+	incompatible := target
+	incompatible.Profile = "builder"
+	if _, err := store.alignRunnerDemand(ctx, incompatible, []operations.Instance{source, incompatible}, "owner/repo", 101); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("incompatible runner error = %v", err)
+	}
+	invalidSource, invalidTarget := source, target
+	invalidSource.Resources.CPU, invalidTarget.Resources.CPU = 0, 0
+	if _, err := store.alignRunnerDemand(ctx, invalidTarget, []operations.Instance{invalidSource, invalidTarget}, "owner/repo", 101); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("invalid scheduling metadata error = %v", err)
+	}
+
+	newPair := func(t *testing.T) (*Store, operations.Instance, operations.Instance, []operations.Instance) {
+		t.Helper()
+		pairStore := testStore(t)
+		if err := pairStore.CreateInstance(ctx, source); err != nil {
+			t.Fatal(err)
+		}
+		if err := pairStore.CreateInstance(ctx, target); err != nil {
+			t.Fatal(err)
+		}
+		instances, err := pairStore.LiveInstances(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pairStore, instances[0], instances[1], instances
+	}
+	assertOriginal := func(t *testing.T, pairStore *Store) {
+		t.Helper()
+		alpha, alphaErr := pairStore.Instance(ctx, source.ID)
+		beta, betaErr := pairStore.Instance(ctx, target.ID)
+		if alphaErr != nil || betaErr != nil || alpha.Demand.JobID != 101 || beta.Demand.JobID != 102 {
+			t.Fatalf("alignment partially committed: alpha=%#v/%v beta=%#v/%v", alpha, alphaErr, beta, betaErr)
+		}
+	}
+
+	for _, point := range []string{"runner-demand.begin", "runner-demand.source", "runner-demand.target", "runner-demand.commit"} {
+		t.Run(point, func(t *testing.T) {
+			pairStore, alpha, beta, instances := newPair(t)
+			pairStore.injectFault = func(candidate string) error {
+				if candidate == point {
+					return errors.New("injected")
+				}
+				return nil
+			}
+			if _, err := pairStore.alignRunnerDemand(ctx, beta, instances, "owner/repo", alpha.Demand.JobID); err == nil {
+				t.Fatalf("fault %s was ignored", point)
+			}
+			pairStore.injectFault = nil
+			assertOriginal(t, pairStore)
+		})
+	}
+
+	for _, staleID := range []string{source.ID, target.ID} {
+		t.Run("stale-"+staleID, func(t *testing.T) {
+			pairStore, alpha, beta, instances := newPair(t)
+			if _, err := pairStore.db.ExecContext(ctx, `UPDATE instances SET version=version+1 WHERE id=?`, staleID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pairStore.alignRunnerDemand(ctx, beta, instances, "owner/repo", alpha.Demand.JobID); !errors.Is(err, operations.ErrConflict) {
+				t.Fatalf("stale runner error = %v", err)
+			}
+			alphaAfter, _ := pairStore.Instance(ctx, source.ID)
+			betaAfter, _ := pairStore.Instance(ctx, target.ID)
+			if alphaAfter.Demand.JobID != 101 || betaAfter.Demand.JobID != 102 {
+				t.Fatalf("stale alignment partially committed: alpha=%#v beta=%#v", alphaAfter, betaAfter)
+			}
+		})
+	}
+}
+
 func TestProjectDemandRankCoversMonotonicLifecycleAndIdempotency(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -681,6 +845,21 @@ func TestProjectDemandEventUsesDurableRecordAndUniqueOwnedInstance(t *testing.T)
 	startedStore, started := newStoreWithDemand(t, operations.DemandJobStarted)
 	if err := startedStore.ProjectDemandEvent(ctx, 7, started); !errors.Is(err, operations.ErrUncertain) {
 		t.Fatalf("active demand without VM error = %v", err)
+	}
+	for _, kind := range []operations.DemandEventKind{operations.DemandJobStarted, operations.DemandJobCompleted} {
+		namedStore := testStore(t)
+		named := demandEvent(kind, 92)
+		named.RunnerName = "missing-runner"
+		if _, err := namedStore.ApplyDemandBatch(ctx, 7, 1, []operations.DemandEvent{named}); err != nil {
+			t.Fatal(err)
+		}
+		err := namedStore.ProjectDemandEvent(ctx, 7, named)
+		if kind == operations.DemandJobStarted && !errors.Is(err, operations.ErrUncertain) {
+			t.Fatalf("named active demand without VM error = %v", err)
+		}
+		if kind == operations.DemandJobCompleted && err != nil {
+			t.Fatalf("named completion after VM deletion = %v", err)
+		}
 	}
 
 	duplicateStore, duplicate := newStoreWithDemand(t, operations.DemandJobAssigned)

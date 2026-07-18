@@ -205,7 +205,13 @@ Correlation is deterministic and conservative:
 
 Runner and VM lifecycle ownership remains keyed by the exact scale-set request
 and runner identity, so REST correlation can improve scheduling and SLO truth
-without weakening cleanup safety.
+without weakening cleanup safety. The request acquired to provision a JIT
+runner is a reservation, not proof that GitHub executed that request on the
+same runner. When an official lifecycle event supplies `RunnerName`, the named
+runner is authoritative. If GitHub cross-assigns two reservations, SQLite
+atomically swaps their scheduling identities before advancing lifecycle state;
+immutable Tart ownership signatures are never rewritten. Missing, duplicate,
+or incompatible correlations fail closed.
 
 At most one REST-only job may hold a host reservation. The scheduler chooses it
 with the same ordering used for executable work. The reservation:
@@ -554,12 +560,12 @@ Exit criteria:
 ### Phase 1: canonical jobs and complete queue health
 
 Implementation boundary of the accompanying change: steps 1--4 are complete
-except ETag/change caching, and step 5 is complete for health/readiness metrics.
+except ETag/change caching, step 5 is complete for health/readiness metrics,
+and terminal runner/VM correlation uses authoritative runner-name assignment.
 Source-divergence rendering in `fleetctl`, workflow-concurrency classification,
-REST-only reservations, terminal cleanup correlation, and the production
-capacity change remain follow-up work. REST reconciliation currently performs a
-bounded full active-run snapshot; caching is a performance optimization, not a
-correctness dependency.
+REST-only reservations, and the production capacity change remain follow-up
+work. REST reconciliation currently performs a bounded full active-run
+snapshot; caching is a performance optimization, not a correctness dependency.
 
 1. Add one canonical demand-group record and retain the existing per-request
    demand projection as its alias/lifecycle table. Keep the replaceable REST

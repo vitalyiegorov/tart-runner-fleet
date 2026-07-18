@@ -245,12 +245,27 @@ func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event 
 		return err
 	}
 	var instance operations.Instance
-	for _, candidate := range instances {
-		if candidate.Repo == repo && candidate.Demand.JobID == record.RunnerRequestID {
-			if instance.ID != "" {
-				return operations.ErrConflict
+	if record.RunnerName != "" {
+		for _, candidate := range instances {
+			if candidate.ID == record.RunnerName {
+				instance = candidate
+				break
 			}
-			instance = candidate
+		}
+		if instance.ID != "" {
+			instance, err = s.alignRunnerDemand(ctx, instance, instances, repo, record.RunnerRequestID)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, candidate := range instances {
+			if candidate.Repo == repo && candidate.Demand.JobID == record.RunnerRequestID {
+				if instance.ID != "" {
+					return operations.ErrConflict
+				}
+				instance = candidate
+			}
 		}
 	}
 	if instance.ID == "" {
@@ -260,6 +275,77 @@ func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event 
 		return operations.ErrUncertain
 	}
 	return s.projectDemandRank(ctx, instance, record.Status)
+}
+
+// alignRunnerDemand reconciles the reservation used to provision a JIT runner
+// with GitHub's authoritative RunnerName assignment. Scale sets may match two
+// acquired requests to the opposite registered runners, so updating only the
+// named runner would duplicate one request and leave the displaced runner with
+// an unsafe stale identity. Swapping both scheduling identities atomically
+// preserves the one-to-one mapping while ownership signatures remain immutable.
+func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instance, instances []operations.Instance, repo string, requestID int64) (operations.Instance, error) {
+	if target.ID == "" || repo == "" || requestID <= 0 {
+		return operations.Instance{}, operations.ErrInvalid
+	}
+	var source operations.Instance
+	for _, candidate := range instances {
+		if candidate.Repo == repo && candidate.Demand.JobID == requestID {
+			if source.ID != "" {
+				return operations.Instance{}, operations.ErrConflict
+			}
+			source = candidate
+		}
+	}
+	if source.ID == "" {
+		return operations.Instance{}, operations.ErrUncertain
+	}
+	if source.ID == target.ID {
+		return target, nil
+	}
+	if source.Platform != target.Platform || source.Profile != target.Profile || source.Route != target.Route || source.Resources != target.Resources {
+		return operations.Instance{}, operations.ErrConflict
+	}
+
+	sourceNext, targetNext := source, target
+	sourceNext.Repo, targetNext.Repo = target.Repo, source.Repo
+	sourceNext.Demand, targetNext.Demand = target.Demand, source.Demand
+	if !sourceNext.SchedulingMetadataValid() || !targetNext.SchedulingMetadataValid() {
+		return operations.Instance{}, operations.ErrConflict
+	}
+	sourceBefore, _ := encodeSchedulingMetadata(source)
+	targetBefore, _ := encodeSchedulingMetadata(target)
+	sourceAfter, _ := encodeSchedulingMetadata(sourceNext)
+	targetAfter, _ := encodeSchedulingMetadata(targetNext)
+
+	tx, err := s.beginTx(ctx, "runner-demand.begin")
+	if err != nil {
+		return operations.Instance{}, fmt.Errorf("begin runner demand alignment: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC()
+	update := func(point string, current operations.Instance, before, after []byte) error {
+		result, updateErr := s.txExec(ctx, tx, point, `UPDATE instances SET scheduling_metadata=?,updated_at=?
+			WHERE id=? AND state=? AND version=? AND scheduling_metadata=?`, after, now.UnixNano(), current.ID, current.State, current.Version, before)
+		if updateErr != nil {
+			return updateErr
+		}
+		changed, _ := result.RowsAffected()
+		if changed != 1 {
+			return operations.ErrConflict
+		}
+		return nil
+	}
+	if err := update("runner-demand.source", source, sourceBefore, sourceAfter); err != nil {
+		return operations.Instance{}, fmt.Errorf("align source runner demand: %w", err)
+	}
+	if err := update("runner-demand.target", target, targetBefore, targetAfter); err != nil {
+		return operations.Instance{}, fmt.Errorf("align target runner demand: %w", err)
+	}
+	if err := s.commit(tx, "runner-demand.commit"); err != nil {
+		return operations.Instance{}, fmt.Errorf("commit runner demand alignment: %w", err)
+	}
+	targetNext.UpdatedAt = now
+	return targetNext, nil
 }
 
 func (s *Store) projectDemandRank(ctx context.Context, instance operations.Instance, status operations.DemandEventKind) error {
