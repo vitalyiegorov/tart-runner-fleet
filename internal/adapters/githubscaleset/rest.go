@@ -68,26 +68,36 @@ func (o *Observer) Refresh(ctx context.Context, previous *Snapshot) Observation 
 func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 	s := &Snapshot{at: o.clock.Now(), runs: map[int64]WorkflowRun{}, jobs: map[int64]WorkflowJob{}, runners: map[int64]Runner{}}
 	for _, repo := range o.repos {
-		var runPage struct {
-			Runs []struct {
-				ID        int64     `json:"id"`
-				Attempt   int       `json:"run_attempt"`
-				Status    string    `json:"status"`
-				CreatedAt time.Time `json:"created_at"`
-			} `json:"workflow_runs"`
-		}
-		if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runPage, func() {
-			for _, r := range runPage.Runs {
-				s.runs[r.ID] = WorkflowRun{ID: r.ID, Repository: repo, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.CreatedAt.UTC()}
+		var repoRuns []WorkflowRun
+		for _, status := range activeRunStatuses {
+			var runPage struct {
+				Runs []struct {
+					ID        int64     `json:"id"`
+					Attempt   int       `json:"run_attempt"`
+					Status    string    `json:"status"`
+					CreatedAt time.Time `json:"created_at"`
+				} `json:"workflow_runs"`
 			}
-			runPage.Runs = nil
-		}); err != nil {
-			return nil, fmt.Errorf("list workflow runs for %s/%s: %w", repo.Owner, repo.Name, err)
-		}
-		for _, run := range s.runs {
-			if run.Repository != repo || !activeRun(run.Status) {
-				continue
+			path := fmt.Sprintf("/repos/%s/%s/actions/runs?status=%s&per_page=100", url.PathEscape(repo.Owner),
+				url.PathEscape(repo.Name), url.QueryEscape(status))
+			if err := o.pages(ctx, path, &runPage, func() {
+				for _, r := range runPage.Runs {
+					if !activeRun(r.Status) {
+						continue
+					}
+					if _, duplicate := s.runs[r.ID]; duplicate {
+						continue
+					}
+					run := WorkflowRun{ID: r.ID, Repository: repo, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.CreatedAt.UTC()}
+					s.runs[r.ID] = run
+					repoRuns = append(repoRuns, run)
+				}
+				runPage.Runs = nil
+			}); err != nil {
+				return nil, fmt.Errorf("list %s workflow runs for %s/%s: %w", status, repo.Owner, repo.Name, err)
 			}
+		}
+		for _, run := range repoRuns {
 			var jobPage struct {
 				Jobs []struct {
 					ID           int64 `json:"id"`
@@ -98,21 +108,23 @@ func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 					CompletedAt  time.Time `json:"completed_at"`
 				} `json:"jobs"`
 			}
-			path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), run.ID)
+			path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), run.ID)
 			if err := o.pages(ctx, path, &jobPage, func() {
 				for _, j := range jobPage.Jobs {
 					queuedAt := j.CreatedAt
+					exactQueueTime := !queuedAt.IsZero()
 					if queuedAt.IsZero() {
 						queuedAt = j.StartedAt
+						exactQueueTime = !queuedAt.IsZero()
 					}
 					if queuedAt.IsZero() {
 						queuedAt = run.CreatedAt
 					}
 					job := WorkflowJob{ID: j.ID, RunID: run.ID, Repository: repo, Name: j.Name, Status: j.Status,
 						Labels: append([]string(nil), j.Labels...), RunAttempt: run.Attempt, CreatedAt: queuedAt.UTC(),
-						StartedAt: j.StartedAt.UTC(), CompletedAt: j.CompletedAt.UTC()}
+						QueueTimeExact: exactQueueTime, StartedAt: j.StartedAt.UTC(), CompletedAt: j.CompletedAt.UTC()}
 					s.jobs[j.ID] = job
-					if j.Status == "queued" || j.Status == "waiting" || j.Status == "pending" {
+					if j.Status == "queued" {
 						s.queued = append(s.queued, j.ID)
 					}
 				}
@@ -148,13 +160,15 @@ func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 	return s, nil
 }
 
+var activeRunStatuses = [...]string{"queued", "in_progress", "pending", "waiting", "requested"}
+
 func activeRun(status string) bool {
-	switch status {
-	case "queued", "in_progress", "pending", "waiting", "requested":
-		return true
-	default:
-		return false
+	for _, candidate := range activeRunStatuses {
+		if status == candidate {
+			return true
+		}
 	}
+	return false
 }
 
 func (o *Observer) pages(ctx context.Context, path string, target any, consume func()) error {

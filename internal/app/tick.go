@@ -70,6 +70,9 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	if coordinator.Store == nil {
 		coordinator.Store = e.Store
 	}
+	if coordinator.Now == nil {
+		coordinator.Now = func() time.Time { return now }
+	}
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
 		if err != nil {

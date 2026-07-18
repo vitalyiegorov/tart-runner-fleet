@@ -95,17 +95,24 @@ func (s *InstallationTokenSource) Token(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("request installation token: %w", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if err := resp.Body.Close(); err != nil {
+			return "", fmt.Errorf("close installation token response: %w", err)
+		}
 		return "", fmt.Errorf("request installation token: GitHub status %d", resp.StatusCode)
 	}
 	var payload struct {
 		Token     string    `json:"token"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
-		return "", fmt.Errorf("decode installation token: %w", err)
+	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload)
+	closeErr := resp.Body.Close()
+	if decodeErr != nil {
+		return "", fmt.Errorf("decode installation token: %w", decodeErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close installation token response: %w", closeErr)
 	}
 	if payload.Token == "" || !payload.ExpiresAt.After(now) {
 		return "", errors.New("invalid installation token response")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,9 +75,9 @@ func TestRESTQueueReconciliationUsesScopeAndProfileRoute(t *testing.T) {
 	at := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	snapshot := fakeQueueSnapshot{at: at, jobs: []githubscaleset.WorkflowJob{
 		{ID: 101, RunID: 11, RunAttempt: 2, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
-			Name: "Build iOS E2E app", Status: "queued", Labels: []string{"self-hosted", "macos-builder"}, CreatedAt: at.Add(-time.Hour)},
+			Name: "Build iOS E2E app", Status: "queued", Labels: []string{"self-hosted", "macos-builder"}, CreatedAt: at.Add(-time.Hour), QueueTimeExact: true},
 		{ID: 102, RunID: 12, RunAttempt: 1, Repository: githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"},
-			Name: "Maestro", Status: "queued", Labels: []string{"self-hosted", "macos-maestro"}, CreatedAt: at.Add(-time.Minute)},
+			Name: "Maestro", Status: "queued", Labels: []string{"self-hosted", "macos-maestro"}, CreatedAt: at.Add(-time.Minute), QueueTimeExact: true},
 	}}
 	bindings := []Binding{
 		{StoreKey: 201, ScaleSetID: 1, Scope: "budgie", Targets: []string{"budgie-at/budgie"}, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}},
@@ -115,13 +116,26 @@ func TestRESTQueueReconciliationValidationAndStoreFailure(t *testing.T) {
 func TestQueueSummaryIncludesRESTOnlyBacklogWithoutMakingItExecutable(t *testing.T) {
 	oldest := time.Date(2026, 7, 17, 9, 47, 52, 0, time.UTC)
 	store := &fakeDemandStore{githubJobs: map[int64][]operations.GitHubJobObservation{3: {
-		{WorkflowJobID: 100, CreatedAt: oldest}, {WorkflowJobID: 101, CreatedAt: oldest.Add(time.Minute)},
+		{WorkflowJobID: 100, CreatedAt: oldest, QueueTimeExact: true},
+		{WorkflowJobID: 101, CreatedAt: oldest.Add(time.Minute), QueueTimeExact: true},
 	}}}
 	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
 	executable := []domain.Demand{{CreatedAt: oldest.Add(10 * time.Minute)}}
 	summary, err := (DemandCoordinator{Store: store}).QueueSummary(context.Background(), binding, executable)
 	if err != nil || summary.Count != 2 || summary.Oldest != oldest || len(executable) != 1 {
 		t.Fatalf("queue summary = %#v, %v", summary, err)
+	}
+}
+
+func TestQueueSummaryDoesNotTurnInferredRunCreationIntoQueueSLOAge(t *testing.T) {
+	protocolAge := time.Date(2026, 7, 17, 11, 59, 0, 0, time.UTC)
+	store := &fakeDemandStore{githubJobs: map[int64][]operations.GitHubJobObservation{3: {
+		{WorkflowJobID: 100, CreatedAt: protocolAge.Add(-time.Hour), QueueTimeExact: false},
+	}}}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
+	summary, err := (DemandCoordinator{Store: store}).QueueSummary(context.Background(), binding, []domain.Demand{{CreatedAt: protocolAge}})
+	if err != nil || summary.Count != 1 || summary.Oldest != protocolAge {
+		t.Fatalf("queue summary trusted inferred REST time = %#v, %v", summary, err)
 	}
 }
 
@@ -209,7 +223,7 @@ func TestIngestCommitsSanitizedConcreteEvents(t *testing.T) {
 
 func TestQueuedDemandsUsesOfficialStatisticsAsAdmissionBound(t *testing.T) {
 	queue := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1}, records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "repo", WorkflowRunID: 9, QueueTime: queue.Add(time.Second), FirstQueueTime: queue.Add(time.Second)},
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue, FirstQueueTime: queue},
 	}}
@@ -222,7 +236,7 @@ func TestQueuedDemandsUsesOfficialStatisticsAsAdmissionBound(t *testing.T) {
 
 func TestAssignedStatisticsDoNotAuthorizeStaleAvailableRequests(t *testing.T) {
 	queue := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 2}, records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 2, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
 	}}
 	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
@@ -243,9 +257,37 @@ func TestQueuedDemandsPropagatesStatisticsReadFailure(t *testing.T) {
 	}
 }
 
+func TestQueuedDemandsFailsClosedWithoutFreshOfficialStatistics(t *testing.T) {
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	record := operations.DemandRecord{Status: operations.DemandJobAvailable, RunnerRequestID: 1,
+		Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute)}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	for _, test := range []struct {
+		name       string
+		store      DemandStore
+		wantReason string
+	}{
+		{name: "missing store", store: noStatisticsStore{inner: &fakeDemandStore{records: []operations.DemandRecord{record}}}, wantReason: "unavailable"},
+		{name: "missing snapshot", store: &fakeDemandStore{records: []operations.DemandRecord{record}}, wantReason: "stale or invalid"},
+		{name: "stale snapshot", store: &fakeDemandStore{records: []operations.DemandRecord{record}, statistics: operations.DemandStatistics{
+			MessageID: 9, Available: 1, ObservedAt: now.Add(-3 * time.Minute)}}, wantReason: "stale or invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := (DemandCoordinator{Store: test.store, Now: func() time.Time { return now }}).QueuedDemands(context.Background(), binding)
+			if !errors.Is(err, operations.ErrUncertain) || !strings.Contains(err.Error(), test.wantReason) {
+				t.Fatalf("QueuedDemands() error = %v", err)
+			}
+		})
+	}
+	if got, err := (DemandCoordinator{Store: noStatisticsStore{inner: &fakeDemandStore{}}, Now: func() time.Time { return now }}).
+		QueuedDemands(context.Background(), binding); err != nil || len(got) != 0 {
+		t.Fatalf("idle queue required statistics: %#v, %v", got, err)
+	}
+}
+
 func TestPreassignedStatisticsAuthorizeOnlySyntheticRequests(t *testing.T) {
 	queue := time.Now().UTC()
-	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 1}, records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 1, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 1 << 62, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 1<<62 + 1, Owner: "owner", Repository: "repo", WorkflowRunID: 9, QueueTime: queue},
 	}}
@@ -258,7 +300,7 @@ func TestPreassignedStatisticsAuthorizeOnlySyntheticRequests(t *testing.T) {
 
 func TestRunningStatisticsCannotMakePreassignedCapacityNegative(t *testing.T) {
 	queue := time.Now().UTC()
-	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 1, Running: 2}, records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Assigned: 1, Running: 2, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 1 << 62, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: queue},
 	}}
 	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
@@ -270,7 +312,7 @@ func TestRunningStatisticsCannotMakePreassignedCapacityNegative(t *testing.T) {
 
 func TestQueuedDemandsCollapsesRotatedAliasesToNewestRequestAndOriginalAge(t *testing.T) {
 	original := time.Date(2026, 7, 17, 9, 47, 52, 0, time.UTC)
-	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1}, records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 700, Owner: "budgie-at", Repository: "budgie", WorkflowRunID: 77,
 			LogicalKey: "canonical", QueueTime: original.Add(time.Hour), FirstQueueTime: original, UpdatedAt: original.Add(time.Hour)},
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 701, Owner: "budgie-at", Repository: "budgie", WorkflowRunID: 77,
@@ -314,7 +356,7 @@ func TestIngestRequiresAndPersistsOfficialStatistics(t *testing.T) {
 
 func TestQueuedDemandsMapsOnlyAvailableRecords(t *testing.T) {
 	queue := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
-	store := &fakeDemandStore{records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 3, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAssigned, RunnerRequestID: 1, Owner: "owner", Repository: "repo", WorkflowRunID: 9},
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "repo", WorkflowRunID: 9, EventName: "schedule", QueueTime: queue},
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 3, Owner: "owner", Repository: "repo", WorkflowRunID: 9, EventName: "push", QueueTime: queue.Add(time.Second)},
@@ -335,7 +377,7 @@ func TestQueuedDemandsMapsOnlyAvailableRecords(t *testing.T) {
 
 func TestQueuedDemandsFiltersRecordsOutsideTheBindingScope(t *testing.T) {
 	queue := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
-	store := &fakeDemandStore{records: []operations.DemandRecord{
+	store := &fakeDemandStore{statistics: operations.DemandStatistics{MessageID: 9, Available: 1, ObservedAt: time.Now().UTC()}, records: []operations.DemandRecord{
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 1, Owner: "owner", Repository: "other", WorkflowRunID: 9, QueueTime: queue},
 		{Status: operations.DemandJobAvailable, RunnerRequestID: 2, Owner: "owner", Repository: "allowed", WorkflowRunID: 9, QueueTime: queue},
 	}}
@@ -410,7 +452,9 @@ func TestCanaryDemandIsolationRequiresDedicatedLabelAtIngestionAndRead(t *testin
 	canary.Labels = append(append([]string(nil), ordinary.Labels...), "tart-fleet-canary")
 
 	store := &fakeDemandStore{applied: true}
-	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 8, Events: []githubscaleset.JobEvent{ordinary, canary}}}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 8,
+		Statistics: githubscaleset.DemandStatistics{MessageID: 8, Available: 1},
+		Events:     []githubscaleset.JobEvent{ordinary, canary}}}
 	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err != nil {
 		t.Fatal(err)
 	}

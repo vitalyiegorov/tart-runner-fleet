@@ -30,6 +30,7 @@ type Status struct {
 	LastSuccessfulTick time.Time        `json:"lastSuccessfulTick"`
 	Live               Check            `json:"live"`
 	Ready              Check            `json:"ready"`
+	QueueSLO           *Check           `json:"queueSlo,omitempty"`
 	Queues             []Queue          `json:"queues"`
 	Instances          []Instance       `json:"instances"`
 	Observations       []Observation    `json:"observations"`
@@ -51,6 +52,17 @@ type HostPressure struct {
 type Check struct {
 	OK      bool     `json:"ok"`
 	Reasons []string `json:"reasons"`
+}
+
+// EffectiveQueueSLO keeps a new fleetctl compatible with an older fleet.v1
+// daemon during atomic handoff. Older daemons did not emit queueSlo; their
+// existing ready and queue fields remain authoritative until the new daemon is
+// loaded.
+func (s Status) EffectiveQueueSLO() Check {
+	if s.QueueSLO == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.QueueSLO
 }
 
 type Queue struct {

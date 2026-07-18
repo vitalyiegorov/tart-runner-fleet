@@ -346,7 +346,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		_ = adminServer.Shutdown(shutdown)
 	}()
 
-	coordinator := app.DemandCoordinator{Store: store}
+	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)

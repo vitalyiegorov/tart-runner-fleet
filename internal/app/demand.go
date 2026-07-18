@@ -78,7 +78,7 @@ func (b Binding) acceptsLabels(labels []string) bool {
 	for _, required := range b.RequiredLabels {
 		found := false
 		for _, label := range labels {
-			if label == required {
+			if strings.EqualFold(label, required) {
 				found = true
 				break
 			}
@@ -91,8 +91,26 @@ func (b Binding) acceptsLabels(labels []string) bool {
 }
 
 type DemandCoordinator struct {
-	Store     DemandStore
-	Projector DemandProjector
+	Store            DemandStore
+	Projector        DemandProjector
+	Now              func() time.Time
+	StatisticsMaxAge time.Duration
+}
+
+const defaultStatisticsMaxAge = 2 * time.Minute
+
+func (c DemandCoordinator) now() time.Time {
+	if c.Now != nil {
+		return c.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (c DemandCoordinator) statisticsMaxAge() time.Duration {
+	if c.StatisticsMaxAge > 0 {
+		return c.StatisticsMaxAge
+	}
+	return defaultStatisticsMaxAge
 }
 
 type QueueSummary struct {
@@ -119,7 +137,7 @@ func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, ex
 		summary.Count = len(jobs)
 	}
 	for _, job := range jobs {
-		if summary.Oldest.IsZero() || job.CreatedAt.Before(summary.Oldest) {
+		if job.QueueTimeExact && (summary.Oldest.IsZero() || job.CreatedAt.Before(summary.Oldest)) {
 			summary.Oldest = job.CreatedAt
 		}
 	}
@@ -149,7 +167,7 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 			observations = append(observations, operations.GitHubJobObservation{WorkflowJobID: job.ID,
 				Owner: job.Repository.Owner, Repository: job.Repository.Name, WorkflowRunID: job.RunID,
 				RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
-				Status: job.Status, CreatedAt: job.CreatedAt})
+				Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
 		}
 		applied, err := store.ReconcileGitHubJobs(ctx, binding.durableKey(), snapshot.ObservedAt(), observations)
 		changed = changed || applied
@@ -193,6 +211,7 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 				MessageID: int64(demand.Statistics.MessageID), Available: demand.Statistics.Available,
 				Acquired: demand.Statistics.Acquired, Assigned: demand.Statistics.Assigned, Running: demand.Statistics.Running,
 				Registered: demand.Statistics.Registered, Busy: demand.Statistics.Busy, Idle: demand.Statistics.Idle,
+				ObservedAt: c.now(),
 			})
 			changed = changed || statisticsChanged
 			if err != nil {
@@ -286,35 +305,46 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 		}
 		return left.Before(right)
 	})
-	if statisticsStore, ok := c.Store.(DemandStatisticsStore); ok {
-		statistics, statisticsErr := statisticsStore.DemandStatistics(ctx, binding.durableKey())
-		if statisticsErr != nil && !errors.Is(statisticsErr, operations.ErrNotFound) {
-			return nil, statisticsErr
-		}
-		if statisticsErr == nil && statistics.Valid() {
-			normalLimit := statistics.Available
-			preassignedLimit := statistics.Assigned - statistics.Running
-			if preassignedLimit < 0 {
-				preassignedLimit = 0
-			}
-			bounded := make([]operations.DemandRecord, 0, min(len(selected), normalLimit+preassignedLimit))
-			for _, record := range selected {
-				if githubscaleset.IsPreassignedRequestID(record.RunnerRequestID) {
-					if preassignedLimit == 0 {
-						continue
-					}
-					preassignedLimit--
-				} else {
-					if normalLimit == 0 {
-						continue
-					}
-					normalLimit--
-				}
-				bounded = append(bounded, record)
-			}
-			selected = bounded
-		}
+	if len(selected) == 0 {
+		return []domain.Demand{}, nil
 	}
+	statisticsStore, ok := c.Store.(DemandStatisticsStore)
+	if !ok {
+		return nil, fmt.Errorf("scale-set statistics unavailable: %w", operations.ErrUncertain)
+	}
+	statistics, statisticsErr := statisticsStore.DemandStatistics(ctx, binding.durableKey())
+	if statisticsErr != nil {
+		if errors.Is(statisticsErr, operations.ErrNotFound) {
+			return nil, fmt.Errorf("scale-set statistics not observed: %w", operations.ErrUncertain)
+		}
+		return nil, statisticsErr
+	}
+	now := c.now()
+	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
+		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
+		return nil, fmt.Errorf("scale-set statistics are stale or invalid: %w", operations.ErrUncertain)
+	}
+	normalLimit := statistics.Available
+	preassignedLimit := statistics.Assigned - statistics.Running
+	if preassignedLimit < 0 {
+		preassignedLimit = 0
+	}
+	bounded := make([]operations.DemandRecord, 0, min(len(selected), normalLimit+preassignedLimit))
+	for _, record := range selected {
+		if githubscaleset.IsPreassignedRequestID(record.RunnerRequestID) {
+			if preassignedLimit == 0 {
+				continue
+			}
+			preassignedLimit--
+		} else {
+			if normalLimit == 0 {
+				continue
+			}
+			normalLimit--
+		}
+		bounded = append(bounded, record)
+	}
+	selected = bounded
 	result := make([]domain.Demand, 0, len(selected))
 	for _, record := range selected {
 		createdAt := record.FirstQueueTime

@@ -82,7 +82,7 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		queue := toNanos(record.QueueTime)
 		if _, err := s.txExec(ctx, tx, "inbox.group", `INSERT INTO demand_groups(scale_set_id,logical_key,first_queue_time,workflow_job_id,run_attempt,updated_at)
 			VALUES(?,?,?,0,0,?) ON CONFLICT(scale_set_id,logical_key) DO UPDATE SET
-			first_queue_time=CASE WHEN demand_groups.first_queue_time=0 THEN excluded.first_queue_time WHEN excluded.first_queue_time=0 THEN demand_groups.first_queue_time ELSE MIN(demand_groups.first_queue_time,excluded.first_queue_time) END,
+			first_queue_time=CASE WHEN demand_groups.run_attempt>0 THEN demand_groups.first_queue_time WHEN demand_groups.first_queue_time=0 THEN excluded.first_queue_time WHEN excluded.first_queue_time=0 THEN demand_groups.first_queue_time ELSE MIN(demand_groups.first_queue_time,excluded.first_queue_time) END,
 			updated_at=excluded.updated_at`, scaleSetID, record.LogicalKey, queue, now.UnixNano()); err != nil {
 			return fmt.Errorf("project demand group: %w", err)
 		}
@@ -472,17 +472,18 @@ func (s *Store) ReconcileGitHubJobs(ctx context.Context, scaleSetID int64, obser
 	for _, job := range jobs {
 		labels, _ := json.Marshal(job.Labels)
 		if _, err := s.txExec(ctx, tx, "githubjobs.upsert", `INSERT INTO github_job_observations(
-			scale_set_id,workflow_job_id,owner,repository,workflow_run_id,run_attempt,display_name,workflow_ref,labels,status,created_at,observed_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(scale_set_id,workflow_job_id) DO UPDATE SET
+			scale_set_id,workflow_job_id,owner,repository,workflow_run_id,run_attempt,display_name,workflow_ref,labels,status,created_at,queue_time_exact,observed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(scale_set_id,workflow_job_id) DO UPDATE SET
 			run_attempt=excluded.run_attempt,display_name=excluded.display_name,workflow_ref=excluded.workflow_ref,
-			labels=excluded.labels,status=excluded.status,created_at=excluded.created_at,observed_at=excluded.observed_at`,
+			labels=excluded.labels,status=excluded.status,created_at=excluded.created_at,queue_time_exact=excluded.queue_time_exact,
+			observed_at=excluded.observed_at`,
 			scaleSetID, job.WorkflowJobID, job.Owner, job.Repository, job.WorkflowRunID, job.RunAttempt, job.DisplayName,
-			job.WorkflowRef, labels, job.Status, job.CreatedAt.UTC().UnixNano(), observedAt.UTC().UnixNano()); err != nil {
+			job.WorkflowRef, labels, job.Status, job.CreatedAt.UTC().UnixNano(), job.QueueTimeExact, observedAt.UTC().UnixNano()); err != nil {
 			return false, fmt.Errorf("store GitHub job observation: %w", err)
 		}
 		key := demandLogicalKey(job.Owner, job.Repository, job.WorkflowRunID, job.DisplayName, job.WorkflowRef, job.Labels, "")
 		candidate := groups[key]
-		if candidate.first.IsZero() || job.CreatedAt.Before(candidate.first) {
+		if job.QueueTimeExact && (candidate.first.IsZero() || job.CreatedAt.Before(candidate.first)) {
 			candidate.first = job.CreatedAt.UTC()
 		}
 		if candidate.attempt == 0 {
@@ -505,9 +506,13 @@ func (s *Store) ReconcileGitHubJobs(ctx context.Context, scaleSetID int64, obser
 		if _, err := s.txExec(ctx, tx, "githubjobs.group", `INSERT INTO demand_groups(
 			scale_set_id,logical_key,first_queue_time,workflow_job_id,run_attempt,updated_at) VALUES(?,?,?,?,?,?)
 			ON CONFLICT(scale_set_id,logical_key) DO UPDATE SET
-			first_queue_time=CASE WHEN demand_groups.first_queue_time=0 THEN excluded.first_queue_time ELSE MIN(demand_groups.first_queue_time,excluded.first_queue_time) END,
+			first_queue_time=CASE
+				WHEN excluded.run_attempt>0 AND demand_groups.run_attempt>0 AND excluded.run_attempt<>demand_groups.run_attempt THEN excluded.first_queue_time
+				WHEN demand_groups.first_queue_time=0 THEN excluded.first_queue_time
+				WHEN excluded.first_queue_time=0 THEN demand_groups.first_queue_time
+				ELSE MIN(demand_groups.first_queue_time,excluded.first_queue_time) END,
 			workflow_job_id=excluded.workflow_job_id,run_attempt=excluded.run_attempt,updated_at=excluded.updated_at`,
-			scaleSetID, key, candidate.first.UnixNano(), jobID, attempt, observedAt.UTC().UnixNano()); err != nil {
+			scaleSetID, key, toNanos(candidate.first), jobID, attempt, observedAt.UTC().UnixNano()); err != nil {
 			return false, fmt.Errorf("reconcile demand group: %w", err)
 		}
 		if _, err := s.txExec(ctx, tx, "githubjobs.project", `UPDATE runner_demands SET
@@ -530,8 +535,8 @@ func (s *Store) QueuedGitHubJobs(ctx context.Context, scaleSetID int64) ([]opera
 		return nil, operations.ErrInvalid
 	}
 	rows, err := s.dbQuery(ctx, "githubjobs.queued", `SELECT workflow_job_id,owner,repository,workflow_run_id,run_attempt,
-		display_name,workflow_ref,labels,status,created_at FROM github_job_observations
-		WHERE scale_set_id=? AND status IN ('queued','waiting','pending') ORDER BY created_at,workflow_job_id`, scaleSetID)
+		display_name,workflow_ref,labels,status,created_at,queue_time_exact FROM github_job_observations
+		WHERE scale_set_id=? AND status='queued' ORDER BY created_at,workflow_job_id`, scaleSetID)
 	if err != nil {
 		return nil, fmt.Errorf("list queued GitHub jobs: %w", err)
 	}
@@ -542,7 +547,7 @@ func (s *Store) QueuedGitHubJobs(ctx context.Context, scaleSetID int64) ([]opera
 		var labels []byte
 		var created int64
 		if err := rows.Scan(&job.WorkflowJobID, &job.Owner, &job.Repository, &job.WorkflowRunID, &job.RunAttempt,
-			&job.DisplayName, &job.WorkflowRef, &labels, &job.Status, &created); err != nil {
+			&job.DisplayName, &job.WorkflowRef, &labels, &job.Status, &created, &job.QueueTimeExact); err != nil {
 			return nil, fmt.Errorf("scan queued GitHub job: %w", err)
 		}
 		if err := json.Unmarshal(labels, &job.Labels); err != nil {

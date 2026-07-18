@@ -124,6 +124,10 @@ func TestInstallationTokenSourceFailureResponsesAndEarlyRefresh(t *testing.T) {
 		{"invalid payload", doerFunc(func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"token":"","expires_at":"2026-07-17T11:00:00Z"}`))}, nil
 		})},
+		{"close", doerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusCreated, Header: http.Header{}, Body: closeErrorBody{Reader: strings.NewReader(
+				`{"token":"token","expires_at":"2026-07-17T13:00:00Z"}`)}}, nil
+		})},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

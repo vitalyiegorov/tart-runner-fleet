@@ -32,15 +32,21 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 }
 
 func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
+	queueSLO := status.Data.EffectiveQueueSLO()
 	state := "READY"
 	if !status.Data.Ready.OK {
 		state = "NOT READY"
+	} else if !queueSLO.OK {
+		state = "DEGRADED"
 	}
 	fmt.Fprintf(output, "TART RUNNER FLEET — %s\n", state)
 	fmt.Fprintf(output, "controller %s  mode %s  host %s  revision %d\n", status.Data.ControllerVersion,
 		status.Data.ControllerMode, status.Data.HostMode, status.Revision)
 	if !status.Data.Ready.OK {
 		fmt.Fprintf(output, "blocked: %s\n", joinReasons(status.Data.Ready))
+	}
+	if !queueSLO.OK {
+		fmt.Fprintf(output, "queue SLO: %s\n", joinReasons(queueSLO))
 	}
 	fmt.Fprintln(output, "\nHOST PRESSURE")
 	pressure := status.Data.HostPressure

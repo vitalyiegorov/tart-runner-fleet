@@ -372,6 +372,22 @@ func (h *Health) Ready() HealthResult {
 			reasons["critical_observation_unavailable"] = struct{}{}
 		}
 	}
+	ordered := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		ordered = append(ordered, reason)
+	}
+	sort.Strings(ordered)
+	return HealthResult{OK: len(ordered) == 0, Reasons: ordered}
+}
+
+// QueueHealth reports service SLO degradation independently from authority
+// readiness. Capacity backlog must page operators, but it must not make a
+// healthy authority daemon fail updater verification or restart in a loop.
+func (h *Health) QueueHealth() HealthResult {
+	now := h.clock.Now()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	reasons := make(map[string]struct{})
 	for _, queue := range h.queues {
 		if queue.Count <= 0 || queue.OldestEnqueuedAt.IsZero() {
 			continue

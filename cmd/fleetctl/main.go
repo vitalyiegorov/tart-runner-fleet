@@ -507,10 +507,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	if err != nil {
 		return remoteError(stderr, err)
 	}
+	queueSLO := status.Data.EffectiveQueueSLO()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
 		{Name: "scheduler ready", OK: status.Data.Ready.OK, Detail: joinReasons(status.Data.Ready)},
+		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {

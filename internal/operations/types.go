@@ -335,16 +335,17 @@ func (s DemandStatistics) Valid() bool {
 // GitHubJobObservation is the stable REST identity used to enrich broker
 // events. A zero WorkflowJobID is never accepted, preventing guessed joins.
 type GitHubJobObservation struct {
-	WorkflowJobID int64
-	Owner         string
-	Repository    string
-	WorkflowRunID int64
-	RunAttempt    int
-	DisplayName   string
-	WorkflowRef   string
-	Labels        []string
-	Status        string
-	CreatedAt     time.Time
+	WorkflowJobID  int64
+	Owner          string
+	Repository     string
+	WorkflowRunID  int64
+	RunAttempt     int
+	DisplayName    string
+	WorkflowRef    string
+	Labels         []string
+	Status         string
+	CreatedAt      time.Time
+	QueueTimeExact bool
 }
 
 func (j GitHubJobObservation) Valid() bool {

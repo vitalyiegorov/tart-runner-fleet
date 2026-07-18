@@ -46,7 +46,7 @@ func TestDemandInboxPreservesOriginalAgeAcrossRotatedProtocolIdentities(t *testi
 	observation := operations.GitHubJobObservation{WorkflowJobID: 16146281234, Owner: "owner", Repository: "repo",
 		WorkflowRunID: 77, RunAttempt: 3, DisplayName: "Build iOS E2E app",
 		WorkflowRef: "budgie-at/budgie/.github/workflows/e2e.yml@refs/pull/597/merge",
-		Labels:      []string{"self-hosted", "linux"}, Status: "queued", CreatedAt: original}
+		Labels:      []string{"self-hosted", "linux"}, Status: "queued", CreatedAt: original, QueueTimeExact: true}
 	if _, err := store.ReconcileGitHubJobs(ctx, 7155, time.Date(2026, 7, 17, 10, 52, 0, 0, time.UTC), []operations.GitHubJobObservation{observation}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,15 +70,41 @@ func TestDemandInboxDoesNotGuessAmongSameNameMatrixJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	jobs := []operations.GitHubJobObservation{
-		{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 2, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC()},
-		{WorkflowJobID: 101, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 3, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(51, 0).UTC()},
+		{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 3, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true},
+		{WorkflowJobID: 101, Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 3, DisplayName: event.DisplayName, Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(51, 0).UTC(), QueueTimeExact: true},
 	}
 	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), jobs); err != nil {
 		t.Fatal(err)
 	}
 	record, err := store.DemandRecord(ctx, 1, 10)
-	if err != nil || record.WorkflowJobID != 0 || record.RunAttempt != 0 || record.FirstQueueTime != jobs[0].CreatedAt {
+	if err != nil || record.WorkflowJobID != 0 || record.RunAttempt != 3 || record.FirstQueueTime != jobs[0].CreatedAt {
 		t.Fatalf("ambiguous correlation guessed identity: %#v, %v", record, err)
+	}
+}
+
+func TestDemandInboxStartsFreshQueueAgeForNewRunAttempt(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	event := demandEvent(operations.DemandJobAvailable, 10)
+	event.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	first := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: event.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{first}); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.WorkflowJobID = 101
+	second.RunAttempt = 2
+	second.CreatedAt = time.Unix(200, 0).UTC()
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(210, 0).UTC(), []operations.GitHubJobObservation{second}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 10)
+	if err != nil || record.RunAttempt != 2 || record.WorkflowJobID != 101 || record.FirstQueueTime != second.CreatedAt {
+		t.Fatalf("rerun inherited prior attempt queue age: %#v, %v", record, err)
 	}
 }
 
@@ -87,7 +113,7 @@ func TestGitHubQueueSnapshotReplacementAndStatisticsMonotonicity(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	job := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 1,
-		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now.Add(-time.Minute)}
+		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now.Add(-time.Minute), QueueTimeExact: true}
 	if changed, err := store.ReconcileGitHubJobs(ctx, 1, now, []operations.GitHubJobObservation{job}); err != nil || !changed {
 		t.Fatalf("initial snapshot = %v, %v", changed, err)
 	}
@@ -121,7 +147,7 @@ func TestCanonicalQueuePersistenceFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	job := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 1,
-		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now}
+		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now, QueueTimeExact: true}
 	for _, point := range []string{"githubjobs.begin", "githubjobs.count", "githubjobs.replace", "githubjobs.upsert", "githubjobs.group", "githubjobs.project", "githubjobs.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)

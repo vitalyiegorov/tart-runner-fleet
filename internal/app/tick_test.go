@@ -67,9 +67,10 @@ func tickConfig() scheduler.Config {
 func TestEngineTickPlansAndCommitsFreshSnapshot(t *testing.T) {
 	now := time.Date(2026, 7, 12, 20, 0, 0, 0, time.UTC)
 	prior, _ := json.Marshal(scheduler.State{DRRCursor: "other/repo"})
-	store := &tickStore{state: operations.SchedulerState{Version: 2, Data: prior}, fakeDemandStore: fakeDemandStore{records: []operations.DemandRecord{{
-		Status: operations.DemandJobAvailable, RunnerRequestID: 10, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute),
-	}}}}
+	store := &tickStore{state: operations.SchedulerState{Version: 2, Data: prior}, fakeDemandStore: fakeDemandStore{
+		statistics: operations.DemandStatistics{MessageID: 1, Available: 1, ObservedAt: now}, records: []operations.DemandRecord{{
+			Status: operations.DemandJobAvailable, RunnerRequestID: 10, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute),
+		}}}}
 	binding := Binding{ScaleSetID: 1, Profile: tickConfig().Profiles["small"]}
 	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
 	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{

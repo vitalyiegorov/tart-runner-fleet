@@ -111,14 +111,14 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 			return
 		}
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready())
+		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
 	}
 }
 
-func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready HealthResult) adminapi.StatusEnvelope {
+func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready, queueSLO HealthResult) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
 		metric := snapshot.Queues[profile]
@@ -144,13 +144,15 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 		observations = append(observations, adminapi.Observation{Name: name, Freshness: string(metric.Freshness),
 			ObservedAt: metric.ObservedAt, AgeSeconds: age.Seconds()})
 	}
+	queueCheck := adminapi.Check{OK: queueSLO.OK, Reasons: nonNilStrings(queueSLO.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
 			LastLoopTick: snapshot.LastLoopTick, LastSuccessfulTick: snapshot.LastSuccessfulTick,
-			Live:   adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
-			Ready:  adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
-			Queues: queues, Instances: instances, Observations: observations,
+			Live:     adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
+			Ready:    adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
+			QueueSLO: &queueCheck,
+			Queues:   queues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations},
 			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: snapshot.HostPressure.AvailableMemoryMiB,
 				FreeDiskGiB: snapshot.HostPressure.FreeDiskGiB, SwapUsedMiB: snapshot.HostPressure.SwapUsedMiB,
