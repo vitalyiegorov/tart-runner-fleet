@@ -21,7 +21,9 @@ The publisher verifies the version manifest, allowlisted contents, archive,
 SHA-256 manifest, reproducible binaries, and CycloneDX SBOMs before publishing.
 Release creation uploads assets while the release is a draft and publishes only
 after all uploads succeed. Retries may repair a draft, but never mutate a
-published release.
+published release. Repository-level release immutability is enabled, so GitHub
+locks every future published release's tag and assets and emits a release
+attestation at publication.
 
 ## Promoted semantic versions
 

@@ -129,7 +129,7 @@ jobs:
               --draft \
               --generate-notes
           fi
-          # A retry may repair a partial draft. Published releases are never
-          # mutated, so repository-level release immutability can be enabled.
+          # A retry may repair a partial draft. Repository-level release
+          # immutability locks the assets and tag as soon as it is published.
           gh release upload "$VERSION" "${assets[@]}" --clobber
           gh release edit "$VERSION" --draft=false --latest
