@@ -168,20 +168,21 @@ func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
 }
 
 type dependencies struct {
-	openConfig  func(string) (io.ReadCloser, error)
-	openStore   func(context.Context, string) (runtimeStore, error)
-	loadKey     func(context.Context, string, string, string) (*credentials.Secret, error)
-	newScaleSet func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
-	inventory   func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory
-	listen      func(string, string) (net.Listener, error)
-	adminListen func(string) (net.Listener, error)
-	cursor      func(context.Context, runtimeStore, int64) (int64, error)
-	newVM       func(runtimeStore, config.Config, lifecycle.DrainControl) lifecycle.VMControl
-	readiness   func(config.Config) lifecycle.Readiness
-	bootstrap   func(config.Config) lifecycle.Bootstrapper
-	now         func() time.Time
-	after       func(time.Duration) <-chan time.Time
-	leaseOwner  func(config.Config) string
+	openConfig      func(string) (io.ReadCloser, error)
+	openStore       func(context.Context, string) (runtimeStore, error)
+	loadKey         func(context.Context, string, string, string) (*credentials.Secret, error)
+	newScaleSet     func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
+	newRESTObserver func(githubscaleset.ObserverConfig) (queueObserver, error)
+	inventory       func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory
+	listen          func(string, string) (net.Listener, error)
+	adminListen     func(string) (net.Listener, error)
+	cursor          func(context.Context, runtimeStore, int64) (int64, error)
+	newVM           func(runtimeStore, config.Config, lifecycle.DrainControl) lifecycle.VMControl
+	readiness       func(config.Config) lifecycle.Readiness
+	bootstrap       func(config.Config) lifecycle.Bootstrapper
+	now             func() time.Time
+	after           func(time.Duration) <-chan time.Time
+	leaseOwner      func(config.Config) string
 }
 
 var deps = defaultDependencies()
@@ -211,6 +212,9 @@ func defaultDependencies() dependencies {
 		},
 		newScaleSet: func(ctx context.Context, cfg githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
 			return githubscaleset.NewGitHubAppScaleSet(ctx, cfg)
+		},
+		newRESTObserver: func(cfg githubscaleset.ObserverConfig) (queueObserver, error) {
+			return githubscaleset.NewObserver(cfg)
 		},
 		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver) app.Inventory {
 			return app.ProductionInventory{Store: store,
@@ -308,15 +312,17 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	for id := range schedulerConfig.Profiles {
 		profiles = append(profiles, string(id))
 	}
+	officialScaleSetSessions := opts.Mode != reconcile.Observe
+	canonicalRESTInventory := cfg.GitHub.CanonicalJobInventory
 	criticalObservations := []string{"operations", "scheduler"}
-	if opts.Mode != reconcile.Observe {
+	if officialScaleSetSessions {
 		for _, binding := range bindings {
 			criticalObservations = append(criticalObservations, fmt.Sprintf("github-%d", binding.StoreKey))
 		}
-		if cfg.GitHub.CanonicalJobInventory {
-			for scope := range bindingsByScope(bindings) {
-				criticalObservations = append(criticalObservations, "github-rest-"+scope)
-			}
+	}
+	if canonicalRESTInventory {
+		for scope := range bindingsByScope(bindings) {
+			criticalObservations = append(criticalObservations, "github-rest-"+scope)
 		}
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
@@ -353,7 +359,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
-	if opts.Mode != reconcile.Observe {
+	if officialScaleSetSessions || canonicalRESTInventory {
 		service, account, path := githubCredential(cfg)
 		secret, err := d.loadKey(ctx, service, account, path)
 		if err != nil {
@@ -362,56 +368,58 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		privateKey := githubscaleset.NewPrivateKeySecret(secret.Reveal())
 		secret.Destroy()
 		defer privateKey.Destroy()
-		defer func() {
-			closeCtx, cancel := context.WithTimeout(context.Background(), scaleSetCloseTimeout)
-			defer cancel()
-			if closeErr := closeScaleSetSources(closeCtx, closers); closeErr != nil {
-				if retErr == nil {
-					retErr = closeErr
-				} else {
-					retErr = errors.Join(retErr, closeErr)
+		if officialScaleSetSessions {
+			defer func() {
+				closeCtx, cancel := context.WithTimeout(context.Background(), scaleSetCloseTimeout)
+				defer cancel()
+				if closeErr := closeScaleSetSources(closeCtx, closers); closeErr != nil {
+					if retErr == nil {
+						retErr = closeErr
+					} else {
+						retErr = errors.Join(retErr, closeErr)
+					}
 				}
-			}
-		}()
-		for _, binding := range bindings {
-			settings, err := sourceSettingsFor(cfg, binding)
-			if err != nil {
-				return err
-			}
-			openSource := func(openCtx context.Context) (scaleSetSource, error) {
-				cursor, cursorErr := d.cursor(openCtx, store, settings.cursorKey)
-				if cursorErr != nil {
-					return nil, cursorErr
+			}()
+			for _, binding := range bindings {
+				settings, err := sourceSettingsFor(cfg, binding)
+				if err != nil {
+					return err
 				}
-				return d.newScaleSet(openCtx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: settings.configURL,
-					ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
-					ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
-					RequestTimeout: cfg.Timeouts.GitHub,
-					System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
-			}
-			initial, err := openSource(ctx)
-			if err != nil {
-				return err
-			}
-			source, err := newRecoveringScaleSetSource(initial, openSource, recoveryLimiter)
-			if err != nil {
-				if initial != nil {
-					_ = initial.Close(ctx)
+				openSource := func(openCtx context.Context) (scaleSetSource, error) {
+					cursor, cursorErr := d.cursor(openCtx, store, settings.cursorKey)
+					if cursorErr != nil {
+						return nil, cursorErr
+					}
+					return d.newScaleSet(openCtx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: settings.configURL,
+						ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
+						ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
+						RequestTimeout: cfg.Timeouts.GitHub,
+						System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
 				}
-				return err
-			}
-			closers = append(closers, source)
-			ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
-				health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey)})
-			for _, target := range bindingTargets(binding, cfg.Targets) {
-				key := lifecycle.SourceKey{Repo: target, Profile: binding.Profile.ID}
-				if _, duplicate := controls[key]; duplicate {
-					return fmt.Errorf("duplicate GitHub control binding for %s/%s", target, binding.Profile.ID)
+				initial, err := openSource(ctx)
+				if err != nil {
+					return err
 				}
-				controls[key] = lifecycle.SourceBinding{StoreKey: binding.StoreKey, Source: source}
+				source, err := newRecoveringScaleSetSource(initial, openSource, recoveryLimiter)
+				if err != nil {
+					if initial != nil {
+						_ = initial.Close(ctx)
+					}
+					return err
+				}
+				closers = append(closers, source)
+				ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
+					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey)})
+				for _, target := range bindingTargets(binding, cfg.Targets) {
+					key := lifecycle.SourceKey{Repo: target, Profile: binding.Profile.ID}
+					if _, duplicate := controls[key]; duplicate {
+						return fmt.Errorf("duplicate GitHub control binding for %s/%s", target, binding.Profile.ID)
+					}
+					controls[key] = lifecycle.SourceBinding{StoreKey: binding.StoreKey, Source: source}
+				}
 			}
 		}
-		if cfg.GitHub.CanonicalJobInventory {
+		if canonicalRESTInventory {
 			for scope, scopeBindings := range bindingsByScope(bindings) {
 				settings, err := sourceSettingsFor(cfg, scopeBindings[0])
 				if err != nil {
@@ -428,7 +436,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				if err != nil {
 					return err
 				}
-				observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: apiBase,
+				observer, err := d.newRESTObserver(githubscaleset.ObserverConfig{BaseURL: apiBase,
 					Repositories: repositoriesForBindings(scopeBindings, cfg.Targets), HTTP: http.DefaultClient,
 					Tokens: tokens, Timeout: cfg.Timeouts.GitHub})
 				if err != nil {
@@ -819,13 +827,17 @@ type boundIngester struct {
 type restQueueIngester struct {
 	coordinator app.DemandCoordinator
 	bindings    []app.Binding
-	observer    *githubscaleset.Observer
+	observer    queueObserver
 	interval    time.Duration
 	health      *telemetry.Health
 	observation string
 	now         func() time.Time
 	previous    *githubscaleset.Snapshot
 	next        time.Time
+}
+
+type queueObserver interface {
+	Refresh(context.Context, *githubscaleset.Snapshot) githubscaleset.Observation
 }
 
 func (r *restQueueIngester) Ingest(ctx context.Context) error {

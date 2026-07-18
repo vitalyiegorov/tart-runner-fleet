@@ -543,6 +543,67 @@ func TestRunObserveAndShadow(t *testing.T) {
 	}
 }
 
+// Regression: canonical inventory is the only safe way for an observe
+// candidate to prove complete GitHub queue visibility beside the incumbent.
+// Observe must poll the read-only Actions REST API without opening a competing
+// official scale-set message session or acquiring lifecycle authority.
+func TestRunObservePollsCanonicalRESTWithoutScaleSetSession(t *testing.T) {
+	d := testDependencies(t)
+	var keyLoads atomic.Int32
+	baseLoadKey := d.loadKey
+	d.loadKey = func(ctx context.Context, service, account, path string) (*credentials.Secret, error) {
+		keyLoads.Add(1)
+		return baseLoadKey(ctx, service, account, path)
+	}
+	var scaleSetCreations atomic.Int32
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		scaleSetCreations.Add(1)
+		return nil, errors.New("observe opened a scale-set session")
+	}
+	observed := make(chan struct{})
+	var observedOnce sync.Once
+	d.newRESTObserver = func(cfg githubscaleset.ObserverConfig) (queueObserver, error) {
+		if len(cfg.Repositories) != 1 || cfg.Repositories[0].Owner != "owner" || cfg.Repositories[0].Name != "repo" {
+			t.Fatalf("observer repositories = %#v", cfg.Repositories)
+		}
+		return githubscaleset.NewObserver(githubscaleset.ObserverConfig{
+			BaseURL:      cfg.BaseURL,
+			Repositories: cfg.Repositories,
+			HTTP: runtimeDoerFunc(func(*http.Request) (*http.Response, error) {
+				observedOnce.Do(func() { close(observed) })
+				return runtimeResponse(`{"workflow_runs":[]}`), nil
+			}),
+			Tokens:  githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil }),
+			Timeout: cfg.Timeout,
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{
+			ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Observe,
+		}, d)
+	}()
+	select {
+	case <-observed:
+		cancel()
+	case err := <-done:
+		cancel()
+		t.Fatalf("observe stopped before canonical inventory: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("observe did not poll canonical REST inventory")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if keyLoads.Load() != 1 || scaleSetCreations.Load() != 0 {
+		t.Fatalf("key loads=%d scale-set sessions=%d", keyLoads.Load(), scaleSetCreations.Load())
+	}
+}
+
 func TestRunReportsRedactedScaleSetCleanupFailure(t *testing.T) {
 	d := testDependencies(t)
 	ready := make(chan struct{})

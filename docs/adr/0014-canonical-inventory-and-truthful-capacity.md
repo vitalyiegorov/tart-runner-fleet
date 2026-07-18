@@ -61,8 +61,10 @@ inflated delivery lookahead. Production activation sets the flag to `true` and
 may happen only after:
 
 - the GitHub App has read-only Actions permission for every installation;
-- observe/shadow proves complete queue visibility without owning lifecycle
-  effects;
+- canonical observe proves complete queue visibility beside the incumbent
+  without opening official scale-set sessions or owning lifecycle effects;
+- shadow runs only after the incumbent no longer consumes the same scale-set
+  sessions;
 - the exact-scope canary proves queue, acquisition, job execution, runner
   absence, and VM deletion; and
 - a versioned candidate configuration sets `canonicalJobInventory: true` and
