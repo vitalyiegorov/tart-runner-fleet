@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by
+[ADR 0014](0014-opt-in-macos-exclusive-admission.md), which preserves this
+decision as the default and adds an explicit macOS-exclusive policy.
 
 ## Context
 

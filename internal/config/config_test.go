@@ -45,6 +45,16 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" {
 		t.Fatalf("mac performance decode = %+v", cfg.MacOS)
 	}
+	if cfg.MacOS.AdmissionPolicy != MacOSAdmissionShared {
+		t.Fatalf("omitted macOS admission policy = %q, want %q", cfg.MacOS.AdmissionPolicy, MacOSAdmissionShared)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode(legacy) = %v", err)
+	}
+	if strings.Contains(encoded.String(), `"admissionPolicy"`) {
+		t.Fatalf("legacy Decode->Encode introduced a field older strict releases reject:\n%s", encoded.String())
+	}
 	wantGuards := Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
 	if cfg.Guards != wantGuards {
 		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
@@ -70,6 +80,7 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"too many linux runners":  func(c *Config) { c.Linux.MaxInstances = 5 },
 		"invalid root disk mode":  func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
 		"relative shared path":    func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
+		"invalid mac admission":   func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -302,6 +313,7 @@ func TestDecodeMultiScopeGitHubConfiguration(t *testing.T) {
 
 func TestEncodeDeterministicallyRoundTripsMultiScopeConfiguration(t *testing.T) {
 	cfg := multiScopeAuthorityConfig()
+	cfg.MacOS.AdmissionPolicy = MacOSAdmissionExclusive
 	cfg.MacOS.RootDiskOptions = "sync=none"
 	cfg.MacOS.SharedDirectoryPath = "/private/tmp/ci-shared"
 	cfg.GitHub.Scopes[0].ScaleSets[0].ID = 101
@@ -325,6 +337,9 @@ func TestEncodeDeterministicallyRoundTripsMultiScopeConfiguration(t *testing.T) 
 	}
 	if roundTrip.MacOS.RootDiskOptions != cfg.MacOS.RootDiskOptions || roundTrip.MacOS.SharedDirectoryPath != cfg.MacOS.SharedDirectoryPath {
 		t.Fatalf("round trip lost mac performance options: %+v", roundTrip.MacOS)
+	}
+	if roundTrip.MacOS.AdmissionPolicy != MacOSAdmissionExclusive || !strings.Contains(first.String(), `"admissionPolicy": "macos-exclusive"`) {
+		t.Fatalf("round trip lost mac admission policy: %+v\n%s", roundTrip.MacOS, first.String())
 	}
 	if roundTrip.GitHub.Scopes[0].ScaleSets[0].ID != 101 || roundTrip.GitHub.Scopes[1].ScaleSets[4].ID != 205 ||
 		roundTrip.Linux.Profiles[0].Resources != cfg.Linux.Profiles[0].Resources || roundTrip.Timeouts != cfg.Timeouts ||
