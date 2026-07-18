@@ -30,6 +30,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Validate pull request title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: ./scripts/check-pr-title.sh "$PR_TITLE"
       - name: Module, format, and workflow integrity
         run: make preflight
 

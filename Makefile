@@ -6,7 +6,7 @@ CPD_THRESHOLD ?= 100
 
 export GOTOOLCHAIN ?= local
 
-.PHONY: fmt fmt-check mod-check vet workflow-lint self-host-check lint deadcode cpd vuln test unit race coverage build preflight quality verify ci
+.PHONY: fmt fmt-check mod-check pr-title-check vet workflow-lint self-host-check lint deadcode cpd vuln test unit race coverage build preflight quality verify ci
 
 fmt:
 	@files="$$(find . -name '*.go' -not -path './vendor/*')"; \
@@ -20,6 +20,10 @@ mod-check:
 	$(GO) mod tidy -diff
 	$(GO) -C tools mod verify
 	$(GO) -C tools mod tidy -diff
+
+pr-title-check:
+	@test -n "$(PR_TITLE)" || { echo 'PR_TITLE is required' >&2; exit 2; }
+	./scripts/check-pr-title.sh "$(PR_TITLE)"
 
 vet:
 	$(GO) vet ./...
