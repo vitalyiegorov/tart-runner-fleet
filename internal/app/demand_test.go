@@ -546,3 +546,26 @@ func TestDemandProjectionFailurePreventsAcknowledgement(t *testing.T) {
 		t.Fatalf("projection result = changed %v err %v committed %v", changed, err, source.committed)
 	}
 }
+
+func TestQueuedDemandsMarksStaleStatisticsWithSentinel(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	record := operations.DemandRecord{Status: operations.DemandJobAvailable, RunnerRequestID: 1,
+		Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute)}
+	binding := Binding{ScaleSetID: 3, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	store := &fakeDemandStore{records: []operations.DemandRecord{record}, statistics: operations.DemandStatistics{
+		MessageID: 9, Available: 1, ObservedAt: now.Add(-3 * time.Minute)}}
+	got, err := (DemandCoordinator{Store: store, Now: func() time.Time { return now }, StatisticsMaxAge: time.Minute}).
+		QueuedDemands(context.Background(), binding)
+	if !errors.Is(err, ErrDemandStatisticsUnavailable) {
+		t.Fatalf("stale statistics missing sentinel: %v", err)
+	}
+	if len(got) != 1 || got[0].Key.JobID != 1 {
+		t.Fatalf("degraded binding must still expose canonical demand for queue visibility: %#v", got)
+	}
+	// The missing statistics-store capability is a wiring defect, not a
+	// per-binding degradation; it must keep failing the tick loudly.
+	if _, err := (DemandCoordinator{Store: noStatisticsStore{inner: &fakeDemandStore{records: []operations.DemandRecord{record}}},
+		Now: func() time.Time { return now }}).QueuedDemands(context.Background(), binding); errors.Is(err, ErrDemandStatisticsUnavailable) {
+		t.Fatalf("missing statistics store must not be treated as degradable: %v", err)
+	}
+}

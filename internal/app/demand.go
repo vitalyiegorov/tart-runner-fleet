@@ -135,6 +135,15 @@ func (c DemandCoordinator) statisticsMaxAge() time.Duration {
 	return defaultStatisticsMaxAge
 }
 
+// ErrDemandStatisticsUnavailable marks a binding whose scale-set statistics
+// are missing, stale, or ahead of the clock. Broker statistics arrive only
+// with message activity, so a quiet queue ages past any freshness budget
+// while its demand is still durable; callers must fail closed for that
+// binding alone instead of failing the whole reconciliation tick, or the
+// scheduler deadlocks fleet-wide until new messages arrive (issue #67).
+// It wraps operations.ErrUncertain so existing uncertainty handling holds.
+var ErrDemandStatisticsUnavailable = fmt.Errorf("demand statistics unavailable: %w", operations.ErrUncertain)
+
 type QueueSummary struct {
 	Count  int
 	Oldest time.Time
@@ -346,14 +355,14 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 	statistics, statisticsErr := statisticsStore.DemandStatistics(ctx, binding.durableKey())
 	if statisticsErr != nil {
 		if errors.Is(statisticsErr, operations.ErrNotFound) {
-			return nil, fmt.Errorf("scale-set statistics not observed: %w", operations.ErrUncertain)
+			return convertDemandRecords(binding, selected), fmt.Errorf("scale-set statistics not observed: %w", ErrDemandStatisticsUnavailable)
 		}
 		return nil, statisticsErr
 	}
 	now := c.now()
 	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
 		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
-		return nil, fmt.Errorf("scale-set statistics are stale or invalid: %w", operations.ErrUncertain)
+		return convertDemandRecords(binding, selected), fmt.Errorf("scale-set statistics are stale or invalid: %w", ErrDemandStatisticsUnavailable)
 	}
 	normalLimit := statistics.Available
 	preassignedLimit := statistics.Assigned - statistics.Running
@@ -375,9 +384,12 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 		}
 		bounded = append(bounded, record)
 	}
-	selected = bounded
-	result := make([]domain.Demand, 0, len(selected))
-	for _, record := range selected {
+	return convertDemandRecords(binding, bounded), nil
+}
+
+func convertDemandRecords(binding Binding, records []operations.DemandRecord) []domain.Demand {
+	result := make([]domain.Demand, 0, len(records))
+	for _, record := range records {
 		createdAt := record.FirstQueueTime
 		if createdAt.IsZero() {
 			createdAt = record.QueueTime
@@ -392,7 +404,7 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 			Event: event(record.EventName), RunStatus: domain.RunQueued,
 		})
 	}
-	return result, nil
+	return result
 }
 
 func event(name string) domain.Event {
