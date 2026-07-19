@@ -69,15 +69,15 @@ jobs:
               -f "labels[]=$1" >/dev/null
           }
 
+          # The gate this check enforces is the Conventional Commit title
+          # (validated above). Labeling only feeds release-note categories,
+          # and some triggering actors (Dependabot, machine accounts) hold a
+          # token GitHub restricts to read-only regardless of the permissions
+          # block — release.yml's catch-all category still lists the
+          # unlabeled PR, so a denied label must not fail the check.
           if ! apply_label "$category"; then
-            # Dependabot-triggered runs can hold a read-only token even with
-            # the permissions block above; release.yml's catch-all category
-            # still lists the unlabeled PR.
-            if [ "$GH_ACTOR" = "dependabot[bot]" ]; then
-              printf 'warning: read-only token on Dependabot run; leaving PR unlabeled\n' >&2
-              exit 0
-            fi
-            exit 1
+            printf 'warning: token cannot label this PR (actor: %s); leaving it unlabeled\n' "$GH_ACTOR" >&2
+            exit 0
           fi
           case "$prefix" in
             *!)
