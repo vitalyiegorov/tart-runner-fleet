@@ -68,6 +68,8 @@ type fakeRunner struct {
 	commandError  map[string]error
 	startError    error
 	startNoEffect bool
+	startExited   bool
+	startOutput   []byte
 	setNoEffect   bool
 	startHook     func()
 	observeError  error
@@ -170,23 +172,31 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 	return nil, nil
 }
 
-func (f *fakeRunner) Start(_ context.Context, args ...string) error {
+type fakeStarted struct {
+	exited bool
+	output []byte
+}
+
+func (f fakeStarted) Exited() bool   { return f.exited }
+func (f fakeStarted) Output() []byte { return f.output }
+
+func (f *fakeRunner) Start(_ context.Context, args ...string) (StartedCommand, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.commands = append(f.commands, append([]string(nil), args...))
 	if f.startError != nil {
-		return f.startError
+		return nil, f.startError
 	}
 	if f.startHook != nil {
 		f.startHook()
 	}
 	if f.startNoEffect {
-		return nil
+		return fakeStarted{exited: f.startExited, output: f.startOutput}, nil
 	}
 	vm := f.vms[args[1]]
 	vm.Running = true
 	f.vms[args[1]] = vm
-	return nil
+	return fakeStarted{exited: f.startExited, output: f.startOutput}, nil
 }
 
 func testAdapter(now time.Time) (*Adapter, *fakeRunner, *memoryOwnership, operations.Ownership) {
@@ -505,13 +515,13 @@ func TestTypedErrorsClassifyAndRealRunners(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := (ExecRunner{Binary: "/usr/bin/true"}).Start(canceled); err != nil {
+	if _, err := (ExecRunner{Binary: "/usr/bin/true"}).Start(canceled); err != nil {
 		t.Fatalf("detached start inherited cancellation: %v", err)
 	}
-	if err := (ExecRunner{Binary: "/definitely/missing/tart"}).Start(context.Background()); err == nil {
+	if _, err := (ExecRunner{Binary: "/definitely/missing/tart"}).Start(context.Background()); err == nil {
 		t.Fatal("start failure ignored")
 	}
-	_ = (ExecRunner{}).Start(context.Background())
+	_, _ = (ExecRunner{}).Start(context.Background())
 	_, _ = (ExecRunner{}).Run(context.Background())
 	if err := (RealPoller{}).Wait(context.Background(), time.Millisecond); err != nil || (RealPoller{}).Now().Location() != time.UTC {
 		t.Fatalf("real poller timer: %v", err)
@@ -591,6 +601,60 @@ func TestAdapterStartFailureBranchesAndPolling(t *testing.T) {
 	runner.startHook = func() { registry.getErr = errors.New("ownership unavailable") }
 	if err := adapter.Start(context.Background(), "vm", ownership); err == nil {
 		t.Fatal("poll observation failure ignored")
+	}
+}
+
+func TestStartFailsClosedWhenMacOSQuotaExhausted(t *testing.T) {
+	now := time.Now()
+	adapter, runner, registry, ownership := testAdapter(now)
+	runner.vms["gha-macos-a"] = VM{Name: "gha-macos-a", Source: "local"}
+	if err := registry.PutOwnership(context.Background(), "gha-macos-a", ownership); err != nil {
+		t.Fatal(err)
+	}
+	runner.startNoEffect = true
+	runner.startExited = true
+	runner.startOutput = []byte("Error: The number of VMs exceeds the system limit")
+
+	err := adapter.Start(context.Background(), "gha-macos-a", ownership)
+
+	var tartErr *Error
+	if !errors.As(err, &tartErr) {
+		t.Fatalf("expected *Error, got %v", err)
+	}
+	if tartErr.Kind != ErrorHostQuota {
+		t.Fatalf("expected ErrorHostQuota, got %s", tartErr.Kind)
+	}
+}
+
+func TestStartFailsFastWhenProcessExitsEarly(t *testing.T) {
+	now := time.Now()
+	adapter, runner, registry, ownership := testAdapter(now)
+	runner.vms["gha-macos-a"] = VM{Name: "gha-macos-a", Source: "local"}
+	if err := registry.PutOwnership(context.Background(), "gha-macos-a", ownership); err != nil {
+		t.Fatal(err)
+	}
+	runner.startNoEffect = true
+	runner.startExited = true
+	runner.startOutput = []byte("some other startup failure")
+
+	err := adapter.Start(context.Background(), "gha-macos-a", ownership)
+
+	var tartErr *Error
+	if !errors.As(err, &tartErr) {
+		t.Fatalf("expected *Error, got %v", err)
+	}
+	if tartErr.Kind != ErrorCommand {
+		t.Fatalf("expected ErrorCommand, got %s", tartErr.Kind)
+	}
+}
+
+func TestBoundedWriterTruncates(t *testing.T) {
+	w := &boundedWriter{limit: 4}
+	if n, err := w.Write([]byte("123456")); n != 6 || err != nil {
+		t.Fatalf("write reported n=%d err=%v", n, err)
+	}
+	if string(w.data) != "1234" {
+		t.Fatalf("expected truncation to 4 bytes, got %q", w.data)
 	}
 }
 

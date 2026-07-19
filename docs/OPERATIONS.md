@@ -196,6 +196,17 @@ chain: runner exits, guest powers off, fresh inventory observes stopped, and
 the durable drain/deregister/delete operation completes before the base is
 selected for production.
 
+### macOS VM quota exhaustion (`host_quota`)
+
+Apple's kernel caps concurrent macOS guests at 2 per host and, on macOS 26,
+sometimes fails to release a slot after a clean `tart stop`
+(cirruslabs/tart#1217, #967). The tart adapter reports this as error kind
+`host_quota` ("exceeds the system limit") and fails closed instead of
+retrying. Operator response: verify no macOS VM is actually running
+(`tart list`), then reboot the host — a reboot is the only known way to
+clear a leaked quota slot. Do not raise `maxActive` or retry admission
+until the reboot completes.
+
 ## Real canary and authority handoff
 
 Every release carries four immutable launchd templates plus

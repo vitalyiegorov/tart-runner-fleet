@@ -409,7 +409,9 @@ func (r *recordingTartRunner) Run(_ context.Context, args ...string) ([]byte, er
 	}
 	return nil, nil
 }
-func (*recordingTartRunner) Start(context.Context, ...string) error { return nil }
+func (*recordingTartRunner) Start(context.Context, ...string) (tart.StartedCommand, error) {
+	return nil, nil
+}
 
 type fakeListener struct {
 	done chan struct{}
