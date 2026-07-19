@@ -604,47 +604,37 @@ func TestAdapterStartFailureBranchesAndPolling(t *testing.T) {
 	}
 }
 
-func TestStartFailsClosedWhenMacOSQuotaExhausted(t *testing.T) {
-	now := time.Now()
-	adapter, runner, registry, ownership := testAdapter(now)
-	runner.vms["gha-macos-a"] = VM{Name: "gha-macos-a", Source: "local"}
-	if err := registry.PutOwnership(context.Background(), "gha-macos-a", ownership); err != nil {
-		t.Fatal(err)
+func TestStartClassifiesEarlyProcessExit(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		want   ErrorKind
+	}{
+		{name: "macos quota exhausted fails closed", output: "Error: The number of VMs exceeds the system limit", want: ErrorHostQuota},
+		{name: "other early exit fails fast", output: "some other startup failure", want: ErrorCommand},
 	}
-	runner.startNoEffect = true
-	runner.startExited = true
-	runner.startOutput = []byte("Error: The number of VMs exceeds the system limit")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			adapter, runner, registry, ownership := testAdapter(now)
+			runner.vms["gha-macos-a"] = VM{Name: "gha-macos-a", Source: "local"}
+			if err := registry.PutOwnership(context.Background(), "gha-macos-a", ownership); err != nil {
+				t.Fatal(err)
+			}
+			runner.startNoEffect = true
+			runner.startExited = true
+			runner.startOutput = []byte(tc.output)
 
-	err := adapter.Start(context.Background(), "gha-macos-a", ownership)
+			err := adapter.Start(context.Background(), "gha-macos-a", ownership)
 
-	var tartErr *Error
-	if !errors.As(err, &tartErr) {
-		t.Fatalf("expected *Error, got %v", err)
-	}
-	if tartErr.Kind != ErrorHostQuota {
-		t.Fatalf("expected ErrorHostQuota, got %s", tartErr.Kind)
-	}
-}
-
-func TestStartFailsFastWhenProcessExitsEarly(t *testing.T) {
-	now := time.Now()
-	adapter, runner, registry, ownership := testAdapter(now)
-	runner.vms["gha-macos-a"] = VM{Name: "gha-macos-a", Source: "local"}
-	if err := registry.PutOwnership(context.Background(), "gha-macos-a", ownership); err != nil {
-		t.Fatal(err)
-	}
-	runner.startNoEffect = true
-	runner.startExited = true
-	runner.startOutput = []byte("some other startup failure")
-
-	err := adapter.Start(context.Background(), "gha-macos-a", ownership)
-
-	var tartErr *Error
-	if !errors.As(err, &tartErr) {
-		t.Fatalf("expected *Error, got %v", err)
-	}
-	if tartErr.Kind != ErrorCommand {
-		t.Fatalf("expected ErrorCommand, got %s", tartErr.Kind)
+			var tartErr *Error
+			if !errors.As(err, &tartErr) {
+				t.Fatalf("expected *Error, got %v", err)
+			}
+			if tartErr.Kind != tc.want {
+				t.Fatalf("expected %s, got %s", tc.want, tartErr.Kind)
+			}
+		})
 	}
 }
 
