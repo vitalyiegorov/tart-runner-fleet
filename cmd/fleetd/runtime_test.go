@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
@@ -27,6 +29,121 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
+
+type runtimeDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f runtimeDoerFunc) Do(request *http.Request) (*http.Response, error) { return f(request) }
+
+func runtimeResponse(body string) *http.Response {
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+}
+
+func TestRESTQueueIngesterPollsPersistsWaitsAndReportsFailures(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	doer := runtimeDoerFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/repos/budgie-at/budgie/actions/runs":
+			return runtimeResponse(`{"workflow_runs":[{"id":10,"run_attempt":2,"status":"in_progress","created_at":"2026-07-17T09:47:50Z"}]}`), nil
+		case "/repos/budgie-at/budgie/actions/runs/10/jobs":
+			return runtimeResponse(`{"jobs":[{"id":101,"name":"Build iOS E2E app","status":"queued","labels":["self-hosted","macos-builder"],"started_at":"2026-07-17T09:47:52Z"}]}`), nil
+		case "/repos/budgie-at/budgie/actions/runners":
+			return runtimeResponse(`{"runners":[]}`), nil
+		default:
+			t.Fatalf("unexpected REST path %q", request.URL.Path)
+			return nil, nil
+		}
+	})
+	observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test",
+		Repositories: []githubscaleset.Repository{{Owner: "budgie-at", Name: "budgie"}}, HTTP: doer,
+		Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := app.Binding{ScaleSetID: 1, Targets: []string{"budgie-at/budgie"},
+		Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}, CriticalObservations: []string{"github-rest-legacy"}})
+	ingester := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding},
+		observer: observer, interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
+	changed, err := ingester.IngestChanged(ctx)
+	if err != nil || !changed {
+		t.Fatalf("first ingest = %v, %v", changed, err)
+	}
+	jobs, err := store.QueuedGitHubJobs(ctx, 1)
+	if err != nil || len(jobs) != 1 || jobs[0].WorkflowJobID != 101 {
+		t.Fatalf("persisted jobs = %#v, %v", jobs, err)
+	}
+	now = now.Add(2 * time.Second)
+	if err := ingester.Ingest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationFresh {
+		t.Fatal("fresh REST observation not reported")
+	}
+	timed := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding},
+		observer: observer, interval: time.Second, now: time.Now, next: time.Now().Add(time.Millisecond)}
+	if _, err := timed.IngestChanged(ctx); err != nil {
+		t.Fatalf("timed poll = %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := ingester.IngestChanged(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait = %v", err)
+	}
+	broken, _ := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test",
+		Repositories: []githubscaleset.Repository{{Owner: "budgie-at", Name: "budgie"}}, HTTP: runtimeDoerFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("down")
+		}), Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
+	ingester.observer = broken
+	now = now.Add(2 * time.Second)
+	if _, err := ingester.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationStale {
+		t.Fatalf("stale REST failure = %v observation=%#v", err, health.Snapshot().Observations)
+	}
+	unavailable := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding}, observer: broken,
+		interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
+	if _, err := unavailable.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable {
+		t.Fatalf("unavailable REST failure = %v observation=%#v", err, health.Snapshot().Observations)
+	}
+	closed, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = closed.Close()
+	ingester = &restQueueIngester{coordinator: app.DemandCoordinator{Store: closed}, bindings: []app.Binding{binding}, observer: observer,
+		interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
+	if _, err := ingester.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable {
+		t.Fatalf("REST persistence failure = %v", err)
+	}
+	if _, err := (*restQueueIngester)(nil).IngestChanged(ctx); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("nil ingester = %v", err)
+	}
+}
+
+func TestRESTBindingGroupingAndRepositorySelection(t *testing.T) {
+	bindings := []app.Binding{
+		{Scope: "scope", Targets: []string{"o/r", "invalid", "o/r"}},
+		{Scope: "scope", Targets: []string{"o/other"}},
+		{},
+	}
+	grouped := bindingsByScope(bindings)
+	if len(grouped["scope"]) != 2 || len(grouped[legacyScopeName]) != 1 {
+		t.Fatalf("grouped = %#v", grouped)
+	}
+	repositories := repositoriesForBindings(grouped["scope"], nil)
+	if len(repositories) != 2 || repositories[0].Owner != "o" || repositories[1].Name != "other" {
+		t.Fatalf("repositories = %#v", repositories)
+	}
+	repositories = repositoriesForBindings(grouped[legacyScopeName], []config.Target{{Slug: "fallback/repo"}})
+	if len(repositories) != 1 || repositories[0].Owner != "fallback" {
+		t.Fatalf("fallback repositories = %#v", repositories)
+	}
+}
 
 type runtimeInventory struct{}
 
@@ -55,6 +172,13 @@ func (r keyRunner) Run(context.Context, string, ...string) ([]byte, error) { ret
 type fakeSource struct {
 	closed         atomic.Int32
 	directJITCalls atomic.Int32
+}
+
+type closeErrorSource struct{ fakeSource }
+
+func (s *closeErrorSource) Close(context.Context) error {
+	s.closed.Add(1)
+	return errors.New("close failed")
 }
 
 func (*fakeSource) Handle(ctx context.Context, _ func(context.Context, githubscaleset.Demand) error) error {
@@ -285,7 +409,9 @@ func (r *recordingTartRunner) Run(_ context.Context, args ...string) ([]byte, er
 	}
 	return nil, nil
 }
-func (*recordingTartRunner) Start(context.Context, ...string) error { return nil }
+func (*recordingTartRunner) Start(context.Context, ...string) (tart.StartedCommand, error) {
+	return nil, nil
+}
 
 type fakeListener struct {
 	done chan struct{}
@@ -315,7 +441,7 @@ func writeConfig(t *testing.T, shadow bool) string {
 	t.Helper()
 	github := ""
 	if shadow {
-		github = `,"github":{"configUrl":"https://github.com/owner","owner":"owner","clientId":"client","installationId":1,"keychainService":"fleet","keychainAccount":"app","scaleSets":[{"profile":"small","id":1,"maxCapacity":5},{"profile":"medium","id":2,"maxCapacity":5},{"profile":"large","id":3,"maxCapacity":3},{"profile":"builder","id":4,"maxCapacity":2},{"profile":"maestro","id":5,"maxCapacity":3}]}`
+		github = `,"github":{"configUrl":"https://github.com/owner","owner":"owner","clientId":"client","installationId":1,"keychainService":"fleet","keychainAccount":"app","canonicalJobInventory":true,"scaleSets":[{"profile":"small","id":1,"maxCapacity":4},{"profile":"medium","id":2,"maxCapacity":4},{"profile":"large","id":3,"maxCapacity":2},{"profile":"builder","id":4,"maxCapacity":1},{"profile":"maestro","id":5,"maxCapacity":2}]}`
 	}
 	raw := `{"baseVm":"linux","vmPrefix":"gha","pollSeconds":1,"maxLinuxWhenMacosIdle":4,"maxLinuxCpu":8,"maxLinuxMemoryMb":16384,"linuxReservationAgeSeconds":300,"minFreeDiskGb":1,"linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":50},{"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096,"diskGb":50},{"id":"large","label":"linux-large","cpu":4,"memoryMb":8192,"diskGb":50}],"macosBurst":{"enabled":true,"baseVm":"mac","vmPrefix":"gha-mac","builder":{"id":"builder","label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},"maestro":{"id":"maestro","label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2}},"targets":[{"type":"repo","slug":"owner/repo","maxActive":4}]` + github + `}`
 	path := filepath.Join(t.TempDir(), "fleet.json")
@@ -329,17 +455,18 @@ func writeMultiScopeConfig(t *testing.T) string {
 	t.Helper()
 	cfg := config.Default()
 	cfg.GitHub = config.GitHub{
-		SessionOwner:  "fleet-session",
-		App:           config.GitHubApp{ClientID: "client", KeychainService: "fleet", KeychainAccount: "app"},
-		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 101}},
+		SessionOwner:          "fleet-session",
+		CanonicalJobInventory: true,
+		App:                   config.GitHubApp{ClientID: "client", KeychainService: "fleet", KeychainAccount: "app"},
+		Installations:         []config.GitHubInstallation{{Name: "personal", InstallationID: 101}},
 		Scopes: []config.GitHubScope{{Name: "personal-repo", Kind: config.ScopeRepository,
 			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"},
 			ScaleSets: []config.ScaleSet{
-				{Profile: "small", Name: "repo-small", ID: 11, MaxCapacity: 5, Labels: []string{"self-hosted", "linux-small"}},
-				{Profile: "medium", Name: "repo-medium", ID: 12, MaxCapacity: 5, Labels: []string{"self-hosted", "linux-medium"}},
-				{Profile: "large", Name: "repo-large", ID: 13, MaxCapacity: 3, Labels: []string{"self-hosted", "linux-large"}},
-				{Profile: "builder", Name: "repo-builder", ID: 14, MaxCapacity: 2, Labels: []string{"self-hosted", "macos-builder"}},
-				{Profile: "maestro", Name: "repo-maestro", ID: 15, MaxCapacity: 3, Labels: []string{"self-hosted", "macos-maestro"}},
+				{Profile: "small", Name: "repo-small", ID: 11, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-small"}},
+				{Profile: "medium", Name: "repo-medium", ID: 12, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-medium"}},
+				{Profile: "large", Name: "repo-large", ID: 13, MaxCapacity: 2, Labels: []string{"self-hosted", "linux-large"}},
+				{Profile: "builder", Name: "repo-builder", ID: 14, MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
+				{Profile: "maestro", Name: "repo-maestro", ID: 15, MaxCapacity: 2, Labels: []string{"self-hosted", "macos-maestro"}},
 			}}},
 	}
 	var encoded bytes.Buffer
@@ -415,6 +542,67 @@ func TestRunObserveAndShadow(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Regression: canonical inventory is the only safe way for an observe
+// candidate to prove complete GitHub queue visibility beside the incumbent.
+// Observe must poll the read-only Actions REST API without opening a competing
+// official scale-set message session or acquiring lifecycle authority.
+func TestRunObservePollsCanonicalRESTWithoutScaleSetSession(t *testing.T) {
+	d := testDependencies(t)
+	var keyLoads atomic.Int32
+	baseLoadKey := d.loadKey
+	d.loadKey = func(ctx context.Context, service, account, path string) (*credentials.Secret, error) {
+		keyLoads.Add(1)
+		return baseLoadKey(ctx, service, account, path)
+	}
+	var scaleSetCreations atomic.Int32
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		scaleSetCreations.Add(1)
+		return nil, errors.New("observe opened a scale-set session")
+	}
+	observed := make(chan struct{})
+	var observedOnce sync.Once
+	d.newRESTObserver = func(cfg githubscaleset.ObserverConfig) (queueObserver, error) {
+		if len(cfg.Repositories) != 1 || cfg.Repositories[0].Owner != "owner" || cfg.Repositories[0].Name != "repo" {
+			return nil, errors.New("unexpected observer repositories")
+		}
+		return githubscaleset.NewObserver(githubscaleset.ObserverConfig{
+			BaseURL:      cfg.BaseURL,
+			Repositories: cfg.Repositories,
+			HTTP: runtimeDoerFunc(func(*http.Request) (*http.Response, error) {
+				observedOnce.Do(func() { close(observed) })
+				return runtimeResponse(`{"workflow_runs":[]}`), nil
+			}),
+			Tokens:  githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil }),
+			Timeout: cfg.Timeout,
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{
+			ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "fleet.db"),
+			HealthAddress: "127.0.0.1:0", Mode: reconcile.Observe,
+		}, d)
+	}()
+	select {
+	case <-observed:
+		cancel()
+	case err := <-done:
+		cancel()
+		t.Fatalf("observe stopped before canonical inventory: %v", err)
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("observe did not poll canonical REST inventory")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if keyLoads.Load() != 1 || scaleSetCreations.Load() != 0 {
+		t.Fatalf("key loads=%d scale-set sessions=%d", keyLoads.Load(), scaleSetCreations.Load())
 	}
 }
 
@@ -960,6 +1148,47 @@ func TestRunCleansPartialScaleSetsAndDetectsHealthDeath(t *testing.T) {
 	}
 }
 
+func TestRunJoinsStartupAndCleanupFailures(t *testing.T) {
+	d := testDependencies(t)
+	var first *closeErrorSource
+	calls := 0
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		calls++
+		if calls == 1 {
+			first = &closeErrorSource{}
+			return first, nil
+		}
+		return nil, errors.New("open failed")
+	}
+	err := runWithDependencies(context.Background(), options{Mode: reconcile.Shadow, ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "x.db")}, d)
+	if err == nil || !strings.Contains(err.Error(), "open failed") || !strings.Contains(err.Error(), "scale-set session cleanup failed") || first.closed.Load() != 1 {
+		t.Fatalf("joined startup cleanup error = %v, closed=%d", err, first.closed.Load())
+	}
+}
+
+func TestCloseScaleSetSourcesHonorsCancellationWhileDispatching(t *testing.T) {
+	started := make(chan struct{}, scaleSetCloseConcurrency)
+	release := make(chan struct{})
+	sources := make([]scaleSetSource, scaleSetCloseConcurrency+1)
+	for i := range sources {
+		sources[i] = &contextIgnoringCloseSource{started: started, release: release}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- closeScaleSetSources(ctx, sources)
+	}()
+	for range scaleSetCloseConcurrency {
+		<-started
+	}
+	cancel()
+	err := <-result
+	close(release)
+	if !errors.Is(err, errScaleSetClose) {
+		t.Fatalf("cancelled close = %v", err)
+	}
+}
+
 func TestDefaultDependenciesAndHelpers(t *testing.T) {
 	d := defaultDependencies()
 	ctx := context.Background()
@@ -1071,12 +1300,15 @@ func TestEngineTickerRecordsBoundedMetricsAndModes(t *testing.T) {
 		AdmissionAllowed: true, AdmissionReason: "capacity available",
 	}}, Demands: []domain.Demand{
 		{Profile: "small", CreatedAt: now.Add(-time.Minute)}, {Profile: "small", CreatedAt: now.Add(-2 * time.Minute)},
+	}, Queues: map[domain.ProfileID]app.QueueSummary{
+		"maestro": {Count: 3, Oldest: now.Add(-3 * time.Minute)},
 	}, Instances: []domain.Instance{
 		{Profile: "small", State: domain.InstanceRunning, Resources: domain.Resources{CPU: 2, MemoryMB: 4096}},
 		{Profile: "maestro", State: domain.InstanceDeleted, Resources: domain.Resources{CPU: 4, MemoryMB: 7168}},
 	}})
 	snapshot := health.Snapshot()
-	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 ||
+	if snapshot.Mode != telemetry.ModeLinux || snapshot.Queues["small"].Count != 2 || snapshot.Queues["small"].OldestEnqueuedAt != now.Add(-2*time.Minute) ||
+		snapshot.Queues["maestro"].Count != 3 || snapshot.Queues["maestro"].OldestEnqueuedAt != now.Add(-3*time.Minute) || snapshot.Instances["small"].CPU != 2 || snapshot.Instances["maestro"].Count != 0 ||
 		snapshot.HostPressure.FreeDiskGiB != 200 || !snapshot.HostPressure.AdmissionAllowed {
 		t.Fatalf("snapshot=%#v", snapshot)
 	}
@@ -1120,6 +1352,11 @@ func TestCanaryBindingSelectionIsExactAndLegacyCompatible(t *testing.T) {
 	selected, err = selectRuntimeBindings(legacy, options{Mode: reconcile.Canary, CanaryScope: legacyScopeName, CanaryProfile: "small"})
 	if err != nil || len(selected) != 1 {
 		t.Fatalf("legacy selected=%#v err=%v", selected, err)
+	}
+	alreadyLabelled := []app.Binding{{StoreKey: 8, ScaleSetID: 8, Scope: "scope", RequiredLabels: []string{canaryDemandLabel}, Profile: domain.Profile{ID: "small"}}}
+	selected, err = selectRuntimeBindings(alreadyLabelled, options{Mode: reconcile.Canary, CanaryScope: "scope", CanaryProfile: "small"})
+	if err != nil || len(selected) != 1 || len(selected[0].RequiredLabels) != 1 {
+		t.Fatalf("existing canary label duplicated: %#v, %v", selected, err)
 	}
 }
 

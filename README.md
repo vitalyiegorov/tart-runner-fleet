@@ -195,7 +195,10 @@ contents, archive contents, and SHA-256 manifest, and is retry-safe. It does not
 promote the daemon's launchd authority. Manually dispatched or non-generated
 tag releases independently rebuild each macOS ARM64 binary twice, compare both
 binaries and their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256
-manifests. Releases also contain secret-safe ARM64 guest bootstrap helpers for
+manifests. Conventional Commit PR titles, automatic release-note categories,
+version selection, and immutable retry semantics are documented in
+[`docs/RELEASING.md`](docs/RELEASING.md). Releases also contain secret-safe
+ARM64 guest bootstrap helpers for
 Linux and macOS; install the matching helper at
 `/usr/local/libexec/tart-runner-fleet-bootstrap` in each immutable base VM. The
 helper supervises the one-job ephemeral listener and powers the guest off after

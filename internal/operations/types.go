@@ -268,6 +268,8 @@ type DemandEvent struct {
 	Repository      string          `json:"repository,omitempty"`
 	WorkflowRunID   int64           `json:"workflow_run_id,omitempty"`
 	JobID           string          `json:"job_id,omitempty"`
+	DisplayName     string          `json:"display_name,omitempty"`
+	WorkflowRef     string          `json:"workflow_ref,omitempty"`
 	EventName       string          `json:"event_name,omitempty"`
 	Labels          []string        `json:"labels,omitempty"`
 	QueueTime       time.Time       `json:"queue_time,omitempty"`
@@ -296,13 +298,59 @@ type DemandRecord struct {
 	Repository      string
 	WorkflowRunID   int64
 	JobID           string
+	DisplayName     string
+	WorkflowRef     string
+	LogicalKey      string
 	EventName       string
 	Labels          []string
 	QueueTime       time.Time
+	FirstQueueTime  time.Time
+	WorkflowJobID   int64
+	RunAttempt      int
 	RunnerID        int
 	RunnerName      string
 	Result          string
 	UpdatedAt       time.Time
+}
+
+// DemandStatistics is GitHub's authoritative point-in-time view of one
+// runner scale set. It bounds admission but never erases durable demand.
+type DemandStatistics struct {
+	MessageID  int64
+	Available  int
+	Acquired   int
+	Assigned   int
+	Running    int
+	Registered int
+	Busy       int
+	Idle       int
+	ObservedAt time.Time
+}
+
+func (s DemandStatistics) Valid() bool {
+	return s.MessageID > 0 && s.Available >= 0 && s.Acquired >= 0 && s.Assigned >= 0 && s.Running >= 0 &&
+		s.Registered >= 0 && s.Busy >= 0 && s.Idle >= 0
+}
+
+// GitHubJobObservation is the stable REST identity used to enrich broker
+// events. A zero WorkflowJobID is never accepted, preventing guessed joins.
+type GitHubJobObservation struct {
+	WorkflowJobID  int64
+	Owner          string
+	Repository     string
+	WorkflowRunID  int64
+	RunAttempt     int
+	DisplayName    string
+	WorkflowRef    string
+	Labels         []string
+	Status         string
+	CreatedAt      time.Time
+	QueueTimeExact bool
+}
+
+func (j GitHubJobObservation) Valid() bool {
+	return j.WorkflowJobID > 0 && j.Owner != "" && j.Repository != "" && j.WorkflowRunID > 0 &&
+		j.RunAttempt > 0 && j.DisplayName != "" && !j.CreatedAt.IsZero()
 }
 
 func (c DeletionConfirmation) Safe(now time.Time, maxAge time.Duration) bool {

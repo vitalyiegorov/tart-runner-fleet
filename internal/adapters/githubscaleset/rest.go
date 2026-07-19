@@ -18,21 +18,23 @@ type Doer interface {
 }
 
 type ObserverConfig struct {
-	BaseURL      string
-	Repositories []Repository
-	HTTP         Doer
-	Tokens       TokenSource
-	Clock        Clock
-	Timeout      time.Duration
+	BaseURL                string
+	Repositories           []Repository
+	HTTP                   Doer
+	Tokens                 TokenSource
+	Clock                  Clock
+	Timeout                time.Duration
+	IncludeRunnerInventory bool
 }
 
 type Observer struct {
-	base    *url.URL
-	repos   []Repository
-	http    Doer
-	tokens  TokenSource
-	clock   Clock
-	timeout time.Duration
+	base           *url.URL
+	repos          []Repository
+	http           Doer
+	tokens         TokenSource
+	clock          Clock
+	timeout        time.Duration
+	includeRunners bool
 }
 
 func NewObserver(c ObserverConfig) (*Observer, error) {
@@ -49,7 +51,8 @@ func NewObserver(c ObserverConfig) (*Observer, error) {
 	if c.Timeout <= 0 {
 		c.Timeout = 15 * time.Second
 	}
-	return &Observer{base: base, repos: append([]Repository(nil), c.Repositories...), http: c.HTTP, tokens: c.Tokens, clock: c.Clock, timeout: c.Timeout}, nil
+	return &Observer{base: base, repos: append([]Repository(nil), c.Repositories...), http: c.HTTP, tokens: c.Tokens,
+		clock: c.Clock, timeout: c.Timeout, includeRunners: c.IncludeRunnerInventory}, nil
 }
 
 func (o *Observer) Refresh(ctx context.Context, previous *Snapshot) Observation {
@@ -68,37 +71,63 @@ func (o *Observer) Refresh(ctx context.Context, previous *Snapshot) Observation 
 func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 	s := &Snapshot{at: o.clock.Now(), runs: map[int64]WorkflowRun{}, jobs: map[int64]WorkflowJob{}, runners: map[int64]Runner{}}
 	for _, repo := range o.repos {
-		var runPage struct {
-			Runs []struct {
-				ID     int64  `json:"id"`
-				Status string `json:"status"`
-			} `json:"workflow_runs"`
-		}
-		if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runs?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runPage, func() {
-			for _, r := range runPage.Runs {
-				s.runs[r.ID] = WorkflowRun{ID: r.ID, Repository: repo, Status: r.Status}
+		var repoRuns []WorkflowRun
+		for _, status := range activeRunStatuses {
+			var runPage struct {
+				Runs []struct {
+					ID        int64     `json:"id"`
+					Attempt   int       `json:"run_attempt"`
+					Status    string    `json:"status"`
+					CreatedAt time.Time `json:"created_at"`
+				} `json:"workflow_runs"`
 			}
-			runPage.Runs = nil
-		}); err != nil {
-			return nil, fmt.Errorf("list workflow runs for %s/%s: %w", repo.Owner, repo.Name, err)
-		}
-		for _, run := range s.runs {
-			if run.Repository != repo || !activeRun(run.Status) {
-				continue
+			path := fmt.Sprintf("/repos/%s/%s/actions/runs?status=%s&per_page=100", url.PathEscape(repo.Owner),
+				url.PathEscape(repo.Name), url.QueryEscape(status))
+			if err := o.pages(ctx, path, &runPage, func() {
+				for _, r := range runPage.Runs {
+					if !activeRun(r.Status) {
+						continue
+					}
+					if _, duplicate := s.runs[r.ID]; duplicate {
+						continue
+					}
+					run := WorkflowRun{ID: r.ID, Repository: repo, Status: r.Status, Attempt: r.Attempt, CreatedAt: r.CreatedAt.UTC()}
+					s.runs[r.ID] = run
+					repoRuns = append(repoRuns, run)
+				}
+				runPage.Runs = nil
+			}); err != nil {
+				return nil, fmt.Errorf("list %s workflow runs for %s/%s: %w", status, repo.Owner, repo.Name, err)
 			}
+		}
+		for _, run := range repoRuns {
 			var jobPage struct {
 				Jobs []struct {
 					ID           int64 `json:"id"`
 					Name, Status string
-					Labels       []string `json:"labels"`
+					Labels       []string  `json:"labels"`
+					CreatedAt    time.Time `json:"created_at"`
+					StartedAt    time.Time `json:"started_at"`
+					CompletedAt  time.Time `json:"completed_at"`
 				} `json:"jobs"`
 			}
-			path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=all&per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), run.ID)
+			path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?filter=latest&per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), run.ID)
 			if err := o.pages(ctx, path, &jobPage, func() {
 				for _, j := range jobPage.Jobs {
-					job := WorkflowJob{ID: j.ID, RunID: run.ID, Repository: repo, Name: j.Name, Status: j.Status, Labels: append([]string(nil), j.Labels...)}
+					queuedAt := j.CreatedAt
+					exactQueueTime := !queuedAt.IsZero()
+					if queuedAt.IsZero() {
+						queuedAt = j.StartedAt
+						exactQueueTime = !queuedAt.IsZero()
+					}
+					if queuedAt.IsZero() {
+						queuedAt = run.CreatedAt
+					}
+					job := WorkflowJob{ID: j.ID, RunID: run.ID, Repository: repo, Name: j.Name, Status: j.Status,
+						Labels: append([]string(nil), j.Labels...), RunAttempt: run.Attempt, CreatedAt: queuedAt.UTC(),
+						QueueTimeExact: exactQueueTime, StartedAt: j.StartedAt.UTC(), CompletedAt: j.CompletedAt.UTC()}
 					s.jobs[j.ID] = job
-					if j.Status == "queued" || j.Status == "waiting" || j.Status == "pending" {
+					if j.Status == "queued" {
 						s.queued = append(s.queued, j.ID)
 					}
 				}
@@ -107,40 +136,44 @@ func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
 				return nil, fmt.Errorf("list jobs for run %d: %w", run.ID, err)
 			}
 		}
-		var runnerPage struct {
-			Runners []struct {
-				ID           int64 `json:"id"`
-				Name, Status string
-				Busy         bool
-				Labels       []struct {
-					Name string `json:"name"`
-				} `json:"labels"`
-			} `json:"runners"`
-		}
-		if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runners?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runnerPage, func() {
-			for _, r := range runnerPage.Runners {
-				labels := make([]string, len(r.Labels))
-				for i, l := range r.Labels {
-					labels[i] = l.Name
-				}
-				s.runners[r.ID] = Runner{ID: r.ID, Repository: repo, Name: r.Name, Status: r.Status, Busy: r.Busy, Labels: labels}
+		if o.includeRunners {
+			var runnerPage struct {
+				Runners []struct {
+					ID           int64 `json:"id"`
+					Name, Status string
+					Busy         bool
+					Labels       []struct {
+						Name string `json:"name"`
+					} `json:"labels"`
+				} `json:"runners"`
 			}
-			runnerPage.Runners = nil
-		}); err != nil {
-			return nil, fmt.Errorf("list runners for %s/%s: %w", repo.Owner, repo.Name, err)
+			if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runners?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runnerPage, func() {
+				for _, r := range runnerPage.Runners {
+					labels := make([]string, len(r.Labels))
+					for i, l := range r.Labels {
+						labels[i] = l.Name
+					}
+					s.runners[r.ID] = Runner{ID: r.ID, Repository: repo, Name: r.Name, Status: r.Status, Busy: r.Busy, Labels: labels}
+				}
+				runnerPage.Runners = nil
+			}); err != nil {
+				return nil, fmt.Errorf("list runners for %s/%s: %w", repo.Owner, repo.Name, err)
+			}
 		}
 	}
 	sort.Slice(s.queued, func(i, j int) bool { return s.queued[i] < s.queued[j] })
 	return s, nil
 }
 
+var activeRunStatuses = [...]string{"queued", "in_progress", "pending", "waiting", "requested"}
+
 func activeRun(status string) bool {
-	switch status {
-	case "queued", "in_progress", "pending", "waiting", "requested":
-		return true
-	default:
-		return false
+	for _, candidate := range activeRunStatuses {
+		if status == candidate {
+			return true
+		}
 	}
+	return false
 }
 
 func (o *Observer) pages(ctx context.Context, path string, target any, consume func()) error {
@@ -186,6 +219,10 @@ func (o *Observer) resolve(path string) (*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !u.IsAbs() && strings.HasPrefix(u.Path, "/") && o.base.Path != "" && o.base.Path != "/" &&
+		!strings.HasPrefix(u.Path, strings.TrimRight(o.base.Path, "/")+"/") {
+		u.Path = strings.TrimRight(o.base.Path, "/") + u.Path
+	}
 	return o.base.ResolveReference(u), nil
 }
 func (o *Observer) next(link string) (*url.URL, error) {
@@ -195,11 +232,10 @@ func (o *Observer) next(link string) (*url.URL, error) {
 			continue
 		}
 		raw := strings.Trim(strings.TrimSpace(bits[0]), "<>")
-		u, err := url.Parse(raw)
+		u, err := o.resolve(raw)
 		if err != nil {
 			return nil, err
 		}
-		u = o.base.ResolveReference(u)
 		if u.Scheme != o.base.Scheme || u.Host != o.base.Host {
 			return nil, errors.New("pagination URL escaped GitHub API origin")
 		}

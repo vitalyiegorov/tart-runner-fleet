@@ -83,7 +83,10 @@ func (f *fakeScaleSet) GenerateJitRunnerConfig(ctx context.Context, s *scaleset.
 }
 
 func TestScaleSetAckCursorRedeliveryAndJIT(t *testing.T) {
-	f := &fakeScaleSet{messages: []*scaleset.RunnerScaleSetMessage{{MessageID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 3, TotalRunningJobs: 1}}}}
+	f := &fakeScaleSet{messages: []*scaleset.RunnerScaleSetMessage{{MessageID: 7, Statistics: &scaleset.RunnerScaleSetStatistic{
+		TotalAvailableJobs: 2, TotalAcquiredJobs: 1, TotalAssignedJobs: 3, TotalRunningJobs: 1,
+		TotalRegisteredRunners: 4, TotalBusyRunners: 2, TotalIdleRunners: 2,
+	}}}}
 	s, err := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 9, MaxCapacity: 4, PollTimeout: time.Second, RequestTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +95,9 @@ func TestScaleSetAckCursorRedeliveryAndJIT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Demand.MessageID != 7 || m.Demand.Assigned != 3 || m.Demand.Running != 1 || !f.deadlineSeen {
+	if m.Demand.MessageID != 7 || m.Demand.Statistics.Available != 2 || m.Demand.Statistics.Acquired != 1 ||
+		m.Demand.Statistics.Assigned != 3 || m.Demand.Statistics.Running != 1 ||
+		m.Demand.Statistics.Registered != 4 || m.Demand.Statistics.Busy != 2 || m.Demand.Statistics.Idle != 2 || !f.deadlineSeen {
 		t.Fatalf("unexpected demand: %+v", m.Demand)
 	}
 	if _, err = s.Next(context.Background()); !errors.Is(err, ErrUnackedMessage) {
@@ -275,7 +280,9 @@ func TestScaleSetHandleRedeliversAfterTransientAckFailure(t *testing.T) {
 func TestScaleSetPreservesMixedEventsWithDeepCopies(t *testing.T) {
 	queued := time.Unix(50, 0)
 	labels := []string{"self-hosted", "arm64"}
-	base := scaleset.JobMessageBase{RunnerRequestID: 91, OwnerName: "owner", RepositoryName: "repo", WorkflowRunID: 77, JobID: "job-uuid", EventName: "push", RequestLabels: labels, QueueTime: queued}
+	base := scaleset.JobMessageBase{RunnerRequestID: 91, OwnerName: "owner", RepositoryName: "repo", WorkflowRunID: 77,
+		JobID: "job-uuid", JobDisplayName: "Build iOS E2E app", JobWorkflowRef: "owner/repo/.github/workflows/e2e.yml@refs/pull/597/merge",
+		EventName: "push", RequestLabels: labels, QueueTime: queued}
 	f := &fakeScaleSet{messages: []*scaleset.RunnerScaleSetMessage{{MessageID: 12,
 		JobAvailableMessages: []*scaleset.JobAvailable{{AcquireJobURL: "https://secret/acquire", JobMessageBase: base}, nil},
 		JobAssignedMessages:  []*scaleset.JobAssigned{{JobMessageBase: base}},
@@ -293,7 +300,9 @@ func TestScaleSetPreservesMixedEventsWithDeepCopies(t *testing.T) {
 		t.Fatalf("events: %+v", m.Demand.Events)
 	}
 	for i, e := range m.Demand.Events {
-		if e.RunnerRequestID != 91 || e.Owner != "owner" || e.Repository != "repo" || e.WorkflowRunID != 77 || e.JobID != "job-uuid" || e.EventName != "push" || e.QueueTime != queued || e.Labels[0] != "self-hosted" {
+		if e.RunnerRequestID != 91 || e.Owner != "owner" || e.Repository != "repo" || e.WorkflowRunID != 77 || e.JobID != "job-uuid" ||
+			e.DisplayName != "Build iOS E2E app" || e.WorkflowRef != "owner/repo/.github/workflows/e2e.yml@refs/pull/597/merge" ||
+			e.EventName != "push" || e.QueueTime != queued || e.Labels[0] != "self-hosted" {
 			t.Fatalf("event %d: %+v", i, e)
 		}
 	}
@@ -357,6 +366,12 @@ func TestScaleSetNormalizesPreassignedJobWithoutRunnerRequestID(t *testing.T) {
 	incomplete.JobID = ""
 	if got := eventFromBase(JobAssigned, incomplete); got.RunnerRequestID != 0 {
 		t.Fatalf("incomplete identity synthesized: %d", got.RunnerRequestID)
+	}
+}
+
+func TestFirstTimeReturnsZeroWhenNoProtocolTimestampExists(t *testing.T) {
+	if got := firstTime(time.Time{}, time.Time{}); !got.IsZero() {
+		t.Fatalf("firstTime() = %v", got)
 	}
 }
 

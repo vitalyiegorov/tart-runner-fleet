@@ -51,10 +51,11 @@ func provisionConfig() config.Config {
 	for _, value := range []struct {
 		profile, route string
 		capacity       int
-	}{{"small", "linux-small", 5}, {"medium", "linux-medium", 5}, {"large", "linux-large", 3}, {"builder", "macos-builder", 2}, {"maestro", "macos-maestro", 3}} {
+	}{{"small", "linux-small", 4}, {"medium", "linux-medium", 4}, {"large", "linux-large", 2}, {"builder", "macos-builder", 1}, {"maestro", "macos-maestro", 2}} {
 		sets = append(sets, config.ScaleSet{Profile: value.profile, Name: "repo-" + value.profile, MaxCapacity: value.capacity, Labels: []string{"self-hosted", value.route}})
 	}
-	cfg.GitHub = config.GitHub{SessionOwner: "host", App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
+	cfg.GitHub = config.GitHub{SessionOwner: "host", CanonicalJobInventory: true,
+		App:           config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
 		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}},
 		Scopes:        []config.GitHubScope{{Name: "repo", Kind: config.ScopeRepository, ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"}, ScaleSets: sets}}}
 	return cfg
@@ -166,6 +167,12 @@ func TestRunSortsScopesAndSetsWithoutMutatingInput(t *testing.T) {
 	for i := range second.ScaleSets {
 		second.ScaleSets[i].Name = "aaa-" + second.ScaleSets[i].Profile
 		second.ScaleSets[i].Labels = append([]string(nil), second.ScaleSets[i].Labels...)
+		switch second.ScaleSets[i].Profile {
+		case "small", "medium", "large", "maestro":
+			second.ScaleSets[i].MaxCapacity = 2
+		case "builder":
+			second.ScaleSets[i].MaxCapacity = 1
+		}
 	}
 	cfg.GitHub.Scopes[0].Name = "zzz"
 	cfg.GitHub.Scopes = append(cfg.GitHub.Scopes, second)

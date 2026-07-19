@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. The delivery-only queue-lookahead clauses are superseded by ADR 0013.
 
 ## Context
 

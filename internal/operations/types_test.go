@@ -109,6 +109,49 @@ func TestDemandEventValidation(t *testing.T) {
 	}
 }
 
+func TestCanonicalDemandObservationValidation(t *testing.T) {
+	statistics := DemandStatistics{MessageID: 1}
+	if !statistics.Valid() {
+		t.Fatal("valid statistics rejected")
+	}
+	for _, mutate := range []func(*DemandStatistics){
+		func(value *DemandStatistics) { value.MessageID = 0 },
+		func(value *DemandStatistics) { value.Available = -1 },
+		func(value *DemandStatistics) { value.Acquired = -1 },
+		func(value *DemandStatistics) { value.Assigned = -1 },
+		func(value *DemandStatistics) { value.Running = -1 },
+		func(value *DemandStatistics) { value.Registered = -1 },
+		func(value *DemandStatistics) { value.Busy = -1 },
+		func(value *DemandStatistics) { value.Idle = -1 },
+	} {
+		candidate := statistics
+		mutate(&candidate)
+		if candidate.Valid() {
+			t.Fatalf("invalid statistics accepted: %#v", candidate)
+		}
+	}
+	job := GitHubJobObservation{WorkflowJobID: 1, Owner: "o", Repository: "r", WorkflowRunID: 2,
+		RunAttempt: 1, DisplayName: "job", CreatedAt: time.Now()}
+	if !job.Valid() {
+		t.Fatal("valid GitHub job rejected")
+	}
+	for _, mutate := range []func(*GitHubJobObservation){
+		func(value *GitHubJobObservation) { value.WorkflowJobID = 0 },
+		func(value *GitHubJobObservation) { value.Owner = "" },
+		func(value *GitHubJobObservation) { value.Repository = "" },
+		func(value *GitHubJobObservation) { value.WorkflowRunID = 0 },
+		func(value *GitHubJobObservation) { value.RunAttempt = 0 },
+		func(value *GitHubJobObservation) { value.DisplayName = "" },
+		func(value *GitHubJobObservation) { value.CreatedAt = time.Time{} },
+	} {
+		candidate := job
+		mutate(&candidate)
+		if candidate.Valid() {
+			t.Fatalf("invalid GitHub job accepted: %#v", candidate)
+		}
+	}
+}
+
 func TestRetryPolicy(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	policy := RetryPolicy{Initial: time.Second, Maximum: 4 * time.Second, MaxAttempts: 4}

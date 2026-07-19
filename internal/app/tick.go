@@ -37,6 +37,7 @@ type TickResult struct {
 	Plan      scheduler.Plan
 	Applied   bool
 	Demands   []domain.Demand
+	Queues    map[domain.ProfileID]QueueSummary
 	Instances []domain.Instance
 	HostMode  domain.HostMode
 	Host      domain.Host
@@ -64,9 +65,13 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		}
 	}
 	demands := make([]domain.Demand, 0)
+	queues := make(map[domain.ProfileID]QueueSummary, len(e.Bindings))
 	coordinator := e.Demand
 	if coordinator.Store == nil {
 		coordinator.Store = e.Store
+	}
+	if coordinator.Now == nil {
+		coordinator.Now = func() time.Time { return now }
 	}
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
@@ -74,11 +79,21 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			return TickResult{}, err
 		}
 		demands = append(demands, queued...)
+		summary, err := coordinator.QueueSummary(ctx, binding, queued)
+		if err != nil {
+			return TickResult{}, err
+		}
+		current := queues[binding.Profile.ID]
+		current.Count += summary.Count
+		if current.Oldest.IsZero() || (!summary.Oldest.IsZero() && summary.Oldest.Before(current.Oldest)) {
+			current.Oldest = summary.Oldest
+		}
+		queues[binding.Profile.ID] = current
 	}
 	instances, host := e.Inventory.Observe(ctx)
 	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
-	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...),
+	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues,
 		Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value}, err
 }

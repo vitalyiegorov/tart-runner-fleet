@@ -130,6 +130,19 @@ func TestValidationAndPreparationRejectEveryUntrustedBoundary(t *testing.T) {
 			t.Fatal("candidate config failure ignored")
 		}
 	})
+	t.Run("target mode", func(t *testing.T) {
+		for _, mode := range []string{"observe", "shadow", "authority"} {
+			host, command, _, candidate, _ := hostFixture(t)
+			candidate.Mode = mode
+			if err := host.Validate(context.Background(), candidate); err != nil {
+				t.Fatalf("mode=%s: %v", mode, err)
+			}
+			joined := strings.Join(command.calls, "\n")
+			if want := "fleetctl config validate --mode " + mode; !strings.Contains(joined, want) {
+				t.Fatalf("mode=%s missing %q in calls:\n%s", mode, want, joined)
+			}
+		}
+	})
 	t.Run("template placeholder", func(t *testing.T) {
 		host, _, current, candidate, _ := hostFixture(t)
 		path := filepath.Join(candidate.ReleaseDir, "com.vitalyiegorov.tart-runner-fleet.authority.plist")

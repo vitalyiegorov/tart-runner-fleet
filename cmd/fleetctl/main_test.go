@@ -294,6 +294,11 @@ func TestDegradedUnavailableAndUsageExitCodes(t *testing.T) {
 	degraded := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
 		return fakeClient{status: status, live: adminapi.Check{OK: true}, ready: status.Data.Ready}, nil
 	}}
+	queueStatus := healthyStatus()
+	queueStatus.Data.QueueSLO = &adminapi.Check{OK: false, Reasons: []string{"queue_slo_breached"}}
+	queueDegraded := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
+		return fakeClient{status: queueStatus, live: queueStatus.Data.Live, ready: queueStatus.Data.Ready}, nil
+	}}
 	unavailable := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
 		return fakeClient{}, errors.New("offline")
 	}}
@@ -308,6 +313,7 @@ func TestDegradedUnavailableAndUsageExitCodes(t *testing.T) {
 		text string
 	}{
 		{name: "require ready", args: []string{"status", "--require-ready"}, deps: degraded, code: exitDegraded, text: "NOT READY"},
+		{name: "queue degraded", args: []string{"status"}, deps: queueDegraded, code: exitSuccess, text: "DEGRADED"},
 		{name: "health degraded", args: []string{"health"}, deps: degraded, code: exitDegraded, text: "successful_tick_expired"},
 		{name: "doctor degraded", args: []string{"doctor"}, deps: degraded, code: exitDegraded, text: "FAIL"},
 		{name: "offline", args: []string{"status"}, deps: unavailable, code: exitUnavailable, text: "offline"},
@@ -392,7 +398,13 @@ func TestConfigValidationAndLegacyAlias(t *testing.T) {
 			t.Fatalf("path=%s code=%d stderr=%q", path, code, stderr.String())
 		}
 	}
-	for _, args := range [][]string{{"config"}, {"config", "explain"}, {"config", "validate"}, {"config", "validate", "--output", "yaml", valid}} {
+	for _, mode := range []string{"shadow", "canary", "authority"} {
+		var modeStdout, modeStderr bytes.Buffer
+		if code := executeWith(context.Background(), []string{"config", "validate", "--mode", mode, valid}, &modeStdout, &modeStderr, deps); code != exitFailure || !strings.Contains(modeStderr.String(), "disk floor") {
+			t.Fatalf("mode=%s code=%d stdout=%q stderr=%q", mode, code, modeStdout.String(), modeStderr.String())
+		}
+	}
+	for _, args := range [][]string{{"config"}, {"config", "explain"}, {"config", "validate"}, {"config", "validate", "--output", "yaml", valid}, {"config", "validate", "--mode", "other", valid}} {
 		var stdout, stderr bytes.Buffer
 		if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitUsage {
 			t.Fatalf("args=%v code=%d", args, code)
@@ -499,12 +511,13 @@ func (f *fakeProvisioner) Ensure(_ context.Context, spec githubscaleset.ScaleSet
 func fleetProvisionConfig() config.Config {
 	cfg := config.Default()
 	cfg.Targets = []config.Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4}}
-	sets := []config.ScaleSet{{Profile: "small", Name: "repo-small", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-small"}},
-		{Profile: "medium", Name: "repo-medium", MaxCapacity: 5, Labels: []string{"self-hosted", "linux-medium"}},
-		{Profile: "large", Name: "repo-large", MaxCapacity: 3, Labels: []string{"self-hosted", "linux-large"}},
-		{Profile: "builder", Name: "repo-builder", MaxCapacity: 2, Labels: []string{"self-hosted", "macos-builder"}},
-		{Profile: "maestro", Name: "repo-maestro", MaxCapacity: 3, Labels: []string{"self-hosted", "macos-maestro"}}}
-	cfg.GitHub = config.GitHub{SessionOwner: "host", App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
+	sets := []config.ScaleSet{{Profile: "small", Name: "repo-small", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-small"}},
+		{Profile: "medium", Name: "repo-medium", MaxCapacity: 4, Labels: []string{"self-hosted", "linux-medium"}},
+		{Profile: "large", Name: "repo-large", MaxCapacity: 2, Labels: []string{"self-hosted", "linux-large"}},
+		{Profile: "builder", Name: "repo-builder", MaxCapacity: 1, Labels: []string{"self-hosted", "macos-builder"}},
+		{Profile: "maestro", Name: "repo-maestro", MaxCapacity: 2, Labels: []string{"self-hosted", "macos-maestro"}}}
+	cfg.GitHub = config.GitHub{SessionOwner: "host", CanonicalJobInventory: true,
+		App:           config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
 		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}}, Scopes: []config.GitHubScope{{Name: "repo", Kind: config.ScopeRepository,
 			ConfigURL: "https://github.com/owner/repo", Installation: "personal", Targets: []string{"owner/repo"}, ScaleSets: sets}}}
 	return cfg

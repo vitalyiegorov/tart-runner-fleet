@@ -141,6 +141,37 @@ func TestHealthSnapshotMetricsAndDefensiveCopies(t *testing.T) {
 	}
 }
 
+func TestQueueSLOIsIndependentFromAuthorityReadiness(t *testing.T) {
+	health, clock := newTestHealth(t)
+	if err := health.SetQueue("builder", 0, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if queue := health.QueueHealth(); !queue.OK {
+		t.Fatalf("idle queue health = %+v", queue)
+	}
+	health.RecordTick(true)
+	for _, name := range []string{"github", "host", "tart"} {
+		if err := health.RecordObservation(name, ObservationFresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := health.SetQueue("linux-small", 1, clock.Now().Add(-11*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if ready := health.Ready(); !ready.OK {
+		t.Fatalf("queue backlog disabled authority readiness = %+v", ready)
+	}
+	if queue := health.QueueHealth(); queue.OK || !contains(queue.Reasons, "queue_slo_breached") || contains(queue.Reasons, "queue_incident") {
+		t.Fatalf("queue SLO = %+v", queue)
+	}
+	if err := health.SetQueue("linux-small", 1, clock.Now().Add(-31*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if queue := health.QueueHealth(); queue.OK || !contains(queue.Reasons, "queue_incident") {
+		t.Fatalf("queue incident = %+v", queue)
+	}
+}
+
 func TestHealthRejectsInvalidUpdatesWithoutEchoingValues(t *testing.T) {
 	health, clock := newTestHealth(t)
 	secret := "ghp_do-not-leak"
@@ -196,6 +227,9 @@ func TestNewHealthValidationAndDefaults(t *testing.T) {
 		{ReadyTickTTL: -1},
 		{ReadyTickTTL: time.Minute, LiveTickTTL: time.Second},
 		{CriticalObservationTTL: -1},
+		{QueueSLO: -1},
+		{QueueIncidentSLO: -1},
+		{QueueSLO: time.Hour, QueueIncidentSLO: time.Minute},
 		{Profiles: []string{"x", "x"}},
 		{CriticalObservations: []string{"x", "x"}},
 		{Profiles: []string{""}},

@@ -142,10 +142,15 @@ type GitHub struct {
 	KeychainAccount string     `json:"keychainAccount"`
 	ScaleSets       []ScaleSet `json:"scaleSets"`
 
-	SessionOwner  string               `json:"sessionOwner"`
-	App           GitHubApp            `json:"app"`
-	Installations []GitHubInstallation `json:"installations"`
-	Scopes        []GitHubScope        `json:"scopes"`
+	SessionOwner string `json:"sessionOwner"`
+	// CanonicalJobInventory enables the bounded REST job inventory and replaces
+	// scale-set lookahead with truthful advertised capacity. It is deliberately
+	// opt-in so a release can land before GitHub App permissions and the live
+	// configuration are migrated together through shadow and canary gates.
+	CanonicalJobInventory bool                 `json:"canonicalJobInventory,omitempty"`
+	App                   GitHubApp            `json:"app"`
+	Installations         []GitHubInstallation `json:"installations"`
+	Scopes                []GitHubScope        `json:"scopes"`
 }
 
 type ScaleSet struct {
@@ -530,8 +535,16 @@ func (c Config) validateLegacyAuthority() error {
 	for _, scaleSet := range c.GitHub.ScaleSets {
 		_, known := profiles[scaleSet.Profile]
 		runtimeCapacity := min(capacities[scaleSet.Profile], targetCapacity)
-		if !known || scaleSet.ID <= 0 || scaleSet.MaxCapacity <= runtimeCapacity {
+		if !known || scaleSet.ID <= 0 {
 			return fmt.Errorf("invalid scale set for profile %q", scaleSet.Profile)
+		}
+		if c.GitHub.CanonicalJobInventory && scaleSet.MaxCapacity != runtimeCapacity {
+			return fmt.Errorf("scale set for profile %q requires truthful capacity: maxCapacity=%d, runtime capacity=%d",
+				scaleSet.Profile, scaleSet.MaxCapacity, runtimeCapacity)
+		}
+		if !c.GitHub.CanonicalJobInventory && scaleSet.MaxCapacity <= runtimeCapacity {
+			return fmt.Errorf("scale set for profile %q requires queue lookahead until canonicalJobInventory is enabled: maxCapacity=%d, runtime capacity=%d",
+				scaleSet.Profile, scaleSet.MaxCapacity, runtimeCapacity)
 		}
 		if _, duplicate := seen[scaleSet.Profile]; duplicate {
 			return fmt.Errorf("duplicate scale set profile %q", scaleSet.Profile)
@@ -615,7 +628,7 @@ func (c Config) validateMultiScopeAuthority() error {
 		if err := validateScopeTargets(scope, parsed, targets, assignedTargets); err != nil {
 			return err
 		}
-		if err := validateScopeScaleSets(scope, profiles, capacities, targetCapacities); err != nil {
+		if err := validateScopeScaleSets(scope, profiles, capacities, targetCapacities, github.CanonicalJobInventory); err != nil {
 			return err
 		}
 	}
@@ -719,7 +732,8 @@ func validateScopeTargets(scope GitHubScope, parsed *url.URL, targets, assigned 
 	return nil
 }
 
-func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capacities, targetCapacities map[string]int) error {
+func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capacities, targetCapacities map[string]int,
+	canonicalJobInventory bool) error {
 	seenProfiles := make(map[string]struct{}, len(scope.ScaleSets))
 	seenNames := make(map[string]struct{}, len(scope.ScaleSets))
 	scopeCapacity := 0
@@ -728,12 +742,16 @@ func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capac
 	}
 	for _, scaleSet := range scope.ScaleSets {
 		route, known := profiles[scaleSet.Profile]
-		if !known || strings.TrimSpace(scaleSet.Name) == "" || scaleSet.ID < 0 || scaleSet.MaxCapacity < 0 {
+		if !known || strings.TrimSpace(scaleSet.Name) == "" || scaleSet.ID < 0 || scaleSet.MaxCapacity <= 0 {
 			return fmt.Errorf("invalid scale set for profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)
 		}
 		runtimeCapacity := min(capacities[scaleSet.Profile], scopeCapacity)
-		if scaleSet.MaxCapacity <= runtimeCapacity {
-			return fmt.Errorf("scale set %q in GitHub scope %q requires queue lookahead: maxCapacity=%d, runtime capacity=%d",
+		if canonicalJobInventory && scaleSet.MaxCapacity != runtimeCapacity {
+			return fmt.Errorf("scale set %q in GitHub scope %q requires truthful capacity: maxCapacity=%d, runtime capacity=%d",
+				scaleSet.Name, scope.Name, scaleSet.MaxCapacity, runtimeCapacity)
+		}
+		if !canonicalJobInventory && scaleSet.MaxCapacity <= runtimeCapacity {
+			return fmt.Errorf("scale set %q in GitHub scope %q requires queue lookahead until canonicalJobInventory is enabled: maxCapacity=%d, runtime capacity=%d",
 				scaleSet.Name, scope.Name, scaleSet.MaxCapacity, runtimeCapacity)
 		}
 		if _, duplicate := seenProfiles[scaleSet.Profile]; duplicate {

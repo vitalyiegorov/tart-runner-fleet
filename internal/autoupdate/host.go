@@ -127,7 +127,7 @@ func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
 	if err := verifyChecksums(candidate.ReleaseDir); err != nil {
 		return err
 	}
-	if _, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleetctl"), "config", "validate", candidate.ConfigPath); err != nil {
+	if _, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleetctl"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
 		return fmt.Errorf("candidate config validation: %w", err)
 	}
 	return nil

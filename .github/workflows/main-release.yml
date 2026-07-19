@@ -93,50 +93,43 @@ jobs:
       - name: Publish immutable production release
         run: |
           set -euo pipefail
+          assets=(
+            "dist/$ARCHIVE"
+            dist/SHA256SUMS
+            dist/BUILDINFO.txt
+            dist/RELEASE_VERSION
+            dist/fleetd
+            dist/fleetctl
+            dist/tart-runner-fleet-bootstrap-darwin-arm64
+            dist/tart-runner-fleet-bootstrap-linux-arm64
+            dist/fleetd.cdx.json
+            dist/fleetctl.cdx.json
+            dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
+            dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json
+            dist/com.vitalyiegorov.tart-runner-fleet.plist
+            dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist
+            dist/com.vitalyiegorov.tart-runner-fleet.canary.plist
+            dist/com.vitalyiegorov.tart-runner-fleet.authority.plist
+            dist/render-launchd.sh
+          )
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            TAG_SHA="$(gh api "repos/$GH_REPO/commits/$VERSION" --jq .sha)"
-            test "$TAG_SHA" = "$HEAD_SHA"
-            # A retry may resume a partially completed upload. The validated
-            # artifact is immutable for this CI run, so replacement is safe.
-            gh release upload "$VERSION" \
-              "dist/$ARCHIVE" \
-              dist/SHA256SUMS \
-              dist/BUILDINFO.txt \
-              dist/RELEASE_VERSION \
-              dist/fleetd \
-              dist/fleetctl \
-              dist/tart-runner-fleet-bootstrap-darwin-arm64 \
-              dist/tart-runner-fleet-bootstrap-linux-arm64 \
-              dist/fleetd.cdx.json \
-              dist/fleetctl.cdx.json \
-              dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
-              dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
-              dist/com.vitalyiegorov.tart-runner-fleet.plist \
-              dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist \
-              dist/com.vitalyiegorov.tart-runner-fleet.canary.plist \
-              dist/com.vitalyiegorov.tart-runner-fleet.authority.plist \
-              dist/render-launchd.sh \
-              --clobber
+            IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
+            if [ "$IS_DRAFT" != true ]; then
+              TAG_SHA="$(gh api "repos/$GH_REPO/commits/$VERSION" --jq .sha)"
+              test "$TAG_SHA" = "$HEAD_SHA"
+              printf 'release %s is already published and immutable\n' "$VERSION"
+              exit 0
+            fi
+            DRAFT_TARGET="$(gh release view "$VERSION" --json targetCommitish --jq .targetCommitish)"
+            test "$DRAFT_TARGET" = "$HEAD_SHA"
           else
             gh release create "$VERSION" \
-              "dist/$ARCHIVE" \
-              dist/SHA256SUMS \
-              dist/BUILDINFO.txt \
-              dist/RELEASE_VERSION \
-              dist/fleetd \
-              dist/fleetctl \
-              dist/tart-runner-fleet-bootstrap-darwin-arm64 \
-              dist/tart-runner-fleet-bootstrap-linux-arm64 \
-              dist/fleetd.cdx.json \
-              dist/fleetctl.cdx.json \
-              dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
-              dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
-              dist/com.vitalyiegorov.tart-runner-fleet.plist \
-              dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist \
-              dist/com.vitalyiegorov.tart-runner-fleet.canary.plist \
-              dist/com.vitalyiegorov.tart-runner-fleet.authority.plist \
-              dist/render-launchd.sh \
               --target "$HEAD_SHA" \
               --title "$VERSION" \
+              --draft \
               --generate-notes
           fi
+          # A retry may repair a partial draft. Repository-level release
+          # immutability locks the assets and tag as soon as it is published.
+          gh release upload "$VERSION" "${assets[@]}" --clobber
+          gh release edit "$VERSION" --draft=false --latest

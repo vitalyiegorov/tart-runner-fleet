@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -56,7 +57,7 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 				}
 				seenKeys[key] = identity
 				bindings = append(bindings, Binding{StoreKey: key, ScaleSetID: int64(scaleSet.ID), Scope: scope.Name,
-					Targets: append([]string(nil), scope.Targets...), Profile: profile})
+					Targets: append([]string(nil), scope.Targets...), ScaleSetLabels: effectiveScaleSetLabels(scaleSet), Profile: profile})
 			}
 		}
 		return bindings, nil
@@ -67,9 +68,24 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 		if !ok || scaleSet.ID <= 0 {
 			return nil, fmt.Errorf("invalid scale set profile %q", scaleSet.Profile)
 		}
-		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID), Profile: profile})
+		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID),
+			ScaleSetLabels: effectiveScaleSetLabels(scaleSet), Profile: profile})
 	}
 	return bindings, nil
+}
+
+func effectiveScaleSetLabels(scaleSet config.ScaleSet) []string {
+	labels := append([]string(nil), scaleSet.Labels...)
+	name := strings.TrimSpace(scaleSet.Name)
+	if name == "" {
+		return labels
+	}
+	for _, label := range labels {
+		if strings.EqualFold(label, name) {
+			return labels
+		}
+	}
+	return append(labels, name)
 }
 
 func scopedStoreKey(scope string, scaleSetID int) int64 {

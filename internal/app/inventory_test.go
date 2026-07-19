@@ -98,6 +98,12 @@ func TestProductionInventoryMarksRunningCompletedRunnerRecoverableFromFreshEvide
 	}
 }
 
+func TestProductionInventoryUsesBoundedDefaultRecoveryEvidenceAge(t *testing.T) {
+	if got := (ProductionInventory{}).recoveryConfirmationMaxAge(); got != 30*time.Second {
+		t.Fatalf("default recovery evidence age = %v", got)
+	}
+}
+
 func TestProductionInventoryKnownPressureReturnsFreshZeroCapacity(t *testing.T) {
 	now := time.Now().UTC()
 	snapshot := healthySnapshot(now)

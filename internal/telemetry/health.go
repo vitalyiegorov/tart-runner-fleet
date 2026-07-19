@@ -12,6 +12,8 @@ const (
 	defaultReadyTickTTL           = 30 * time.Second
 	defaultLiveTickTTL            = 2 * time.Minute
 	defaultCriticalObservationTTL = 45 * time.Second
+	defaultQueueSLO               = 10 * time.Minute
+	defaultQueueIncidentSLO       = 30 * time.Minute
 )
 
 var (
@@ -51,6 +53,8 @@ type HealthConfig struct {
 	ReadyTickTTL           time.Duration
 	LiveTickTTL            time.Duration
 	CriticalObservationTTL time.Duration
+	QueueSLO               time.Duration
+	QueueIncidentSLO       time.Duration
 	Profiles               []string
 	CriticalObservations   []string
 }
@@ -113,6 +117,8 @@ type Health struct {
 	readyTickTTL           time.Duration
 	liveTickTTL            time.Duration
 	criticalObservationTTL time.Duration
+	queueSLO               time.Duration
+	queueIncidentSLO       time.Duration
 	profiles               map[string]struct{}
 	critical               map[string]struct{}
 
@@ -132,7 +138,8 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 	if clock == nil {
 		return nil, errClockRequired
 	}
-	if config.ReadyTickTTL < 0 || config.LiveTickTTL < 0 || config.CriticalObservationTTL < 0 {
+	if config.ReadyTickTTL < 0 || config.LiveTickTTL < 0 || config.CriticalObservationTTL < 0 ||
+		config.QueueSLO < 0 || config.QueueIncidentSLO < 0 {
 		return nil, errInvalidHealthConfig
 	}
 	if config.ReadyTickTTL == 0 {
@@ -143,6 +150,15 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 	}
 	if config.CriticalObservationTTL == 0 {
 		config.CriticalObservationTTL = defaultCriticalObservationTTL
+	}
+	if config.QueueSLO == 0 {
+		config.QueueSLO = defaultQueueSLO
+	}
+	if config.QueueIncidentSLO == 0 {
+		config.QueueIncidentSLO = defaultQueueIncidentSLO
+	}
+	if config.QueueIncidentSLO < config.QueueSLO {
+		return nil, errInvalidHealthConfig
 	}
 	if config.LiveTickTTL <= config.ReadyTickTTL {
 		return nil, errInvalidHealthConfig
@@ -161,7 +177,8 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 		clock: clock, createdAt: now,
 		readyTickTTL: config.ReadyTickTTL, liveTickTTL: config.LiveTickTTL,
 		criticalObservationTTL: config.CriticalObservationTTL,
-		profiles:               profiles, critical: critical, mode: ModeIdle,
+		queueSLO:               config.QueueSLO, queueIncidentSLO: config.QueueIncidentSLO,
+		profiles: profiles, critical: critical, mode: ModeIdle,
 		queues:       make(map[string]QueueMetrics, len(profiles)),
 		instances:    make(map[string]InstanceMetrics, len(profiles)),
 		observations: make(map[string]ObservationMetric, len(critical)),
@@ -353,6 +370,34 @@ func (h *Health) Ready() HealthResult {
 			reasons["critical_observation_stale"] = struct{}{}
 		default:
 			reasons["critical_observation_unavailable"] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(reasons))
+	for reason := range reasons {
+		ordered = append(ordered, reason)
+	}
+	sort.Strings(ordered)
+	return HealthResult{OK: len(ordered) == 0, Reasons: ordered}
+}
+
+// QueueHealth reports service SLO degradation independently from authority
+// readiness. Capacity backlog must page operators, but it must not make a
+// healthy authority daemon fail updater verification or restart in a loop.
+func (h *Health) QueueHealth() HealthResult {
+	now := h.clock.Now()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	reasons := make(map[string]struct{})
+	for _, queue := range h.queues {
+		if queue.Count <= 0 || queue.OldestEnqueuedAt.IsZero() {
+			continue
+		}
+		age := now.Sub(queue.OldestEnqueuedAt)
+		if age > h.queueSLO {
+			reasons["queue_slo_breached"] = struct{}{}
+		}
+		if age > h.queueIncidentSLO {
+			reasons["queue_incident"] = struct{}{}
 		}
 	}
 	ordered := make([]string, 0, len(reasons))

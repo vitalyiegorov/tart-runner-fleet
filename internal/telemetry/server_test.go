@@ -93,7 +93,11 @@ func TestServerEndpointsAndBoundedMetrics(t *testing.T) {
 }
 
 func TestServerUnhealthyMethodAndUnknownPath(t *testing.T) {
-	health, _ := newTestHealth(t)
+	health, clock := newTestHealth(t)
+	if err := health.RecordObservation("github", ObservationFresh); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
 	server, err := NewServer(health, ServerConfig{})
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +138,9 @@ func TestServerGracefulShutdownAndServeErrors(t *testing.T) {
 	server, err := NewServer(health, ServerConfig{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := server.Serve(nil); !errors.Is(err, errListenerRequired) {
+		t.Fatalf("nil listener error=%v", err)
 	}
 	listener := newBlockingListener()
 	done := make(chan error, 1)

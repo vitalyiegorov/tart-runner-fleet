@@ -1,0 +1,72 @@
+name: PR Metadata
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pr-metadata-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release-label:
+    name: Classify release note
+    runs-on: [self-hosted, linux-tiered, linux-small]
+    timeout-minutes: 5
+    steps:
+      # This privileged workflow deliberately does not check out or execute PR
+      # code. It reads only event metadata from the trusted base workflow.
+      - name: Derive release category from Conventional Commit title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9][a-z0-9._/-]*\))?!?: [a-z0-9].+[^.]$'
+          if ! printf '%s\n' "$PR_TITLE" | grep -E -q "$pattern" ||
+            [ "${#PR_TITLE}" -gt 100 ]; then
+            printf 'PR title is not a supported Conventional Commit: %s\n' "$PR_TITLE" >&2
+            exit 2
+          fi
+
+          type="$(printf '%s\n' "$PR_TITLE" | sed -E 's/^([a-z]+).*/\1/')"
+          prefix="${PR_TITLE%%:*}"
+          case "$type" in
+            feat) category=release-feature ;;
+            fix) category=release-fix ;;
+            perf) category=release-performance ;;
+            docs) category=release-documentation ;;
+            chore)
+              case "$prefix" in
+                chore\(deps\)|chore\(dependencies\)) category=release-dependencies ;;
+                *) category=release-maintenance ;;
+              esac
+              ;;
+            build|ci|refactor|revert|style|test) category=release-maintenance ;;
+            *) exit 2 ;;
+          esac
+
+          for label in \
+            release-feature release-fix release-performance \
+            release-documentation release-dependencies release-maintenance \
+            release-breaking; do
+            gh api --method DELETE \
+              "repos/$GH_REPO/issues/$PR_NUMBER/labels/$label" \
+              >/dev/null 2>&1 || true
+          done
+
+          gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
+            -f "labels[]=$category" >/dev/null
+          case "$prefix" in
+            *!)
+              gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
+                -f 'labels[]=release-breaking' >/dev/null
+              ;;
+          esac

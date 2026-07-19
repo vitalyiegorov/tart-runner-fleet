@@ -2,8 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -13,6 +16,21 @@ import (
 type DemandStore interface {
 	ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (bool, error)
 	ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error)
+}
+
+type DemandStatisticsStore interface {
+	PutDemandStatistics(context.Context, int64, operations.DemandStatistics) (bool, error)
+	DemandStatistics(context.Context, int64) (operations.DemandStatistics, error)
+}
+
+type GitHubJobStore interface {
+	ReconcileGitHubJobSnapshot(context.Context, time.Time, map[int64][]operations.GitHubJobObservation) (bool, error)
+	QueuedGitHubJobs(context.Context, int64) ([]operations.GitHubJobObservation, error)
+}
+
+type GitHubQueueSnapshot interface {
+	ObservedAt() time.Time
+	QueuedJobs() []githubscaleset.WorkflowJob
 }
 
 type DemandProjector interface {
@@ -28,6 +46,7 @@ type Binding struct {
 	ScaleSetID     int64
 	Scope          string
 	Targets        []string
+	ScaleSetLabels []string
 	RequiredLabels []string
 	Profile        domain.Profile
 }
@@ -49,7 +68,7 @@ func (b Binding) accepts(repo string) bool {
 		return true
 	}
 	for _, target := range b.Targets {
-		if target == repo {
+		if strings.EqualFold(target, repo) {
 			return true
 		}
 	}
@@ -60,7 +79,7 @@ func (b Binding) acceptsLabels(labels []string) bool {
 	for _, required := range b.RequiredLabels {
 		found := false
 		for _, label := range labels {
-			if label == required {
+			if strings.EqualFold(label, required) {
 				found = true
 				break
 			}
@@ -72,9 +91,131 @@ func (b Binding) acceptsLabels(labels []string) bool {
 	return true
 }
 
+// matchesRESTLabels mirrors GitHub's scale-set label compatibility rule: a
+// queued job is eligible when every label it requests is advertised by the
+// scale set. RequiredLabels is an additional controller-side isolation guard
+// used by exact-scope canaries. Bindings constructed by older callers without
+// ScaleSetLabels retain the narrow profile-route fallback.
+func (b Binding) matchesRESTLabels(labels []string) bool {
+	if !b.acceptsLabels(labels) {
+		return false
+	}
+	if len(b.ScaleSetLabels) == 0 {
+		return containsFold(labels, string(b.Profile.Route))
+	}
+	for _, requested := range labels {
+		if !containsFold(b.ScaleSetLabels, requested) {
+			return false
+		}
+	}
+	return true
+}
+
 type DemandCoordinator struct {
-	Store     DemandStore
-	Projector DemandProjector
+	Store            DemandStore
+	Projector        DemandProjector
+	Now              func() time.Time
+	StatisticsMaxAge time.Duration
+	StrictJobRouting bool
+}
+
+const defaultStatisticsMaxAge = 2 * time.Minute
+
+func (c DemandCoordinator) now() time.Time {
+	if c.Now != nil {
+		return c.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (c DemandCoordinator) statisticsMaxAge() time.Duration {
+	if c.StatisticsMaxAge > 0 {
+		return c.StatisticsMaxAge
+	}
+	return defaultStatisticsMaxAge
+}
+
+type QueueSummary struct {
+	Count  int
+	Oldest time.Time
+}
+
+func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, executable []domain.Demand) (QueueSummary, error) {
+	summary := QueueSummary{Count: len(executable)}
+	for _, demand := range executable {
+		if summary.Oldest.IsZero() || demand.CreatedAt.Before(summary.Oldest) {
+			summary.Oldest = demand.CreatedAt
+		}
+	}
+	store, ok := c.Store.(GitHubJobStore)
+	if !ok {
+		return summary, nil
+	}
+	jobs, err := store.QueuedGitHubJobs(ctx, binding.durableKey())
+	if err != nil {
+		return QueueSummary{}, err
+	}
+	if len(jobs) > summary.Count {
+		summary.Count = len(jobs)
+	}
+	for _, job := range jobs {
+		if job.QueueTimeExact && (summary.Oldest.IsZero() || job.CreatedAt.Before(summary.Oldest)) {
+			summary.Oldest = job.CreatedAt
+		}
+	}
+	return summary, nil
+}
+
+// ReconcileQueuedJobs adds REST's complete queue view without granting it
+// lifecycle authority. Jobs are routed through the same scope and profile
+// predicates as scale-set demand.
+func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []Binding, snapshot GitHubQueueSnapshot) (bool, error) {
+	store, ok := c.Store.(GitHubJobStore)
+	if !ok || snapshot == nil || snapshot.ObservedAt().IsZero() {
+		return false, operations.ErrInvalid
+	}
+	observations := make(map[int64][]operations.GitHubJobObservation, len(bindings))
+	for _, binding := range bindings {
+		if !binding.valid() {
+			return false, operations.ErrInvalid
+		}
+		observations[binding.durableKey()] = nil
+	}
+	for _, job := range snapshot.QueuedJobs() {
+		var matched *Binding
+		for i := range bindings {
+			binding := &bindings[i]
+			if !binding.accepts(job.Repository.Owner+"/"+job.Repository.Name) || !binding.matchesRESTLabels(job.Labels) {
+				continue
+			}
+			if matched != nil {
+				return false, fmt.Errorf("GitHub job %d matches scale sets %d and %d: %w",
+					job.ID, matched.ScaleSetID, binding.ScaleSetID, operations.ErrConflict)
+			}
+			matched = binding
+		}
+		if matched == nil {
+			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") {
+				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
+			}
+			continue
+		}
+		key := matched.durableKey()
+		observations[key] = append(observations[key], operations.GitHubJobObservation{WorkflowJobID: job.ID,
+			Owner: job.Repository.Owner, Repository: job.Repository.Name, WorkflowRunID: job.RunID,
+			RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
+			Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
+	}
+	return store.ReconcileGitHubJobSnapshot(ctx, snapshot.ObservedAt(), observations)
+}
+
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c DemandCoordinator) IngestOnce(ctx context.Context, binding Binding, source MessageSource) error {
@@ -92,6 +233,22 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 	}
 	changed := false
 	err := source.Handle(ctx, func(ctx context.Context, demand githubscaleset.Demand) error {
+		if demand.Statistics.MessageID > 0 {
+			statisticsStore, ok := c.Store.(DemandStatisticsStore)
+			if !ok {
+				return fmt.Errorf("demand statistics store unavailable: %w", operations.ErrUncertain)
+			}
+			statisticsChanged, err := statisticsStore.PutDemandStatistics(ctx, binding.durableKey(), operations.DemandStatistics{
+				MessageID: int64(demand.Statistics.MessageID), Available: demand.Statistics.Available,
+				Acquired: demand.Statistics.Acquired, Assigned: demand.Statistics.Assigned, Running: demand.Statistics.Running,
+				Registered: demand.Statistics.Registered, Busy: demand.Statistics.Busy, Idle: demand.Statistics.Idle,
+				ObservedAt: c.now(),
+			})
+			changed = changed || statisticsChanged
+			if err != nil {
+				return err
+			}
+		}
 		events := make([]operations.DemandEvent, 0, len(demand.Events))
 		for _, event := range demand.Events {
 			if !binding.accepts(event.Owner+"/"+event.Repository) || !binding.acceptsLabels(event.Labels) {
@@ -123,7 +280,8 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 func convertEvent(event githubscaleset.JobEvent) operations.DemandEvent {
 	return operations.DemandEvent{Kind: operations.DemandEventKind(event.Kind), RunnerRequestID: event.RunnerRequestID,
 		Owner: event.Owner, Repository: event.Repository, WorkflowRunID: event.WorkflowRunID, JobID: event.JobID,
-		EventName: event.EventName, Labels: append([]string(nil), event.Labels...), QueueTime: event.QueueTime,
+		DisplayName: event.DisplayName, WorkflowRef: event.WorkflowRef, EventName: event.EventName,
+		Labels: append([]string(nil), event.Labels...), QueueTime: event.QueueTime,
 		RunnerID: event.RunnerID, RunnerName: event.RunnerName, Result: event.Result}
 }
 
@@ -135,7 +293,9 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 	if err != nil {
 		return nil, err
 	}
-	result := make([]domain.Demand, 0, len(records))
+	// A scale-set message may rotate request IDs for one logical workflow job.
+	// Keep only its newest actionable request while preserving canonical age.
+	canonical := make(map[string]operations.DemandRecord, len(records))
 	for _, record := range records {
 		if record.Status != operations.DemandJobAvailable {
 			continue
@@ -143,12 +303,92 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 		if !binding.accepts(record.Owner+"/"+record.Repository) || !binding.acceptsLabels(record.Labels) {
 			continue
 		}
-		if record.RunnerRequestID <= 0 || record.WorkflowRunID <= 0 || record.Owner == "" || record.Repository == "" || record.QueueTime.IsZero() {
+		createdAt := record.FirstQueueTime
+		if createdAt.IsZero() {
+			createdAt = record.QueueTime
+		}
+		if record.RunnerRequestID <= 0 || record.WorkflowRunID <= 0 || record.Owner == "" || record.Repository == "" || createdAt.IsZero() {
 			return nil, fmt.Errorf("incomplete durable demand %d: %w", record.RunnerRequestID, operations.ErrUncertain)
 		}
+		key := record.LogicalKey
+		if key == "" {
+			key = fmt.Sprintf("request:%d", record.RunnerRequestID)
+		}
+		previous, exists := canonical[key]
+		if !exists || record.UpdatedAt.After(previous.UpdatedAt) || (record.UpdatedAt.Equal(previous.UpdatedAt) && record.RunnerRequestID > previous.RunnerRequestID) {
+			canonical[key] = record
+		}
+	}
+	selected := make([]operations.DemandRecord, 0, len(canonical))
+	for _, record := range canonical {
+		selected = append(selected, record)
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		left, right := selected[i].FirstQueueTime, selected[j].FirstQueueTime
+		if left.IsZero() {
+			left = selected[i].QueueTime
+		}
+		if right.IsZero() {
+			right = selected[j].QueueTime
+		}
+		if left.Equal(right) {
+			return selected[i].RunnerRequestID < selected[j].RunnerRequestID
+		}
+		return left.Before(right)
+	})
+	if len(selected) == 0 {
+		return []domain.Demand{}, nil
+	}
+	statisticsStore, ok := c.Store.(DemandStatisticsStore)
+	if !ok {
+		return nil, fmt.Errorf("scale-set statistics unavailable: %w", operations.ErrUncertain)
+	}
+	statistics, statisticsErr := statisticsStore.DemandStatistics(ctx, binding.durableKey())
+	if statisticsErr != nil {
+		if errors.Is(statisticsErr, operations.ErrNotFound) {
+			return nil, fmt.Errorf("scale-set statistics not observed: %w", operations.ErrUncertain)
+		}
+		return nil, statisticsErr
+	}
+	now := c.now()
+	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
+		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
+		return nil, fmt.Errorf("scale-set statistics are stale or invalid: %w", operations.ErrUncertain)
+	}
+	normalLimit := statistics.Available
+	preassignedLimit := statistics.Assigned - statistics.Running
+	if preassignedLimit < 0 {
+		preassignedLimit = 0
+	}
+	bounded := make([]operations.DemandRecord, 0, min(len(selected), normalLimit+preassignedLimit))
+	for _, record := range selected {
+		if githubscaleset.IsPreassignedRequestID(record.RunnerRequestID) {
+			if preassignedLimit == 0 {
+				continue
+			}
+			preassignedLimit--
+		} else {
+			if normalLimit == 0 {
+				continue
+			}
+			normalLimit--
+		}
+		bounded = append(bounded, record)
+	}
+	selected = bounded
+	result := make([]domain.Demand, 0, len(selected))
+	for _, record := range selected {
+		createdAt := record.FirstQueueTime
+		if createdAt.IsZero() {
+			createdAt = record.QueueTime
+		}
+		attempt := record.RunAttempt
+		if attempt <= 0 {
+			attempt = 1
+		}
 		result = append(result, domain.Demand{
-			Key:       domain.DemandKey{Repo: record.Owner + "/" + record.Repository, RunID: record.WorkflowRunID, Attempt: 1, JobID: record.RunnerRequestID},
-			CreatedAt: record.QueueTime.UTC(), Profile: binding.Profile.ID, Route: binding.Profile.Route, Platform: binding.Profile.Platform,
+			Key:       domain.DemandKey{Repo: record.Owner + "/" + record.Repository, RunID: record.WorkflowRunID, Attempt: attempt, JobID: record.RunnerRequestID},
+			CreatedAt: createdAt.UTC(), Profile: binding.Profile.ID, Route: binding.Profile.Route, Platform: binding.Profile.Platform,
 			Event: event(record.EventName), RunStatus: domain.RunQueued,
 		})
 	}

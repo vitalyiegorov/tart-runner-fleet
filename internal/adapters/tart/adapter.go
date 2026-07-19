@@ -24,6 +24,7 @@ const (
 	ErrorPermission   ErrorKind = "permission"
 	ErrorCommand      ErrorKind = "command"
 	ErrorUncertain    ErrorKind = "uncertain"
+	ErrorHostQuota    ErrorKind = "host_quota"
 )
 
 type Error struct {
@@ -40,9 +41,17 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
+// StartedCommand is a handle to a detached, already-started process. It lets
+// callers poll for an early exit (and inspect its bounded output) without
+// blocking on the process for the lifetime of the VM.
+type StartedCommand interface {
+	Exited() bool
+	Output() []byte
+}
+
 type Runner interface {
 	Run(context.Context, ...string) ([]byte, error)
-	Start(context.Context, ...string) error
+	Start(context.Context, ...string) (StartedCommand, error)
 }
 
 type Poller interface {
@@ -83,7 +92,47 @@ func (r ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-func (r ExecRunner) Start(ctx context.Context, args ...string) error {
+// startedCommand is the ExecRunner-backed StartedCommand: it tracks whether
+// the detached process has exited and, if so, its bounded combined output.
+type startedCommand struct {
+	mu     sync.Mutex
+	output []byte
+	exited bool
+}
+
+func (s *startedCommand) Exited() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exited
+}
+
+func (s *startedCommand) Output() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.output...)
+}
+
+// boundedWriter keeps the first N bytes of combined output; enough to
+// classify startup failures without unbounded growth on long-lived runs.
+type boundedWriter struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func (w *boundedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if remaining := w.limit - len(w.data); remaining > 0 {
+		if len(p) < remaining {
+			remaining = len(p)
+		}
+		w.data = append(w.data, p[:remaining]...)
+	}
+	return len(p), nil
+}
+
+func (r ExecRunner) Start(ctx context.Context, args ...string) (StartedCommand, error) {
 	binary := r.Binary
 	if binary == "" {
 		binary = "tart"
@@ -91,11 +140,24 @@ func (r ExecRunner) Start(ctx context.Context, args ...string) error {
 	// #nosec G204 -- Binary is a trusted adapter dependency; arguments never pass through a shell.
 	command := exec.CommandContext(context.WithoutCancel(ctx), binary, args...)
 	configureDetached(command)
+	writer := &boundedWriter{limit: 8192}
+	command.Stdout = writer
+	command.Stderr = writer
+	started := &startedCommand{}
 	if err := command.Start(); err != nil {
-		return classify(args, nil, err, ctx.Err())
+		return nil, classify(args, nil, err, ctx.Err())
 	}
-	go func() { _ = command.Wait() }()
-	return nil
+	go func() {
+		_ = command.Wait()
+		writer.mu.Lock()
+		output := append([]byte(nil), writer.data...)
+		writer.mu.Unlock()
+		started.mu.Lock()
+		started.output = output
+		started.exited = true
+		started.mu.Unlock()
+	}()
+	return started, nil
 }
 
 func classify(args []string, output []byte, err, contextErr error) error {
@@ -298,7 +360,8 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 			args = append(args, "--dir=ci-shared:"+a.MacOSSharedDirectoryPath)
 		}
 	}
-	if err := a.runner().Start(ctx, args...); err != nil {
+	started, err := a.runner().Start(ctx, args...)
+	if err != nil {
 		return err
 	}
 	deadline := a.poller().Now().Add(a.startTimeout())
@@ -309,6 +372,13 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 		}
 		if err != nil {
 			return err
+		}
+		if started != nil && started.Exited() {
+			output := started.Output()
+			if strings.Contains(strings.ToLower(string(output)), "exceeds the system limit") {
+				return &Error{Op: "run", Kind: ErrorHostQuota, ExitCode: -1, Stderr: string(output), Err: errors.New("macos vm quota exhausted; host reboot required (tart#1217)")}
+			}
+			return &Error{Op: "run", Kind: ErrorCommand, ExitCode: -1, Stderr: string(output), Err: errors.New("tart run exited before the vm was observed running")}
 		}
 		if err := a.poller().Wait(ctx, 25*time.Millisecond); err != nil {
 			return err

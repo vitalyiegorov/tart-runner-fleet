@@ -516,6 +516,78 @@ func (s *Store) Migrate(ctx context.Context) error {
 			}
 		}
 	}
+	if version < 10 {
+		now := time.Now().UTC().UnixNano()
+		for _, column := range []struct {
+			name  string
+			query string
+		}{
+			{"display_name", `ALTER TABLE runner_demands ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`},
+			{"workflow_ref", `ALTER TABLE runner_demands ADD COLUMN workflow_ref TEXT NOT NULL DEFAULT ''`},
+			{"logical_key", `ALTER TABLE runner_demands ADD COLUMN logical_key TEXT NOT NULL DEFAULT ''`},
+			{"first_queue_time", `ALTER TABLE runner_demands ADD COLUMN first_queue_time INTEGER NOT NULL DEFAULT 0`},
+			{"workflow_job_id", `ALTER TABLE runner_demands ADD COLUMN workflow_job_id INTEGER NOT NULL DEFAULT 0`},
+			{"run_attempt", `ALTER TABLE runner_demands ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0`},
+		} {
+			var present int
+			if err := s.txRow(ctx, tx, "migrate.v10.column."+column.name,
+				`SELECT COUNT(*) FROM pragma_table_info('runner_demands') WHERE name=?`, column.name).Scan(&present); err != nil {
+				return fmt.Errorf("inspect migration 10 column %s: %w", column.name, err)
+			}
+			if present == 0 {
+				if _, err := s.txExec(ctx, tx, "migrate.v10."+column.name, column.query); err != nil {
+					return fmt.Errorf("migration 10 column %s: %w", column.name, err)
+				}
+			}
+		}
+		for _, step := range []struct {
+			point string
+			query string
+		}{
+			{"groups", `CREATE TABLE IF NOT EXISTS demand_groups (
+				scale_set_id INTEGER NOT NULL, logical_key TEXT NOT NULL, first_queue_time INTEGER NOT NULL,
+				workflow_job_id INTEGER NOT NULL DEFAULT 0, run_attempt INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+				PRIMARY KEY(scale_set_id,logical_key)
+			)`},
+			{"statistics", `CREATE TABLE IF NOT EXISTS scale_set_statistics (
+				scale_set_id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, available INTEGER NOT NULL, acquired INTEGER NOT NULL,
+				assigned INTEGER NOT NULL, running INTEGER NOT NULL, registered INTEGER NOT NULL, busy INTEGER NOT NULL,
+				idle INTEGER NOT NULL, observed_at INTEGER NOT NULL
+			)`},
+			{"github-jobs", `CREATE TABLE IF NOT EXISTS github_job_observations (
+				scale_set_id INTEGER NOT NULL, workflow_job_id INTEGER NOT NULL, owner TEXT NOT NULL, repository TEXT NOT NULL,
+				workflow_run_id INTEGER NOT NULL, run_attempt INTEGER NOT NULL, display_name TEXT NOT NULL, workflow_ref TEXT NOT NULL,
+				labels BLOB NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL, queue_time_exact INTEGER NOT NULL DEFAULT 0,
+				observed_at INTEGER NOT NULL,
+				PRIMARY KEY(scale_set_id,workflow_job_id)
+			)`},
+			{"active-order", `CREATE INDEX IF NOT EXISTS runner_demands_logical ON runner_demands(scale_set_id,logical_key,status_rank,first_queue_time)`},
+		} {
+			if _, err := s.txExec(ctx, tx, "migrate.v10."+step.point, step.query); err != nil {
+				return fmt.Errorf("migration 10 %s: %w", step.point, err)
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v10.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(10, ?)`, now); err != nil {
+			return fmt.Errorf("record migration 10: %w", err)
+		}
+	}
+	if version < 11 {
+		now := time.Now().UTC().UnixNano()
+		var present int
+		if err := s.txRow(ctx, tx, "migrate.v11.queue-time-exact",
+			`SELECT COUNT(*) FROM pragma_table_info('github_job_observations') WHERE name='queue_time_exact'`).Scan(&present); err != nil {
+			return fmt.Errorf("inspect migration 11 queue_time_exact: %w", err)
+		}
+		if present == 0 {
+			if _, err := s.txExec(ctx, tx, "migrate.v11.add-queue-time-exact",
+				`ALTER TABLE github_job_observations ADD COLUMN queue_time_exact INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migration 11 queue_time_exact: %w", err)
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v11.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(11, ?)`, now); err != nil {
+			return fmt.Errorf("record migration 11: %w", err)
+		}
+	}
 	if err := s.commit(tx, "migrate.commit"); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}

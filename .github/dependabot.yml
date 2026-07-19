@@ -1,0 +1,53 @@
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Europe/Vienna
+    open-pull-requests-limit: 5
+    labels: [dependencies, go, release-dependencies]
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      go-runtime-dependencies:
+        dependency-type: production
+        update-types: [minor, patch]
+      go-development-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: gomod
+    directory: /tools
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:15"
+      timezone: Europe/Vienna
+    open-pull-requests-limit: 5
+    labels: [dependencies, go, release-dependencies]
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      go-build-tools:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:30"
+      timezone: Europe/Vienna
+    open-pull-requests-limit: 5
+    labels: [dependencies, github_actions, release-dependencies]
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: [minor, patch]
