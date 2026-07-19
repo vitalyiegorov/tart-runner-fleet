@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -75,10 +76,17 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	}
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
-		if err != nil {
+		schedulable := queued
+		if errors.Is(err, ErrDemandStatisticsUnavailable) {
+			// Fail closed for this binding only: schedule nothing for it this
+			// tick but keep its queue visible to the SLO monitor. Failing the
+			// whole tick here deadlocks the fleet, because statistics refresh
+			// only with new broker messages that a stalled queue never sends.
+			schedulable = nil
+		} else if err != nil {
 			return TickResult{}, err
 		}
-		demands = append(demands, queued...)
+		demands = append(demands, schedulable...)
 		summary, err := coordinator.QueueSummary(ctx, binding, queued)
 		if err != nil {
 			return TickResult{}, err
