@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
 
 concurrency:
   group: pr-metadata-${{ github.event.pull_request.number }}
@@ -24,6 +25,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          GH_ACTOR: ${{ github.actor }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
@@ -62,11 +64,23 @@ jobs:
               >/dev/null 2>&1 || true
           done
 
-          gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
-            -f "labels[]=$category" >/dev/null
+          apply_label() {
+            gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
+              -f "labels[]=$1" >/dev/null
+          }
+
+          if ! apply_label "$category"; then
+            # Dependabot-triggered runs can hold a read-only token even with
+            # the permissions block above; release.yml's catch-all category
+            # still lists the unlabeled PR.
+            if [ "$GH_ACTOR" = "dependabot[bot]" ]; then
+              printf 'warning: read-only token on Dependabot run; leaving PR unlabeled\n' >&2
+              exit 0
+            fi
+            exit 1
+          fi
           case "$prefix" in
             *!)
-              gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
-                -f 'labels[]=release-breaking' >/dev/null
+              apply_label release-breaking
               ;;
           esac
