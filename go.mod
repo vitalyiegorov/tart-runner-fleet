@@ -5,7 +5,7 @@ go 1.25.12
 require (
 	github.com/actions/scaleset v0.4.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
-	modernc.org/sqlite v1.39.1
+	modernc.org/sqlite v1.54.0
 )
 
 require (
@@ -21,7 +21,7 @@ require (
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
-	modernc.org/libc v1.73.4 // indirect
+	modernc.org/libc v1.74.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
