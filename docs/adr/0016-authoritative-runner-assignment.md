@@ -1,4 +1,4 @@
-# ADR 0015: Authoritative runner assignment correlation
+# ADR 0016: Authoritative runner assignment correlation
 
 ## Status
 

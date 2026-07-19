@@ -1,6 +1,6 @@
 # Fleet architecture plan: reliable, work-conserving, low-latency CI
 
-Status: reviewed target. ADR 0013 records the narrow supersessions, and the
+Status: reviewed target. ADR 0015 records the narrow supersessions, and the
 accompanying change implements the Phase 1 inventory foundation: complete REST
 snapshots, official scale-set statistics, monotonic canonical queue age,
 conservative correlation, truthful queue health, and fail-closed readiness.

@@ -1,4 +1,4 @@
-# ADR 0014: Canonical job inventory and truthful capacity
+# ADR 0015: Canonical job inventory and truthful capacity
 
 ## Status
 
@@ -90,6 +90,6 @@ guessed numeric job ID. Official statistics bound all acquisition.
 
 The REST observer requires only read-only Actions permission in this phase; it
 does not fetch repository runner inventory. Official lifecycle events correlate
-terminal cleanup to the authoritative runner name as specified by ADR 0015.
+terminal cleanup to the authoritative runner name as specified by ADR 0016.
 Workflow-concurrency classification, ETag caching, scheduler v2, and stable
 launcher activation remain separately gated work.
