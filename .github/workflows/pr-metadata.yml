@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
 
 concurrency:
   group: pr-metadata-${{ github.event.pull_request.number }}
@@ -24,6 +25,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          GH_ACTOR: ${{ github.actor }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
@@ -62,11 +64,23 @@ jobs:
               >/dev/null 2>&1 || true
           done
 
-          gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
-            -f "labels[]=$category" >/dev/null
+          apply_label() {
+            gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
+              -f "labels[]=$1" >/dev/null
+          }
+
+          # The gate this check enforces is the Conventional Commit title
+          # (validated above). Labeling only feeds release-note categories,
+          # and some triggering actors (Dependabot, machine accounts) hold a
+          # token GitHub restricts to read-only regardless of the permissions
+          # block — release.yml's catch-all category still lists the
+          # unlabeled PR, so a denied label must not fail the check.
+          if ! apply_label "$category"; then
+            printf 'warning: token cannot label this PR (actor: %s); leaving it unlabeled\n' "$GH_ACTOR" >&2
+            exit 0
+          fi
           case "$prefix" in
             *!)
-              gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
-                -f 'labels[]=release-breaking' >/dev/null
+              apply_label release-breaking
               ;;
           esac
