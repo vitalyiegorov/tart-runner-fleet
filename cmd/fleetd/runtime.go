@@ -237,7 +237,7 @@ func defaultDependencies() dependencies {
 				StartTimeout: cfg.Timeouts.Boot, ConfirmationMaxAge: deletionConfirmationMaxAge,
 				MacOSVMPrefixes:      []string{"trf-" + strings.ToLower(cfg.MacOS.Builder.ID) + "-", "trf-" + strings.ToLower(cfg.MacOS.Maestro.ID) + "-"},
 				MacOSRootDiskOptions: cfg.MacOS.RootDiskOptions, MacOSSharedDirectoryPath: cfg.MacOS.SharedDirectoryPath,
-				MacOSNestedVirtualization: cfg.MacOS.NestedVirtualization}
+				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization}
 		},
 		readiness: func(cfg config.Config) lifecycle.Readiness {
 			return tartReadiness{Runner: tart.ExecRunner{}, Timeout: cfg.Timeouts.Boot,

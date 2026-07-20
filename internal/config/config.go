@@ -61,6 +61,10 @@ type Linux struct {
 	MaxInstances int
 	Capacity     Resources
 	Profiles     []Profile
+	// NestedVirtualization boots Linux guests with --nested so they can host
+	// hardware-accelerated VMs of their own (KVM for Android emulators).
+	// Apple's Virtualization framework only offers this to Linux guests.
+	NestedVirtualization bool
 }
 
 type MacOSAdmissionPolicy string
@@ -182,6 +186,7 @@ type wireConfig struct {
 	MaxLinuxMemoryMiB         int       `json:"maxLinuxMemoryMb"`
 	LinuxReservationAgeSecs   int       `json:"linuxReservationAgeSeconds"`
 	LinuxProfiles             []Profile `json:"linuxProfiles"`
+	LinuxNestedVirtualization bool      `json:"linuxNestedVirtualization,omitempty"`
 	MinFreeDiskGiB            int       `json:"minFreeDiskGb"`
 	MinAvailableMemoryMiB     int       `json:"minAvailableMemoryMb,omitempty"`
 	MaxSwapUsedMiB            int       `json:"maxSwapUsedMb,omitempty"`
@@ -219,7 +224,8 @@ func Decode(r io.Reader) (Config, error) {
 		PollInterval:   time.Duration(w.PollSeconds) * time.Second,
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
-			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles)},
+			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
+			NestedVirtualization: w.LinuxNestedVirtualization},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy), BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
@@ -286,7 +292,7 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
 	wire.MacOSBurst.RootDiskOptions = cfg.MacOS.RootDiskOptions
 	wire.MacOSBurst.SharedDirectoryPath = cfg.MacOS.SharedDirectoryPath
-	wire.MacOSBurst.NestedVirtualization = cfg.MacOS.NestedVirtualization
+	wire.LinuxNestedVirtualization = cfg.Linux.NestedVirtualization
 
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
@@ -435,6 +441,9 @@ func (c Config) Validate() error {
 	}
 	if c.Linux.Capacity.CPU <= 0 || c.Linux.Capacity.MemoryMiB <= 0 {
 		return errors.New("linux capacity must be positive")
+	}
+	if c.MacOS.NestedVirtualization {
+		return errors.New("macOS guests do not support nested virtualization (Apple Virtualization framework limitation); use linuxNestedVirtualization")
 	}
 	if c.Guards.MinFreeDiskGiB <= 0 {
 		return errors.New("disk reserve must be positive")

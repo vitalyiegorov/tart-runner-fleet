@@ -213,11 +213,12 @@ type Adapter struct {
 	MacOSVMPrefixes          []string
 	MacOSRootDiskOptions     string
 	MacOSSharedDirectoryPath string
-	// MacOSNestedVirtualization passes --nested so guests can host their own
-	// hypervisor (Android emulator HVF); requires M3+ silicon and a macOS 15+
-	// guest, which the controller does not verify — tart fails the start when
-	// the host cannot nest.
-	MacOSNestedVirtualization bool
+	// LinuxNestedVirtualization passes --nested so Linux guests can host their
+	// own hypervisor (KVM for Android emulators); requires M3+ silicon, which
+	// the controller does not verify — tart fails the start when the host
+	// cannot nest. macOS guests never get the flag: Apple's Virtualization
+	// framework does not support nesting them and tart rejects it at boot.
+	LinuxNestedVirtualization bool
 	Now                       func() time.Time
 	Poller                    Poller
 	mu                        sync.Mutex
@@ -364,9 +365,10 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 		if a.MacOSSharedDirectoryPath != "" {
 			args = append(args, "--dir=ci-shared:"+a.MacOSSharedDirectoryPath)
 		}
-		if a.MacOSNestedVirtualization {
-			args = append(args, "--nested")
-		}
+	} else if a.LinuxNestedVirtualization {
+		// Apple's Virtualization framework offers nested virtualization to
+		// Linux guests only (M3+); tart rejects --nested for macOS guests.
+		args = append(args, "--nested")
 	}
 	started, err := a.runner().Start(ctx, args...)
 	if err != nil {
