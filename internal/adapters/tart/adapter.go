@@ -218,9 +218,9 @@ type Adapter struct {
 	// guest, which the controller does not verify — tart fails the start when
 	// the host cannot nest.
 	MacOSNestedVirtualization bool
-	Now                      func() time.Time
-	Poller                   Poller
-	mu                       sync.Mutex
+	Now                       func() time.Time
+	Poller                    Poller
+	mu                        sync.Mutex
 }
 
 type Request struct {
