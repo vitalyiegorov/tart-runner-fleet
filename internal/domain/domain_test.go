@@ -86,6 +86,8 @@ func TestExplicitInstanceLifecycleTransitionMatrixIsExhaustive(t *testing.T) {
 		{InstanceRunning, InstanceDraining}:       true,
 		{InstanceOnlineIdle, InstanceDraining}:    true,
 		{InstanceDraining, InstanceDeregistering}: true,
+		// Recovery-drain abort: fresh evidence disproved the drain premise.
+		{InstanceDraining, InstanceRunning}:       true,
 		{InstanceDeregistering, InstanceStopping}: true,
 		{InstanceStopping, InstanceDeleted}:       true,
 		{InstanceFailed, InstancePlanned}:         true,

@@ -99,6 +99,14 @@ func (r ControlRouter) SafeToDeregister(ctx context.Context, instance operations
 	return record.Status == operations.DemandJobCompleted, nil
 }
 
+func (r ControlRouter) RunnerRegistered(ctx context.Context, instance operations.Instance) (bool, error) {
+	binding, err := r.binding(instance)
+	if err != nil {
+		return false, err
+	}
+	return binding.Source.Registered(ctx, instance.ID)
+}
+
 func (r ControlRouter) Deregister(ctx context.Context, instance operations.Instance) error {
 	binding, err := r.binding(instance)
 	if err != nil {
