@@ -213,6 +213,11 @@ type Adapter struct {
 	MacOSVMPrefixes          []string
 	MacOSRootDiskOptions     string
 	MacOSSharedDirectoryPath string
+	// MacOSNestedVirtualization passes --nested so guests can host their own
+	// hypervisor (Android emulator HVF); requires M3+ silicon and a macOS 15+
+	// guest, which the controller does not verify — tart fails the start when
+	// the host cannot nest.
+	MacOSNestedVirtualization bool
 	Now                      func() time.Time
 	Poller                   Poller
 	mu                       sync.Mutex
@@ -358,6 +363,9 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 		}
 		if a.MacOSSharedDirectoryPath != "" {
 			args = append(args, "--dir=ci-shared:"+a.MacOSSharedDirectoryPath)
+		}
+		if a.MacOSNestedVirtualization {
+			args = append(args, "--nested")
 		}
 	}
 	started, err := a.runner().Start(ctx, args...)
