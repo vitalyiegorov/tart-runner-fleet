@@ -165,10 +165,33 @@ func TestEngineTickDegradesBindingWhenStatisticsAreStale(t *testing.T) {
 	if err != nil || result.Plan.Status != scheduler.PlanReady {
 		t.Fatalf("stale statistics failed the whole tick: %#v, %v", result, err)
 	}
-	if len(result.Demands) != 0 || len(result.Plan.Operations) != 0 {
-		t.Fatalf("stale statistics still scheduled work: %#v", result)
+	if len(result.Demands) != 1 || len(result.Plan.Operations) != 1 {
+		t.Fatalf("degraded binding must trickle exactly one demand: %#v", result)
 	}
 	if result.Queues["small"].Count != 1 || result.Queues["small"].Oldest != now.Add(-time.Minute) {
+		t.Fatalf("degraded binding lost queue visibility: %#v", result.Queues)
+	}
+}
+
+func TestEngineTickTricklesOldestDemandWhenStatisticsAreStale(t *testing.T) {
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	store := &tickStore{fakeDemandStore: fakeDemandStore{
+		statistics: operations.DemandStatistics{MessageID: 1, Available: 2, ObservedAt: now.Add(-3 * time.Minute)},
+		records: []operations.DemandRecord{{
+			Status: operations.DemandJobAvailable, RunnerRequestID: 11, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-2 * time.Minute),
+		}, {
+			Status: operations.DemandJobAvailable, RunnerRequestID: 12, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute),
+		}}}}
+	binding := Binding{ScaleSetID: 1, Profile: tickConfig().Profiles["small"]}
+	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
+	}, Config: tickConfig(), Bindings: []Binding{binding}, ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
+	result, err := engine.Tick(context.Background())
+	if err != nil || len(result.Demands) != 1 || result.Demands[0].Key.JobID != 11 {
+		t.Fatalf("expected only the oldest demand to trickle: %#v, %v", result.Demands, err)
+	}
+	if result.Queues["small"].Count != 2 {
 		t.Fatalf("degraded binding lost queue visibility: %#v", result.Queues)
 	}
 }

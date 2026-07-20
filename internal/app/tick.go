@@ -78,11 +78,15 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
 		schedulable := queued
 		if errors.Is(err, ErrDemandStatisticsUnavailable) {
-			// Fail closed for this binding only: schedule nothing for it this
-			// tick but keep its queue visible to the SLO monitor. Failing the
-			// whole tick here deadlocks the fleet, because statistics refresh
-			// only with new broker messages that a stalled queue never sends.
-			schedulable = nil
+			// Statistics refresh only with new broker messages, and a stalled
+			// queue never sends any, so a fully fail-closed binding livelocks
+			// itself: durable demand waits forever on statistics that need the
+			// demand to run first. A durable JobAvailable demand is itself
+			// evidence of capacity need, so trickle the oldest single demand
+			// per tick — the spawned runner picks the job up, the broker
+			// delivers fresh statistics, and the binding leaves degradation.
+			// The queue stays fully visible to the SLO monitor either way.
+			schedulable = queued[:min(1, len(queued))]
 		} else if err != nil {
 			return TickResult{}, err
 		}
