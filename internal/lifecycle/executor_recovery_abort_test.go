@@ -28,50 +28,49 @@ func drainExecutor(state *memoryState, vm fakeVM, control *fakeDrainControl) Dra
 	return DrainExecutor{State: state, VM: vm, Control: control, Now: func() time.Time { return now }, ConfirmationMaxAge: time.Minute}
 }
 
-// Incident replay: a stopped-recovery drain planned from a glitched power
-// reading targets a VM that is actually running a job. Even with the
-// registration lookup flaking to "absent" — the exact glitch that released
-// the kill on 2026-07-20 — the executor must abort without touching GitHub
-// or the VM, and the instance must return to Running.
-func TestStoppedRecoveryDrainAbortsWhenVMIsActuallyRunning(t *testing.T) {
-	calls := []string{}
-	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery)}
-	control := &fakeDrainControl{calls: &calls, safe: true, registered: false}
-	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, control)
+// Premise disproven → abort. Case one replays the incident: a stopped-recovery
+// drain planned from a glitched power reading targets a VM that is actually
+// running a job, while the registration lookup flakes to "absent" — the exact
+// glitch that released the kill on 2026-07-20. Case two is the inactive
+// variant: a runner still registered on GitHub may be executing a job, so
+// retrying the kill order until a lookup flake lets it through is forbidden.
+func TestRecoveryDrainAbortsWhenPremiseIsDisproven(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		phase     int
+		vm        fakeVM
+		control   fakeDrainControl
+		wantCalls []string
+	}{
+		{name: "stopped recovery with VM actually running and flaky registration lookup",
+			phase:     operations.DrainPhaseStoppedRecovery,
+			vm:        fakeVM{running: true},
+			control:   fakeDrainControl{safe: true, registered: false},
+			wantCalls: []string{"power:trf-small-1"}},
+		{name: "inactive recovery with runner still registered",
+			phase:     operations.DrainPhaseInactiveRecovery,
+			vm:        fakeVM{running: true},
+			control:   fakeDrainControl{safe: true, registered: true},
+			wantCalls: []string{"registered:trf-small-1"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := []string{}
+			test.vm.calls, test.control.calls = &calls, &calls
+			state := &memoryState{instance: recoveryInstance(test.phase)}
+			executor := drainExecutor(state, test.vm, &test.control)
 
-	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+			err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
 
-	if err != nil {
-		t.Fatalf("abort must acknowledge the operation as a no-op, got %v", err)
-	}
-	if state.instance.State != operations.StateRunning {
-		t.Fatalf("instance must roll back to running, got %s", state.instance.State)
-	}
-	if want := []string{"power:trf-small-1"}; !reflect.DeepEqual(calls, want) {
-		t.Fatalf("only the power re-verification may run before an abort; calls=%#v", calls)
-	}
-}
-
-// An inactive-recovery drain whose runner is still registered on GitHub has
-// its premise disproven: the runner may be executing a job. Retrying the kill
-// order until a lookup flake lets it through is exactly the incident; the
-// executor must abort instead.
-func TestInactiveRecoveryDrainAbortsWhileRunnerStillRegistered(t *testing.T) {
-	calls := []string{}
-	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseInactiveRecovery)}
-	control := &fakeDrainControl{calls: &calls, safe: true, registered: true}
-	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, control)
-
-	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
-
-	if err != nil {
-		t.Fatalf("abort must acknowledge the operation as a no-op, got %v", err)
-	}
-	if state.instance.State != operations.StateRunning {
-		t.Fatalf("instance must roll back to running, got %s", state.instance.State)
-	}
-	if want := []string{"registered:trf-small-1"}; !reflect.DeepEqual(calls, want) {
-		t.Fatalf("only the registration re-verification may run before an abort; calls=%#v", calls)
+			if err != nil {
+				t.Fatalf("abort must acknowledge the operation as a no-op, got %v", err)
+			}
+			if state.instance.State != operations.StateRunning {
+				t.Fatalf("instance must roll back to running, got %s", state.instance.State)
+			}
+			if !reflect.DeepEqual(calls, test.wantCalls) {
+				t.Fatalf("only the premise re-verification may run before an abort; calls=%#v", calls)
+			}
+		})
 	}
 }
 
@@ -103,7 +102,8 @@ func TestStoppedRecoveryDrainReclaimsPoweredOffVMDespiteLingeringRegistration(t 
 }
 
 // An inactive-recovery drain whose premise holds — runner deregistered and
-// demand completed — proceeds to reclaim as before.
+// demand completed — proceeds to reclaim as before, and the demand-state
+// guard still applies after the registration re-verification.
 func TestInactiveRecoveryDrainProceedsWhenPremiseHolds(t *testing.T) {
 	calls := []string{}
 	now := time.Unix(1000, 0).UTC()
@@ -123,20 +123,59 @@ func TestInactiveRecoveryDrainProceedsWhenPremiseHolds(t *testing.T) {
 	}
 }
 
-// Premise re-verification must fail closed: if the power probe errors, the
-// executor may neither kill nor abort on a guess — the operation retries.
-func TestStoppedRecoveryDrainRetriesWhenPowerProbeFails(t *testing.T) {
+// Premise re-verification must fail closed: if the probe errors — or the
+// port is missing entirely — the executor may neither kill nor abort on a
+// guess, and the demand-state guard refusal keeps retrying as before.
+func TestRecoveryDrainRetriesWhenPremiseCannotBeVerified(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		phase   int
+		noVM    bool
+		vm      fakeVM
+		control fakeDrainControl
+	}{
+		{name: "power probe error", phase: operations.DrainPhaseStoppedRecovery,
+			vm: fakeVM{runningErr: context.DeadlineExceeded}, control: fakeDrainControl{safe: true}},
+		{name: "missing VM port", phase: operations.DrainPhaseStoppedRecovery, noVM: true,
+			control: fakeDrainControl{safe: true}},
+		{name: "registration probe error", phase: operations.DrainPhaseInactiveRecovery,
+			control: fakeDrainControl{safe: true, registeredErr: context.DeadlineExceeded}},
+		{name: "inactive premise holds but demand guard refuses", phase: operations.DrainPhaseInactiveRecovery,
+			control: fakeDrainControl{safe: false, registered: false}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := []string{}
+			test.vm.calls, test.control.calls = &calls, &calls
+			state := &memoryState{instance: recoveryInstance(test.phase)}
+			executor := drainExecutor(state, test.vm, &test.control)
+			if test.noVM {
+				executor.VM = nil
+			}
+
+			err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+
+			if err == nil || err.Error() != "runner lifecycle failed at drain_guard" {
+				t.Fatalf("unverifiable premise must surface as a guard-stage retry, got %v", err)
+			}
+			if state.instance.State != operations.StateDraining {
+				t.Fatalf("instance must stay draining pending fresh evidence, got %s", state.instance.State)
+			}
+		})
+	}
+}
+
+// The rollback itself must be durable: if the compare-and-swap back to
+// Running fails, the operation reports a persistence failure and retries
+// rather than acknowledging an abort that never happened.
+func TestRecoveryDrainAbortSurfacesPersistenceFailure(t *testing.T) {
 	calls := []string{}
-	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery)}
-	control := &fakeDrainControl{calls: &calls, safe: true}
-	executor := drainExecutor(state, fakeVM{calls: &calls, runningErr: context.DeadlineExceeded}, control)
+	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery), advanceErr: operations.ErrConflict}
+	control := &fakeDrainControl{calls: &calls}
+	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, control)
 
 	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
 
-	if err == nil || err.Error() != "runner lifecycle failed at drain_guard" {
-		t.Fatalf("probe failure must surface as a guard-stage retry, got %v", err)
-	}
-	if state.instance.State != operations.StateDraining {
-		t.Fatalf("instance must stay draining pending fresh evidence, got %s", state.instance.State)
+	if err == nil || err.Error() != "runner lifecycle failed at persist" {
+		t.Fatalf("failed rollback must surface as a persist-stage retry, got %v", err)
 	}
 }

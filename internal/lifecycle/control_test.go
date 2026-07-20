@@ -73,6 +73,10 @@ func TestControlRouterResolvesRegistrationAndFreshDrainState(t *testing.T) {
 	if err != nil || !registered {
 		t.Fatalf("Registered() = %v, %v", registered, err)
 	}
+	runnerRegistered, err := router.RunnerRegistered(context.Background(), state.instance)
+	if err != nil || !runnerRegistered {
+		t.Fatalf("RunnerRegistered() = %v, %v", runnerRegistered, err)
+	}
 	if err := router.ResetRegistration(context.Background(), state.instance.ID); err != nil || source.registered || source.deregister != 1 {
 		t.Fatalf("ResetRegistration() = %v registered=%v count=%d", err, source.registered, source.deregister)
 	}
@@ -105,6 +109,9 @@ func TestControlRouterFailsClosedForUnknownOrActiveDemand(t *testing.T) {
 	}
 	if _, err := router.Registered(context.Background(), state.instance.ID); !errors.Is(err, operations.ErrUncertain) {
 		t.Fatalf("unknown source = %v", err)
+	}
+	if _, err := router.RunnerRegistered(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("unknown source for runner registration = %v", err)
 	}
 	source := &fakeScaleControl{}
 	router.Sources = map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 1, Source: source}}
