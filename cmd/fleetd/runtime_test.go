@@ -1690,6 +1690,7 @@ func (v *lifecycleVM) Start(context.Context, string, operations.Ownership) error
 }
 func (*lifecycleVM) Stop(context.Context, string, operations.Ownership) error   { return nil }
 func (*lifecycleVM) Delete(context.Context, string, operations.Ownership) error { return nil }
+func (*lifecycleVM) Running(context.Context, string) (bool, error)              { return false, nil }
 
 type readyProbe struct{}
 

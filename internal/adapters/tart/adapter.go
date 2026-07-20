@@ -478,6 +478,18 @@ func (a *Adapter) Delete(ctx context.Context, name string, ownership operations.
 	return commandErr
 }
 
+// Running reports the VM's current power state; an absent VM is not running.
+func (a *Adapter) Running(ctx context.Context, name string) (bool, error) {
+	vm, err := a.find(ctx, name)
+	if errors.Is(err, operations.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return vm.Running, nil
+}
+
 func (a *Adapter) existsOwned(ctx context.Context, name string, ownership operations.Ownership) (bool, error) {
 	_, err := a.ownedVM(ctx, name, ownership)
 	if errors.Is(err, operations.ErrNotFound) {

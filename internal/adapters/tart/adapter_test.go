@@ -747,3 +747,23 @@ func TestAdapterDefaultsAndInvalidList(t *testing.T) {
 		t.Fatal("adapter defaults mismatch")
 	}
 }
+
+func TestRunningReportsPowerStateAndTreatsAbsentVMAsOff(t *testing.T) {
+	now := time.Unix(400, 0).UTC()
+	adapter, runner, _, _ := testAdapter(now)
+	runner.vms["vm"] = VM{Name: "vm", Running: true}
+	if running, err := adapter.Running(context.Background(), "vm"); err != nil || !running {
+		t.Fatalf("Running(powered on) = %v, %v", running, err)
+	}
+	runner.vms["vm"] = VM{Name: "vm", Running: false}
+	if running, err := adapter.Running(context.Background(), "vm"); err != nil || running {
+		t.Fatalf("Running(powered off) = %v, %v", running, err)
+	}
+	if running, err := adapter.Running(context.Background(), "absent"); err != nil || running {
+		t.Fatalf("Running(absent) = %v, %v", running, err)
+	}
+	runner.listError = errors.New("api unavailable")
+	if _, err := adapter.Running(context.Background(), "vm"); err == nil {
+		t.Fatal("list error swallowed")
+	}
+}

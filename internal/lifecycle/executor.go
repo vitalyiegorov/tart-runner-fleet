@@ -72,6 +72,10 @@ type VMControl interface {
 	Start(context.Context, string, operations.Ownership) error
 	Stop(context.Context, string, operations.Ownership) error
 	Delete(context.Context, string, operations.Ownership) error
+	// Running reports the VM's current power state; an absent VM is not
+	// running. Recovery drains re-verify their premise against this before
+	// every destructive step.
+	Running(context.Context, string) (bool, error)
 }
 
 type Readiness interface {
@@ -94,6 +98,9 @@ type DrainControl interface {
 	SafeToDeregister(context.Context, operations.Instance) (bool, error)
 	Deregister(context.Context, operations.Instance) error
 	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
+	// RunnerRegistered reports whether the instance's runner is currently
+	// registered on GitHub, without folding in demand state.
+	RunnerRegistered(context.Context, operations.Instance) (bool, error)
 }
 
 // ProvisionExecutor is a restartable state machine. One durable outbox
@@ -327,9 +334,49 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 			if e.Control == nil {
 				return e.fail(ctx, instance, StageGuard)
 			}
-			safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
-			if guardErr != nil || !safe {
-				return e.fail(ctx, instance, StageGuard)
+			// A recovery drain is a standing kill order derived from a single
+			// planning-time observation. Re-verify that premise against ground
+			// truth on every attempt: one stale observation must never be able
+			// to destroy a VM whose runner may be executing a job (2026-07-20
+			// incident: a glitched power reading planned a stopped-recovery
+			// drain of a busy runner; the registration guard refused 23 times,
+			// then one transient runner-lookup miss released the kill).
+			// Aborting on contrary evidence is always safe: if the instance is
+			// genuinely reclaimable, the next inventory observation re-plans
+			// the drain.
+			switch instance.DrainPhase {
+			case operations.DrainPhaseStoppedRecovery:
+				if e.VM == nil {
+					return e.fail(ctx, instance, StageGuard)
+				}
+				running, runningErr := e.VM.Running(ctx, instance.ID)
+				if runningErr != nil {
+					return e.fail(ctx, instance, StageGuard)
+				}
+				if running {
+					return e.abort(ctx, instance)
+				}
+				// The VM is provably powered off, so deregistration cannot
+				// interrupt work. Proceed without consulting the registration
+				// lookup: a powered-off VM's lingering registration must not
+				// delay reclaim, and a transient lookup miss must not gate it.
+			case operations.DrainPhaseInactiveRecovery:
+				registered, registeredErr := e.Control.RunnerRegistered(ctx, instance)
+				if registeredErr != nil {
+					return e.fail(ctx, instance, StageGuard)
+				}
+				if registered {
+					return e.abort(ctx, instance)
+				}
+				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
+				if guardErr != nil || !safe {
+					return e.fail(ctx, instance, StageGuard)
+				}
+			default:
+				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
+				if guardErr != nil || !safe {
+					return e.fail(ctx, instance, StageGuard)
+				}
 			}
 			if err := e.Control.Deregister(ctx, instance); err != nil {
 				return e.fail(ctx, instance, StageDeregister)
@@ -371,6 +418,17 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 		}
 	}
 	return safeError(StagePersist)
+}
+
+// abort cancels a recovery drain whose premise fresh evidence has disproven.
+// The instance returns to Running — the conservative busy state; demand
+// projections advance it as real events arrive — and the drain operation is
+// acknowledged as a completed no-op so it stops being retried.
+func (e DrainExecutor) abort(ctx context.Context, instance operations.Instance) error {
+	if _, err := e.advance(ctx, instance, operations.StateRunning); err != nil {
+		return safeError(StagePersist)
+	}
+	return nil
 }
 
 func (e DrainExecutor) waitConfirmed(ctx context.Context, id string) error {

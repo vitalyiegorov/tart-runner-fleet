@@ -48,6 +48,8 @@ type fakeVM struct {
 	calls                       *[]string
 	cloneErr, startErr, stopErr error
 	deleteErr                   error
+	running                     bool
+	runningErr                  error
 }
 
 func (v fakeVM) Clone(_ context.Context, request tart.Request) error {
@@ -65,6 +67,10 @@ func (v fakeVM) Stop(_ context.Context, name string, _ operations.Ownership) err
 func (v fakeVM) Delete(_ context.Context, name string, _ operations.Ownership) error {
 	*v.calls = append(*v.calls, "delete:"+name)
 	return v.deleteErr
+}
+func (v fakeVM) Running(_ context.Context, name string) (bool, error) {
+	*v.calls = append(*v.calls, "power:"+name)
+	return v.running, v.runningErr
 }
 
 type fakeReady struct {
@@ -368,9 +374,16 @@ type fakeDrainControl struct {
 	calls         *[]string
 	safe          bool
 	guardErr      error
+	registered    bool
+	registeredErr error
 	deregisterErr error
 	confirmations []operations.DeletionConfirmation
 	confirmErr    error
+}
+
+func (d *fakeDrainControl) RunnerRegistered(_ context.Context, instance operations.Instance) (bool, error) {
+	*d.calls = append(*d.calls, "registered:"+instance.ID)
+	return d.registered, d.registeredErr
 }
 
 func (d *fakeDrainControl) SafeToDeregister(_ context.Context, instance operations.Instance) (bool, error) {

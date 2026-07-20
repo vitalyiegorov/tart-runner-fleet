@@ -176,7 +176,10 @@ func (s InstanceState) CanTransitionTo(next InstanceState) bool {
 	case InstanceRunning:
 		return next == InstanceDraining
 	case InstanceDraining:
-		return next == InstanceDeregistering
+		// Draining may roll back to Running: a recovery drain aborts when
+		// execution-time evidence disproves its planning-time premise (the VM
+		// is powered on, or its runner is still registered).
+		return next == InstanceDeregistering || next == InstanceRunning
 	case InstanceDeregistering:
 		return next == InstanceStopping
 	case InstanceStopping:
