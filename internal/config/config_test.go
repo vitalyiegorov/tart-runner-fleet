@@ -15,6 +15,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
       "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
       "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
       "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "linuxNestedVirtualization":true,
       "linuxProfiles":[
         {"id":"small","label":"linux-small","cpu":1,"memoryMb":2048},
         {"id":"medium","label":"linux-medium","cpu":2,"memoryMb":4096,"diskGb":40}
@@ -22,7 +23,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
       "macosBurst":{"enabled":true,"baseVm":"macos-base","vmPrefix":"gha-macos",
         "builder":{"label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},
         "maestro":{"label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2},
-        "rootDiskOptions":"sync=none","sharedDirectoryPath":"/private/tmp/ci-shared","nestedVirtualization":true},
+        "rootDiskOptions":"sync=none","sharedDirectoryPath":"/private/tmp/ci-shared"},
       "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
     }`
 
@@ -42,7 +43,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.MacOS.Maestro.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
 		t.Fatalf("mac/target decode = %+v %+v", cfg.MacOS, cfg.Targets)
 	}
-	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" || !cfg.MacOS.NestedVirtualization {
+	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" || !cfg.Linux.NestedVirtualization {
 		t.Fatalf("mac performance decode = %+v", cfg.MacOS)
 	}
 	if cfg.MacOS.AdmissionPolicy != MacOSAdmissionShared {
@@ -149,12 +150,13 @@ func TestValidateEveryInvariant(t *testing.T) {
 		"profile memory too big": func(c *Config) { c.Linux.Profiles[0].Resources.MemoryMiB = c.Linux.Capacity.MemoryMiB + 1 },
 		"target wrong type":      func(c *Config) { c.Targets[0].Type = "org" },
 		"target zero max":        func(c *Config) { c.Targets[0].MaxActive = 0 },
-		"mac no base":            func(c *Config) { c.MacOS.BaseVM = "" },
-		"mac no prefix":          func(c *Config) { c.MacOS.VMPrefix = "" },
-		"mac no label":           func(c *Config) { c.MacOS.Builder.Label = "" },
-		"mac zero cpu":           func(c *Config) { c.MacOS.Builder.Resources.CPU = 0; c.MacOS.Builder.CPU = 0 },
-		"mac zero memory":        func(c *Config) { c.MacOS.Builder.Resources.MemoryMiB = 0; c.MacOS.Builder.MemoryMiB = 0 },
-		"mac zero active":        func(c *Config) { c.MacOS.Builder.MaxActive = 0 },
+		"mac nested virtualization (Linux-only feature)": func(c *Config) { c.MacOS.NestedVirtualization = true },
+		"mac no base":     func(c *Config) { c.MacOS.BaseVM = "" },
+		"mac no prefix":   func(c *Config) { c.MacOS.VMPrefix = "" },
+		"mac no label":    func(c *Config) { c.MacOS.Builder.Label = "" },
+		"mac zero cpu":    func(c *Config) { c.MacOS.Builder.Resources.CPU = 0; c.MacOS.Builder.CPU = 0 },
+		"mac zero memory": func(c *Config) { c.MacOS.Builder.Resources.MemoryMiB = 0; c.MacOS.Builder.MemoryMiB = 0 },
+		"mac zero active": func(c *Config) { c.MacOS.Builder.MaxActive = 0 },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
