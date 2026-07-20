@@ -401,10 +401,11 @@ func TestOwnershipConflictListUncertaintyAndNames(t *testing.T) {
 	adapter.MacOSVMPrefixes = []string{"trf-builder-", "trf-maestro-"}
 	adapter.MacOSRootDiskOptions = "sync=none"
 	adapter.MacOSSharedDirectoryPath = "/private/tmp/ci-shared"
+	adapter.MacOSNestedVirtualization = true
 	if err := adapter.Start(context.Background(), "trf-maestro-1", ownership); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"run", "trf-maestro-1", "--no-graphics", "--no-audio", "--no-clipboard", "--root-disk-opts=sync=none", "--dir=ci-shared:/private/tmp/ci-shared"}
+	want := []string{"run", "trf-maestro-1", "--no-graphics", "--no-audio", "--no-clipboard", "--root-disk-opts=sync=none", "--dir=ci-shared:/private/tmp/ci-shared", "--nested"}
 	found := false
 	for _, command := range runner.commands {
 		if reflect.DeepEqual(command, want) {

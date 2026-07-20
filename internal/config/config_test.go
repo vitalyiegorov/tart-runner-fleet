@@ -22,7 +22,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
       "macosBurst":{"enabled":true,"baseVm":"macos-base","vmPrefix":"gha-macos",
         "builder":{"label":"macos-builder","cpu":8,"memoryMb":12288,"maxActive":1},
         "maestro":{"label":"macos-maestro","cpu":4,"memoryMb":7168,"maxActive":2},
-        "rootDiskOptions":"sync=none","sharedDirectoryPath":"/private/tmp/ci-shared"},
+        "rootDiskOptions":"sync=none","sharedDirectoryPath":"/private/tmp/ci-shared","nestedVirtualization":true},
       "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
     }`
 
@@ -42,7 +42,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.MacOS.Maestro.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
 		t.Fatalf("mac/target decode = %+v %+v", cfg.MacOS, cfg.Targets)
 	}
-	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" {
+	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" || !cfg.MacOS.NestedVirtualization {
 		t.Fatalf("mac performance decode = %+v", cfg.MacOS)
 	}
 	if cfg.MacOS.AdmissionPolicy != MacOSAdmissionShared {

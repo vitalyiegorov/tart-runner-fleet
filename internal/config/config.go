@@ -71,14 +71,15 @@ const (
 )
 
 type MacOS struct {
-	Enabled             bool
-	AdmissionPolicy     MacOSAdmissionPolicy
-	BaseVM              string
-	VMPrefix            string
-	Builder             Profile
-	Maestro             Profile
-	RootDiskOptions     string
-	SharedDirectoryPath string
+	Enabled              bool
+	AdmissionPolicy      MacOSAdmissionPolicy
+	BaseVM               string
+	VMPrefix             string
+	Builder              Profile
+	Maestro              Profile
+	RootDiskOptions      string
+	SharedDirectoryPath  string
+	NestedVirtualization bool
 }
 
 type Timeouts struct {
@@ -190,14 +191,15 @@ type wireConfig struct {
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
 	MacOSBurst                struct {
-		Enabled             bool                 `json:"enabled"`
-		AdmissionPolicy     MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
-		BaseVM              string               `json:"baseVm"`
-		VMPrefix            string               `json:"vmPrefix"`
-		Builder             Profile              `json:"builder"`
-		Maestro             Profile              `json:"maestro"`
-		RootDiskOptions     string               `json:"rootDiskOptions,omitempty"`
-		SharedDirectoryPath string               `json:"sharedDirectoryPath,omitempty"`
+		Enabled              bool                 `json:"enabled"`
+		AdmissionPolicy      MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
+		BaseVM               string               `json:"baseVm"`
+		VMPrefix             string               `json:"vmPrefix"`
+		Builder              Profile              `json:"builder"`
+		Maestro              Profile              `json:"maestro"`
+		RootDiskOptions      string               `json:"rootDiskOptions,omitempty"`
+		SharedDirectoryPath  string               `json:"sharedDirectoryPath,omitempty"`
+		NestedVirtualization bool                 `json:"nestedVirtualization,omitempty"`
 	} `json:"macosBurst"`
 	GitHub  GitHub   `json:"github"`
 	Targets []Target `json:"targets"`
@@ -220,7 +222,8 @@ func Decode(r io.Reader) (Config, error) {
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles)},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy), BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
-			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath},
+			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
+			NestedVirtualization: w.MacOSBurst.NestedVirtualization},
 		GitHub:   w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45), Boot: secondsOr(w.BootTimeoutSeconds, 180)},
 		Guards:   normalizeGuards(w), Targets: normalizeTargets(w.Targets),
@@ -283,6 +286,7 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
 	wire.MacOSBurst.RootDiskOptions = cfg.MacOS.RootDiskOptions
 	wire.MacOSBurst.SharedDirectoryPath = cfg.MacOS.SharedDirectoryPath
+	wire.MacOSBurst.NestedVirtualization = cfg.MacOS.NestedVirtualization
 
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
