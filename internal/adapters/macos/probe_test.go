@@ -133,43 +133,101 @@ func TestParsingFailuresAndUnits(t *testing.T) {
 	}
 }
 
-func TestSnapshotDegradesAtEveryProbeAndParseStage(t *testing.T) {
+func TestCriticalProbeFailuresDegradeAdvisoryFailuresDoNot(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
-	stages := []string{"df:/", "sysctl:vm.swapusage", "top:0", "sysctl:vm.loadavg"}
-	for _, stage := range stages {
-		t.Run(stage, func(t *testing.T) {
-			runner := &fakeCommands{outputs: validOutputs(), errors: map[string]error{stage: errors.New("failed")}}
-			snapshot := (&Probe{Runner: runner, Now: func() time.Time { return now }}).Snapshot(context.Background())
-			if snapshot.Freshness != Unavailable || snapshot.Cause == nil {
-				t.Fatalf("stage failure not degraded: %#v", snapshot)
-			}
-		})
-	}
-	badOutputs := []struct {
-		name string
-		key  string
+
+	// Memory (vm_stat) and disk (df) are hard capacity signals: a command or
+	// parse failure must degrade the whole observation so admission fails
+	// closed rather than admitting VMs blind to capacity.
+	critical := []struct {
+		name   string
+		cmdKey string
+		badKey string
 	}{
-		{"vm", "vm_stat"},
-		{"disk", "df"},
-		{"swap", "sysctl"},
-		{"cpu", "top"},
+		{"vm_stat command", "vm_stat", ""},
+		{"df command", "df:/", ""},
+		{"vm_stat parse", "", "vm_stat"},
+		{"df parse", "", "df"},
 	}
-	for _, test := range badOutputs {
-		t.Run("parse-"+test.name, func(t *testing.T) {
+	for _, test := range critical {
+		t.Run("critical/"+test.name, func(t *testing.T) {
 			outputs := validOutputs()
-			outputs[test.key] = []byte("bad")
-			snapshot := (&Probe{Runner: &fakeCommands{outputs: outputs}, Now: func() time.Time { return now }}).Snapshot(context.Background())
+			errs := map[string]error{}
+			if test.cmdKey != "" {
+				errs[test.cmdKey] = errors.New("failed")
+			}
+			if test.badKey != "" {
+				outputs[test.badKey] = []byte("bad")
+			}
+			snapshot := (&Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }}).Snapshot(context.Background())
 			if snapshot.Freshness != Unavailable || snapshot.Cause == nil {
-				t.Fatalf("parse failure not degraded: %#v", snapshot)
+				t.Fatalf("critical failure not degraded: %#v", snapshot)
 			}
 		})
 	}
-	runner := &fakeCommands{outputs: validOutputs()}
-	runner.outputs["sysctl"] = []byte("used = 1M")
-	// Load parsing is reached through the special vm.loadavg response, so test
-	// the aggregate parser directly for that final error branch.
-	if _, err := parseSnapshot(validOutputs()["vm_stat"], validOutputs()["df"], validOutputs()["sysctl"], validOutputs()["top"], []byte("bad")); err == nil {
-		t.Fatal("bad load accepted by aggregate parser")
+
+	// Swap, CPU, and load are advisory throttles: a failure with no prior
+	// reading must still produce a Fresh snapshot carrying the real memory and
+	// disk figures with permissive advisory defaults, never Unavailable. A
+	// flaky `top` bricking the whole scheduler was an 18h fleet-wide outage.
+	advisory := []struct {
+		name   string
+		cmdKey string
+		badKey string
+	}{
+		{"swap command", "sysctl:vm.swapusage", ""},
+		{"cpu command", "top:0", ""},
+		{"load command", "sysctl:vm.loadavg", ""},
+		{"swap parse", "", "sysctl"},
+		{"cpu parse", "", "top"},
+	}
+	for _, test := range advisory {
+		t.Run("advisory/"+test.name, func(t *testing.T) {
+			outputs := validOutputs()
+			errs := map[string]error{}
+			if test.cmdKey != "" {
+				errs[test.cmdKey] = errors.New("failed")
+			}
+			if test.badKey != "" {
+				outputs[test.badKey] = []byte("bad")
+			}
+			snapshot := (&Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }}).Snapshot(context.Background())
+			if snapshot.Freshness != Fresh {
+				t.Fatalf("advisory failure bricked the observation: %#v", snapshot)
+			}
+			if snapshot.AvailableMemoryMB != 4843 || snapshot.FreeDiskGB != 80 {
+				t.Fatalf("advisory failure dropped hard-capacity metrics: %#v", snapshot)
+			}
+		})
+	}
+}
+
+func TestAdvisoryFailureStaysAdmissibleAndRecoversLastKnown(t *testing.T) {
+	now := time.Unix(300, 0).UTC()
+	guard := Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15}
+
+	// Regression for the 18h wedge: a daemon that restarts while `top` is flaky
+	// has no prior snapshot, so a CPU-probe failure must still yield a Fresh,
+	// admissible observation on permissive defaults instead of bricking.
+	coldStart := &fakeCommands{outputs: validOutputs(), errors: map[string]error{"top:0": errors.New("top hung")}}
+	fresh := (&Probe{Runner: coldStart, Now: func() time.Time { return now }}).Snapshot(context.Background())
+	if fresh.Freshness != Fresh || fresh.CPUidlePercent != permissiveCPUidlePercent {
+		t.Fatalf("cold-start CPU probe failure did not degrade permissively: %#v", fresh)
+	}
+	if !guard.Evaluate(fresh, Request{MemoryMB: 2000}).Allowed {
+		t.Fatal("healthy host with an unreadable CPU probe was denied admission")
+	}
+
+	// Once a good reading exists, a later advisory failure carries it forward
+	// rather than snapping to the permissive default.
+	probe := &Probe{Runner: &fakeCommands{outputs: validOutputs()}, Now: func() time.Time { return now }}
+	if good := probe.Snapshot(context.Background()); good.CPUidlePercent != 90 {
+		t.Fatalf("expected 90%% idle from valid output, got %v", good.CPUidlePercent)
+	}
+	probe.Runner = &fakeCommands{outputs: validOutputs(), errors: map[string]error{"top:0": errors.New("top hung")}}
+	carried := probe.Snapshot(context.Background())
+	if carried.Freshness != Fresh || carried.CPUidlePercent != 90 {
+		t.Fatalf("advisory failure did not carry the last-known reading: %#v", carried)
 	}
 }
 
