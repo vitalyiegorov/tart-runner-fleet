@@ -130,7 +130,17 @@ func PlanTick(in Input) Plan {
 			plan = planMacWithCoexistence(in, plan, linux, macos)
 		} else {
 			plan.Next.MacHandoff = nil
-			plan = planMacOS(in, plan, macos)
+			attempted := planMacOS(in, plan, macos)
+			if containsSpawn(attempted.Operations) || len(linux) == 0 {
+				plan = attempted
+			} else {
+				// The oldest demand is a macOS job the idle host cannot admit for
+				// resources (e.g. a builder VM without enough headroom). Reserve it
+				// and bounded-drain feasible Linux rather than starving the whole
+				// queue behind it — the same backfill the coexistence path performs
+				// when Linux is already live.
+				plan = planMacHandoff(in, plan, linux, macos)
+			}
 		}
 	case domain.PlatformLinux:
 		plan.Next.MacHandoff = retainedMacHandoff(in.Prior.MacHandoff, macos)
@@ -697,11 +707,17 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 	}
 	plan.Operations = append(plan.Operations, drains...)
 	if allIdle {
-		plan.Next.MacHandoff = nil
 		nextInput := in
 		nextInput.Instances = domain.Fresh(filtered, in.Instances.ObservedAt)
-		plan = appendMacSpawns(nextInput, plan, macDemands, operationIDs(drains))
-		return plan
+		spawned := appendMacSpawns(nextInput, plan, macDemands, operationIDs(drains))
+		if containsSpawn(spawned.Operations) {
+			spawned.Next.MacHandoff = nil
+			return spawned
+		}
+		// The macOS head cannot be admitted even with every Linux instance idle
+		// or drained (an idle host without headroom for the VM). Fall through to
+		// reserve it and bounded-drain feasible Linux instead of stalling — a
+		// resource-infeasible head must not deadlock the queue.
 	}
 	plan.Next.MacHandoff = &handoff
 	if !handoff.BackfillAdmitted {

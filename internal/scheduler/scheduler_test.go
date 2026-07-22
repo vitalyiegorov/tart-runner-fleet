@@ -816,6 +816,38 @@ func TestMacHandoffSurvivesTemporaryOlderLinuxSelection(t *testing.T) {
 	}
 }
 
+func TestIdleHostInfeasibleMacHeadBackfillsLinuxInsteadOfStarving(t *testing.T) {
+	// Regression for a fleet-wide wedge: on an idle host (no live instances) the
+	// oldest demand was a macOS builder that the host could not admit for
+	// resources (a 12GiB VM while free memory was lower). PlanTick took the bare
+	// planMacOS path, produced an empty plan, and starved every feasible Linux
+	// job behind the one unschedulable macOS head. The coexistence path already
+	// bounded-drains Linux when Linux is live; the idle host must do the same.
+	macJob := demand("a/repo", 1, 30*time.Minute, "builder")
+	agedSmall := demand("b/repo", 2, 20*time.Minute, "small")
+	secondSmall := demand("c/repo", 3, 15*time.Minute, "small")
+
+	in := input([]domain.Demand{macJob, agedSmall, secondSmall}, nil, State{})
+	// The host can fit a small Linux VM but not the 12GiB builder.
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 9_216, Slots: 4}}, testNow)
+
+	plan := PlanTick(in)
+	if plan.Status != PlanReady {
+		t.Fatalf("expected ready plan, got %s: %#v", plan.Status, plan)
+	}
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{agedSmall.Key}) {
+		t.Fatalf("idle-host infeasible mac head starved Linux: spawns = %#v, want %#v", got, agedSmall.Key)
+	}
+	for _, operation := range plan.Operations {
+		if operation.Kind == OperationSpawn && operation.Profile == "builder" {
+			t.Fatalf("infeasible builder was spawned: %#v", plan)
+		}
+	}
+	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.Demand != macJob.Key || !plan.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("mac head not reserved while backfilling: %#v", plan.Next.MacHandoff)
+	}
+}
+
 func TestBlockedMacHandoffBackfillsYoungControlPlaneNotYoungStandard(t *testing.T) {
 	macJob := demand("mac/repo", 1, 10*time.Minute, "builder")
 	standard := demand("standard/repo", 2, time.Minute, "small")
