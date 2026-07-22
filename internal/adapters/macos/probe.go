@@ -52,11 +52,28 @@ type Probe struct {
 	last     Snapshot
 }
 
+// Permissive advisory defaults cannot by themselves deny admission: full CPU
+// idle, zero load, and zero swap all pass the guardrail pressure checks. They
+// apply only when an advisory probe fails and no prior reading exists.
+const (
+	permissiveCPUidlePercent = 100
+	permissiveLoadAverage    = 0
+	permissiveSwapUsedMB     = 0
+)
+
 func (p *Probe) Snapshot(ctx context.Context) Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()()
+	hasPrior := !p.last.ObservedAt.IsZero()
+
+	// Memory and disk are hard capacity signals. Without them admission cannot
+	// be judged safely, so their absence degrades the whole observation.
 	vmStat, err := p.run(ctx, "vm_stat")
+	if err != nil {
+		return p.degraded(now, err)
+	}
+	availableMemoryMB, swapouts, err := parseVMStat(string(vmStat))
 	if err != nil {
 		return p.degraded(now, err)
 	}
@@ -64,26 +81,48 @@ func (p *Probe) Snapshot(ctx context.Context) Snapshot {
 	if err != nil {
 		return p.degraded(now, err)
 	}
-	swap, err := p.run(ctx, "sysctl", "-n", "vm.swapusage")
+	freeDiskGB, err := parseDisk(string(disk))
 	if err != nil {
 		return p.degraded(now, err)
 	}
-	cpu, err := p.run(ctx, "top", "-l", "1", "-n", "0")
-	if err != nil {
-		return p.degraded(now, err)
+
+	// Swap, CPU idle, and load are advisory throttles. A single flaky heavy
+	// probe (notably `top`) must never fail the whole host observation and
+	// fail-close admission fleet-wide, so each falls back to its last good
+	// reading and then to a permissive default. This is the difference between
+	// throttling on unmeasurable soft pressure and bricking the scheduler.
+	snapshot := Snapshot{
+		Freshness:         Fresh,
+		ObservedAt:        now,
+		AvailableMemoryMB: availableMemoryMB,
+		FreeDiskGB:        freeDiskGB,
+		SwapOuts:          swapouts,
+		SwapUsedMB:        int64(p.advisory(ctx, hasPrior, float64(p.last.SwapUsedMB), permissiveSwapUsedMB, parseSwapFloat, "sysctl", "-n", "vm.swapusage")),
+		CPUidlePercent:    p.advisory(ctx, hasPrior, p.last.CPUidlePercent, permissiveCPUidlePercent, parseCPU, "top", "-l", "1", "-n", "0"),
+		LoadAverage:       p.advisory(ctx, hasPrior, p.last.LoadAverage, permissiveLoadAverage, parseLoad, "sysctl", "-n", "vm.loadavg"),
 	}
-	load, err := p.run(ctx, "sysctl", "-n", "vm.loadavg")
-	if err != nil {
-		return p.degraded(now, err)
-	}
-	snapshot, err := parseSnapshot(vmStat, disk, swap, cpu, load)
-	if err != nil {
-		return p.degraded(now, err)
-	}
-	snapshot.Freshness = Fresh
-	snapshot.ObservedAt = now
 	p.last = snapshot
 	return snapshot
+}
+
+// advisory reads one soft-pressure metric, degrading gracefully: a probe or
+// parse failure yields the last good reading when one exists, otherwise the
+// permissive default. It never fails the observation.
+func (p *Probe) advisory(ctx context.Context, hasPrior bool, lastKnown, permissive float64, parse func(string) (float64, error), binary string, args ...string) float64 {
+	if output, err := p.run(ctx, binary, args...); err == nil {
+		if value, parseErr := parse(string(output)); parseErr == nil {
+			return value
+		}
+	}
+	if hasPrior {
+		return lastKnown
+	}
+	return permissive
+}
+
+func parseSwapFloat(value string) (float64, error) {
+	swapUsedMB, err := parseSwap(value)
+	return float64(swapUsedMB), err
 }
 
 func (p *Probe) degraded(now time.Time, cause error) Snapshot {
@@ -111,30 +150,6 @@ func (p *Probe) run(ctx context.Context, binary string, args ...string) ([]byte,
 		return nil, fmt.Errorf("%s probe: %w", binary, err)
 	}
 	return output, nil
-}
-
-func parseSnapshot(vmStat, disk, swap, cpu, load []byte) (Snapshot, error) {
-	available, swapouts, err := parseVMStat(string(vmStat))
-	if err != nil {
-		return Snapshot{}, err
-	}
-	freeDisk, err := parseDisk(string(disk))
-	if err != nil {
-		return Snapshot{}, err
-	}
-	swapUsed, err := parseSwap(string(swap))
-	if err != nil {
-		return Snapshot{}, err
-	}
-	idle, err := parseCPU(string(cpu))
-	if err != nil {
-		return Snapshot{}, err
-	}
-	loadAverage, err := parseLoad(string(load))
-	if err != nil {
-		return Snapshot{}, err
-	}
-	return Snapshot{AvailableMemoryMB: available, FreeDiskGB: freeDisk, SwapUsedMB: swapUsed, SwapOuts: swapouts, CPUidlePercent: idle, LoadAverage: loadAverage}, nil
 }
 
 func parseVMStat(value string) (int64, int64, error) {
