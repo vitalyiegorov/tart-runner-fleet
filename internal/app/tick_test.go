@@ -34,6 +34,9 @@ func (s *tickStore) Instance(_ context.Context, id string) (operations.Instance,
 	}
 	return v, nil
 }
+func (s *tickStore) SpawnGeneration(context.Context, domain.DemandKey) (int, error) {
+	return 0, nil
+}
 func (s *tickStore) ApplyPlan(_ context.Context, plan operations.Plan) (bool, error) {
 	if s.applyErr != nil {
 		return false, s.applyErr

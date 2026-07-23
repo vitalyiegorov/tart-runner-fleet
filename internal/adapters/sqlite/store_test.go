@@ -849,6 +849,31 @@ func TestApplyPlanUpdateAndFailureBranches(t *testing.T) {
 	}
 }
 
+func TestSpawnGenerationCountsTerminalIncarnationsByDemand(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	demand := domain.DemandKey{Repo: "owner/repo", RunID: 7, Attempt: 1, JobID: 9}
+	other := domain.DemandKey{Repo: "owner/repo", RunID: 7, Attempt: 1, JobID: 10}
+	mk := func(id string, state operations.State, resource string) {
+		t.Helper()
+		ownership := operations.Ownership{ControllerID: "c", ResourceID: resource, OperationID: id}
+		if err := store.CreateInstance(ctx, operations.Instance{ID: id, State: state, Ownership: ownership}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	mk("gen-deleted", operations.StateDeleted, demand.String())
+	mk("gen-failed", operations.StateFailed, demand.String())
+	mk("gen-live", operations.StateOnlineIdle, demand.String())
+	mk("gen-other", operations.StateDeleted, other.String())
+
+	if got, err := store.SpawnGeneration(ctx, demand); err != nil || got != 2 {
+		t.Fatalf("SpawnGeneration = %d, %v (want 2 terminal, live excluded)", got, err)
+	}
+	if got, err := store.SpawnGeneration(ctx, domain.DemandKey{Repo: "fresh", RunID: 1, Attempt: 1, JobID: 1}); err != nil || got != 0 {
+		t.Fatalf("SpawnGeneration for unseen demand = %d, %v", got, err)
+	}
+}
+
 type scanError struct{ err error }
 
 func (s scanError) Scan(...any) error { return s.err }
@@ -883,6 +908,10 @@ func TestScannerErrorsAndClosedDatabaseErrors(t *testing.T) {
 			return store.CreateInstance(ctx, operations.Instance{ID: "vm", State: operations.StatePlanned, Ownership: ownership})
 		},
 		func() error { _, err := store.Instance(ctx, "vm"); return err },
+		func() error {
+			_, err := store.SpawnGeneration(ctx, domain.DemandKey{Repo: "owner/repo", RunID: 1, Attempt: 1, JobID: 1})
+			return err
+		},
 		func() error {
 			_, _, err := store.Transition(ctx, operations.Transition{InstanceID: "vm", ExpectedState: operations.StatePlanned, NextState: operations.StateCloning, Operation: operation})
 			return err

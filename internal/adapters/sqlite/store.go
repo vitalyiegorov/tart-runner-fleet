@@ -620,6 +620,27 @@ func (s *Store) Instance(ctx context.Context, id string) (operations.Instance, e
 	return scanInstance(s.db.QueryRowContext(ctx, `SELECT id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at FROM instances WHERE id=?`, id))
 }
 
+// SpawnGeneration counts the demand's prior terminal incarnations from durable
+// state. A completed or failed attempt leaves a deleted/failed instance row (and
+// its durable operations) behind as a tombstone; the count lets the controller
+// derive a fresh, deterministic identity for the next spawn that supersedes
+// those tombstones. Only terminal rows are counted, so a still-live incarnation
+// keeps colliding and a genuine double-spawn hard-fails. The count is stable
+// within a tick: the fleet is a single writer and there is at most one live
+// incarnation per demand, so no concurrent worker transition can advance it
+// while a respawn is being planned. The demand is addressed through
+// ownership.resource_id, matching how recovery migrations already key ownership.
+func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (int, error) {
+	var generation int
+	err := s.dbRow(ctx, "instances.generation", `SELECT COUNT(*) FROM instances
+		WHERE state IN (?,?) AND json_extract(ownership,'$.resource_id')=?`,
+		operations.StateDeleted, operations.StateFailed, demand.String()).Scan(&generation)
+	if err != nil {
+		return 0, fmt.Errorf("count spawn generation: %w", err)
+	}
+	return generation, nil
+}
+
 // Advance atomically persists one externally observed lifecycle edge without
 // enqueuing another effect. The owning outbox operation remains claimed until
 // its executor reaches a terminal lifecycle state and completes it.

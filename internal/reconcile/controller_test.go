@@ -18,7 +18,13 @@ type fakeStore struct {
 	state                           operations.SchedulerState
 	instances                       map[string]operations.Instance
 	applied                         []operations.Plan
+	generation                      int
+	generationErr                   error
 	stateErr, instanceErr, applyErr error
+}
+
+func (f *fakeStore) SpawnGeneration(context.Context, domain.DemandKey) (int, error) {
+	return f.generation, f.generationErr
 }
 
 func (f *fakeStore) SchedulerState(context.Context) (operations.SchedulerState, error) {
@@ -193,6 +199,47 @@ func TestControllerAuthorityTranslatesSpawnAndDependentDrain(t *testing.T) {
 	var payload map[string]any
 	if err := json.Unmarshal(got.Operations[1].Payload, &payload); err != nil || payload["repo"] != "owner/repo" {
 		t.Fatalf("payload = %s, %v", got.Operations[1].Payload, err)
+	}
+}
+
+// Regression for the fleet-wedging identity collision: a respawn of a demand
+// whose prior incarnation reached a terminal state must derive a distinct
+// durable identity. Generation zero preserves the scheduler content address so
+// first spawns and same-attempt replays are unchanged; a later generation salts
+// both the instance name and the durable operation identity.
+func TestControllerScopesSpawnIdentityToTerminalGeneration(t *testing.T) {
+	spawn := scheduler.Operation{ID: "spawn-op", Kind: scheduler.OperationSpawn,
+		Demand: domain.DemandKey{Repo: "owner/repo", RunID: 11, Attempt: 2, JobID: 33}, Profile: "maestro", Route: "macos-maestro"}
+	profiles := map[domain.ProfileID]domain.Profile{
+		"maestro": {ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS, Resources: domain.Resources{CPU: 4, MemoryMB: 7168, Slots: 1}},
+	}
+	commit := func(generation int) operations.Plan {
+		t.Helper()
+		store := &fakeStore{state: operations.SchedulerState{Version: 2}, generation: generation}
+		controller := Controller{Store: store, ControllerID: "controller", Mode: Authority, Profiles: profiles}
+		if applied, err := controller.Commit(context.Background(), readyPlan(spawn), "cursor", controllerNow); err != nil || !applied {
+			t.Fatalf("generation %d commit = %v, %v", generation, applied, err)
+		}
+		return store.applied[0]
+	}
+	base, next := commit(0), commit(1)
+	if base.Operations[0].ID != "spawn-op" || base.Operations[0].IdempotencyKey != "spawn-op" || base.Instances[0].Instance.Ownership.OperationID != "spawn-op" {
+		t.Fatalf("generation zero must preserve scheduler content address: %#v", base.Operations[0])
+	}
+	if base.Instances[0].Instance.ID == next.Instances[0].Instance.ID {
+		t.Fatalf("respawn reused instance identity %q", base.Instances[0].Instance.ID)
+	}
+	if base.Operations[0].ID == next.Operations[0].ID || base.Operations[0].IdempotencyKey == next.Operations[0].IdempotencyKey {
+		t.Fatalf("respawn reused operation identity %q", base.Operations[0].ID)
+	}
+	if next.Instances[0].Instance.Ownership.OperationID != next.Operations[0].ID {
+		t.Fatalf("respawn ownership %q diverged from operation identity %q", next.Instances[0].Instance.Ownership.OperationID, next.Operations[0].ID)
+	}
+
+	errStore := &fakeStore{state: operations.SchedulerState{Version: 2}, generationErr: errors.New("generation unavailable")}
+	errController := Controller{Store: errStore, ControllerID: "controller", Mode: Authority, Profiles: profiles}
+	if _, err := errController.Commit(context.Background(), readyPlan(spawn), "cursor", controllerNow); err == nil {
+		t.Fatal("generation query error ignored")
 	}
 }
 
