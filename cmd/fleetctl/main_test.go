@@ -398,6 +398,19 @@ func TestConfigValidationAndLegacyAlias(t *testing.T) {
 			t.Fatalf("path=%s code=%d stderr=%q", path, code, stderr.String())
 		}
 	}
+	// A config that decodes and passes Config.Validate but references a
+	// nonexistent scale set profile must still fail validation, because fleetd
+	// would crash-loop building bindings at startup (production incident).
+	runtimeGap := filepath.Join(dir, "runtime-gap.json")
+	if err := os.WriteFile(runtimeGap, []byte(strings.Replace(raw, `"targets":`,
+		`"github":{"scaleSets":[{"profile":"xl","name":"fleet-repo-xl","id":1,"maxCapacity":1}]},"targets":`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gapStdout, gapStderr bytes.Buffer
+	if code := executeWith(context.Background(), []string{"config", "validate", runtimeGap}, &gapStdout, &gapStderr, deps); code != exitFailure ||
+		!strings.Contains(gapStderr.String(), "unknown profile") {
+		t.Fatalf("runtime gap not caught: code=%d stdout=%q stderr=%q", code, gapStdout.String(), gapStderr.String())
+	}
 	for _, mode := range []string{"shadow", "canary", "authority"} {
 		var modeStdout, modeStderr bytes.Buffer
 		if code := executeWith(context.Background(), []string{"config", "validate", "--mode", mode, valid}, &modeStdout, &modeStderr, deps); code != exitFailure || !strings.Contains(modeStderr.String(), "disk floor") {
