@@ -16,6 +16,10 @@ var (
 	ErrLeaseLost = errors.New("lease lost")
 	ErrInvalid   = errors.New("invalid operation")
 	ErrUncertain = errors.New("observation uncertain")
+	// ErrSchedulerStateMissing reports that the seeded scheduler_state singleton
+	// is absent (e.g. an operator deleted it). Callers distinguish it from a
+	// generic store failure to drive a bounded cold-start reseed.
+	ErrSchedulerStateMissing = errors.New("scheduler state missing")
 )
 
 type State = domain.InstanceState
