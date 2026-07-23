@@ -233,3 +233,82 @@ func TestEngineTickTricklesOldestDemandWhenStatisticsAreStale(t *testing.T) {
 		t.Fatalf("degraded binding lost queue visibility: %#v", result.Queues)
 	}
 }
+
+// TestEngineTickTrickleSkipsDemandWithLiveIncarnation reproduces the incident:
+// statistics are stale, so the trickle engages; the oldest demand already has
+// a live (assigned) instance waiting on GitHub. Blindly trickling the oldest
+// demand would respawn it and collide with the live incarnation, wedging every
+// recycled tick. The trickle must instead admit the next demand — the oldest
+// one without a live incarnation — and the tick must succeed.
+func TestEngineTickTrickleSkipsDemandWithLiveIncarnation(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	store := &tickStore{fakeDemandStore: fakeDemandStore{
+		statistics: operations.DemandStatistics{MessageID: 1, Available: 2, ObservedAt: now.Add(-3 * time.Minute)},
+		records: []operations.DemandRecord{{
+			Status: operations.DemandJobAvailable, RunnerRequestID: 11, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-2 * time.Minute),
+		}, {
+			Status: operations.DemandJobAvailable, RunnerRequestID: 12, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute),
+		}}}}
+	cfg := scheduler.Config{LinuxCapacity: domain.Resources{CPU: 4, MemoryMB: 8192, Slots: 2}, FairnessAge: 5 * time.Minute,
+		RepoCaps: map[string]int{"owner/repo": 2}, Profiles: map[domain.ProfileID]domain.Profile{
+			"small": {ID: "small", Route: "tiered", Platform: domain.PlatformLinux, Resources: domain.Resources{CPU: 2, MemoryMB: 4096, Slots: 1}},
+		}}
+	live := domain.Instance{ID: "trf-small-live11", Repo: "owner/repo",
+		Demand:   domain.DemandKey{Repo: "owner/repo", RunID: 8, Attempt: 1, JobID: 11},
+		Platform: domain.PlatformLinux, Profile: "small", Route: "tiered",
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4096, Slots: 1},
+		State:     domain.InstanceAssigned, Power: domain.InstancePowerRunning}
+	binding := Binding{ScaleSetID: 1, Profile: cfg.Profiles["small"]}
+	host := domain.Host{Available: cfg.LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance{live}, now), host: domain.Fresh(host, now),
+	}, Config: cfg, Bindings: []Binding{binding}, ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
+	result, err := engine.Tick(context.Background())
+	if err != nil {
+		t.Fatalf("trickle must not wedge the tick when the oldest demand is live: %v", err)
+	}
+	if len(result.Demands) != 1 || result.Demands[0].Key.JobID != 12 {
+		t.Fatalf("trickle must skip the live demand and admit the next: %#v", result.Demands)
+	}
+	spawns := 0
+	for _, operation := range result.Plan.Operations {
+		if operation.Kind != scheduler.OperationSpawn {
+			continue
+		}
+		spawns++
+		if operation.Demand.JobID == 11 {
+			t.Fatalf("planned a duplicate spawn for a demand with a live incarnation: %#v", operation)
+		}
+		if operation.Demand.JobID != 12 {
+			t.Fatalf("spawn targeted an unexpected demand: %#v", operation)
+		}
+	}
+	if spawns != 1 {
+		t.Fatalf("expected exactly one spawn for the skipped-forward demand: %#v", result.Plan.Operations)
+	}
+	if result.Queues["small"].Count != 2 {
+		t.Fatalf("degraded binding lost queue visibility: %#v", result.Queues)
+	}
+}
+
+// TestTrickleSelectsOldestWithoutLiveIncarnation pins the trickle selection
+// helper directly across its branches: empty input, first candidate live,
+// no candidate live, and every candidate live.
+func TestTrickleSelectsOldestWithoutLiveIncarnation(t *testing.T) {
+	keyA := domain.DemandKey{Repo: "owner/repo", RunID: 8, Attempt: 1, JobID: 11}
+	keyB := domain.DemandKey{Repo: "owner/repo", RunID: 8, Attempt: 1, JobID: 12}
+	a := domain.Demand{Key: keyA}
+	b := domain.Demand{Key: keyB}
+	if got := trickle(nil, map[domain.DemandKey]bool{}); got != nil {
+		t.Fatalf("empty queue must trickle nothing: %#v", got)
+	}
+	if got := trickle([]domain.Demand{a, b}, map[domain.DemandKey]bool{}); len(got) != 1 || got[0].Key != keyA {
+		t.Fatalf("no live incarnation must trickle the oldest: %#v", got)
+	}
+	if got := trickle([]domain.Demand{a, b}, map[domain.DemandKey]bool{keyA: true}); len(got) != 1 || got[0].Key != keyB {
+		t.Fatalf("first live must skip forward to the next: %#v", got)
+	}
+	if got := trickle([]domain.Demand{a, b}, map[domain.DemandKey]bool{keyA: true, keyB: true}); got != nil {
+		t.Fatalf("all live must trickle nothing: %#v", got)
+	}
+}

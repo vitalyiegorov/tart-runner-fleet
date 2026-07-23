@@ -65,6 +65,81 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	}
 }
 
+func TestDecodeAndEncodeOptInFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fragment string
+		decoded  func(Config) bool
+		clear    func(*Config)
+	}{
+		{
+			name: "mixed platform admission",
+			raw: `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false, "mixedPlatformAdmission":true},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`,
+			fragment: `"mixedPlatformAdmission": true`,
+			decoded:  func(c Config) bool { return c.MacOS.MixedPlatformAdmission },
+			clear:    func(c *Config) { c.MacOS.MixedPlatformAdmission = false },
+		},
+		{
+			name: "pressure memory accounting",
+			raw: `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "pressureMemoryAccounting":true,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`,
+			fragment: `"pressureMemoryAccounting": true`,
+			decoded:  func(c Config) bool { return c.Guards.PressureMemoryAccounting },
+			clear:    func(c *Config) { c.Guards.PressureMemoryAccounting = false },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg, err := Decode(strings.NewReader(test.raw))
+			if err != nil {
+				t.Fatalf("Decode() error = %v", err)
+			}
+			if !test.decoded(cfg) {
+				t.Fatalf("flag not decoded")
+			}
+			var encoded bytes.Buffer
+			if err := Encode(&encoded, cfg); err != nil {
+				t.Fatalf("Encode() = %v", err)
+			}
+			if !strings.Contains(encoded.String(), test.fragment) {
+				t.Fatalf("Encode omitted %s:\n%s", test.fragment, encoded.String())
+			}
+			roundTripped, err := Decode(&encoded)
+			if err != nil || !test.decoded(roundTripped) {
+				t.Fatalf("round-trip = %v, %v", test.decoded(roundTripped), err)
+			}
+			// Default off is omitted from the encoded form so older strict
+			// releases, which reject unknown fields, accept legacy configs.
+			legacy := cfg
+			test.clear(&legacy)
+			var legacyEncoded bytes.Buffer
+			if err := Encode(&legacyEncoded, legacy); err != nil {
+				t.Fatalf("Encode(legacy) = %v", err)
+			}
+			if strings.Contains(legacyEncoded.String(), strings.Split(test.fragment, `"`)[1]) {
+				t.Fatalf("default-off flag leaked into encoded form:\n%s", legacyEncoded.String())
+			}
+		})
+	}
+}
+
 func TestDecodeAndEncodePreserveExplicitAssignedTimeout(t *testing.T) {
 	raw := `{
       "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",

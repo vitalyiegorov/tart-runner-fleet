@@ -28,8 +28,21 @@ func (f *fakeCommands) Run(_ context.Context, binary string, args ...string) ([]
 	if err := f.errors[key]; err != nil {
 		return nil, err
 	}
-	if binary == "sysctl" && len(args) > 0 && args[len(args)-1] == "vm.loadavg" {
-		return []byte("{ 2.0 1.5 1.0 }"), nil
+	if binary == "sysctl" && len(args) > 0 {
+		switch args[len(args)-1] {
+		case "vm.loadavg":
+			return []byte("{ 2.0 1.5 1.0 }"), nil
+		case "kern.memorystatus_level":
+			if out, ok := f.outputs["kern.memorystatus_level"]; ok {
+				return out, nil
+			}
+			return []byte("78\n"), nil
+		case "hw.memsize":
+			if out, ok := f.outputs["hw.memsize"]; ok {
+				return out, nil
+			}
+			return []byte("25769803776\n"), nil
+		}
 	}
 	return f.outputs[binary], nil
 }
@@ -228,6 +241,94 @@ func TestAdvisoryFailureStaysAdmissibleAndRecoversLastKnown(t *testing.T) {
 	carried := probe.Snapshot(context.Background())
 	if carried.Freshness != Fresh || carried.CPUidlePercent != 90 {
 		t.Fatalf("advisory failure did not carry the last-known reading: %#v", carried)
+	}
+}
+
+func TestPressureAccountingPrimaryAndFallback(t *testing.T) {
+	now := time.Unix(400, 0).UTC()
+
+	// Flag on with both sysctls valid: availability is memsize x level%
+	// (25769803776 B = 24576 MiB, level 78 => 19169 MiB), replacing the legacy
+	// page figure (4843 MiB) that understates reality by gigabytes.
+	on := &Probe{Runner: &fakeCommands{outputs: validOutputs()}, Now: func() time.Time { return now }, PressureAccounting: true}
+	if snapshot := on.Snapshot(context.Background()); snapshot.Freshness != Fresh || snapshot.AvailableMemoryMB != 19169 {
+		t.Fatalf("pressure path did not compute memsize x level: %#v", snapshot)
+	}
+
+	// Flag off: the pressure sysctls are ignored and the legacy page figure
+	// stands byte-for-byte, even though the runner would answer them.
+	off := &Probe{Runner: &fakeCommands{outputs: validOutputs()}, Now: func() time.Time { return now }}
+	if snapshot := off.Snapshot(context.Background()); snapshot.AvailableMemoryMB != 4843 {
+		t.Fatalf("flag off changed legacy availability: %#v", snapshot)
+	}
+
+	// A level above 100 (kernel anomaly) is capped at physical memory, never more.
+	capped := validOutputs()
+	capped["kern.memorystatus_level"] = []byte("150\n")
+	high := &Probe{Runner: &fakeCommands{outputs: capped}, Now: func() time.Time { return now }, PressureAccounting: true}
+	if snapshot := high.Snapshot(context.Background()); snapshot.AvailableMemoryMB != 24576 {
+		t.Fatalf("pressure availability exceeded physical memory: %#v", snapshot)
+	}
+
+	// Every pressure read/parse failure falls back to the vm_stat page figure
+	// without degrading the observation (Fresh, 4843 MiB).
+	fallbacks := []struct {
+		name    string
+		errKey  string
+		badKey  string
+		badData string
+	}{
+		{"level command", "sysctl:kern.memorystatus_level", "", ""},
+		{"memsize command", "sysctl:hw.memsize", "", ""},
+		{"level parse", "", "kern.memorystatus_level", "bad"},
+		{"level negative", "", "kern.memorystatus_level", "-1"},
+		{"memsize parse", "", "hw.memsize", "bad"},
+		{"memsize zero", "", "hw.memsize", "0"},
+	}
+	for _, test := range fallbacks {
+		t.Run("fallback/"+test.name, func(t *testing.T) {
+			outputs := validOutputs()
+			errs := map[string]error{}
+			if test.errKey != "" {
+				errs[test.errKey] = errors.New("failed")
+			}
+			if test.badKey != "" {
+				outputs[test.badKey] = []byte(test.badData)
+			}
+			probe := &Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }, PressureAccounting: true}
+			snapshot := probe.Snapshot(context.Background())
+			if snapshot.Freshness != Fresh || snapshot.AvailableMemoryMB != 4843 {
+				t.Fatalf("pressure failure did not fall back to the page figure: %#v", snapshot)
+			}
+		})
+	}
+
+	// vm_stat remains the fail-closed base: with the flag on, a vm_stat failure
+	// still degrades the whole observation to Unavailable.
+	degraded := &Probe{Runner: &fakeCommands{outputs: validOutputs(), errors: map[string]error{"vm_stat": errors.New("failed")}}, Now: func() time.Time { return now }, PressureAccounting: true}
+	if snapshot := degraded.Snapshot(context.Background()); snapshot.Freshness != Unavailable || snapshot.Cause == nil {
+		t.Fatalf("pressure flag masked a critical vm_stat failure: %#v", snapshot)
+	}
+}
+
+func TestPressureParsingFailuresAndUnits(t *testing.T) {
+	if level, err := parseMemorystatusLevel("78\n"); err != nil || level != 78 {
+		t.Fatalf("level parse: %d %v", level, err)
+	}
+	if _, err := parseMemorystatusLevel("bad"); err == nil {
+		t.Fatal("nonnumeric level accepted")
+	}
+	if _, err := parseMemorystatusLevel("-1"); err == nil {
+		t.Fatal("negative level accepted")
+	}
+	if memsize, err := parseMemsizeBytes("25769803776\n"); err != nil || memsize != 25769803776 {
+		t.Fatalf("memsize parse: %d %v", memsize, err)
+	}
+	if _, err := parseMemsizeBytes("bad"); err == nil {
+		t.Fatal("nonnumeric memsize accepted")
+	}
+	if _, err := parseMemsizeBytes("0"); err == nil {
+		t.Fatal("nonpositive memsize accepted")
 	}
 }
 

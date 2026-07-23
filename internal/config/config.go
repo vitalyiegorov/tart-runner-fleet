@@ -75,15 +75,20 @@ const (
 )
 
 type MacOS struct {
-	Enabled              bool
-	AdmissionPolicy      MacOSAdmissionPolicy
-	BaseVM               string
-	VMPrefix             string
-	Builder              Profile
-	Maestro              Profile
-	RootDiskOptions      string
-	SharedDirectoryPath  string
-	NestedVirtualization bool
+	Enabled         bool
+	AdmissionPolicy MacOSAdmissionPolicy
+	// MixedPlatformAdmission lets Linux runners fill the residual host envelope
+	// beside a live macOS cohort (and a compatible macOS profile fill it beside
+	// live Linux) instead of the platform-exclusive one-platform-per-tick model.
+	// Default false preserves today's admission behavior byte-for-byte.
+	MixedPlatformAdmission bool
+	BaseVM                 string
+	VMPrefix               string
+	Builder                Profile
+	Maestro                Profile
+	RootDiskOptions        string
+	SharedDirectoryPath    string
+	NestedVirtualization   bool
 }
 
 type Timeouts struct {
@@ -103,6 +108,11 @@ type Guards struct {
 	MaxSwapUsedMiB        int
 	MaxLoadAverage        float64
 	MinCPUIdlePercent     float64
+	// PressureMemoryAccounting selects the kernel memory-pressure availability
+	// signal in the macOS host probe instead of the legacy vm_stat page formula.
+	// Default false preserves legacy behavior byte-for-byte; it is enabled
+	// per-host in fleet.json.
+	PressureMemoryAccounting bool
 }
 
 const (
@@ -197,20 +207,22 @@ type wireConfig struct {
 	MaxSwapUsedMiB            int       `json:"maxSwapUsedMb,omitempty"`
 	MaxLoadAverage            float64   `json:"maxLoadAverage,omitempty"`
 	MinCPUIdlePercent         float64   `json:"minCpuIdlePercent,omitempty"`
+	PressureMemoryAccounting  bool      `json:"pressureMemoryAccounting,omitempty"`
 	GitHubTimeoutSeconds      int       `json:"githubTimeoutSeconds"`
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
 	AssignedTimeoutSeconds    int       `json:"assignedTimeoutSeconds,omitempty"`
 	MacOSBurst                struct {
-		Enabled              bool                 `json:"enabled"`
-		AdmissionPolicy      MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
-		BaseVM               string               `json:"baseVm"`
-		VMPrefix             string               `json:"vmPrefix"`
-		Builder              Profile              `json:"builder"`
-		Maestro              Profile              `json:"maestro"`
-		RootDiskOptions      string               `json:"rootDiskOptions,omitempty"`
-		SharedDirectoryPath  string               `json:"sharedDirectoryPath,omitempty"`
-		NestedVirtualization bool                 `json:"nestedVirtualization,omitempty"`
+		Enabled                bool                 `json:"enabled"`
+		AdmissionPolicy        MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
+		MixedPlatformAdmission bool                 `json:"mixedPlatformAdmission,omitempty"`
+		BaseVM                 string               `json:"baseVm"`
+		VMPrefix               string               `json:"vmPrefix"`
+		Builder                Profile              `json:"builder"`
+		Maestro                Profile              `json:"maestro"`
+		RootDiskOptions        string               `json:"rootDiskOptions,omitempty"`
+		SharedDirectoryPath    string               `json:"sharedDirectoryPath,omitempty"`
+		NestedVirtualization   bool                 `json:"nestedVirtualization,omitempty"`
 	} `json:"macosBurst"`
 	GitHub  GitHub   `json:"github"`
 	Targets []Target `json:"targets"`
@@ -232,7 +244,8 @@ func Decode(r io.Reader) (Config, error) {
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
 			NestedVirtualization: w.LinuxNestedVirtualization},
-		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy), BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
+		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
+			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
 			NestedVirtualization: w.MacOSBurst.NestedVirtualization},
@@ -289,7 +302,8 @@ func Encode(w io.Writer, cfg Config) error {
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
-		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, GitHubTimeoutSeconds: githubSeconds,
+		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, PressureMemoryAccounting: cfg.Guards.PressureMemoryAccounting,
+		GitHubTimeoutSeconds:      githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
 	}
@@ -297,6 +311,7 @@ func Encode(w io.Writer, cfg Config) error {
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
 		wire.MacOSBurst.AdmissionPolicy = MacOSAdmissionExclusive
 	}
+	wire.MacOSBurst.MixedPlatformAdmission = cfg.MacOS.MixedPlatformAdmission
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
@@ -355,7 +370,8 @@ func secondsOr(value, fallback int) time.Duration {
 
 func normalizeGuards(w wireConfig) Guards {
 	guards := Guards{MinFreeDiskGiB: w.MinFreeDiskGiB, MinAvailableMemoryMiB: w.MinAvailableMemoryMiB,
-		MaxSwapUsedMiB: w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent}
+		MaxSwapUsedMiB: w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
+		PressureMemoryAccounting: w.PressureMemoryAccounting}
 	if guards.MinAvailableMemoryMiB == 0 {
 		guards.MinAvailableMemoryMiB = defaultMinAvailableMemoryMiB
 	}

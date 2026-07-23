@@ -79,30 +79,57 @@ func TestRecoveryDrainAbortsWhenPremiseIsDisproven(t *testing.T) {
 	}
 }
 
-// The counterpart guard: a genuinely powered-off VM must still drain, and a
-// lingering GitHub registration must neither delay it (the old guard waited
-// on !Registered for up to the GitHub timeout) nor gate it behind a lookup
-// that can flake. A powered-off VM cannot be executing work.
-func TestStoppedRecoveryDrainReclaimsPoweredOffVMDespiteLingeringRegistration(t *testing.T) {
-	calls := []string{}
-	now := time.Unix(1000, 0).UTC()
-	confirmed := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
-	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery)}
-	control := &fakeDrainControl{calls: &calls, safe: false, registered: true,
-		confirmations: []operations.DeletionConfirmation{confirmed, confirmed}}
-	executor := drainExecutor(state, fakeVM{calls: &calls, running: false}, control)
-
-	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
-
-	if err != nil {
-		t.Fatal(err)
+// Both premise-holds reclaim paths share one shape: a powered-off VM with a
+// lingering registration (stopped recovery) and a zombie whose job never
+// started (stalled assignment) must deregister, stop, and delete. Job
+// inactivity derives from runner absence, so reclaim never blocks on events
+// that will never arrive.
+func TestRecoveryDrainReclaimsWhenPremiseHolds(t *testing.T) {
+	tests := []struct {
+		name    string
+		phase   int
+		running bool
+		control func(calls *[]string, confirmations []operations.DeletionConfirmation) *fakeDrainControl
+		want    []string
+	}{
+		{
+			name:  "stopped recovery reclaims powered-off VM despite lingering registration",
+			phase: operations.DrainPhaseStoppedRecovery, running: false,
+			control: func(calls *[]string, c []operations.DeletionConfirmation) *fakeDrainControl {
+				return &fakeDrainControl{calls: calls, safe: false, registered: true, confirmations: c}
+			},
+			want: []string{"power:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
+		},
+		{
+			name:  "stalled assignment reclaims zombie when no job started",
+			phase: operations.DrainPhaseStalledAssignment, running: true,
+			control: func(calls *[]string, c []operations.DeletionConfirmation) *fakeDrainControl {
+				return &fakeDrainControl{calls: calls, jobStarted: false, registered: false, confirmations: c}
+			},
+			want: []string{"started:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
+		},
 	}
-	if state.instance.State != operations.StateDeleted {
-		t.Fatalf("powered-off VM must be reclaimed, got %s", state.instance.State)
-	}
-	want := []string{"power:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("calls=%#v", calls)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := []string{}
+			now := time.Unix(1000, 0).UTC()
+			confirmed := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
+			state := &memoryState{instance: recoveryInstance(test.phase)}
+			executor := drainExecutor(state, fakeVM{calls: &calls, running: test.running},
+				test.control(&calls, []operations.DeletionConfirmation{confirmed, confirmed}))
+
+			err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.instance.State != operations.StateDeleted {
+				t.Fatalf("premise-holds reclaim failed, got %s", state.instance.State)
+			}
+			if !reflect.DeepEqual(calls, test.want) {
+				t.Fatalf("calls=%#v", calls)
+			}
+		})
 	}
 }
 
@@ -125,34 +152,6 @@ func TestInactiveRecoveryDrainProceedsWhenPremiseHolds(t *testing.T) {
 	}
 	if state.instance.State != operations.StateDeleted {
 		t.Fatalf("confirmed-inactive VM must be reclaimed, got %s", state.instance.State)
-	}
-}
-
-// A stalled-assignment recovery whose premise holds — no job ever started on
-// the runner — reclaims the zombie VM: it deregisters the idle assigned runner
-// (GitHub re-queues the job elsewhere), then stops and deletes the VM. Job
-// inactivity is derived from runner absence, so reclaim never blocks on a
-// JobCompleted event that will never arrive for a job that never started.
-func TestStalledAssignmentRecoveryReclaimsZombieWhenNoJobStarted(t *testing.T) {
-	calls := []string{}
-	now := time.Unix(1000, 0).UTC()
-	confirmed := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
-	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStalledAssignment)}
-	control := &fakeDrainControl{calls: &calls, jobStarted: false, registered: false,
-		confirmations: []operations.DeletionConfirmation{confirmed, confirmed}}
-	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, control)
-
-	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
-
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.instance.State != operations.StateDeleted {
-		t.Fatalf("stalled zombie must be reclaimed, got %s", state.instance.State)
-	}
-	want := []string{"started:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("calls=%#v", calls)
 	}
 }
 

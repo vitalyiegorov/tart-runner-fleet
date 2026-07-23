@@ -63,6 +63,13 @@ type simWorld struct {
 	// jobID hands out unique, deterministic demand identifiers.
 	jobID int64
 
+	// enforceHostBound turns on the mixed-admission resource oracle: the
+	// go-forward fleet (consuming instances not drained this tick, plus this
+	// tick's spawns) must fit Host.Available. It is opt-in because a
+	// deliberately shrinking host can leave a pre-existing fleet over-subscribed
+	// through no fault of the scheduler.
+	enforceHostBound bool
+
 	// bookkeeping for liveness oracles.
 	spawnedAt            map[domain.DemandKey]int
 	feasiblePendingTicks map[domain.DemandKey]int
@@ -314,6 +321,52 @@ func (w *simWorld) assertSafety(plan Plan) {
 	w.t.Helper()
 	w.assertDrainSafety(plan)
 	w.assertCapacity(plan)
+	w.assertMacCohort(plan)
+}
+
+// assertMacCohort is the mixed-admission safety oracle. It evaluates the
+// go-forward fleet — instances that consume the host and are NOT drained this
+// tick, plus this tick's spawns — and pins the macOS platform invariants that
+// mixed admission must never breach: at most one macOS profile is active (the
+// single-cohort rule), each macOS profile stays within its MaxActive, and the
+// total macOS guest count never exceeds Apple's hard two-guest ceiling. It uses
+// the go-forward set (excluding instances drained this tick) so a legitimate
+// profile switch — which drains the old cohort while spawning the new one — is
+// not misread as a transient cohort violation. It holds with the flag off too,
+// so it strengthens every existing simulation.
+func (w *simWorld) assertMacCohort(plan Plan) {
+	w.t.Helper()
+	drained := map[string]bool{}
+	for _, op := range plan.Operations {
+		if op.Kind == OperationDrain {
+			drained[op.Instance] = true
+		}
+	}
+	perProfile := map[domain.ProfileID]int{}
+	for _, inst := range w.instances {
+		if inst.ConsumesHostResources() && inst.Platform == domain.PlatformMacOS && !drained[inst.ID] {
+			perProfile[inst.Profile]++
+		}
+	}
+	for _, op := range plan.Operations {
+		if op.Kind == OperationSpawn && w.config.Profiles[op.Profile].Platform == domain.PlatformMacOS {
+			perProfile[op.Profile]++
+		}
+	}
+	total := 0
+	for profile, count := range perProfile {
+		limit := macProfileLimit(w.config.Profiles[profile])
+		if count > limit {
+			w.t.Fatalf("macOS profile %q go-forward count %d exceeds MaxActive %d: plan=%#v", profile, count, limit, plan.Operations)
+		}
+		total += count
+	}
+	if len(perProfile) > 1 {
+		w.t.Fatalf("more than one macOS profile active go-forward (single-cohort breach): %#v", perProfile)
+	}
+	if total > 2 {
+		w.t.Fatalf("go-forward macOS guest count %d exceeds Apple's two-guest ceiling: %#v", total, perProfile)
+	}
 }
 
 // drainable defines the states in which draining an instance cannot kill a live
@@ -345,7 +398,7 @@ func (w *simWorld) assertDrainSafety(plan Plan) {
 			stalled := inst.State == domain.InstanceAssigned && inst.Power == domain.InstancePowerRunning &&
 				!inst.RecoveryReady && w.config.AssignedTimeout > 0 && !inst.AssignedSince.IsZero() &&
 				w.now.Sub(inst.AssignedSince) >= w.config.AssignedTimeout
-			if !busy || !(confirmedInactive || stalled) {
+			if !busy || (!confirmedInactive && !stalled) {
 				w.t.Fatalf("recovery drain of unsafe instance %q state=%s power=%s recoveryReady=%v assignedSince=%s",
 					op.Instance, inst.State, inst.Power, inst.RecoveryReady, inst.AssignedSince)
 			}
@@ -396,6 +449,24 @@ func (w *simWorld) assertCapacity(plan Plan) {
 		}
 		if w.linuxRepoCount(repo)+add > cap {
 			w.t.Fatalf("repo cap exceeded for %q: existing=%d add=%d cap=%d", repo, w.linuxRepoCount(repo), add, cap)
+		}
+	}
+	if w.enforceHostBound {
+		var goForward domain.Resources
+		drained := map[string]bool{}
+		for _, op := range plan.Operations {
+			if op.Kind == OperationDrain {
+				drained[op.Instance] = true
+			}
+		}
+		for _, inst := range w.instances {
+			if inst.ConsumesHostResources() && !drained[inst.ID] {
+				goForward = goForward.Add(inst.Resources)
+			}
+		}
+		goForward = goForward.Add(spawns)
+		if !w.host.Available.CanFit(goForward) {
+			w.t.Fatalf("go-forward consumption %#v exceeds Host.Available %#v: plan=%#v", goForward, w.host.Available, plan.Operations)
 		}
 	}
 }
@@ -465,6 +536,29 @@ var simRepos = []string{"a/repo", "b/repo", "c/repo", "mac-a", "mac-b"}
 // TestSimulationRandomizedSafetyAndDeterminism drives mixed macOS/Linux demand
 // streams across several repos and all five profiles, asserting the safety and
 // determinism oracles every tick over many seeds.
+
+// poissonArrivals returns the shared randomized demand-arrival closure used by
+// the randomized simulation suites: 0-2 new demands most ticks, front-loaded,
+// macOS profiles bound to mac repos and Linux profiles to linux repos.
+func poissonArrivals(rng *rand.Rand, ticks int) func(*simWorld, int) {
+	return func(w *simWorld, tick int) {
+		n := rng.Intn(3)
+		if tick > ticks/2 {
+			n = rng.Intn(2)
+		}
+		for i := 0; i < n; i++ {
+			profile := simAllProfiles[rng.Intn(len(simAllProfiles))]
+			var repo string
+			if w.config.Profiles[profile].Platform == domain.PlatformMacOS {
+				repo = simRepos[3+rng.Intn(2)]
+			} else {
+				repo = simRepos[rng.Intn(3)]
+			}
+			w.addDemand(repo, rng.Intn(9), profile)
+		}
+	}
+}
+
 func TestSimulationRandomizedSafetyAndDeterminism(t *testing.T) {
 	const seeds = 32
 	const ticks = 200
@@ -480,26 +574,138 @@ func TestSimulationRandomizedSafetyAndDeterminism(t *testing.T) {
 			host := domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 4}}
 			w := newSimWorld(t, cfg, host, seed)
 			rng := rand.New(rand.NewSource(seed ^ 0x5eed))
-			arrive := func(w *simWorld, tick int) {
-				// Poisson-ish arrival: 0-2 new demands most ticks, front-loaded.
-				n := rng.Intn(3)
-				if tick > ticks/2 {
-					n = rng.Intn(2)
-				}
-				for i := 0; i < n; i++ {
-					profile := simAllProfiles[rng.Intn(len(simAllProfiles))]
-					var repo string
-					if w.config.Profiles[profile].Platform == domain.PlatformMacOS {
-						repo = simRepos[3+rng.Intn(2)]
-					} else {
-						repo = simRepos[rng.Intn(3)]
-					}
-					w.addDemand(repo, rng.Intn(9), profile)
-				}
-			}
+			arrive := poissonArrivals(rng, ticks)
 			w.run(simOptions{ticks: ticks, checkDeterminism: true, arrive: arrive})
 		})
 	}
+}
+
+// mixedSimConfig gives two maestros CPU room to coexist with a few small/medium
+// Linux VMs (the default testConfig is CPU-walled at two maestros). Host equals
+// LinuxCapacity so the go-forward Host.Available oracle is exact.
+func mixedSimConfig() (Config, domain.Host) {
+	cfg := testConfig()
+	cfg.LinuxCapacity = domain.Resources{CPU: 12, MemoryMB: 24_576, Slots: 4}
+	cfg.RepoCaps["mac-a"] = 2
+	cfg.RepoCaps["mac-b"] = 2
+	cfg.MixedPlatformAdmission = true
+	return cfg, domain.Host{Available: domain.Resources{CPU: 12, MemoryMB: 24_576, Slots: 4}}
+}
+
+// liveSimMaestro returns a running maestro instance for seeding a full macOS
+// cohort at tick zero.
+func liveSimMaestro(id string) domain.Instance {
+	cfg, _ := mixedSimConfig()
+	return domain.Instance{ID: id, Repo: "mac-a", Platform: domain.PlatformMacOS, Profile: "maestro",
+		Route: cfg.Profiles["maestro"].Route, Resources: cfg.Profiles["maestro"].Resources,
+		State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+}
+
+// TestSimulationMixedRandomizedSafetyAndDeterminism is the flag-ON twin of
+// TestSimulationRandomizedSafetyAndDeterminism. Every per-tick safety oracle
+// (drain-safety, capacity, repo caps, slots, determinism) plus the mixed
+// oracles (mac single-cohort + MaxActive + Apple two-guest ceiling, and the
+// go-forward Host.Available bound) must hold on every tick over all 32 seeds.
+func TestSimulationMixedRandomizedSafetyAndDeterminism(t *testing.T) {
+	const seeds = 32
+	const ticks = 200
+	for seed := int64(0); seed < seeds; seed++ {
+		seed := seed
+		t.Run("seed", func(t *testing.T) {
+			t.Parallel()
+			cfg, host := mixedSimConfig()
+			w := newSimWorld(t, cfg, host, seed)
+			w.enforceHostBound = true
+			rng := rand.New(rand.NewSource(seed ^ 0x5eed))
+			arrive := poissonArrivals(rng, ticks)
+			w.run(simOptions{ticks: ticks, checkDeterminism: true, arrive: arrive})
+		})
+	}
+}
+
+// TestSimulationMixedImprovesCoexistence proves the throughput win directly:
+// under an identical maestro-heavy workload, mixed admission runs strictly more
+// Linux work than the platform-exclusive baseline over the same horizon, and
+// never fewer macOS jobs — Linux fills the idle envelope the maestros leave.
+func TestSimulationMixedImprovesCoexistence(t *testing.T) {
+	const ticks = 200
+	arrive := func(w *simWorld, tick int) {
+		// An aged maestro arrives every tick, so a maestro is always the
+		// global-FIFO priority head and the cohort stays full at two. The
+		// exclusive baseline therefore takes the macOS branch every tick and, with
+		// the cohort already at MaxActive, admits no Linux (the bounded one-shot
+		// backfill only serves aged/control-plane smallest-tier work; this Linux
+		// stream is YOUNG and standard). That is the idle-envelope pathology.
+		// Mixed admission must fill the ~4 CPU / 10 GiB the maestros leave free.
+		w.addDemand(simRepos[3+tick%2], 8, "maestro")
+		w.addDemand(simRepos[tick%3], 0, "small")
+	}
+	run := func(mixed bool) (w *simWorld, linux, mac int) {
+		cfg, host := mixedSimConfig()
+		cfg.MixedPlatformAdmission = mixed
+		w = newSimWorld(t, cfg, host, 21)
+		w.enforceHostBound = true
+		// Seed a full, live maestro cohort so the blocked macOS-head state holds
+		// from tick zero rather than warming up.
+		w.instances = append(w.instances, liveSimMaestro("seed-maestro-1"), liveSimMaestro("seed-maestro-2"))
+		w.run(simOptions{ticks: ticks, arrive: arrive})
+		for key := range w.spawnedAt {
+			if key.Repo == "mac-a" || key.Repo == "mac-b" {
+				mac++
+			} else {
+				linux++
+			}
+		}
+		return w, linux, mac
+	}
+	_, baseLinux, baseMac := run(false)
+	_, mixedLinux, mixedMac := run(true)
+
+	// Headline win: mixed admission runs substantially more Linux in the envelope
+	// the maestro cohort leaves idle. The exclusive baseline starves this young
+	// standard stream behind the maestro head. (The Linux stream here is
+	// deliberately over the four-slot throughput ceiling, so this test measures
+	// the coexistence win, not queue latency — bounded latency is proved
+	// separately under a below-ceiling arrival rate.)
+	if mixedLinux <= baseLinux {
+		t.Fatalf("mixed admission did not increase Linux throughput: baseline=%d mixed=%d", baseLinux, mixedLinux)
+	}
+	// macOS is not materially reduced. Raw maestro COUNT over a fixed horizon may
+	// differ by at most one from the baseline: because the macOS cohort is always
+	// planned before the Linux remainder, mixed admission never denies a maestro
+	// in favor of Linux — but a live Linux VM can transiently hold a slot across
+	// the brief macOS teardown gap, shifting a single respawn by one tick. That
+	// bounded cadence coupling is dwarfed by the Linux gain.
+	if mixedMac < baseMac-1 {
+		t.Fatalf("mixed admission materially reduced macOS throughput: baseline=%d mixed=%d", baseMac, mixedMac)
+	}
+	t.Logf("throughput: linux baseline=%d mixed=%d (+%d); macOS baseline=%d mixed=%d",
+		baseLinux, mixedLinux, mixedLinux-baseLinux, baseMac, mixedMac)
+}
+
+// TestSimulationMixedBoundedAdmissionLatency is the flag-ON liveness twin: no
+// feasible demand waits longer than K feasible-pending ticks. Mixed admission
+// must not starve any platform.
+func TestSimulationMixedBoundedAdmissionLatency(t *testing.T) {
+	const K = 40
+	const ticks = 200
+	cfg, host := mixedSimConfig()
+	w := newSimWorld(t, cfg, host, 7)
+	w.enforceHostBound = true
+	rng := rand.New(rand.NewSource(7))
+	arrive := func(w *simWorld, tick int) {
+		if tick >= ticks-K-10 {
+			return
+		}
+		if tick%3 == 0 {
+			w.addDemand(simRepos[rng.Intn(3)], rng.Intn(4), simLinuxProfiles[rng.Intn(len(simLinuxProfiles))])
+		}
+		if tick%7 == 0 {
+			w.addDemand(simRepos[3+rng.Intn(2)], rng.Intn(4), "maestro")
+		}
+	}
+	w.run(simOptions{ticks: ticks, arrive: arrive})
+	assertNoStarvation(t, w, K)
 }
 
 // TestSimulationDeterministicAcrossRuns pins that the same seed yields an
@@ -743,16 +949,16 @@ func TestSimulationPriorityInversionExactSelect(t *testing.T) {
 			hpSpawned = true
 		}
 	}
-	if !hpSpawned && containsSpawn(plan.Operations) {
-		t.Skipf("KNOWN GAP (priority-inversion, seed 5): exactSelect maximized selection COUNT and admitted lower-priority "+
-			"small jobs (%d spawns) while deferring the higher-priority control-plane large job %s that also fits. "+
-			"The inversion is bounded (the large job wins once it ages past FairnessAge) but is a latent priority inversion. "+
-			"Follow-up: make exactSelect prefer higher-priority demands over raw count within a feasible tick.",
+	// The control-plane head must be admitted in the first admitting tick rather
+	// than deferred behind a larger count of lower-priority standard work.
+	// exactSelect must not invert priority to maximize selection COUNT.
+	if containsSpawn(plan.Operations) && !hpSpawned {
+		t.Fatalf("priority inversion: exactSelect admitted lower-priority small jobs (%d spawns) while deferring the "+
+			"higher-priority control-plane large job %s that also fits; exact admission must honor priority over raw count",
 			len(spawnedKeys(plan)), hp.Key.String())
 	}
-	// If the head was admitted, the design honored priority: assert it explicitly.
 	if !hpSpawned {
-		t.Fatalf("expected either the control-plane head admitted or the KNOWN GAP skip; got plan %#v", plan.Operations)
+		t.Fatalf("expected the control-plane head admitted; got plan %#v", plan.Operations)
 	}
 }
 

@@ -229,7 +229,7 @@ func defaultDependencies() dependencies {
 		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver) app.Inventory {
 			return app.ProductionInventory{Store: store,
 				Tart:                       &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
-				Host:                       &macos.Probe{Timeout: cfg.Timeouts.Tart},
+				Host:                       &macos.Probe{Timeout: cfg.Timeouts.Tart, PressureAccounting: cfg.Guards.PressureMemoryAccounting},
 				Recovery:                   recovery,
 				RecoveryConfirmationMaxAge: deletionConfirmationMaxAge,
 				Capacity:                   domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
