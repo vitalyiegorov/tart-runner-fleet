@@ -57,6 +57,11 @@ func TestRecoveryDrainAbortsWhenPremiseIsDisproven(t *testing.T) {
 			vm:        fakeVM{running: true},
 			control:   fakeDrainControl{safe: true, registered: true, jobStarted: true},
 			wantCalls: []string{"started:trf-small-1"}},
+		{name: "lingering runner whose job is active again",
+			phase:     operations.DrainPhaseLingeringRunner,
+			vm:        fakeVM{running: true},
+			control:   fakeDrainControl{safe: true, registered: true, jobActive: true},
+			wantCalls: []string{"active:trf-small-1"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := []string{}
@@ -107,6 +112,14 @@ func TestRecoveryDrainReclaimsWhenPremiseHolds(t *testing.T) {
 				return &fakeDrainControl{calls: calls, jobStarted: false, registered: false, confirmations: c}
 			},
 			want: []string{"started:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
+		},
+		{
+			name:  "lingering runner reclaims idle VM when no active job",
+			phase: operations.DrainPhaseLingeringRunner, running: true,
+			control: func(calls *[]string, c []operations.DeletionConfirmation) *fakeDrainControl {
+				return &fakeDrainControl{calls: calls, jobActive: false, registered: false, confirmations: c}
+			},
+			want: []string{"active:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
 		},
 	}
 	for _, test := range tests {
@@ -176,6 +189,8 @@ func TestRecoveryDrainRetriesWhenPremiseCannotBeVerified(t *testing.T) {
 			control: fakeDrainControl{safe: false, registered: false}},
 		{name: "stalled assignment job-started probe error", phase: operations.DrainPhaseStalledAssignment,
 			control: fakeDrainControl{jobStartedErr: context.DeadlineExceeded}},
+		{name: "lingering runner job-active probe error", phase: operations.DrainPhaseLingeringRunner,
+			control: fakeDrainControl{jobActiveErr: context.DeadlineExceeded}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := []string{}

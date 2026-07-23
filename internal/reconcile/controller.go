@@ -149,6 +149,8 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 					drainPhase = operations.DrainPhaseInactiveRecovery
 				case operation.StalledAssignment:
 					drainPhase = operations.DrainPhaseStalledAssignment
+				case operation.LingeringRunner:
+					drainPhase = operations.DrainPhaseLingeringRunner
 				}
 				validState = instance.State == operations.StateAssigned || instance.State == operations.StateRunning
 			}

@@ -35,10 +35,16 @@ func (f fakeHost) Snapshot(context.Context) macos.Snapshot { return f.value }
 type fakeRecoveryObserver struct {
 	confirmation operations.DeletionConfirmation
 	err          error
+	jobActive    bool
+	jobActiveErr error
 }
 
 func (f fakeRecoveryObserver) ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error) {
 	return f.confirmation, f.err
+}
+
+func (f fakeRecoveryObserver) JobActive(context.Context, operations.Instance) (bool, error) {
+	return f.jobActive, f.jobActiveErr
 }
 
 func inventoryInstance(state operations.State) operations.Instance {
@@ -95,6 +101,44 @@ func TestProductionInventoryMarksRunningCompletedRunnerRecoverableFromFreshEvide
 	instances, _ = inv.Observe(context.Background())
 	if !instances.Usable() || instances.Value[0].RecoveryReady {
 		t.Fatalf("unavailable evidence inferred inactive = %#v", instances)
+	}
+}
+
+func TestProductionInventoryObservesLingeringRunnerEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	entered := now.Add(-30 * time.Minute)
+	running := inventoryInstance(operations.StateRunning)
+	running.UpdatedAt = entered
+	base := func() ProductionInventory {
+		return ProductionInventory{Store: fakeInstances{values: []operations.Instance{running}},
+			Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+			RecoveryConfirmationMaxAge: time.Minute, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+	}
+	for _, test := range []struct {
+		name            string
+		recovery        RecoveryObserver
+		wantJobInactive bool
+	}{
+		// A job actively executing (JobActive true) is never a lingerer, whatever
+		// its age; a terminal/absent demand (JobActive false) marks it inactive; an
+		// unreadable demand fails closed to "active job present, do not touch".
+		{name: "active job is healthy", recovery: fakeRecoveryObserver{jobActive: true}, wantJobInactive: false},
+		{name: "no active job is a lingerer", recovery: fakeRecoveryObserver{jobActive: false}, wantJobInactive: true},
+		{name: "unreadable demand fails closed", recovery: fakeRecoveryObserver{jobActiveErr: errors.New("uncertain")}, wantJobInactive: false},
+		{name: "absent recovery observer fails closed", recovery: nil, wantJobInactive: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inv := base()
+			inv.Recovery = test.recovery
+			instances, _ := inv.Observe(context.Background())
+			if !instances.Usable() || len(instances.Value) != 1 {
+				t.Fatalf("observation = %#v", instances)
+			}
+			got := instances.Value[0]
+			if !got.RunningSince.Equal(entered) || got.JobInactive != test.wantJobInactive {
+				t.Fatalf("runningSince=%s jobInactive=%v; want since=%s inactive=%v", got.RunningSince, got.JobInactive, entered, test.wantJobInactive)
+			}
+		})
 	}
 }
 
