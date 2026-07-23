@@ -145,6 +145,11 @@ type Transition struct {
 const (
 	DrainPhaseStoppedRecovery  = 2
 	DrainPhaseInactiveRecovery = 3
+	// DrainPhaseStalledAssignment recovers an instance stuck in Assigned past
+	// the assignment deadline with no evidence a job ever started. Its
+	// execution-time premise is re-verified against fresh demand state (no
+	// started job bound to the runner) exactly like the other recovery phases.
+	DrainPhaseStalledAssignment = 4
 )
 
 type Lease struct {

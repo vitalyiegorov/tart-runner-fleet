@@ -145,6 +145,57 @@ func TestControlRouterAcceptsStoppedAssignmentRecoveryOnlyAfterRunnerDisappears(
 	}
 }
 
+func TestControlRouterJobStartedReflectsDemandProgress(t *testing.T) {
+	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+	newRouter := func(reader DemandReader) ControlRouter {
+		return ControlRouter{State: state, Demand: reader,
+			Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: &fakeScaleControl{}}}}
+	}
+	for _, test := range []struct {
+		status operations.DemandEventKind
+		want   bool
+	}{
+		{operations.DemandJobAvailable, false},
+		{operations.DemandJobAssigned, false},
+		{operations.DemandJobStarted, true},
+		{operations.DemandJobCompleted, true},
+	} {
+		started, err := newRouter(fakeDemandReader{record: operations.DemandRecord{Status: test.status}}).JobStarted(context.Background(), state.instance)
+		if err != nil || started != test.want {
+			t.Fatalf("JobStarted(%s) = %v, %v; want %v", test.status, started, err, test.want)
+		}
+	}
+	// Fail-closed: an unresolvable binding and a demand-lookup error both surface
+	// as errors so the executor retries at the guard stage instead of killing.
+	if _, err := (ControlRouter{State: state}).JobStarted(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("unknown source JobStarted = %v", err)
+	}
+	if _, err := newRouter(fakeDemandReader{err: operations.ErrUncertain}).JobStarted(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("demand error JobStarted = %v", err)
+	}
+}
+
+func TestControlRouterStalledAssignmentConfirmationDerivesJobInactivityFromRunner(t *testing.T) {
+	now := time.Unix(160, 0).UTC()
+	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+	state.instance.DrainPhase = operations.DrainPhaseStalledAssignment
+	source := &fakeScaleControl{}
+	// Status stays JobAssigned forever — no job ever started — yet the stalled
+	// phase must still confirm reclaim from runner absence, never wait on a
+	// JobCompleted that cannot arrive.
+	router := ControlRouter{State: state, Demand: fakeDemandReader{record: operations.DemandRecord{Status: operations.DemandJobAssigned}},
+		Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: source}},
+		Now:     func() time.Time { return now }}
+	confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID)
+	if err != nil || !confirmation.Safe(now, time.Second) {
+		t.Fatalf("stalled reclaim confirmation = %#v, %v", confirmation, err)
+	}
+	source.registered = true
+	if confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID); err != nil || confirmation.Safe(now, time.Second) {
+		t.Fatalf("registered stalled runner must not confirm = %#v, %v", confirmation, err)
+	}
+}
+
 func TestControlRouterRequiresRunnerAndCompletedJobForRunningRecovery(t *testing.T) {
 	now := time.Unix(175, 0).UTC()
 	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
