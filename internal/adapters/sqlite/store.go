@@ -31,6 +31,13 @@ const (
 	legacyStageAcquireJITError = "runner lifecycle failed at acquire_jit"
 )
 
+// seedSchedulerState idempotently restores the scheduler_state singleton to its
+// cold-start values. INSERT OR IGNORE leaves any existing row untouched, so the
+// same statement is safe both on every open and as a runtime repair after an
+// operator deleted the row. Version 0 with empty reservation/DRR is optimization
+// state the scheduler rebuilds from durable demand — never authoritative data.
+const seedSchedulerState = `INSERT OR IGNORE INTO scheduler_state(singleton,version,data,reservations,drr_state,observation_cursor,updated_at) VALUES(1,0,'{}','[]','{}','',0)`
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, operations.ErrInvalid
@@ -74,6 +81,9 @@ func (s *Store) SchedulerState(ctx context.Context) (operations.SchedulerState, 
 	var data, reservations, drr []byte
 	err := s.db.QueryRowContext(ctx, `SELECT version,data,reservations,drr_state,observation_cursor FROM scheduler_state WHERE singleton=1`).Scan(
 		&state.Version, &data, &reservations, &drr, &state.ObservationCursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return operations.SchedulerState{}, operations.ErrSchedulerStateMissing
+	}
 	if err != nil {
 		return operations.SchedulerState{}, fmt.Errorf("load scheduler state: %w", err)
 	}
@@ -81,6 +91,17 @@ func (s *Store) SchedulerState(ctx context.Context) (operations.SchedulerState, 
 	state.Reservations = append(state.Reservations, reservations...)
 	state.DeficitRoundRobin = append(state.DeficitRoundRobin, drr...)
 	return state, nil
+}
+
+// ReseedSchedulerState performs a bounded, idempotent cold-start repair of the
+// scheduler_state singleton after it was lost (e.g. an operator DELETE). It
+// deliberately repairs nothing else: instance and operation rows are
+// authoritative and are never synthesized here.
+func (s *Store) ReseedSchedulerState(ctx context.Context) error {
+	if _, err := s.dbExec(ctx, "scheduler.reseed", seedSchedulerState); err != nil {
+		return fmt.Errorf("reseed scheduler state: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) ApplyPlan(ctx context.Context, plan operations.Plan) (bool, error) {
@@ -587,6 +608,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if _, err := s.txExec(ctx, tx, "migrate.v11.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(11, ?)`, now); err != nil {
 			return fmt.Errorf("record migration 11: %w", err)
 		}
+	}
+	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
+	// creates and first seeds the table, so it always exists by this point; an
+	// operator deleting the row (incident 2026-07-22, which wedged every tick on
+	// the missing singleton for ~18h) is repaired idempotently by INSERT OR
+	// IGNORE without disturbing a live row.
+	if _, err := s.txExec(ctx, tx, "migrate.reseed", seedSchedulerState); err != nil {
+		return fmt.Errorf("reseed scheduler state: %w", err)
 	}
 	if err := s.commit(tx, "migrate.commit"); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
