@@ -17,6 +17,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
@@ -588,6 +589,13 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "invalid config: %v\n", err)
 			return exitFailure
 		}
+	}
+	// Exercise the same binding construction fleetd runs at startup so a config
+	// that passes decode/validate can never crash-loop the daemon on runtime
+	// invariants (unknown profile, non-positive durable ID, identity collision).
+	if err := app.ValidateBindings(cfg); err != nil {
+		fmt.Fprintf(stderr, "invalid config: %v\n", err)
+		return exitFailure
 	}
 	if *output == "json" {
 		_ = writeJSON(stdout, struct {
