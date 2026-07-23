@@ -193,12 +193,21 @@ const (
 	authorityLeaseName          = "tart-runner-fleet-authority"
 	authorityLeaseTTL           = 30 * time.Second
 	authorityLeaseRenewInterval = 10 * time.Second
-	deletionConfirmationMaxAge  = 30 * time.Second
-	scaleSetCloseTimeout        = 20 * time.Second
-	scaleSetCloseConcurrency    = 4
-	lifecycleRetryMaxAttempts   = 0
-	provisionRetryMaximum       = 30 * time.Second
-	drainRetryMaximum           = 30 * time.Second
+	// authorityLeaseAcquireWindow bounds how long a starting controller waits
+	// for a stale predecessor lease to drain before giving up. A restart within
+	// the previous daemon's TTL leaves its durable lease row behind; rather than
+	// exit silently on "lease held" (launchd has no operator watching the one
+	// stderr line), the successor waits it out. 1.5×TTL guarantees a full TTL of
+	// patience even when we start the instant after the predecessor's last renew.
+	authorityLeaseAcquireWindow = authorityLeaseTTL * 3 / 2
+	// authorityLeaseAcquireRetry paces reacquisition attempts inside the window.
+	authorityLeaseAcquireRetry = 1 * time.Second
+	deletionConfirmationMaxAge = 30 * time.Second
+	scaleSetCloseTimeout       = 20 * time.Second
+	scaleSetCloseConcurrency   = 4
+	lifecycleRetryMaxAttempts  = 0
+	provisionRetryMaximum      = 30 * time.Second
+	drainRetryMaximum          = 30 * time.Second
 )
 
 var errScaleSetClose = errors.New("scale-set session cleanup failed")
@@ -490,6 +499,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}()
 	select {
 	case err := <-serviceDone:
+		// Release the authority lease immediately, before the deferred
+		// scale-set drain (up to scaleSetCloseTimeout). An immediate successor
+		// then acquires during that drain instead of waiting out the full TTL.
+		// Close is idempotent, so the deferred Close above stays a safe backstop.
+		authority.Close()
 		return err
 	case err := <-authorityErrors(authority):
 		cancelRun()
@@ -738,6 +752,33 @@ type authorityLease struct {
 	once   sync.Once
 }
 
+// acquireAuthorityLease obtains the controller authority lease, patiently
+// waiting out a stale lease left behind by a predecessor that exited without
+// releasing it (crash, SIGKILL, or a deploy/restart inside the lease TTL).
+//
+// It is strictly fail-closed and NEVER steals an actively renewed lease:
+// AcquireLease only succeeds when the row is absent or already expired, so a
+// live incumbent that keeps renewing keeps us waiting until the window elapses,
+// at which point we surface the original "lease held" error unchanged. We are
+// adding patience, not takeover.
+func acquireAuthorityLease(ctx context.Context, store operations.Store, owner string, now func() time.Time, after func(time.Duration) <-chan time.Time) (operations.Lease, error) {
+	deadline := now().Add(authorityLeaseAcquireWindow)
+	for {
+		lease, err := store.AcquireLease(ctx, authorityLeaseName, owner, now().UTC(), authorityLeaseTTL)
+		if !errors.Is(err, operations.ErrLeaseHeld) {
+			return lease, err
+		}
+		if !now().Before(deadline) {
+			return operations.Lease{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return operations.Lease{}, ctx.Err()
+		case <-after(authorityLeaseAcquireRetry):
+		}
+	}
+}
+
 func startAuthorityLease(ctx context.Context, store operations.Store, owner string, now func() time.Time, after func(time.Duration) <-chan time.Time) (*authorityLease, error) {
 	if store == nil || strings.TrimSpace(owner) == "" {
 		return nil, operations.ErrInvalid
@@ -748,7 +789,7 @@ func startAuthorityLease(ctx context.Context, store operations.Store, owner stri
 	if after == nil {
 		after = time.After
 	}
-	acquired, err := store.AcquireLease(ctx, authorityLeaseName, owner, now().UTC(), authorityLeaseTTL)
+	acquired, err := acquireAuthorityLease(ctx, store, owner, now, after)
 	if err != nil {
 		return nil, err
 	}
