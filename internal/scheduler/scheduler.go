@@ -21,6 +21,12 @@ type Config struct {
 	RepoSchedulingClasses map[string]domain.SchedulingClass
 	Profiles              map[domain.ProfileID]domain.Profile
 	MacOSExclusive        bool
+	// MixedPlatformAdmission relaxes the per-tick platform-exclusive choice so
+	// Linux runners fill the residual host envelope beside a live macOS cohort
+	// (and a compatible macOS profile fills it beside live Linux), within the
+	// same capacity, MaxActive, single-cohort, and drain-safety invariants.
+	// Default false preserves the platform-exclusive behavior byte-for-byte.
+	MixedPlatformAdmission bool
 }
 
 type State struct {
@@ -135,12 +141,13 @@ func PlanTick(in Input) Plan {
 		plan.Next.LinuxHandoff = nil
 		if mode == domain.HostLinux || mode == domain.HostMixed {
 			plan = planMacWithCoexistence(in, plan, linux, macos)
+			plan = fillLinuxRemainder(in, plan, linux)
 		} else {
 			plan.Next.MacHandoff = nil
 			attempted := planMacOS(in, plan, macos)
 			switch {
 			case containsSpawn(attempted.Operations):
-				plan = attempted
+				plan = fillLinuxRemainder(in, attempted, linux)
 			case mode == domain.HostIdle:
 				// On a fully idle host a macOS head that will not spawn is resource-
 				// infeasible: nothing is live to drain and make room for it, so it is
@@ -150,6 +157,14 @@ func PlanTick(in Input) Plan {
 				plan = planBehindInfeasibleMacHead(in, plan, linux, macos)
 			case len(linux) == 0:
 				plan = attempted
+			case in.Config.MixedPlatformAdmission:
+				// A live macOS cohort blocks the head, but nothing Linux is live to
+				// drain: the head simply does not fit beside the cohort. Fill the
+				// residual envelope with Linux every tick instead of the bounded
+				// one-shot handoff backfill. The infeasible-head remainder planner
+				// admits feasible Linux (and a feasible macOS profile behind the head
+				// when no Linux fits) without ever latching or draining.
+				plan = planBehindInfeasibleMacHead(in, plan, linux, macos)
 			default:
 				// A busy macOS instance (a live foreign cohort) blocks the head while
 				// Linux waits. Bounded-drain one aged Linux job so the drain is not
@@ -165,6 +180,7 @@ func PlanTick(in Input) Plan {
 			plan.Next.LinuxHandoff = nil
 			plan = planLinux(in, plan, linux)
 		}
+		plan = fillMacRemainder(in, plan, macos)
 	}
 	return finish(plan)
 }
@@ -811,6 +827,108 @@ func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands [
 		plan = planMacOS(in, plan, remaining)
 	}
 	return plan
+}
+
+// mixedRemainderInput gates and prepares a second, complementary admission pass.
+// It returns ok=false unless mixed admission is safe this tick: the flag is on,
+// the plan is ready, and no drain is in flight. Refusing to run while a drain is
+// pending is what preserves every platform switch and handoff — a mac->linux or
+// linux->mac profile switch (or a bounded handoff drain) must complete without a
+// new admission refilling the platform being drained. When ok, the returned
+// Input treats this tick's planned spawns as live occupancy, so the second pass
+// plans strictly inside the residual envelope and combined consumption can never
+// exceed the shared capacity, Host.Available, or the four-slot ceiling.
+func mixedRemainderInput(in Input, plan Plan) (Input, bool) {
+	if !in.Config.MixedPlatformAdmission || plan.Status != PlanReady || containsDrain(plan.Operations) {
+		return in, false
+	}
+	augmented := in
+	augmented.Instances = domain.Fresh(appendPlannedSpawns(in.Instances.Value, in.Config, plan.Operations), in.Instances.ObservedAt)
+	return augmented, true
+}
+
+// fillLinuxRemainder admits Linux work in the envelope left after the macOS head
+// has planned. It never drains and never latches, so it is safe to run beside a
+// live macOS cohort or a freshly planned macOS spawn. The Linux allocator owns
+// the reservation and DRR cursor, so the second pass adopts them.
+func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
+	if len(linux) == 0 {
+		return plan
+	}
+	augmented, ok := mixedRemainderInput(in, plan)
+	if !ok {
+		return plan
+	}
+	sub := planLinux(augmented, Plan{Status: PlanReady, Next: plan.Next}, linux)
+	plan.Operations = append(plan.Operations, sub.Operations...)
+	plan.Next.Reservation = sub.Next.Reservation
+	plan.Next.DRRCursor = sub.Next.DRRCursor
+	return plan
+}
+
+// fillMacRemainder admits a compatible macOS profile in the envelope left after
+// the Linux head has planned, turning "N Linux" into "N Linux AND a macOS
+// cohort" within MaxActive and the single-cohort invariant. It only grows the
+// already-active macOS profile (or, on a host with no live macOS, establishes
+// the head demand's profile), and never while a Linux reservation is holding a
+// vector for an aged Linux head. appendMacSpawns performs no drains, so no
+// macOS profile switch can be started as a side effect of a Linux tick; the
+// Linux head keeps ownership of the DRR fairness cursor.
+func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
+	if len(macos) == 0 || plan.Next.Reservation != nil {
+		return plan
+	}
+	augmented, ok := mixedRemainderInput(in, plan)
+	if !ok {
+		return plan
+	}
+	target, active := activeMacProfile(augmented.Instances.Value)
+	if active {
+		if !macProfileCanGrow(augmented, target) {
+			return plan
+		}
+	} else {
+		target = chosenMacProfile(in, macos)
+	}
+	profileDemands := demandsForProfile(macos, target)
+	if len(profileDemands) == 0 {
+		return plan
+	}
+	savedCursor := plan.Next.DRRCursor
+	sub := appendMacSpawns(augmented, Plan{Status: PlanReady, Next: plan.Next}, profileDemands, nil)
+	plan.Operations = append(plan.Operations, sub.Operations...)
+	plan.Next.DRRCursor = savedCursor
+	return plan
+}
+
+// appendPlannedSpawns models this tick's planned spawn operations as live,
+// resource-consuming instances so a complementary admission pass sees the same
+// reduced envelope the executor will. Planned+running matches the initial state
+// the reconcile controller commits, and is exactly how ConsumesHostResources,
+// activeRepoCounts, and the macOS MaxActive accounting read occupancy.
+func appendPlannedSpawns(instances []domain.Instance, config Config, operations []Operation) []domain.Instance {
+	result := append([]domain.Instance(nil), instances...)
+	for _, operation := range operations {
+		if operation.Kind != OperationSpawn {
+			continue
+		}
+		profile := config.Profiles[operation.Profile]
+		result = append(result, domain.Instance{
+			ID: "planned-" + operation.ID, Repo: operation.Demand.Repo, Demand: operation.Demand,
+			Platform: profile.Platform, Profile: profile.ID, Route: profile.Route, Resources: profile.Resources,
+			State: domain.InstancePlanned, Power: domain.InstancePowerRunning,
+		})
+	}
+	return result
+}
+
+func containsDrain(operations []Operation) bool {
+	for _, operation := range operations {
+		if operation.Kind == OperationDrain {
+			return true
+		}
+	}
+	return false
 }
 
 func demandsExcludingProfile(demands []domain.Demand, profile domain.ProfileID) []domain.Demand {
