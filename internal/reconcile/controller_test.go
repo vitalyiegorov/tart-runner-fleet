@@ -267,7 +267,31 @@ func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
 	if intent.ExpectedState != operations.StateRunning || intent.Instance.DrainPhase != operations.DrainPhaseInactiveRecovery {
 		t.Fatalf("inactive recovery intent = %#v", intent)
 	}
+	// The stalled-assignment and lingering-runner deadlines map onto their own
+	// evidence-gated drain phases, distinct from confirmed-inactive recovery.
+	for _, deadline := range []struct {
+		flag  func(*scheduler.Operation)
+		state operations.State
+		phase int
+	}{
+		{flag: func(o *scheduler.Operation) { o.StalledAssignment = true }, state: operations.StateAssigned, phase: operations.DrainPhaseStalledAssignment},
+		{flag: func(o *scheduler.Operation) { o.LingeringRunner = true }, state: operations.StateRunning, phase: operations.DrainPhaseLingeringRunner},
+	} {
+		store.applied = nil
+		instance.State = deadline.state
+		store.instances[instance.ID] = instance
+		op := scheduler.Operation{ID: "recover", Kind: scheduler.OperationDrain, Instance: instance.ID, Recovery: true}
+		deadline.flag(&op)
+		if applied, err := controller.Commit(context.Background(), readyPlan(op), "", controllerNow); err != nil || !applied {
+			t.Fatalf("deadline recovery commit = %v, %v", applied, err)
+		}
+		if intent := store.applied[0].Instances[0]; intent.ExpectedState != deadline.state || intent.Instance.DrainPhase != deadline.phase {
+			t.Fatalf("deadline recovery intent = %#v, want phase %d", intent, deadline.phase)
+		}
+	}
 	store.applied = nil
+	instance.State = operations.StateRunning
+	store.instances[instance.ID] = instance
 	recovery.Recovery = false
 	if _, err := controller.Commit(context.Background(), readyPlan(recovery), "", controllerNow); err == nil {
 		t.Fatal("ordinary drain accepted an assigned instance")

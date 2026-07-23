@@ -151,48 +151,62 @@ func TestControlRouterJobStartedReflectsDemandProgress(t *testing.T) {
 		return ControlRouter{State: state, Demand: reader,
 			Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: &fakeScaleControl{}}}}
 	}
+	// JobStarted treats a completed job as "started" (the assignment path); JobActive
+	// treats only an in-progress JobStarted as live (the lingering-runner path).
 	for _, test := range []struct {
-		status operations.DemandEventKind
-		want   bool
+		status      operations.DemandEventKind
+		wantStarted bool
+		wantActive  bool
 	}{
-		{operations.DemandJobAvailable, false},
-		{operations.DemandJobAssigned, false},
-		{operations.DemandJobStarted, true},
-		{operations.DemandJobCompleted, true},
+		{operations.DemandJobAvailable, false, false},
+		{operations.DemandJobAssigned, false, false},
+		{operations.DemandJobStarted, true, true},
+		{operations.DemandJobCompleted, true, false},
 	} {
-		started, err := newRouter(fakeDemandReader{record: operations.DemandRecord{Status: test.status}}).JobStarted(context.Background(), state.instance)
-		if err != nil || started != test.want {
-			t.Fatalf("JobStarted(%s) = %v, %v; want %v", test.status, started, err, test.want)
+		router := newRouter(fakeDemandReader{record: operations.DemandRecord{Status: test.status}})
+		started, startedErr := router.JobStarted(context.Background(), state.instance)
+		active, activeErr := router.JobActive(context.Background(), state.instance)
+		if startedErr != nil || activeErr != nil || started != test.wantStarted || active != test.wantActive {
+			t.Fatalf("progress(%s) started=%v/%v active=%v/%v; want started=%v active=%v",
+				test.status, started, startedErr, active, activeErr, test.wantStarted, test.wantActive)
 		}
 	}
 	// Fail-closed: an unresolvable binding and a demand-lookup error both surface
 	// as errors so the executor retries at the guard stage instead of killing.
-	if _, err := (ControlRouter{State: state}).JobStarted(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
-		t.Fatalf("unknown source JobStarted = %v", err)
-	}
-	if _, err := newRouter(fakeDemandReader{err: operations.ErrUncertain}).JobStarted(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
-		t.Fatalf("demand error JobStarted = %v", err)
+	for _, probe := range []func(ControlRouter) (bool, error){
+		func(r ControlRouter) (bool, error) { return r.JobStarted(context.Background(), state.instance) },
+		func(r ControlRouter) (bool, error) { return r.JobActive(context.Background(), state.instance) },
+	} {
+		if _, err := probe(ControlRouter{State: state}); !errors.Is(err, operations.ErrUncertain) {
+			t.Fatalf("unknown source probe = %v", err)
+		}
+		if _, err := probe(newRouter(fakeDemandReader{err: operations.ErrUncertain})); !errors.Is(err, operations.ErrUncertain) {
+			t.Fatalf("demand error probe = %v", err)
+		}
 	}
 }
 
-func TestControlRouterStalledAssignmentConfirmationDerivesJobInactivityFromRunner(t *testing.T) {
+func TestControlRouterRecoveryConfirmationDerivesJobInactivityFromRunner(t *testing.T) {
 	now := time.Unix(160, 0).UTC()
-	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
-	state.instance.DrainPhase = operations.DrainPhaseStalledAssignment
-	source := &fakeScaleControl{}
-	// Status stays JobAssigned forever — no job ever started — yet the stalled
-	// phase must still confirm reclaim from runner absence, never wait on a
-	// JobCompleted that cannot arrive.
-	router := ControlRouter{State: state, Demand: fakeDemandReader{record: operations.DemandRecord{Status: operations.DemandJobAssigned}},
-		Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: source}},
-		Now:     func() time.Time { return now }}
-	confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID)
-	if err != nil || !confirmation.Safe(now, time.Second) {
-		t.Fatalf("stalled reclaim confirmation = %#v, %v", confirmation, err)
-	}
-	source.registered = true
-	if confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID); err != nil || confirmation.Safe(now, time.Second) {
-		t.Fatalf("registered stalled runner must not confirm = %#v, %v", confirmation, err)
+	// Both phases confirm reclaim from runner absence alone: a stalled assignment
+	// whose demand never left JobAssigned (no job ever started) and a lingering
+	// runner whose job already ended must never wait on a fresh JobCompleted that
+	// cannot arrive. A still-registered runner must never confirm.
+	for _, phase := range []int{operations.DrainPhaseStalledAssignment, operations.DrainPhaseLingeringRunner} {
+		state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
+		state.instance.DrainPhase = phase
+		source := &fakeScaleControl{}
+		router := ControlRouter{State: state, Demand: fakeDemandReader{record: operations.DemandRecord{Status: operations.DemandJobAssigned}},
+			Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: source}},
+			Now:     func() time.Time { return now }}
+		confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID)
+		if err != nil || !confirmation.Safe(now, time.Second) {
+			t.Fatalf("phase %d reclaim confirmation = %#v, %v", phase, confirmation, err)
+		}
+		source.registered = true
+		if confirmation, err := router.ConfirmDeletion(context.Background(), state.instance.ID); err != nil || confirmation.Safe(now, time.Second) {
+			t.Fatalf("phase %d registered runner must not confirm = %#v, %v", phase, confirmation, err)
+		}
 	}
 }
 

@@ -60,6 +60,11 @@ type simWorld struct {
 	// so its AssignedSince ages past the assignment deadline, exactly the
 	// 84-minute incident this models.
 	stuck map[string]bool
+	// lingering[id] marks an instance whose job ended (or was cancelled before
+	// it began) yet the instance is stuck in Running with no active job. It is
+	// held in Running with JobInactive set so its RunningSince ages past the
+	// idle-runner deadline, exactly tonight's 74-minute lingerer incident.
+	lingering map[string]bool
 	// jobID hands out unique, deterministic demand identifiers.
 	jobID int64
 
@@ -87,6 +92,7 @@ func newSimWorld(t *testing.T, cfg Config, host domain.Host, seed int64) *simWor
 		rng:                  rand.New(rand.NewSource(seed)),
 		jobTicksLeft:         map[string]int{},
 		stuck:                map[string]bool{},
+		lingering:            map[string]bool{},
 		spawnedAt:            map[domain.DemandKey]int{},
 		feasiblePendingTicks: map[domain.DemandKey]int{},
 		everFeasible:         map[domain.DemandKey]bool{},
@@ -249,8 +255,16 @@ func (w *simWorld) advanceInstance(inst domain.Instance, drained bool) (domain.I
 			return inst, true
 		}
 		inst.State = w.mustTransition(inst.State, domain.InstanceRunning)
+		inst.RunningSince = w.now
 		w.jobTicksLeft[inst.ID] = w.rng.Intn(simMaxJobTicks) + 1
 	case domain.InstanceRunning:
+		if w.lingering[inst.ID] {
+			// A lingering runner: its job ended but the instance stays Running with
+			// no active job (RunningSince fixed, JobInactive set) until the
+			// idle-runner deadline opens recovery.
+			inst.JobInactive = true
+			return inst, true
+		}
 		if w.jobTicksLeft[inst.ID] > 0 {
 			w.jobTicksLeft[inst.ID]--
 			return inst, true
@@ -398,9 +412,16 @@ func (w *simWorld) assertDrainSafety(plan Plan) {
 			stalled := inst.State == domain.InstanceAssigned && inst.Power == domain.InstancePowerRunning &&
 				!inst.RecoveryReady && w.config.AssignedTimeout > 0 && !inst.AssignedSince.IsZero() &&
 				w.now.Sub(inst.AssignedSince) >= w.config.AssignedTimeout
-			if !busy || (!confirmedInactive && !stalled) {
-				w.t.Fatalf("recovery drain of unsafe instance %q state=%s power=%s recoveryReady=%v assignedSince=%s",
-					op.Instance, inst.State, inst.Power, inst.RecoveryReady, inst.AssignedSince)
+			// A lingering runner is provably not running a job: its bound demand
+			// carries no active job (JobInactive), so a Running instance past the
+			// idle-runner deadline holds capacity behind work that already ended and
+			// is safe to reclaim. A genuinely busy runner has JobInactive false.
+			lingering := inst.State == domain.InstanceRunning && inst.Power == domain.InstancePowerRunning &&
+				!inst.RecoveryReady && inst.JobInactive && w.config.AssignedTimeout > 0 && !inst.RunningSince.IsZero() &&
+				w.now.Sub(inst.RunningSince) >= w.config.AssignedTimeout
+			if !busy || (!confirmedInactive && !stalled && !lingering) {
+				w.t.Fatalf("recovery drain of unsafe instance %q state=%s power=%s recoveryReady=%v assignedSince=%s runningSince=%s jobInactive=%v",
+					op.Instance, inst.State, inst.Power, inst.RecoveryReady, inst.AssignedSince, inst.RunningSince, inst.JobInactive)
 			}
 			continue
 		}
@@ -1035,5 +1056,54 @@ func TestSimulationStalledAssignmentZombieIsReclaimed(t *testing.T) {
 	}
 	if admittedAt < 0 {
 		t.Fatalf("the demand queued behind the zombie was never admitted after reclaim at tick %d", reclaimedAt)
+	}
+}
+
+// TestSimulationLingeringRunnerIsReclaimed is the liveness oracle for tonight's
+// 74-minute incident: a cancelled run left a runner stuck in Running with no
+// active job, occupying the only free slot so a full-width profile queued
+// behind it could never be admitted (the CPU=8 builder starvation chain). Left
+// unbounded the fleet starves indefinitely. The oracle asserts (1) the lingerer
+// is reclaimed within a bounded window after the idle-runner deadline, and (2)
+// the work queued behind it is then admitted — while assertDrainSafety runs
+// every tick, proving no runner with an active job is ever caught by the deadline.
+func TestSimulationLingeringRunnerIsReclaimed(t *testing.T) {
+	cfg := testConfig() // AssignedTimeout = 15m; simTickDuration = 1m => 15 ticks.
+	deadlineTicks := int(cfg.AssignedTimeout / simTickDuration)
+	// One free slot only, so the lingerer genuinely blocks the queue behind it
+	// and reclaim is the sole way the pending demand can ever run.
+	host := domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 1}}
+	w := newSimWorld(t, cfg, host, 5)
+	lingerer := domain.Instance{ID: "vm-lingerer", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "small",
+		Route: cfg.Profiles["small"].Route, Resources: cfg.Profiles["small"].Resources,
+		State: domain.InstanceRunning, Power: domain.InstancePowerRunning, JobInactive: true, RunningSince: w.now}
+	w.instances = append(w.instances, lingerer)
+	w.lingering[lingerer.ID] = true
+	behind := w.addDemand("b/repo", 0, "small")
+
+	reclaimedAt, admittedAt := -1, -1
+	for tick := 0; tick < deadlineTicks+30; tick++ {
+		w.step(tick, false) // assertSafety (incl. drain-safety) runs inside every step
+		present := false
+		for _, inst := range w.instances {
+			if inst.ID == lingerer.ID {
+				present = true
+			}
+			if inst.Repo == behind.Key.Repo && admittedAt < 0 {
+				admittedAt = tick
+			}
+		}
+		if !present && reclaimedAt < 0 {
+			reclaimedAt = tick
+		}
+	}
+	if reclaimedAt < 0 {
+		t.Fatal("lingering runner was never reclaimed; it would have starved the fleet indefinitely")
+	}
+	if reclaimedAt < deadlineTicks {
+		t.Fatalf("lingerer reclaimed at tick %d, before the deadline of %d ticks", reclaimedAt, deadlineTicks)
+	}
+	if admittedAt < 0 {
+		t.Fatalf("the demand queued behind the lingerer was never admitted after reclaim at tick %d", reclaimedAt)
 	}
 }

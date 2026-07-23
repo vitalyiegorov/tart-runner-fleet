@@ -176,6 +176,62 @@ func TestStalledAssignmentDeadlineNeverTouchesLiveOrYoungAssignments(t *testing.
 	}
 }
 
+// TestLingeringRunnerIsRecoveredAfterDeadline replays tonight's 74-minute
+// incident: a workflow run was cancelled while its jobs were queued/assigned,
+// so the ephemeral runner VM serving one job lingered in instance state Running
+// with its VM powered on, its runner still registered (RecoveryReady stayed
+// false), and its bound demand terminal — no active job (JobInactive). #84's
+// deadline only covers Assigned, so nothing reclaimed it: it held a slot and
+// memory while a demand starved behind it. Past the idle-runner deadline with
+// no active-job evidence, it must become eligible for the SAME evidence-gated
+// recovery path, flagged LingeringRunner (never ConfirmedInactive/StalledAssignment).
+func TestLingeringRunnerIsRecoveredAfterDeadline(t *testing.T) {
+	lingerer := domain.Instance{ID: "trf-medium-lingerer", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, State: domain.InstanceRunning, Power: domain.InstancePowerRunning,
+		RecoveryReady: false, JobInactive: true, RunningSince: testNow.Add(-16 * time.Minute)}
+	plan := PlanTick(input([]domain.Demand{demand("b/repo", 9, time.Minute, "small")}, []domain.Instance{lingerer}, State{}))
+	if len(plan.Operations) != 1 || plan.Operations[0].Kind != OperationDrain || plan.Operations[0].Instance != lingerer.ID ||
+		!plan.Operations[0].Recovery || !plan.Operations[0].LingeringRunner || plan.Operations[0].ConfirmedInactive || plan.Operations[0].StalledAssignment {
+		t.Fatalf("lingering-runner recovery plan = %#v", plan.Operations)
+	}
+}
+
+// The tripwire counterpart: a Running instance whose job is genuinely active
+// (JobInactive false) regardless of age, a lingerer younger than the deadline,
+// and a lingerer with no known Running entry time (RunningSince zero,
+// fail-closed) must all be left strictly alone — the busy-drain invariant is
+// sacred and one active-job runner must never be reclaimed by the deadline.
+func TestIdleRunnerDeadlineNeverTouchesBusyOrYoungRunners(t *testing.T) {
+	base := domain.Instance{ID: "live", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+	for _, test := range []struct {
+		name     string
+		instance domain.Instance
+	}{
+		{name: "active job past deadline", instance: func() domain.Instance {
+			i := base
+			i.JobInactive, i.RunningSince = false, testNow.Add(-time.Hour)
+			return i
+		}()},
+		{name: "idle runner younger than deadline", instance: func() domain.Instance {
+			i := base
+			i.JobInactive, i.RunningSince = true, testNow.Add(-time.Minute)
+			return i
+		}()},
+		{name: "unknown running-since is fail-closed", instance: func() domain.Instance {
+			i := base
+			i.JobInactive = true
+			return i
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if plan := PlanTick(input(nil, []domain.Instance{test.instance}, State{})); len(drainedIDs(plan)) != 0 {
+				t.Fatalf("idle-runner deadline drained a protected runner: %#v", plan.Operations)
+			}
+		})
+	}
+}
+
 func TestRunningCompletedEphemeralRunnerRecoversOnlyWithFreshInactiveEvidence(t *testing.T) {
 	instance := domain.Instance{ID: "completed", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
 		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, State: domain.InstanceRunning, Power: domain.InstancePowerRunning}

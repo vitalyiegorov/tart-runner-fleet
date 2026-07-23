@@ -154,6 +154,14 @@ const (
 	// execution-time premise is re-verified against fresh demand state (no
 	// started job bound to the runner) exactly like the other recovery phases.
 	DrainPhaseStalledAssignment = 4
+	// DrainPhaseLingeringRunner recovers an instance stuck in Running past the
+	// idle-runner deadline whose bound demand carries no active job (terminal or
+	// cancelled before work began). Its execution-time premise is re-verified
+	// against fresh demand state — a job actively started disproves it — exactly
+	// like the other recovery phases; job inactivity is derived from runner
+	// absence after deregistration, so reclaim never blocks on a completion
+	// event that will never arrive.
+	DrainPhaseLingeringRunner = 5
 )
 
 type Lease struct {

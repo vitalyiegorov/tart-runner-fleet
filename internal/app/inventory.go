@@ -23,6 +23,10 @@ type HostInventory interface {
 }
 type RecoveryObserver interface {
 	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
+	// JobActive reports whether the durable demand bound to a Running instance
+	// shows a job currently executing. Its negation is the lingering-runner
+	// evidence the scheduler measures against the idle-runner deadline.
+	JobActive(context.Context, operations.Instance) (bool, error)
 }
 
 type ProductionInventory struct {
@@ -85,9 +89,23 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		if instance.State == operations.StateAssigned {
 			assignedSince = instance.UpdatedAt
 		}
+		// A Running instance's dwell time is the age measured against the
+		// idle-runner deadline; JobInactive is the evidence that pairs with it —
+		// no active job on the durable demand. Both stay zero/false (fail-closed)
+		// for non-running instances or when the demand evidence cannot be read.
+		runningSince := time.Time{}
+		jobInactive := false
+		if instance.State == operations.StateRunning {
+			runningSince = instance.UpdatedAt
+			if power == domain.InstancePowerRunning && p.Recovery != nil {
+				if active, activeErr := p.Recovery.JobActive(ctx, instance); activeErr == nil {
+					jobInactive = !active
+				}
+			}
+		}
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Demand: instance.Demand, Platform: instance.Platform, Profile: instance.Profile,
 			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady,
-			AssignedSince: assignedSince})
+			AssignedSince: assignedSince, RunningSince: runningSince, JobInactive: jobInactive})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {

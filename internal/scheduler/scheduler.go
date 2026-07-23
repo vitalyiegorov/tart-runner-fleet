@@ -87,6 +87,7 @@ type Operation struct {
 	Recovery          bool `json:"recovery,omitempty"`
 	ConfirmedInactive bool `json:"confirmedInactive,omitempty"`
 	StalledAssignment bool `json:"stalledAssignment,omitempty"`
+	LingeringRunner   bool `json:"lingeringRunner,omitempty"`
 }
 
 type PlanStatus string
@@ -295,11 +296,12 @@ func assignmentRecoveries(now time.Time, assignedTimeout time.Duration, instance
 		}
 		confirmedInactive := instance.Power == domain.InstancePowerRunning && instance.RecoveryReady
 		stalled := stalledAssignment(now, assignedTimeout, instance)
-		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled {
+		lingering := lingeringRunner(now, assignedTimeout, instance)
+		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled && !lingering {
 			continue
 		}
 		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
-			Recovery: true, ConfirmedInactive: confirmedInactive, StalledAssignment: stalled}
+			Recovery: true, ConfirmedInactive: confirmedInactive, StalledAssignment: stalled, LingeringRunner: lingering}
 		operation.ID = stableID("op", operation)
 		recoveries = append(recoveries, operation)
 	}
@@ -318,6 +320,26 @@ func stalledAssignment(now time.Time, assignedTimeout time.Duration, instance do
 	return instance.State == domain.InstanceAssigned && instance.Power == domain.InstancePowerRunning &&
 		!instance.RecoveryReady && assignedTimeout > 0 && !instance.AssignedSince.IsZero() &&
 		now.Sub(instance.AssignedSince) >= assignedTimeout
+}
+
+// lingeringRunner reports whether a Running instance has exceeded the
+// idle-runner deadline while its bound demand shows no active job. Unlike a
+// stalled assignment — whose FSM state alone proves no job started — a Running
+// instance's state is ambiguous, so JobInactive (demand status is not
+// JobStarted: terminal, cancelled-before-start, or completed) is the evidence
+// that no work is executing. It narrows to a powered-on, unconfirmed runner —
+// a stopped or already-confirmed-inactive instance is handled by the
+// pre-existing recovery gates — and stays fail-closed when the entry time or
+// deadline is unknown, so it can only open the guarded recovery path (whose
+// execution-time JobActive re-check is the real gate), never bypass it. The
+// deadline is deliberately generous so a job completing normally drains through
+// the ordinary completion path long before this fires. The busy-drain
+// invariant is preserved: an instance with an active job has JobInactive false
+// and is never a candidate, regardless of age.
+func lingeringRunner(now time.Time, idleTimeout time.Duration, instance domain.Instance) bool {
+	return instance.State == domain.InstanceRunning && instance.Power == domain.InstancePowerRunning &&
+		!instance.RecoveryReady && instance.JobInactive && idleTimeout > 0 && !instance.RunningSince.IsZero() &&
+		now.Sub(instance.RunningSince) >= idleTimeout
 }
 
 func normalizedDemands(in Input) []domain.Demand {

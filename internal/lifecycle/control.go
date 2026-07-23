@@ -112,15 +112,31 @@ func (r ControlRouter) RunnerRegistered(ctx context.Context, instance operations
 // live work; an assignment that never progressed past JobAssigned is a stalled
 // zombie safe to reclaim.
 func (r ControlRouter) JobStarted(ctx context.Context, instance operations.Instance) (bool, error) {
+	status, err := r.demandStatus(ctx, instance)
+	return status == operations.DemandJobStarted || status == operations.DemandJobCompleted, err
+}
+
+// JobActive reports whether fresh demand state shows a workflow job is
+// currently executing on this runner — status exactly JobStarted, not a
+// terminal completion. A lingering-runner recovery uses it as the inverse of
+// its planning premise (the demand showed no active job): if a job is active
+// again the drain aborts, otherwise the idle runner is reclaimed. Distinct from
+// JobStarted, which treats a completed job as "started" for the assignment path.
+func (r ControlRouter) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
+	status, err := r.demandStatus(ctx, instance)
+	return status == operations.DemandJobStarted, err
+}
+
+func (r ControlRouter) demandStatus(ctx context.Context, instance operations.Instance) (operations.DemandEventKind, error) {
 	binding, err := r.binding(instance)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	record, err := r.demand(ctx, binding, instance)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return record.Status == operations.DemandJobStarted || record.Status == operations.DemandJobCompleted, nil
+	return record.Status, nil
 }
 
 func (r ControlRouter) Deregister(ctx context.Context, instance operations.Instance) error {
@@ -140,9 +156,11 @@ func (r ControlRouter) ConfirmDeletion(ctx context.Context, name string) (operat
 	if err != nil {
 		return operations.DeletionConfirmation{}, err
 	}
-	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery || instance.DrainPhase == operations.DrainPhaseStalledAssignment {
-		// Once the runner is deregistered the stalled assignment is gone; there is
-		// no JobCompleted event to wait for because no job ever started. Derive
+	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery || instance.DrainPhase == operations.DrainPhaseStalledAssignment ||
+		instance.DrainPhase == operations.DrainPhaseLingeringRunner {
+		// Once the runner is deregistered the stalled/lingering runner is gone;
+		// there is no fresh JobCompleted event to wait for (the job never started,
+		// or its completion already passed without draining the instance). Derive
 		// job inactivity from runner absence, exactly as stopped recovery does.
 		return operations.DeletionConfirmation{Fresh: true, RunnerInactive: !registered,
 			JobsInactive: !registered, ObservedAt: r.now()}, nil

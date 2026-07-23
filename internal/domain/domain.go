@@ -208,8 +208,22 @@ type Instance struct {
 	// Assigned -> Running). Zero means unknown, which the scheduler treats
 	// fail-closed as "never past the deadline".
 	AssignedSince time.Time
-	Attempts      int
-	RetryAt       time.Time
+	// RunningSince is when the instance most recently entered the Running state.
+	// Paired with JobInactive it bounds the idle-runner deadline: a Running
+	// instance whose bound demand carries no active job for this long is a
+	// lingerer holding capacity behind a job that already ended (or was
+	// cancelled). Zero means unknown, treated fail-closed as "never past the
+	// deadline".
+	RunningSince time.Time
+	// JobInactive reports that the durable demand bound to a Running instance
+	// shows no active job — its status is not JobStarted (terminal/completed,
+	// pre-start, or the run was cancelled before work began). A healthy Running
+	// instance executing a job has JobInactive false, so it is never a lingerer
+	// candidate regardless of age. Fail-closed default false when the demand
+	// evidence cannot be read.
+	JobInactive bool
+	Attempts    int
+	RetryAt     time.Time
 }
 
 type InstancePower string

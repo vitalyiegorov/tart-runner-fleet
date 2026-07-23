@@ -105,6 +105,11 @@ type DrainControl interface {
 	// begun executing on this runner. A stalled-assignment recovery drain aborts
 	// the moment it becomes true: the assignment materialized into real work.
 	JobStarted(context.Context, operations.Instance) (bool, error)
+	// JobActive reports whether fresh demand state shows a workflow job is
+	// currently executing (status exactly JobStarted, not completed). A
+	// lingering-runner recovery drain aborts the moment it becomes true: the
+	// idle runner picked up real work after the planning observation.
+	JobActive(context.Context, operations.Instance) (bool, error)
 }
 
 // ProvisionExecutor is a restartable state machine. One durable outbox
@@ -389,6 +394,21 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 					return e.fail(ctx, instance, StageGuard)
 				}
 				if started {
+					return e.abort(ctx, instance)
+				}
+			case operations.DrainPhaseLingeringRunner:
+				// The idle-runner deadline planned this kill from a single
+				// observation that the bound demand carried no active job. Re-verify
+				// against fresh demand state before deregistering the (idle) runner:
+				// if a job is now actively executing, the runner is genuinely busy, so
+				// abort to Running and let normal completion drain it. Otherwise the
+				// job has ended (or was cancelled before it began) and deregistering
+				// is safe — GitHub re-queues any pending work to another runner.
+				active, activeErr := e.Control.JobActive(ctx, instance)
+				if activeErr != nil {
+					return e.fail(ctx, instance, StageGuard)
+				}
+				if active {
 					return e.abort(ctx, instance)
 				}
 			default:
