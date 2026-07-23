@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -481,9 +482,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
+	reporter := newFailureReporter(os.Stderr, d.now)
 	go func() {
 		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, Worker: worker,
-			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond}).Run(runCtx)
+			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond,
+			OnFailure: reporter.report}).Run(runCtx)
 	}()
 	select {
 	case err := <-serviceDone:
@@ -944,6 +947,39 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 	return changed, err
 }
 
+// failureReporter turns app.Service's secret-safe failure callback into a
+// rate-limited log line. The callback receives only a static component name by
+// design, so nothing an upstream error carries can reach the log. Emitting at
+// most one line per component per window keeps a hot failure loop from
+// drowning the daemon's stderr while still breaking the historical silence
+// that once hid an 18h scheduler outage.
+type failureReporter struct {
+	mu     sync.Mutex
+	last   map[string]time.Time
+	now    func() time.Time
+	window time.Duration
+	logger *slog.Logger
+}
+
+func newFailureReporter(w io.Writer, now func() time.Time) *failureReporter {
+	if now == nil {
+		now = time.Now
+	}
+	return &failureReporter{last: make(map[string]time.Time), now: now, window: time.Minute,
+		logger: slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+}
+
+func (r *failureReporter) report(component string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if last, ok := r.last[component]; ok && now.Sub(last) < r.window {
+		return
+	}
+	r.last[component] = now
+	r.logger.Warn("component loop failure", "component", component)
+}
+
 type engineTicker struct {
 	engine          app.Engine
 	health          *telemetry.Health
@@ -961,7 +997,7 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	} else if !success {
 		freshness = telemetry.ObservationStale
 	}
-	_ = e.health.RecordObservation("scheduler", freshness)
+	_ = e.health.RecordObservationDetail("scheduler", freshness, result.Plan.Reason)
 	if err == nil {
 		e.recordMetrics(result)
 		if e.operationCounts != nil {
