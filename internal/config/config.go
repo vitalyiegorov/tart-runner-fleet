@@ -103,6 +103,11 @@ type Guards struct {
 	MaxSwapUsedMiB        int
 	MaxLoadAverage        float64
 	MinCPUIdlePercent     float64
+	// PressureMemoryAccounting selects the kernel memory-pressure availability
+	// signal in the macOS host probe instead of the legacy vm_stat page formula.
+	// Default false preserves legacy behavior byte-for-byte; it is enabled
+	// per-host in fleet.json.
+	PressureMemoryAccounting bool
 }
 
 const (
@@ -197,6 +202,7 @@ type wireConfig struct {
 	MaxSwapUsedMiB            int       `json:"maxSwapUsedMb,omitempty"`
 	MaxLoadAverage            float64   `json:"maxLoadAverage,omitempty"`
 	MinCPUIdlePercent         float64   `json:"minCpuIdlePercent,omitempty"`
+	PressureMemoryAccounting  bool      `json:"pressureMemoryAccounting,omitempty"`
 	GitHubTimeoutSeconds      int       `json:"githubTimeoutSeconds"`
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
@@ -289,7 +295,8 @@ func Encode(w io.Writer, cfg Config) error {
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
-		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, GitHubTimeoutSeconds: githubSeconds,
+		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, PressureMemoryAccounting: cfg.Guards.PressureMemoryAccounting,
+		GitHubTimeoutSeconds:      githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
 	}
@@ -355,7 +362,8 @@ func secondsOr(value, fallback int) time.Duration {
 
 func normalizeGuards(w wireConfig) Guards {
 	guards := Guards{MinFreeDiskGiB: w.MinFreeDiskGiB, MinAvailableMemoryMiB: w.MinAvailableMemoryMiB,
-		MaxSwapUsedMiB: w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent}
+		MaxSwapUsedMiB: w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
+		PressureMemoryAccounting: w.PressureMemoryAccounting}
 	if guards.MinAvailableMemoryMiB == 0 {
 		guards.MinAvailableMemoryMiB = defaultMinAvailableMemoryMiB
 	}

@@ -1048,6 +1048,28 @@ func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	}
 }
 
+func TestProductionInventoryWiresPressureMemoryAccounting(t *testing.T) {
+	cfg := config.Default()
+	cfg.Guards.PressureMemoryAccounting = true
+	production, ok := defaultDependencies().inventory(nil, cfg, nil).(app.ProductionInventory)
+	if !ok {
+		t.Fatal("production inventory adapter type changed")
+	}
+	probe, ok := production.Host.(*macos.Probe)
+	if !ok {
+		t.Fatal("host probe adapter type changed")
+	}
+	if !probe.PressureAccounting {
+		t.Fatal("pressure memory accounting flag was not wired into the host probe")
+	}
+
+	cfg.Guards.PressureMemoryAccounting = false
+	legacy := defaultDependencies().inventory(nil, cfg, nil).(app.ProductionInventory).Host.(*macos.Probe)
+	if legacy.PressureAccounting {
+		t.Fatal("legacy configuration enabled pressure accounting")
+	}
+}
+
 func TestProductionVMControlWiresMacOSPerformanceOptions(t *testing.T) {
 	cfg := config.Default()
 	cfg.MacOS.RootDiskOptions = "sync=none"
