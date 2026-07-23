@@ -646,11 +646,9 @@ func TestSimulationIncident3Topology(t *testing.T) {
 		}
 	}
 	if feasibleAdmitted < feasibleTotal {
-		t.Skipf("KNOWN GAP (incident-3, seed 42): idle-host macOS-builder head backfill is bounded to one job per handoff "+
-			"(scheduler.boundedDrainBackfill + MacHandoff.BackfillAdmitted latch); only %d/%d feasible backlog demands admitted. "+
-			"PR #78 unblocks the queue but does not fully drain it while the infeasible builder head persists. "+
-			"Follow-up: allow continued residual-capacity backfill (as the Linux safeBackfill path does) rather than a single wave.",
-			feasibleAdmitted, feasibleTotal)
+		t.Fatalf("idle-host macOS-builder head starved feasible backlog: only %d/%d feasible backlog demands admitted over %d ticks "+
+			"(a resource-infeasible macOS head must not latch backfill shut behind it)",
+			feasibleAdmitted, feasibleTotal, ticks)
 	}
 	assertNoStarvation(t, w, K)
 }
