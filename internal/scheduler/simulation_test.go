@@ -536,6 +536,29 @@ var simRepos = []string{"a/repo", "b/repo", "c/repo", "mac-a", "mac-b"}
 // TestSimulationRandomizedSafetyAndDeterminism drives mixed macOS/Linux demand
 // streams across several repos and all five profiles, asserting the safety and
 // determinism oracles every tick over many seeds.
+
+// poissonArrivals returns the shared randomized demand-arrival closure used by
+// the randomized simulation suites: 0-2 new demands most ticks, front-loaded,
+// macOS profiles bound to mac repos and Linux profiles to linux repos.
+func poissonArrivals(rng *rand.Rand, ticks int) func(*simWorld, int) {
+	return func(w *simWorld, tick int) {
+		n := rng.Intn(3)
+		if tick > ticks/2 {
+			n = rng.Intn(2)
+		}
+		for i := 0; i < n; i++ {
+			profile := simAllProfiles[rng.Intn(len(simAllProfiles))]
+			var repo string
+			if w.config.Profiles[profile].Platform == domain.PlatformMacOS {
+				repo = simRepos[3+rng.Intn(2)]
+			} else {
+				repo = simRepos[rng.Intn(3)]
+			}
+			w.addDemand(repo, rng.Intn(9), profile)
+		}
+	}
+}
+
 func TestSimulationRandomizedSafetyAndDeterminism(t *testing.T) {
 	const seeds = 32
 	const ticks = 200
@@ -551,23 +574,7 @@ func TestSimulationRandomizedSafetyAndDeterminism(t *testing.T) {
 			host := domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 4}}
 			w := newSimWorld(t, cfg, host, seed)
 			rng := rand.New(rand.NewSource(seed ^ 0x5eed))
-			arrive := func(w *simWorld, tick int) {
-				// Poisson-ish arrival: 0-2 new demands most ticks, front-loaded.
-				n := rng.Intn(3)
-				if tick > ticks/2 {
-					n = rng.Intn(2)
-				}
-				for i := 0; i < n; i++ {
-					profile := simAllProfiles[rng.Intn(len(simAllProfiles))]
-					var repo string
-					if w.config.Profiles[profile].Platform == domain.PlatformMacOS {
-						repo = simRepos[3+rng.Intn(2)]
-					} else {
-						repo = simRepos[rng.Intn(3)]
-					}
-					w.addDemand(repo, rng.Intn(9), profile)
-				}
-			}
+			arrive := poissonArrivals(rng, ticks)
 			w.run(simOptions{ticks: ticks, checkDeterminism: true, arrive: arrive})
 		})
 	}
@@ -610,22 +617,7 @@ func TestSimulationMixedRandomizedSafetyAndDeterminism(t *testing.T) {
 			w := newSimWorld(t, cfg, host, seed)
 			w.enforceHostBound = true
 			rng := rand.New(rand.NewSource(seed ^ 0x5eed))
-			arrive := func(w *simWorld, tick int) {
-				n := rng.Intn(3)
-				if tick > ticks/2 {
-					n = rng.Intn(2)
-				}
-				for i := 0; i < n; i++ {
-					profile := simAllProfiles[rng.Intn(len(simAllProfiles))]
-					var repo string
-					if w.config.Profiles[profile].Platform == domain.PlatformMacOS {
-						repo = simRepos[3+rng.Intn(2)]
-					} else {
-						repo = simRepos[rng.Intn(3)]
-					}
-					w.addDemand(repo, rng.Intn(9), profile)
-				}
-			}
+			arrive := poissonArrivals(rng, ticks)
 			w.run(simOptions{ticks: ticks, checkDeterminism: true, arrive: arrive})
 		})
 	}

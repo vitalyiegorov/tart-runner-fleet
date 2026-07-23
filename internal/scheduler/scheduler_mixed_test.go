@@ -101,37 +101,31 @@ func TestMixedIdleMacHeadSpawnsThenFillsLinux(t *testing.T) {
 	}
 }
 
-// TestMixedMacHeadCoexistenceFillsLinuxBesideLiveLinux covers the macOS-head
-// coexistence leaf (mode HostLinux): the macOS head spawns beside a live Linux
-// VM and Linux fills the rest.
-func TestMixedMacHeadCoexistenceFillsLinuxBesideLiveLinux(t *testing.T) {
-	maestroHead := demand("mac-a", 1, 10*time.Minute, "maestro")
-	small := demand("a/repo", 2, time.Minute, "small")
-	liveLinux := domain.Instance{ID: "linux-1", Repo: "b/repo", Platform: domain.PlatformLinux, Profile: "small",
-		Route: "tiered", Resources: mixedConfig().Profiles["small"].Resources, State: domain.InstanceRunning}
-	plan := PlanTick(mixedInput(t, []domain.Demand{maestroHead, small}, []domain.Instance{liveLinux}, State{}))
-	if containsDrain(plan.Operations) {
-		t.Fatalf("coexistence fill must not drain: %#v", plan.Operations)
+// TestMixedFillBesideLiveLinux covers both remainder-fill leaves next to a
+// live Linux VM: a macOS head spawning beside it with Linux filling the rest
+// (mode HostLinux), and a Linux head establishing a macOS cohort within
+// MaxActive (fillMacRemainder's active=false branch).
+func TestMixedFillBesideLiveLinux(t *testing.T) {
+	tests := []struct {
+		name string
+		head domain.Demand
+		next domain.Demand
+	}{
+		{name: "mac head fills linux", head: demand("mac-a", 1, 10*time.Minute, "maestro"), next: demand("a/repo", 2, time.Minute, "small")},
+		{name: "linux head establishes mac cohort", head: demand("a/repo", 1, 10*time.Minute, "small"), next: demand("mac-a", 2, time.Minute, "maestro")},
 	}
-	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{maestroHead.Key, small.Key}) {
-		t.Fatalf("mac head beside live linux + linux fill = %#v", got)
-	}
-}
-
-// TestMixedLinuxHeadEstablishesMacCohort covers fillMacRemainder's active=false
-// branch: on a Linux-only host, a queued macOS profile is established beside the
-// Linux head within MaxActive.
-func TestMixedLinuxHeadEstablishesMacCohort(t *testing.T) {
-	smallHead := demand("a/repo", 1, 10*time.Minute, "small")
-	maestro := demand("mac-a", 2, time.Minute, "maestro")
-	liveLinux := domain.Instance{ID: "linux-1", Repo: "b/repo", Platform: domain.PlatformLinux, Profile: "small",
-		Route: "tiered", Resources: mixedConfig().Profiles["small"].Resources, State: domain.InstanceRunning}
-	plan := PlanTick(mixedInput(t, []domain.Demand{smallHead, maestro}, []domain.Instance{liveLinux}, State{}))
-	if containsDrain(plan.Operations) {
-		t.Fatalf("mac cohort establishment must not drain: %#v", plan.Operations)
-	}
-	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{smallHead.Key, maestro.Key}) {
-		t.Fatalf("linux head + established mac cohort = %#v", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			liveLinux := domain.Instance{ID: "linux-1", Repo: "b/repo", Platform: domain.PlatformLinux, Profile: "small",
+				Route: "tiered", Resources: mixedConfig().Profiles["small"].Resources, State: domain.InstanceRunning}
+			plan := PlanTick(mixedInput(t, []domain.Demand{test.head, test.next}, []domain.Instance{liveLinux}, State{}))
+			if containsDrain(plan.Operations) {
+				t.Fatalf("remainder fill must not drain: %#v", plan.Operations)
+			}
+			if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{test.head.Key, test.next.Key}) {
+				t.Fatalf("head + remainder fill = %#v", got)
+			}
+		})
 	}
 }
 
