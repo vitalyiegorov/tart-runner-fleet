@@ -78,6 +78,29 @@ func TestHealthSeparatesReadinessAndLiveness(t *testing.T) {
 	}
 }
 
+func TestRecordObservationDetailCarriesBoundedDiagnostic(t *testing.T) {
+	health, _ := newTestHealth(t)
+	if err := health.RecordObservationDetail("host", ObservationStale, "host stale: host probe is stale"); err != nil {
+		t.Fatal(err)
+	}
+	if got := health.Snapshot().Observations["host"]; got.Freshness != ObservationStale || got.Detail != "host stale: host probe is stale" {
+		t.Fatalf("detailed observation = %#v", got)
+	}
+	// The plain recorder leaves the detail empty rather than retaining a prior one.
+	if err := health.RecordObservation("host", ObservationFresh); err != nil {
+		t.Fatal(err)
+	}
+	if got := health.Snapshot().Observations["host"]; got.Detail != "" {
+		t.Fatalf("detail not cleared: %#v", got)
+	}
+	if err := health.RecordObservationDetail("host", ObservationFreshness("bogus"), "x"); err != errInvalidObservation {
+		t.Fatalf("invalid freshness err = %v", err)
+	}
+	if err := health.RecordObservationDetail("missing", ObservationFresh, "x"); err != errUnknownObservation {
+		t.Fatalf("unknown observation err = %v", err)
+	}
+}
+
 func TestHealthDetectsStaleAndExpiredObservations(t *testing.T) {
 	health, clock := newTestHealth(t)
 	health.RecordTick(true)

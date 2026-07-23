@@ -97,6 +97,9 @@ func TestServerUnhealthyMethodAndUnknownPath(t *testing.T) {
 	if err := health.RecordObservation("github", ObservationFresh); err != nil {
 		t.Fatal(err)
 	}
+	if err := health.RecordObservationDetail("tart", ObservationStale, "instances stale: Tart inventory unavailable"); err != nil {
+		t.Fatal(err)
+	}
 	clock.Advance(time.Second)
 	server, err := NewServer(health, ServerConfig{})
 	if err != nil {
@@ -111,6 +114,15 @@ func TestServerUnhealthyMethodAndUnknownPath(t *testing.T) {
 	status.Body.Close()
 	if envelope.Data.ControllerVersion != "dev" || envelope.Data.ControllerMode != "unknown" {
 		t.Fatalf("defaults=%+v", envelope.Data)
+	}
+	detail := ""
+	for _, observation := range envelope.Data.Observations {
+		if observation.Name == "tart" {
+			detail = observation.Detail
+		}
+	}
+	if detail != "instances stale: Tart inventory unavailable" {
+		t.Fatalf("observation detail not surfaced: %#v", envelope.Data.Observations)
 	}
 	recorder := httptest.NewRecorder()
 	conditional := httptest.NewRequest(http.MethodGet, "http://localhost"+adminapi.StatusPath, nil)

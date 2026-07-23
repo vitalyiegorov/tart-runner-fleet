@@ -1267,6 +1267,34 @@ func TestEngineTickerRecordsBlockedAsStale(t *testing.T) {
 		health.Snapshot().OperationRetries != 2 || health.Snapshot().DeadOperations != 1 {
 		t.Fatalf("snapshot=%#v", health.Snapshot())
 	}
+	// The blocked plan's bounded reason is surfaced verbatim on the scheduler
+	// observation so an operator can see why ticks stopped advancing.
+	if detail := health.Snapshot().Observations["scheduler"].Detail; detail != "host stale: stale" {
+		t.Fatalf("scheduler detail=%q", detail)
+	}
+}
+
+func TestFailureReporterLogsOncePerComponentPerWindow(t *testing.T) {
+	var buffer bytes.Buffer
+	now := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
+	reporter := newFailureReporter(&buffer, func() time.Time { return now })
+	reporter.report("scheduler")
+	reporter.report("scheduler") // suppressed inside the window
+	reporter.report("ingest")
+	if got := strings.Count(buffer.String(), "component loop failure"); got != 2 {
+		t.Fatalf("in-window log lines = %d: %q", got, buffer.String())
+	}
+	if !strings.Contains(buffer.String(), "component=scheduler") || !strings.Contains(buffer.String(), "component=ingest") {
+		t.Fatalf("component names missing: %q", buffer.String())
+	}
+	now = now.Add(2 * time.Minute)
+	reporter.report("scheduler") // window elapsed, logs again
+	if got := strings.Count(buffer.String(), "component=scheduler"); got != 2 {
+		t.Fatalf("post-window scheduler lines = %d: %q", got, buffer.String())
+	}
+	// A nil clock falls back to the wall clock and still emits.
+	fallback := newFailureReporter(io.Discard, nil)
+	fallback.report("operations")
 }
 
 func TestEngineTickerMarksOperationSummaryUnavailable(t *testing.T) {

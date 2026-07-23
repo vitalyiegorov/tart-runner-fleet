@@ -73,6 +73,41 @@ func TestFailClosedOnStaleOrUnavailableObservation(t *testing.T) {
 	}
 }
 
+func TestBlockedAndInvalidPlansCarryBoundedReasons(t *testing.T) {
+	demands := []domain.Demand{demand("a/repo", 1, time.Minute, "small")}
+
+	staleDemands := input(demands, nil, State{})
+	staleDemands.Demands = domain.Stale(staleDemands.Demands.Value, testNow.Add(-time.Hour), "stale")
+	if plan := PlanTick(staleDemands); plan.Status != PlanBlockedObservation || plan.Reason != "demands stale: stale" {
+		t.Fatalf("stale demands plan = %#v", plan)
+	}
+
+	unavailableHost := input(demands, nil, State{})
+	unavailableHost.Host = domain.Unavailable[domain.Host]("host probe unavailable")
+	if plan := PlanTick(unavailableHost); plan.Status != PlanBlockedObservation || plan.Reason != "host unavailable: host probe unavailable" {
+		t.Fatalf("unavailable host plan = %#v", plan)
+	}
+
+	several := input(demands, nil, State{})
+	several.Demands = domain.Stale(several.Demands.Value, testNow.Add(-time.Hour), "stale")
+	several.Instances = domain.Unavailable[[]domain.Instance]("Tart inventory unavailable")
+	if plan := PlanTick(several); plan.Reason != "demands stale: stale; instances unavailable: Tart inventory unavailable" {
+		t.Fatalf("multi-block reason = %#v", plan)
+	}
+
+	// A reasonless non-fresh observation still names which input is unusable.
+	reasonless := input(demands, nil, State{})
+	reasonless.Host = domain.Observation[domain.Host]{State: domain.ObservationStale, ObservedAt: testNow}
+	if plan := PlanTick(reasonless); plan.Reason != "host stale" {
+		t.Fatalf("reasonless block plan = %#v", plan)
+	}
+
+	invalidPlatform := input(demands, []domain.Instance{{ID: "invalid", Platform: domain.Platform("other"), State: domain.InstanceRunning}}, State{})
+	if plan := PlanTick(invalidPlatform); plan.Status != PlanInvalidObservation || plan.Reason != "unknown live instance platform" {
+		t.Fatalf("invalid platform plan = %#v", plan)
+	}
+}
+
 func TestStoppedAssignedRunnerIsRecoveredBeforeNewAdmission(t *testing.T) {
 	stopped := domain.Instance{ID: "stopped", Repo: "a/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
 		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, State: domain.InstanceAssigned, Power: domain.InstancePowerStopped}

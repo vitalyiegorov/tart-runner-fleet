@@ -142,7 +142,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			age = snapshot.Now.Sub(metric.ObservedAt)
 		}
 		observations = append(observations, adminapi.Observation{Name: name, Freshness: string(metric.Freshness),
-			ObservedAt: metric.ObservedAt, AgeSeconds: age.Seconds()})
+			ObservedAt: metric.ObservedAt, AgeSeconds: age.Seconds(), Detail: metric.Detail})
 	}
 	queueCheck := adminapi.Check{OK: queueSLO.OK, Reasons: nonNilStrings(queueSLO.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -93,16 +94,20 @@ type Plan struct {
 	Status     PlanStatus
 	Operations []Operation
 	Next       State
+	// Reason carries a bounded, credential-free diagnostic for non-ready plans.
+	// It is composed only from observation reasons (adapter-authored safe
+	// strings) and static scheduler error text, never from wrapped errors.
+	Reason string
 }
 
 // PlanTick computes a complete plan without performing side effects.
 func PlanTick(in Input) Plan {
 	if !in.Demands.Usable() || !in.Instances.Usable() || !in.Host.Usable() {
-		return finish(Plan{Status: PlanBlockedObservation, Next: in.Prior})
+		return finish(Plan{Status: PlanBlockedObservation, Next: in.Prior, Reason: blockedReason(in)})
 	}
 	mode, err := domain.DeriveHostMode(in.Instances.Value)
 	if err != nil {
-		return finish(Plan{Status: PlanInvalidObservation, Next: in.Prior})
+		return finish(Plan{Status: PlanInvalidObservation, Next: in.Prior, Reason: err.Error()})
 	}
 
 	demands := normalizedDemands(in)
@@ -152,6 +157,33 @@ func PlanTick(in Input) Plan {
 		}
 	}
 	return finish(plan)
+}
+
+// blockedReason names which observations are unusable and their adapter
+// authored reasons. Every input is a closed safe-vocabulary string: the
+// observation name is static, the state is an enum, and the reason is written
+// by adapters from a credential-free set. No wrapped error text can enter here.
+func blockedReason(in Input) string {
+	parts := make([]string, 0, 3)
+	for _, observation := range []struct {
+		name   string
+		state  domain.ObservationState
+		reason string
+	}{
+		{"demands", in.Demands.State, in.Demands.Reason},
+		{"instances", in.Instances.State, in.Instances.Reason},
+		{"host", in.Host.State, in.Host.Reason},
+	} {
+		if observation.state == domain.ObservationFresh {
+			continue
+		}
+		part := observation.name + " " + string(observation.state)
+		if observation.reason != "" {
+			part += ": " + observation.reason
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func planExclusiveAdmission(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
