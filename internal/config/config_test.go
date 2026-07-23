@@ -34,6 +34,9 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.PollInterval != 20*time.Second || cfg.ReservationAge != 5*time.Minute {
 		t.Fatalf("durations = %v, %v", cfg.PollInterval, cfg.ReservationAge)
 	}
+	if cfg.Timeouts.Assigned != 15*time.Minute {
+		t.Fatalf("omitted assignedTimeoutSeconds default = %v, want 15m", cfg.Timeouts.Assigned)
+	}
 	if cfg.Linux.Capacity.CPU != 8 || cfg.Linux.Capacity.MemoryMiB != 16384 || cfg.Linux.MaxInstances != 4 {
 		t.Fatalf("linux capacity = %+v, max=%d", cfg.Linux.Capacity, cfg.Linux.MaxInstances)
 	}
@@ -59,6 +62,37 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	wantGuards := Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
 	if cfg.Guards != wantGuards {
 		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
+	}
+}
+
+func TestDecodeAndEncodePreserveExplicitAssignedTimeout(t *testing.T) {
+	raw := `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "assignedTimeoutSeconds":600,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`
+	cfg, err := Decode(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if cfg.Timeouts.Assigned != 10*time.Minute {
+		t.Fatalf("explicit assignedTimeoutSeconds = %v, want 10m", cfg.Timeouts.Assigned)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode() = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"assignedTimeoutSeconds": 600`) {
+		t.Fatalf("Encode omitted assignedTimeoutSeconds:\n%s", encoded.String())
+	}
+	roundTripped, err := Decode(&encoded)
+	if err != nil || roundTripped.Timeouts.Assigned != 10*time.Minute {
+		t.Fatalf("round-trip assigned timeout = %v, %v", roundTripped.Timeouts.Assigned, err)
 	}
 }
 
@@ -135,21 +169,23 @@ func TestDecodeRejectsMalformedUnknownTrailingAndInvalid(t *testing.T) {
 func TestValidateEveryInvariant(t *testing.T) {
 	valid := Default()
 	tests := map[string]func(*Config){
-		"zero poll":              func(c *Config) { c.PollInterval = 0 },
-		"zero reservation":       func(c *Config) { c.ReservationAge = 0 },
-		"zero tart timeout":      func(c *Config) { c.Timeouts.Tart = 0 },
-		"zero boot timeout":      func(c *Config) { c.Timeouts.Boot = 0 },
-		"missing prefix":         func(c *Config) { c.Linux.VMPrefix = "" },
-		"zero instance count":    func(c *Config) { c.Linux.MaxInstances = 0 },
-		"zero capacity cpu":      func(c *Config) { c.Linux.Capacity.CPU = 0 },
-		"zero capacity memory":   func(c *Config) { c.Linux.Capacity.MemoryMiB = 0 },
-		"profile no id":          func(c *Config) { c.Linux.Profiles[0].ID = "" },
-		"profile no label":       func(c *Config) { c.Linux.Profiles[0].Label = "" },
-		"profile zero cpu":       func(c *Config) { c.Linux.Profiles[0].Resources.CPU = 0; c.Linux.Profiles[0].CPU = 0 },
-		"profile zero memory":    func(c *Config) { c.Linux.Profiles[0].Resources.MemoryMiB = 0; c.Linux.Profiles[0].MemoryMiB = 0 },
-		"profile memory too big": func(c *Config) { c.Linux.Profiles[0].Resources.MemoryMiB = c.Linux.Capacity.MemoryMiB + 1 },
-		"target wrong type":      func(c *Config) { c.Targets[0].Type = "org" },
-		"target zero max":        func(c *Config) { c.Targets[0].MaxActive = 0 },
+		"zero poll":                 func(c *Config) { c.PollInterval = 0 },
+		"zero reservation":          func(c *Config) { c.ReservationAge = 0 },
+		"zero tart timeout":         func(c *Config) { c.Timeouts.Tart = 0 },
+		"zero boot timeout":         func(c *Config) { c.Timeouts.Boot = 0 },
+		"assigned timeout too low":  func(c *Config) { c.Timeouts.Assigned = 59 * time.Second },
+		"assigned timeout too high": func(c *Config) { c.Timeouts.Assigned = time.Hour + time.Second },
+		"missing prefix":            func(c *Config) { c.Linux.VMPrefix = "" },
+		"zero instance count":       func(c *Config) { c.Linux.MaxInstances = 0 },
+		"zero capacity cpu":         func(c *Config) { c.Linux.Capacity.CPU = 0 },
+		"zero capacity memory":      func(c *Config) { c.Linux.Capacity.MemoryMiB = 0 },
+		"profile no id":             func(c *Config) { c.Linux.Profiles[0].ID = "" },
+		"profile no label":          func(c *Config) { c.Linux.Profiles[0].Label = "" },
+		"profile zero cpu":          func(c *Config) { c.Linux.Profiles[0].Resources.CPU = 0; c.Linux.Profiles[0].CPU = 0 },
+		"profile zero memory":       func(c *Config) { c.Linux.Profiles[0].Resources.MemoryMiB = 0; c.Linux.Profiles[0].MemoryMiB = 0 },
+		"profile memory too big":    func(c *Config) { c.Linux.Profiles[0].Resources.MemoryMiB = c.Linux.Capacity.MemoryMiB + 1 },
+		"target wrong type":         func(c *Config) { c.Targets[0].Type = "org" },
+		"target zero max":           func(c *Config) { c.Targets[0].MaxActive = 0 },
 		"mac nested virtualization (Linux-only feature)": func(c *Config) { c.MacOS.NestedVirtualization = true },
 		"mac no base":     func(c *Config) { c.MacOS.BaseVM = "" },
 		"mac no prefix":   func(c *Config) { c.MacOS.VMPrefix = "" },
@@ -378,6 +414,7 @@ func TestEncodeRejectsSubsecondDurations(t *testing.T) {
 		"github":      func(c *Config) { c.Timeouts.GitHub += time.Nanosecond },
 		"tart":        func(c *Config) { c.Timeouts.Tart += time.Nanosecond },
 		"boot":        func(c *Config) { c.Timeouts.Boot += time.Nanosecond },
+		"assigned":    func(c *Config) { c.Timeouts.Assigned += time.Nanosecond },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

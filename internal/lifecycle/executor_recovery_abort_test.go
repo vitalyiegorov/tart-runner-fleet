@@ -52,6 +52,11 @@ func TestRecoveryDrainAbortsWhenPremiseIsDisproven(t *testing.T) {
 			vm:        fakeVM{running: true},
 			control:   fakeDrainControl{safe: true, registered: true},
 			wantCalls: []string{"registered:trf-small-1"}},
+		{name: "stalled assignment whose job has since started",
+			phase:     operations.DrainPhaseStalledAssignment,
+			vm:        fakeVM{running: true},
+			control:   fakeDrainControl{safe: true, registered: true, jobStarted: true},
+			wantCalls: []string{"started:trf-small-1"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := []string{}
@@ -123,6 +128,34 @@ func TestInactiveRecoveryDrainProceedsWhenPremiseHolds(t *testing.T) {
 	}
 }
 
+// A stalled-assignment recovery whose premise holds — no job ever started on
+// the runner — reclaims the zombie VM: it deregisters the idle assigned runner
+// (GitHub re-queues the job elsewhere), then stops and deletes the VM. Job
+// inactivity is derived from runner absence, so reclaim never blocks on a
+// JobCompleted event that will never arrive for a job that never started.
+func TestStalledAssignmentRecoveryReclaimsZombieWhenNoJobStarted(t *testing.T) {
+	calls := []string{}
+	now := time.Unix(1000, 0).UTC()
+	confirmed := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
+	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStalledAssignment)}
+	control := &fakeDrainControl{calls: &calls, jobStarted: false, registered: false,
+		confirmations: []operations.DeletionConfirmation{confirmed, confirmed}}
+	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, control)
+
+	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.instance.State != operations.StateDeleted {
+		t.Fatalf("stalled zombie must be reclaimed, got %s", state.instance.State)
+	}
+	want := []string{"started:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls=%#v", calls)
+	}
+}
+
 // Premise re-verification must fail closed: if the probe errors — or the
 // port is missing entirely — the executor may neither kill nor abort on a
 // guess, and the demand-state guard refusal keeps retrying as before.
@@ -142,6 +175,8 @@ func TestRecoveryDrainRetriesWhenPremiseCannotBeVerified(t *testing.T) {
 			control: fakeDrainControl{safe: true, registeredErr: context.DeadlineExceeded}},
 		{name: "inactive premise holds but demand guard refuses", phase: operations.DrainPhaseInactiveRecovery,
 			control: fakeDrainControl{safe: false, registered: false}},
+		{name: "stalled assignment job-started probe error", phase: operations.DrainPhaseStalledAssignment,
+			control: fakeDrainControl{jobStartedErr: context.DeadlineExceeded}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := []string{}

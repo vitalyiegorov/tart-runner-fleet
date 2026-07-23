@@ -101,6 +101,10 @@ type DrainControl interface {
 	// RunnerRegistered reports whether the instance's runner is currently
 	// registered on GitHub, without folding in demand state.
 	RunnerRegistered(context.Context, operations.Instance) (bool, error)
+	// JobStarted reports whether fresh demand state shows a workflow job has
+	// begun executing on this runner. A stalled-assignment recovery drain aborts
+	// the moment it becomes true: the assignment materialized into real work.
+	JobStarted(context.Context, operations.Instance) (bool, error)
 }
 
 // ProvisionExecutor is a restartable state machine. One durable outbox
@@ -371,6 +375,21 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
 				if guardErr != nil || !safe {
 					return e.fail(ctx, instance, StageGuard)
+				}
+			case operations.DrainPhaseStalledAssignment:
+				// The assignment deadline planned this kill from a single
+				// observation that no job had started. Re-verify against fresh
+				// demand state before deregistering the (idle) runner: if a job has
+				// since started, the assignment materialized after all, so abort to
+				// Running and let normal completion drain it. Deregistering an
+				// assigned-but-not-started runner is safe — GitHub re-queues the job
+				// to another runner, exactly the manual remedy the operator applied.
+				started, startedErr := e.Control.JobStarted(ctx, instance)
+				if startedErr != nil {
+					return e.fail(ctx, instance, StageGuard)
+				}
+				if started {
+					return e.abort(ctx, instance)
 				}
 			default:
 				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)

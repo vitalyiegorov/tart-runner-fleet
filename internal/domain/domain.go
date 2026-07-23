@@ -201,6 +201,12 @@ type Instance struct {
 	State         InstanceState
 	Power         InstancePower
 	RecoveryReady bool
+	// AssignedSince is when the instance most recently entered the Assigned
+	// state. It bounds the assignment deadline: an instance still Assigned long
+	// after this never had a job start (only a JobStarted event advances
+	// Assigned -> Running). Zero means unknown, which the scheduler treats
+	// fail-closed as "never past the deadline".
+	AssignedSince time.Time
 	Attempts      int
 	RetryAt       time.Time
 }

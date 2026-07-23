@@ -144,8 +144,11 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 			validState := instance.State == operations.StateOnlineIdle
 			if operation.Recovery {
 				drainPhase = operations.DrainPhaseStoppedRecovery
-				if operation.ConfirmedInactive {
+				switch {
+				case operation.ConfirmedInactive:
 					drainPhase = operations.DrainPhaseInactiveRecovery
+				case operation.StalledAssignment:
+					drainPhase = operations.DrainPhaseStalledAssignment
 				}
 				validState = instance.State == operations.StateAssigned || instance.State == operations.StateRunning
 			}

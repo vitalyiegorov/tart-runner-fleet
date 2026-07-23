@@ -78,8 +78,16 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 				recoveryReady = confirmation.Safe(now, p.recoveryConfirmationMaxAge())
 			}
 		}
+		// An Assigned instance advances to Running only when a JobStarted event
+		// arrives, so its dwell time in Assigned is the age the scheduler measures
+		// against the assignment deadline. UpdatedAt marks entry into the state.
+		assignedSince := time.Time{}
+		if instance.State == operations.StateAssigned {
+			assignedSince = instance.UpdatedAt
+		}
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Platform: instance.Platform, Profile: instance.Profile,
-			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady})
+			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady,
+			AssignedSince: assignedSince})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {
