@@ -19,10 +19,20 @@ type tickStore struct {
 	instances                       map[string]operations.Instance
 	plans                           []operations.Plan
 	stateErr, instanceErr, applyErr error
+	reseedErr                       error
+	reseeded                        int
 }
 
 func (s *tickStore) SchedulerState(context.Context) (operations.SchedulerState, error) {
 	return s.state, s.stateErr
+}
+func (s *tickStore) ReseedSchedulerState(context.Context) error {
+	s.reseeded++
+	if s.reseedErr != nil {
+		return s.reseedErr
+	}
+	s.stateErr = nil
+	return nil
 }
 func (s *tickStore) Instance(_ context.Context, id string) (operations.Instance, error) {
 	if s.instanceErr != nil {
@@ -85,6 +95,31 @@ func TestEngineTickPlansAndCommitsFreshSnapshot(t *testing.T) {
 	}
 	if result.Queues["small"].Count != 1 || result.Queues["small"].Oldest != now.Add(-time.Minute) {
 		t.Fatalf("Tick() queues = %#v", result.Queues)
+	}
+}
+
+func TestEngineTickReseedsMissingSchedulerStateAndRecovers(t *testing.T) {
+	now := time.Date(2026, 7, 22, 20, 0, 0, 0, time.UTC)
+	store := &tickStore{stateErr: operations.ErrSchedulerStateMissing}
+	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
+	}, Config: tickConfig(), ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
+	result, err := engine.Tick(context.Background())
+	if err != nil || store.reseeded != 1 {
+		t.Fatalf("Tick() = %#v, %v, reseeded=%d", result, err, store.reseeded)
+	}
+}
+
+func TestEngineTickPropagatesReseedFailure(t *testing.T) {
+	now := time.Now().UTC()
+	want := errors.New("reseed down")
+	store := &tickStore{stateErr: operations.ErrSchedulerStateMissing, reseedErr: want}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(domain.Host{Available: tickConfig().LinuxCapacity}, now),
+	}, Config: tickConfig(), ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
+	if _, err := engine.Tick(context.Background()); !errors.Is(err, want) {
+		t.Fatalf("Tick() reseed failure = %v", err)
 	}
 }
 

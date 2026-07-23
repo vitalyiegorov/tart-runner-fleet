@@ -342,6 +342,55 @@ func TestApplyPlanIsAtomicIdempotentAndConcurrentSafe(t *testing.T) {
 	}
 }
 
+func TestSchedulerStateSelfHealsAfterOperatorDeletion(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fleet.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Operator clears a stuck reservation with a raw DELETE (incident 2026-07-22).
+	if _, err := store.db.Exec(`DELETE FROM scheduler_state`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SchedulerState(ctx); !errors.Is(err, operations.ErrSchedulerStateMissing) {
+		t.Fatalf("missing singleton = %v, want ErrSchedulerStateMissing", err)
+	}
+	// Runtime one-shot repair restores the cold-start row.
+	if err := store.ReseedSchedulerState(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := store.SchedulerState(ctx); err != nil || state.Version != 0 {
+		t.Fatalf("reseeded state = %#v, %v", state, err)
+	}
+	// Reseed is idempotent: INSERT OR IGNORE must never disturb a live row.
+	plan := operations.Plan{ID: "p", CreatedAt: time.Unix(1, 0).UTC(), Scheduler: operations.SchedulerState{Version: 1, ObservationCursor: "cursor"}}
+	if _, err := store.ApplyPlan(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReseedSchedulerState(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := store.SchedulerState(ctx); err != nil || state.Version != 1 || state.ObservationCursor != "cursor" {
+		t.Fatalf("reseed clobbered a live row: %#v, %v", state, err)
+	}
+	// Reopening an existing DB whose row was deleted self-heals at migrate time.
+	if _, err := store.db.Exec(`DELETE FROM scheduler_state`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if state, err := reopened.SchedulerState(ctx); err != nil || state.Version != 0 {
+		t.Fatalf("open did not self-heal the singleton: %#v, %v", state, err)
+	}
+}
+
 func TestOperationDependenciesGateClaimsAndPropagateDeadLetters(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -878,6 +927,7 @@ func TestScannerErrorsAndClosedDatabaseErrors(t *testing.T) {
 	checks := []func() error{
 		func() error { return store.Migrate(ctx) },
 		func() error { _, err := store.SchedulerState(ctx); return err },
+		func() error { return store.ReseedSchedulerState(ctx) },
 		func() error { _, err := store.ApplyPlan(ctx, plan); return err },
 		func() error {
 			return store.CreateInstance(ctx, operations.Instance{ID: "vm", State: operations.StatePlanned, Ownership: ownership})
@@ -914,7 +964,7 @@ func TestMigrationFaultInjectionRollsBackEveryStage(t *testing.T) {
 	points := []string{
 		"migrate.pragma", "migrate.begin", "migrate.table", "migrate.version", "migrate.v1", "migrate.v1.record",
 		"migrate.v2", "migrate.v2.record", "migrate.v3", "migrate.v3.record", "migrate.v4", "migrate.v4.record",
-		"migrate.v5", "migrate.v5.record", "migrate.v6", "migrate.v6.record", "migrate.commit", "migrate.quick",
+		"migrate.v5", "migrate.v5.record", "migrate.v6", "migrate.v6.record", "migrate.reseed", "migrate.commit", "migrate.quick",
 	}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {

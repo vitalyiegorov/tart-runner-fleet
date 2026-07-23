@@ -16,6 +16,7 @@ import (
 type EngineStore interface {
 	DemandStore
 	reconcile.PlanStore
+	ReseedSchedulerState(context.Context) error
 }
 
 type Inventory interface {
@@ -71,6 +72,18 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		return TickResult{}, operations.ErrInvalid
 	}
 	priorRecord, err := e.Store.SchedulerState(ctx)
+	if errors.Is(err, operations.ErrSchedulerStateMissing) {
+		// Incident 2026-07-22: an operator DELETEd the seeded scheduler_state
+		// singleton, and every tick then failed forever on the missing row.
+		// Reseed the cold-start row once and retry the read so this tick recovers
+		// instead of wedging the fleet. Version 0 with empty reservation/DRR is
+		// safe optimization-state loss the scheduler rebuilds from durable demand;
+		// authoritative instance and operation state is never resynthesized here.
+		if repairErr := e.Store.ReseedSchedulerState(ctx); repairErr != nil {
+			return TickResult{}, repairErr
+		}
+		priorRecord, err = e.Store.SchedulerState(ctx)
+	}
 	if err != nil {
 		return TickResult{}, err
 	}
