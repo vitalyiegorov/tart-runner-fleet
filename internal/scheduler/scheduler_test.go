@@ -856,30 +856,67 @@ func TestIdleHostInfeasibleMacHeadBackfillsLinuxInsteadOfStarving(t *testing.T) 
 	// oldest demand was a macOS builder that the host could not admit for
 	// resources (a 12GiB VM while free memory was lower). PlanTick took the bare
 	// planMacOS path, produced an empty plan, and starved every feasible Linux
-	// job behind the one unschedulable macOS head. The coexistence path already
-	// bounded-drains Linux when Linux is live; the idle host must do the same.
+	// job behind the one unschedulable macOS head.
+	//
+	// A resource-infeasible head cannot fit even an empty host, so it is NOT
+	// waiting on drainable work: the bounded one-shot handoff latch is wrong here
+	// (it would drain the queue by a single job and re-wedge). PlanTick must admit
+	// every feasible Linux job in the residual envelope, EVERY tick, without ever
+	// latching MacHandoff.BackfillAdmitted, mirroring the Linux backfill design.
 	macJob := demand("a/repo", 1, 30*time.Minute, "builder")
 	agedSmall := demand("b/repo", 2, 20*time.Minute, "small")
 	secondSmall := demand("c/repo", 3, 15*time.Minute, "small")
 
 	in := input([]domain.Demand{macJob, agedSmall, secondSmall}, nil, State{})
-	// The host can fit a small Linux VM but not the 12GiB builder.
+	// The host can fit small Linux VMs but not the 12GiB builder.
 	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 9_216, Slots: 4}}, testNow)
 
 	plan := PlanTick(in)
 	if plan.Status != PlanReady {
 		t.Fatalf("expected ready plan, got %s: %#v", plan.Status, plan)
 	}
-	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{agedSmall.Key}) {
-		t.Fatalf("idle-host infeasible mac head starved Linux: spawns = %#v, want %#v", got, agedSmall.Key)
+	// Both feasible smalls admitted this tick — not a single bounded wave.
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{agedSmall.Key, secondSmall.Key}) {
+		t.Fatalf("idle-host infeasible mac head did not fully drain feasible Linux: spawns = %#v", got)
 	}
 	for _, operation := range plan.Operations {
 		if operation.Kind == OperationSpawn && operation.Profile == "builder" {
 			t.Fatalf("infeasible builder was spawned: %#v", plan)
 		}
 	}
-	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.Demand != macJob.Key || !plan.Next.MacHandoff.BackfillAdmitted {
-		t.Fatalf("mac head not reserved while backfilling: %#v", plan.Next.MacHandoff)
+	// The head is retained for continuity but the backfill latch must stay clear:
+	// the next tick must be free to admit more feasible work.
+	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.Demand != macJob.Key || plan.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("infeasible mac head must not latch backfill: %#v", plan.Next.MacHandoff)
+	}
+
+	// Next tick a fresh feasible small arrives while the same infeasible head
+	// persists; it must still be admitted (the queue never latches shut).
+	thirdSmall := demand("b/repo", 4, 16*time.Minute, "small")
+	next := input([]domain.Demand{macJob, thirdSmall}, nil, plan.Next)
+	next.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 9_216, Slots: 4}}, testNow)
+	if got := spawnedKeys(PlanTick(next)); !reflect.DeepEqual(got, []domain.DemandKey{thirdSmall.Key}) {
+		t.Fatalf("infeasible mac head re-wedged the queue on a later tick: spawns = %#v", got)
+	}
+}
+
+func TestIdleHostInfeasibleMacHeadAdmitsFeasibleMacBacklog(t *testing.T) {
+	// A feasible lower-priority macOS profile behind the infeasible head must also
+	// drain: with no feasible Linux to admit this tick, the next feasible macOS
+	// profile is spawned in the residual envelope.
+	builderHead := demand("a/repo", 1, 30*time.Minute, "builder")
+	maestro := demand("b/repo", 2, 20*time.Minute, "maestro")
+
+	in := input([]domain.Demand{builderHead, maestro}, nil, State{})
+	// Fits the 7GiB maestro but not the 12GiB builder.
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 9_216, Slots: 4}}, testNow)
+
+	plan := PlanTick(in)
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("feasible mac backlog starved behind infeasible mac head: spawns = %#v", got)
+	}
+	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("infeasible mac head must not latch: %#v", plan.Next.MacHandoff)
 	}
 }
 

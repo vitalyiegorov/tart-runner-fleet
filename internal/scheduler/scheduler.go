@@ -136,14 +136,22 @@ func PlanTick(in Input) Plan {
 		} else {
 			plan.Next.MacHandoff = nil
 			attempted := planMacOS(in, plan, macos)
-			if containsSpawn(attempted.Operations) || len(linux) == 0 {
+			switch {
+			case containsSpawn(attempted.Operations):
 				plan = attempted
-			} else {
-				// The oldest demand is a macOS job the idle host cannot admit for
-				// resources (e.g. a builder VM without enough headroom). Reserve it
-				// and bounded-drain feasible Linux rather than starving the whole
-				// queue behind it — the same backfill the coexistence path performs
-				// when Linux is already live.
+			case mode == domain.HostIdle:
+				// On a fully idle host a macOS head that will not spawn is resource-
+				// infeasible: nothing is live to drain and make room for it, so it is
+				// NOT waiting on drainable work. The bounded one-shot handoff latch is
+				// wrong here — it drains the queue by a single job and re-wedges.
+				// Admit feasible work behind it in the residual envelope every tick.
+				plan = planBehindInfeasibleMacHead(in, plan, linux, macos)
+			case len(linux) == 0:
+				plan = attempted
+			default:
+				// A busy macOS instance (a live foreign cohort) blocks the head while
+				// Linux waits. Bounded-drain one aged Linux job so the drain is not
+				// starved by an unbounded backfill stream.
 				plan = planMacHandoff(in, plan, linux, macos)
 			}
 		}
@@ -760,6 +768,42 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 		}
 	}
 	return plan
+}
+
+// planBehindInfeasibleMacHead admits feasible work behind a macOS head an idle
+// host cannot fit. Unlike planMacHandoff the head is not waiting for live work to
+// drain for a profile switch, so the bounded one-shot latch is wrong: it would
+// drain the queue by a single job and re-wedge. Instead this mirrors planLinux's
+// reservation+backfill and admits feasible work in the residual envelope EVERY
+// tick: feasible Linux through the exact allocator (respecting Slots and
+// RepoCaps), and — only when no Linux is admitted this tick, so the shared
+// envelope is never double-counted — the next feasible macOS profile behind the
+// head. The head keeps its FIFO priority and spawns the moment the host can fit
+// it. MacHandoff is retained for state continuity but the BackfillAdmitted latch
+// is never set here.
+func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
+	handoff := macHandoffFor(in.Prior.MacHandoff, priorityOrder(in, macDemands)[0], in.Now)
+	before := len(plan.Operations)
+	plan = planLinux(in, plan, linuxDemands)
+	plan.Next.MacHandoff = &handoff
+	if containsSpawn(plan.Operations[before:]) {
+		return plan
+	}
+	remaining := demandsExcludingProfile(macDemands, chosenMacProfile(in, macDemands))
+	if len(remaining) > 0 {
+		plan = planMacOS(in, plan, remaining)
+	}
+	return plan
+}
+
+func demandsExcludingProfile(demands []domain.Demand, profile domain.ProfileID) []domain.Demand {
+	var result []domain.Demand
+	for _, demand := range demands {
+		if demand.Profile != profile {
+			result = append(result, demand)
+		}
+	}
+	return result
 }
 
 func planMacWithCoexistence(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
