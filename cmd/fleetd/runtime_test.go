@@ -1073,32 +1073,41 @@ func TestRunRejectsUnselectedCanaryAndHeldAuthority(t *testing.T) {
 		t.Fatal("unresolved canary selector accepted")
 	}
 
-	database := filepath.Join(t.TempDir(), "held.db")
-	store, err := d.openStore(context.Background(), database)
-	if err != nil {
-		t.Fatal(err)
+	// An actively-renewed incumbent is never stolen: AcquireLease keeps
+	// reporting "lease held" for the whole acquisition window, so the successor
+	// gives up with the original error rather than taking over. A fake clock
+	// advances past the window instantly (no real sleeps, no real waiting).
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	var clock atomic.Int64
+	clock.Store(base.UnixNano())
+	d.now = func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	d.after = func(time.Duration) <-chan time.Time {
+		clock.Add(int64(authorityLeaseAcquireWindow)) // jump the whole window per retry
+		ch := make(chan time.Time, 1)
+		ch <- time.Time{}
+		return ch
 	}
-	now := time.Now().UTC()
-	lease, err := store.AcquireLease(context.Background(), authorityLeaseName, "other-controller", now, authorityLeaseTTL)
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
+	baseOpen := d.openStore
+	d.openStore = func(ctx context.Context, path string) (runtimeStore, error) {
+		store, err := baseOpen(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		return heldLeaseStore{runtimeStore: store}, nil
 	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	err = runWithDependencies(context.Background(), options{Mode: reconcile.Authority, ConfigPath: writeConfig(t, true), DatabasePath: database}, d)
+	err := runWithDependencies(context.Background(), options{Mode: reconcile.Authority,
+		ConfigPath: writeConfig(t, true), DatabasePath: filepath.Join(t.TempDir(), "held.db")}, d)
 	if !errors.Is(err, operations.ErrLeaseHeld) {
 		t.Fatalf("held authority err=%v", err)
 	}
-	cleanup, err := d.openStore(context.Background(), database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup.Close()
-	if err := cleanup.ReleaseLease(context.Background(), lease); err != nil {
-		t.Fatal(err)
-	}
+}
+
+// heldLeaseStore simulates a live incumbent controller: every acquisition
+// attempt reports the lease as held, so a successor must never take it over.
+type heldLeaseStore struct{ runtimeStore }
+
+func (heldLeaseStore) AcquireLease(context.Context, string, string, time.Time, time.Duration) (operations.Lease, error) {
+	return operations.Lease{}, operations.ErrLeaseHeld
 }
 
 func TestRunDaemonAndInvalidBinding(t *testing.T) {
@@ -1621,6 +1630,130 @@ func TestAuthorityLeaseDefaultsRecoveryFailureRenewalAndLoss(t *testing.T) {
 		t.Fatal("lease loss was not reported")
 	}
 	guard.Close()
+}
+
+// stubLeaseStore drives acquireAuthorityLease directly with a fixed AcquireLease
+// outcome; the embedded nil Store is never touched because only AcquireLease is
+// exercised by the acquisition loop.
+type stubLeaseStore struct {
+	operations.Store
+	err error
+}
+
+func (s stubLeaseStore) AcquireLease(context.Context, string, string, time.Time, time.Duration) (operations.Lease, error) {
+	return operations.Lease{}, s.err
+}
+
+// TestAcquireAuthorityLeaseWaitsOutStalePredecessor is the headline regression:
+// a predecessor left a durable lease row that expires mid-window (it died
+// without releasing). The old single-shot acquisition returned "lease held" and
+// the daemon exited silently; the retry now waits out the stale lease and
+// acquires it the moment it expires — never before (that would be theft).
+func TestAcquireAuthorityLeaseWaitsOutStalePredecessor(t *testing.T) {
+	d := testDependencies(t)
+	store, err := d.openStore(context.Background(), filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	if _, err := store.AcquireLease(context.Background(), authorityLeaseName, "predecessor", base, authorityLeaseTTL); err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(base.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()).UTC() }
+	attempts := 0
+	after := func(time.Duration) <-chan time.Time {
+		attempts++
+		clock.Store(base.Add(time.Duration(attempts) * authorityLeaseAcquireRetry).UnixNano())
+		ch := make(chan time.Time, 1)
+		ch <- time.Time{}
+		return ch
+	}
+	lease, err := acquireAuthorityLease(context.Background(), store, "successor", now, after)
+	if err != nil {
+		t.Fatalf("successor failed to wait out stale predecessor lease: %v", err)
+	}
+	if attempts == 0 {
+		t.Fatal("successor acquired without retrying a held lease")
+	}
+	acquiredAt := lease.ExpiresAt.Add(-authorityLeaseTTL)
+	if acquiredAt.Before(base.Add(authorityLeaseTTL)) {
+		t.Fatalf("acquired at %s before predecessor expiry %s: stole a live lease", acquiredAt, base.Add(authorityLeaseTTL))
+	}
+}
+
+// TestAcquireAuthorityLeasePropagatesNonHeldError proves the retry only swallows
+// ErrLeaseHeld; any other store error surfaces immediately without waiting.
+func TestAcquireAuthorityLeasePropagatesNonHeldError(t *testing.T) {
+	boom := errors.New("disk gone")
+	now := func() time.Time { return time.Unix(0, 0).UTC() }
+	_, err := acquireAuthorityLease(context.Background(), stubLeaseStore{err: boom}, "owner", now,
+		func(time.Duration) <-chan time.Time { return make(chan time.Time) })
+	if !errors.Is(err, boom) {
+		t.Fatalf("non-held error not propagated: %v", err)
+	}
+}
+
+// TestAcquireAuthorityLeaseHonorsContextCancellation proves a shutdown during
+// the acquisition wait exits promptly with the context error, never blocking.
+func TestAcquireAuthorityLeaseHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	now := func() time.Time { return time.Unix(0, 0).UTC() } // never advances: always inside the window
+	_, err := acquireAuthorityLease(ctx, stubLeaseStore{err: operations.ErrLeaseHeld}, "owner", now,
+		func(time.Duration) <-chan time.Time {
+			cancel()
+			return make(chan time.Time)
+		})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation not honored: %v", err)
+	}
+}
+
+// TestRunAuthorityReleasesLeaseOnShutdown proves the graceful-shutdown release:
+// a SIGTERM-equivalent context cancel makes the daemon drop its lease, so an
+// immediate successor acquires without waiting out the TTL.
+func TestRunAuthorityReleasesLeaseOnShutdown(t *testing.T) {
+	d := testDependencies(t)
+	ready := make(chan struct{})
+	var once sync.Once
+	d.inventory = func(_ runtimeStore, _ config.Config, _ app.RecoveryObserver) app.Inventory {
+		return notifyingInventory{ready: ready, once: &once}
+	}
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		return &fakeSource{}, nil
+	}
+	database := filepath.Join(t.TempDir(), "fleet.db")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{Mode: reconcile.Authority, ConfigPath: writeConfig(t, true),
+			DatabasePath: database, HealthAddress: "127.0.0.1:0"}, d)
+	}()
+	select {
+	case <-ready:
+		cancel()
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("authority controller did not become ready")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful shutdown err=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("authority controller did not stop after cancellation")
+	}
+	store, err := d.openStore(context.Background(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.AcquireLease(context.Background(), authorityLeaseName, "successor", time.Now().UTC(), authorityLeaseTTL); err != nil {
+		t.Fatalf("successor could not acquire immediately after graceful shutdown: %v", err)
+	}
 }
 
 type renewFailRuntimeStore struct{ runtimeStore }
