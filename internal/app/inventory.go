@@ -78,7 +78,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 				recoveryReady = confirmation.Safe(now, p.recoveryConfirmationMaxAge())
 			}
 		}
-		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Platform: instance.Platform, Profile: instance.Profile,
+		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Demand: instance.Demand, Platform: instance.Platform, Profile: instance.Profile,
 			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady})
 	}
 	for name := range byName {
