@@ -743,16 +743,16 @@ func TestSimulationPriorityInversionExactSelect(t *testing.T) {
 			hpSpawned = true
 		}
 	}
-	if !hpSpawned && containsSpawn(plan.Operations) {
-		t.Skipf("KNOWN GAP (priority-inversion, seed 5): exactSelect maximized selection COUNT and admitted lower-priority "+
-			"small jobs (%d spawns) while deferring the higher-priority control-plane large job %s that also fits. "+
-			"The inversion is bounded (the large job wins once it ages past FairnessAge) but is a latent priority inversion. "+
-			"Follow-up: make exactSelect prefer higher-priority demands over raw count within a feasible tick.",
+	// The control-plane head must be admitted in the first admitting tick rather
+	// than deferred behind a larger count of lower-priority standard work.
+	// exactSelect must not invert priority to maximize selection COUNT.
+	if containsSpawn(plan.Operations) && !hpSpawned {
+		t.Fatalf("priority inversion: exactSelect admitted lower-priority small jobs (%d spawns) while deferring the "+
+			"higher-priority control-plane large job %s that also fits; exact admission must honor priority over raw count",
 			len(spawnedKeys(plan)), hp.Key.String())
 	}
-	// If the head was admitted, the design honored priority: assert it explicitly.
 	if !hpSpawned {
-		t.Fatalf("expected either the control-plane head admitted or the KNOWN GAP skip; got plan %#v", plan.Operations)
+		t.Fatalf("expected the control-plane head admitted; got plan %#v", plan.Operations)
 	}
 }
 

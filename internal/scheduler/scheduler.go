@@ -665,10 +665,22 @@ func eventRank(event domain.Event) int {
 // configured slot vector (four in production). That makes feasibility exact
 // without an unbounded 2^N search.
 func exactSelect(candidates []domain.Demand, free domain.Resources, baseCounts map[string]int, config Config) []domain.Demand {
+	// Priority band per candidate mirrors youngPriorityOrder's lanes: lower band
+	// is higher priority. Count maximization is a throughput optimization that
+	// must apply only WITHIN a band; it must never admit a larger count of
+	// lower-priority work while a feasible higher-priority demand is deferred.
+	bands := make([]int, len(candidates))
+	numBands := 0
+	for i := range candidates {
+		bands[i] = schedulingBand(candidates[i], config)
+		if bands[i]+1 > numBands {
+			numBands = bands[i] + 1
+		}
+	}
 	var best []int
 	var search func(index int, remaining domain.Resources, counts map[string]int, chosen []int)
 	search = func(index int, remaining domain.Resources, counts map[string]int, chosen []int) {
-		if betterSelection(chosen, best) {
+		if betterAdmission(chosen, best, bands, numBands) {
 			best = append([]int(nil), chosen...)
 		}
 		if index >= len(candidates) || len(chosen) >= free.Slots {
@@ -696,6 +708,47 @@ func exactSelect(candidates []domain.Demand, free domain.Resources, baseCounts m
 		selected = append(selected, candidates[index])
 	}
 	return selected
+}
+
+// schedulingBand assigns a demand its priority band for exact admission. It
+// mirrors youngPriorityOrder: control-plane work occupies the highest-priority
+// band, standard work the next. Aging remains the absolute starvation guard and
+// is handled by the reservation head outside exactSelect, so it is not a band
+// here.
+func schedulingBand(demand domain.Demand, config Config) int {
+	if config.RepoSchedulingClasses[demand.Key.Repo] == domain.SchedulingControlPlane {
+		return 0
+	}
+	return 1
+}
+
+// betterAdmission ranks two feasible index selections while respecting priority
+// bands. It first compares their per-band coverage vectors lexicographically
+// (band 0 highest priority): more admitted demands in a higher-priority band
+// beats any count of lower-priority bands, so exact admission never inverts
+// priority to maximize raw count. When the coverage vectors are identical —
+// always the case when every candidate shares one band — total count is equal,
+// so it defers to betterSelection's count/index-lexicographic tie-break,
+// preserving the original throughput behavior and determinism.
+func betterAdmission(candidate, incumbent, bands []int, numBands int) bool {
+	candidateCover := bandCoverage(candidate, bands, numBands)
+	incumbentCover := bandCoverage(incumbent, bands, numBands)
+	for b := 0; b < numBands; b++ {
+		if candidateCover[b] != incumbentCover[b] {
+			return candidateCover[b] > incumbentCover[b]
+		}
+	}
+	return betterSelection(candidate, incumbent)
+}
+
+// bandCoverage counts, per priority band, how many chosen candidates fall in
+// that band. bands maps a candidate index to its band.
+func bandCoverage(chosen, bands []int, numBands int) []int {
+	coverage := make([]int, numBands)
+	for _, index := range chosen {
+		coverage[bands[index]]++
+	}
+	return coverage
 }
 
 func betterSelection(candidate, incumbent []int) bool {
