@@ -107,6 +107,22 @@ func (r ControlRouter) RunnerRegistered(ctx context.Context, instance operations
 	return binding.Source.Registered(ctx, instance.ID)
 }
 
+// JobStarted derives from the durable demand record whether a workflow job has
+// begun executing on this runner. Only a JobStarted (or later) status implies
+// live work; an assignment that never progressed past JobAssigned is a stalled
+// zombie safe to reclaim.
+func (r ControlRouter) JobStarted(ctx context.Context, instance operations.Instance) (bool, error) {
+	binding, err := r.binding(instance)
+	if err != nil {
+		return false, err
+	}
+	record, err := r.demand(ctx, binding, instance)
+	if err != nil {
+		return false, err
+	}
+	return record.Status == operations.DemandJobStarted || record.Status == operations.DemandJobCompleted, nil
+}
+
 func (r ControlRouter) Deregister(ctx context.Context, instance operations.Instance) error {
 	binding, err := r.binding(instance)
 	if err != nil {
@@ -124,7 +140,10 @@ func (r ControlRouter) ConfirmDeletion(ctx context.Context, name string) (operat
 	if err != nil {
 		return operations.DeletionConfirmation{}, err
 	}
-	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery {
+	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery || instance.DrainPhase == operations.DrainPhaseStalledAssignment {
+		// Once the runner is deregistered the stalled assignment is gone; there is
+		// no JobCompleted event to wait for because no job ever started. Derive
+		// job inactivity from runner absence, exactly as stopped recovery does.
 		return operations.DeletionConfirmation{Fresh: true, RunnerInactive: !registered,
 			JobsInactive: !registered, ObservedAt: r.now()}, nil
 	}

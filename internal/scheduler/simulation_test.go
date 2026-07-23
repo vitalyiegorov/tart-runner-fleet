@@ -55,6 +55,11 @@ type simWorld struct {
 
 	// jobTicksLeft[id] counts remaining Running ticks for instance id.
 	jobTicksLeft map[string]int
+	// stuck[id] marks an instance whose assigned job never starts — a zombie
+	// runner. Such an instance is held in Assigned (never advanced to Running)
+	// so its AssignedSince ages past the assignment deadline, exactly the
+	// 84-minute incident this models.
+	stuck map[string]bool
 	// jobID hands out unique, deterministic demand identifiers.
 	jobID int64
 
@@ -74,6 +79,7 @@ func newSimWorld(t *testing.T, cfg Config, host domain.Host, seed int64) *simWor
 		host:                 host,
 		rng:                  rand.New(rand.NewSource(seed)),
 		jobTicksLeft:         map[string]int{},
+		stuck:                map[string]bool{},
 		spawnedAt:            map[domain.DemandKey]int{},
 		feasiblePendingTicks: map[domain.DemandKey]int{},
 		everFeasible:         map[domain.DemandKey]bool{},
@@ -228,7 +234,13 @@ func (w *simWorld) advanceInstance(inst domain.Instance, drained bool) (domain.I
 		inst.State = w.mustTransition(inst.State, domain.InstanceRegistering)
 	case domain.InstanceRegistering:
 		inst.State = w.mustTransition(inst.State, domain.InstanceAssigned)
+		inst.AssignedSince = w.now
 	case domain.InstanceAssigned:
+		if w.stuck[inst.ID] {
+			// A zombie runner: assigned but the job never starts. It stays Assigned
+			// (AssignedSince fixed) until the assignment deadline opens recovery.
+			return inst, true
+		}
 		inst.State = w.mustTransition(inst.State, domain.InstanceRunning)
 		w.jobTicksLeft[inst.ID] = w.rng.Intn(simMaxJobTicks) + 1
 	case domain.InstanceRunning:
@@ -327,9 +339,15 @@ func (w *simWorld) assertDrainSafety(plan Plan) {
 			busy := inst.State == domain.InstanceAssigned || inst.State == domain.InstanceRunning
 			confirmedInactive := inst.Power == domain.InstancePowerStopped ||
 				(inst.Power == domain.InstancePowerRunning && inst.RecoveryReady)
-			if !busy || !confirmedInactive {
-				w.t.Fatalf("recovery drain of unsafe instance %q state=%s power=%s recoveryReady=%v",
-					op.Instance, inst.State, inst.Power, inst.RecoveryReady)
+			// A stalled assignment is provably not running a job: only a JobStarted
+			// event advances Assigned -> Running, so an instance still Assigned past
+			// the deadline never began work and is safe to reclaim.
+			stalled := inst.State == domain.InstanceAssigned && inst.Power == domain.InstancePowerRunning &&
+				!inst.RecoveryReady && w.config.AssignedTimeout > 0 && !inst.AssignedSince.IsZero() &&
+				w.now.Sub(inst.AssignedSince) >= w.config.AssignedTimeout
+			if !busy || !(confirmedInactive || stalled) {
+				w.t.Fatalf("recovery drain of unsafe instance %q state=%s power=%s recoveryReady=%v assignedSince=%s",
+					op.Instance, inst.State, inst.Power, inst.RecoveryReady, inst.AssignedSince)
 			}
 			continue
 		}
@@ -764,4 +782,52 @@ func TestSimulationShrinkingAndGrowingHost(t *testing.T) {
 		}
 	}
 	w.run(simOptions{ticks: ticks, checkDeterminism: true, arrive: arrive})
+}
+
+// TestSimulationStalledAssignmentZombieIsReclaimed is the liveness oracle for
+// the 84-minute incident: an assigned runner whose job never starts must not
+// live forever. It occupies a slot and 4 GiB the whole time, so left unbounded
+// it starves the queue behind it. The oracle asserts (1) the zombie is
+// reclaimed within a bounded window after the assignment deadline, and (2) work
+// queued behind it is still admitted — while assertDrainSafety runs every tick,
+// proving no genuinely busy instance is ever caught by the deadline.
+func TestSimulationStalledAssignmentZombieIsReclaimed(t *testing.T) {
+	cfg := testConfig() // AssignedTimeout = 15m; simTickDuration = 1m => 15 ticks.
+	deadlineTicks := int(cfg.AssignedTimeout / simTickDuration)
+	// One free slot only, so the zombie genuinely blocks the queue behind it and
+	// reclaim is the sole way the pending demand can ever run.
+	host := domain.Host{Available: domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 1}}
+	w := newSimWorld(t, cfg, host, 3)
+	zombie := domain.Instance{ID: "vm-zombie", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium",
+		Route: cfg.Profiles["medium"].Route, Resources: cfg.Profiles["medium"].Resources,
+		State: domain.InstanceAssigned, Power: domain.InstancePowerRunning, AssignedSince: w.now}
+	w.instances = append(w.instances, zombie)
+	w.stuck[zombie.ID] = true
+	behind := w.addDemand("b/repo", 0, "small")
+
+	reclaimedAt, admittedAt := -1, -1
+	for tick := 0; tick < deadlineTicks+30; tick++ {
+		w.step(tick, false) // assertSafety (incl. drain-safety) runs inside every step
+		present := false
+		for _, inst := range w.instances {
+			if inst.ID == zombie.ID {
+				present = true
+			}
+			if inst.Repo == behind.Key.Repo && admittedAt < 0 {
+				admittedAt = tick
+			}
+		}
+		if !present && reclaimedAt < 0 {
+			reclaimedAt = tick
+		}
+	}
+	if reclaimedAt < 0 {
+		t.Fatal("stalled zombie was never reclaimed; it would have starved the fleet indefinitely")
+	}
+	if reclaimedAt < deadlineTicks {
+		t.Fatalf("zombie reclaimed at tick %d, before the deadline of %d ticks", reclaimedAt, deadlineTicks)
+	}
+	if admittedAt < 0 {
+		t.Fatalf("the demand queued behind the zombie was never admitted after reclaim at tick %d", reclaimedAt)
+	}
 }

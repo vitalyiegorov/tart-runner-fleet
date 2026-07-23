@@ -16,6 +16,7 @@ import (
 type Config struct {
 	LinuxCapacity         domain.Resources
 	FairnessAge           time.Duration
+	AssignedTimeout       time.Duration
 	RepoCaps              map[string]int
 	RepoSchedulingClasses map[string]domain.SchedulingClass
 	Profiles              map[domain.ProfileID]domain.Profile
@@ -79,6 +80,7 @@ type Operation struct {
 	DependsOn         []string
 	Recovery          bool `json:"recovery,omitempty"`
 	ConfirmedInactive bool `json:"confirmedInactive,omitempty"`
+	StalledAssignment bool `json:"stalledAssignment,omitempty"`
 }
 
 type PlanStatus string
@@ -112,7 +114,7 @@ func PlanTick(in Input) Plan {
 
 	demands := normalizedDemands(in)
 	plan := Plan{Status: PlanReady, Next: in.Prior}
-	if recoveries := assignmentRecoveries(in.Instances.Value); len(recoveries) > 0 {
+	if recoveries := assignmentRecoveries(in.Now, in.Config.AssignedTimeout, in.Instances.Value); len(recoveries) > 0 {
 		plan.Operations = recoveries
 		return finish(plan)
 	}
@@ -269,22 +271,37 @@ func hasConsumingPlatform(instances []domain.Instance, platform domain.Platform)
 	return false
 }
 
-func assignmentRecoveries(instances []domain.Instance) []Operation {
+func assignmentRecoveries(now time.Time, assignedTimeout time.Duration, instances []domain.Instance) []Operation {
 	var recoveries []Operation
 	for _, instance := range sortedInstances(instances) {
 		if instance.State != domain.InstanceAssigned && instance.State != domain.InstanceRunning {
 			continue
 		}
 		confirmedInactive := instance.Power == domain.InstancePowerRunning && instance.RecoveryReady
-		if instance.Power != domain.InstancePowerStopped && !confirmedInactive {
+		stalled := stalledAssignment(now, assignedTimeout, instance)
+		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled {
 			continue
 		}
 		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
-			Recovery: true, ConfirmedInactive: confirmedInactive}
+			Recovery: true, ConfirmedInactive: confirmedInactive, StalledAssignment: stalled}
 		operation.ID = stableID("op", operation)
 		recoveries = append(recoveries, operation)
 	}
 	return recoveries
+}
+
+// stalledAssignment reports whether an assigned instance has exceeded the
+// assignment deadline with no evidence a job ever started. The instance FSM is
+// the evidence: only a JobStarted demand event advances Assigned -> Running, so
+// an instance still Assigned past the deadline provably never began a job. It
+// deliberately narrows to a powered-on, unconfirmed assignment — a stopped or
+// already-confirmed-inactive instance is handled by the pre-existing recovery
+// gates — and stays fail-closed when the entry time or deadline is unknown, so
+// it can only open the guarded recovery path, never bypass its evidence check.
+func stalledAssignment(now time.Time, assignedTimeout time.Duration, instance domain.Instance) bool {
+	return instance.State == domain.InstanceAssigned && instance.Power == domain.InstancePowerRunning &&
+		!instance.RecoveryReady && assignedTimeout > 0 && !instance.AssignedSince.IsZero() &&
+		now.Sub(instance.AssignedSince) >= assignedTimeout
 }
 
 func normalizedDemands(in Input) []domain.Demand {

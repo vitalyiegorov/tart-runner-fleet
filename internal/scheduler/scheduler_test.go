@@ -13,9 +13,10 @@ var testNow = time.Date(2026, 7, 12, 18, 0, 0, 0, time.UTC)
 
 func testConfig() Config {
 	return Config{
-		LinuxCapacity: domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 4},
-		FairnessAge:   5 * time.Minute,
-		RepoCaps:      map[string]int{"a/repo": 4, "b/repo": 4, "c/repo": 4},
+		LinuxCapacity:   domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 4},
+		FairnessAge:     5 * time.Minute,
+		AssignedTimeout: 15 * time.Minute,
+		RepoCaps:        map[string]int{"a/repo": 4, "b/repo": 4, "c/repo": 4},
 		Profiles: map[domain.ProfileID]domain.Profile{
 			"small":   {ID: "small", Platform: domain.PlatformLinux, Route: "tiered", Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}},
 			"medium":  {ID: "medium", Platform: domain.PlatformLinux, Route: "tiered", Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}},
@@ -119,6 +120,59 @@ func TestStoppedAssignedRunnerIsRecoveredBeforeNewAdmission(t *testing.T) {
 	running.Power = domain.InstancePowerRunning
 	if got := PlanTick(input(nil, []domain.Instance{running}, State{})); len(got.Operations) != 0 {
 		t.Fatalf("running assignment was recovered: %#v", got)
+	}
+}
+
+// TestStalledAssignedRunnerIsRecoveredAfterDeadline replays the 84-minute
+// zombie incident: a trf-medium VM sat in Assigned with its VM powered on, its
+// runner registered, and no job ever starting. Neither existing recovery gate
+// fired (VM not stopped; runner still registered so RecoveryReady stayed
+// false), so the instance held a slot and 4 GiB while the queue starved behind
+// it. Past the assignment deadline with no job-started evidence, it must become
+// eligible for the SAME evidence-gated recovery path, flagged StalledAssignment.
+func TestStalledAssignedRunnerIsRecoveredAfterDeadline(t *testing.T) {
+	zombie := domain.Instance{ID: "trf-medium-zombie", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, State: domain.InstanceAssigned,
+		Power: domain.InstancePowerRunning, RecoveryReady: false, AssignedSince: testNow.Add(-16 * time.Minute)}
+	plan := PlanTick(input([]domain.Demand{demand("b/repo", 9, time.Minute, "small")}, []domain.Instance{zombie}, State{}))
+	if len(plan.Operations) != 1 || plan.Operations[0].Kind != OperationDrain || plan.Operations[0].Instance != zombie.ID ||
+		!plan.Operations[0].Recovery || !plan.Operations[0].StalledAssignment || plan.Operations[0].ConfirmedInactive {
+		t.Fatalf("stalled-assignment recovery plan = %#v", plan.Operations)
+	}
+}
+
+// The tripwire counterpart: an assignment younger than the deadline, an
+// assignment whose job actually started (state Running is only reached via a
+// JobStarted event), and an assignment with no known entry time (AssignedSince
+// zero, fail-closed) must all be left strictly alone.
+func TestStalledAssignmentDeadlineNeverTouchesLiveOrYoungAssignments(t *testing.T) {
+	base := domain.Instance{ID: "live", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, Power: domain.InstancePowerRunning}
+	for _, test := range []struct {
+		name     string
+		instance domain.Instance
+	}{
+		{name: "young assignment", instance: func() domain.Instance {
+			i := base
+			i.State, i.AssignedSince = domain.InstanceAssigned, testNow.Add(-time.Minute)
+			return i
+		}()},
+		{name: "job started (running) past deadline", instance: func() domain.Instance {
+			i := base
+			i.State, i.AssignedSince = domain.InstanceRunning, testNow.Add(-time.Hour)
+			return i
+		}()},
+		{name: "unknown assigned-since is fail-closed", instance: func() domain.Instance {
+			i := base
+			i.State = domain.InstanceAssigned
+			return i
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if plan := PlanTick(input(nil, []domain.Instance{test.instance}, State{})); len(drainedIDs(plan)) != 0 {
+				t.Fatalf("deadline drained a protected assignment: %#v", plan.Operations)
+			}
+		})
 	}
 }
 

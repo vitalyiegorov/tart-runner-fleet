@@ -376,6 +376,8 @@ type fakeDrainControl struct {
 	guardErr      error
 	registered    bool
 	registeredErr error
+	jobStarted    bool
+	jobStartedErr error
 	deregisterErr error
 	confirmations []operations.DeletionConfirmation
 	confirmErr    error
@@ -384,6 +386,11 @@ type fakeDrainControl struct {
 func (d *fakeDrainControl) RunnerRegistered(_ context.Context, instance operations.Instance) (bool, error) {
 	*d.calls = append(*d.calls, "registered:"+instance.ID)
 	return d.registered, d.registeredErr
+}
+
+func (d *fakeDrainControl) JobStarted(_ context.Context, instance operations.Instance) (bool, error) {
+	*d.calls = append(*d.calls, "started:"+instance.ID)
+	return d.jobStarted, d.jobStartedErr
 }
 
 func (d *fakeDrainControl) SafeToDeregister(_ context.Context, instance operations.Instance) (bool, error) {

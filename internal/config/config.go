@@ -90,6 +90,11 @@ type Timeouts struct {
 	GitHub time.Duration
 	Tart   time.Duration
 	Boot   time.Duration
+	// Assigned bounds how long an instance may sit in the Assigned state with
+	// no job ever starting before it becomes eligible for evidence-gated
+	// recovery. Legitimate assignment-to-job-start is seconds; the default is
+	// deliberately generous so only genuine zombies are reclaimed.
+	Assigned time.Duration
 }
 
 type Guards struct {
@@ -195,6 +200,7 @@ type wireConfig struct {
 	GitHubTimeoutSeconds      int       `json:"githubTimeoutSeconds"`
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
+	AssignedTimeoutSeconds    int       `json:"assignedTimeoutSeconds,omitempty"`
 	MacOSBurst                struct {
 		Enabled              bool                 `json:"enabled"`
 		AdmissionPolicy      MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
@@ -230,9 +236,10 @@ func Decode(r io.Reader) (Config, error) {
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
 			NestedVirtualization: w.MacOSBurst.NestedVirtualization},
-		GitHub:   w.GitHub,
-		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45), Boot: secondsOr(w.BootTimeoutSeconds, 180)},
-		Guards:   normalizeGuards(w), Targets: normalizeTargets(w.Targets),
+		GitHub: w.GitHub,
+		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
+			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
+		Guards: normalizeGuards(w), Targets: normalizeTargets(w.Targets),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -270,6 +277,10 @@ func Encode(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	assignedSeconds, err := wholeSeconds("assigned timeout", cfg.Timeouts.Assigned)
+	if err != nil {
+		return err
+	}
 
 	wire := wireConfig{
 		BaseVM: cfg.Linux.BaseVM, VMPrefix: cfg.Linux.VMPrefix,
@@ -279,7 +290,7 @@ func Encode(w io.Writer, cfg Config) error {
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
 		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, GitHubTimeoutSeconds: githubSeconds,
-		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds,
+		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
@@ -395,7 +406,7 @@ func Default() Config {
 		MacOS: MacOS{Enabled: true, AdmissionPolicy: MacOSAdmissionShared, BaseVM: "macos-tartelet-base", VMPrefix: "gha-macos",
 			Builder: Profile{ID: "builder", Label: "macos-builder", Resources: Resources{CPU: 8, MemoryMiB: 12288}, MaxActive: 1},
 			Maestro: Profile{ID: "maestro", Label: "macos-maestro", Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 2}},
-		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute},
+		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute, Assigned: 15 * time.Minute},
 		Guards: Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: defaultMinAvailableMemoryMiB,
 			MaxSwapUsedMiB: defaultMaxSwapUsedMiB, MaxLoadAverage: defaultMaxLoadAverage,
 			MinCPUIdlePercent: defaultMinCPUIdlePercent},
@@ -432,6 +443,9 @@ func (c Config) Validate() error {
 	}
 	if c.Timeouts.GitHub <= 0 || c.Timeouts.Tart <= 0 || c.Timeouts.Boot <= 0 {
 		return errors.New("timeouts must be positive")
+	}
+	if c.Timeouts.Assigned < time.Minute || c.Timeouts.Assigned > time.Hour {
+		return errors.New("assigned timeout must be between 60 and 3600 seconds")
 	}
 	if c.Linux.BaseVM == "" || c.Linux.VMPrefix == "" {
 		return errors.New("linux base VM and prefix are required")
