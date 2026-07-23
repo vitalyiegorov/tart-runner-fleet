@@ -65,6 +65,91 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	}
 }
 
+func TestDecodeAndEncodeMixedPlatformAdmission(t *testing.T) {
+	raw := `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false, "mixedPlatformAdmission":true},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`
+	cfg, err := Decode(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if !cfg.MacOS.MixedPlatformAdmission {
+		t.Fatalf("mixedPlatformAdmission not decoded: %+v", cfg.MacOS)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode() = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"mixedPlatformAdmission": true`) {
+		t.Fatalf("Encode omitted mixedPlatformAdmission:\n%s", encoded.String())
+	}
+	roundTripped, err := Decode(&encoded)
+	if err != nil || !roundTripped.MacOS.MixedPlatformAdmission {
+		t.Fatalf("round-trip mixed admission = %v, %v", roundTripped.MacOS.MixedPlatformAdmission, err)
+	}
+
+	// Default off is omitted from the encoded form so older strict releases,
+	// which reject unknown fields, still accept a legacy configuration.
+	legacy := cfg
+	legacy.MacOS.MixedPlatformAdmission = false
+	var legacyEncoded bytes.Buffer
+	if err := Encode(&legacyEncoded, legacy); err != nil {
+		t.Fatalf("Encode(legacy) = %v", err)
+	}
+	if strings.Contains(legacyEncoded.String(), "mixedPlatformAdmission") {
+		t.Fatalf("default-off mixed admission leaked into encoded form:\n%s", legacyEncoded.String())
+	}
+}
+
+func TestDecodeAndEncodePressureMemoryAccounting(t *testing.T) {
+	raw := `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "pressureMemoryAccounting":true,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`
+	cfg, err := Decode(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if !cfg.Guards.PressureMemoryAccounting {
+		t.Fatalf("pressureMemoryAccounting not decoded: %+v", cfg.Guards)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode() = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"pressureMemoryAccounting": true`) {
+		t.Fatalf("Encode omitted pressureMemoryAccounting:\n%s", encoded.String())
+	}
+	roundTripped, err := Decode(&encoded)
+	if err != nil || !roundTripped.Guards.PressureMemoryAccounting {
+		t.Fatalf("round-trip pressure accounting = %v, %v", roundTripped.Guards.PressureMemoryAccounting, err)
+	}
+
+	// Default off is omitted from the encoded form so older strict releases,
+	// which reject unknown fields, still accept a legacy configuration.
+	legacy := cfg
+	legacy.Guards.PressureMemoryAccounting = false
+	var legacyEncoded bytes.Buffer
+	if err := Encode(&legacyEncoded, legacy); err != nil {
+		t.Fatalf("Encode(legacy) = %v", err)
+	}
+	if strings.Contains(legacyEncoded.String(), "pressureMemoryAccounting") {
+		t.Fatalf("default-off pressure accounting leaked into encoded form:\n%s", legacyEncoded.String())
+	}
+}
+
 func TestDecodeAndEncodePreserveExplicitAssignedTimeout(t *testing.T) {
 	raw := `{
       "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",

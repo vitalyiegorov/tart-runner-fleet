@@ -45,6 +45,21 @@ type TickResult struct {
 	Host      domain.Host
 }
 
+// trickle degrades a fail-closed binding by admitting a single demand while
+// statistics are unavailable. queued is age-sorted oldest-first, so it returns
+// the oldest demand that has no live incarnation, letting the freshly spawned
+// runner draw new broker statistics. Demands already served by a live instance
+// are skipped rather than respawned; if every queued demand is already live it
+// admits nothing, since there is no idle work to un-livelock.
+func trickle(queued []domain.Demand, liveIncarnations map[domain.DemandKey]bool) []domain.Demand {
+	for _, demand := range queued {
+		if !liveIncarnations[demand.Key] {
+			return []domain.Demand{demand}
+		}
+	}
+	return nil
+}
+
 func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	if e.Store == nil || e.Inventory == nil || e.ControllerID == "" || !e.Mode.Valid() {
 		return TickResult{}, operations.ErrInvalid
@@ -87,6 +102,18 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	if coordinator.Now == nil {
 		coordinator.Now = func() time.Time { return now }
 	}
+	instances, host := e.Inventory.Observe(ctx)
+	// Demand keys already owned by a live, non-terminal instance incarnation.
+	// The statistics-fresh path never plans these — the Available/Assigned
+	// bounds account for their assigned/running instances — but the degraded
+	// trickle below bypasses those bounds entirely, so it needs this guard to
+	// avoid double-spawning a demand whose runner is already live.
+	liveIncarnations := make(map[domain.DemandKey]bool, len(instances.Value))
+	for _, instance := range instances.Value {
+		if instance.IncarnatesDemand() {
+			liveIncarnations[instance.Demand] = true
+		}
+	}
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
 		schedulable := queued
@@ -99,7 +126,13 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			// per tick — the spawned runner picks the job up, the broker
 			// delivers fresh statistics, and the binding leaves degradation.
 			// The queue stays fully visible to the SLO monitor either way.
-			schedulable = queued[:min(1, len(queued))]
+			//
+			// Trickle the oldest demand that has no live incarnation: a demand
+			// whose runner is already assigned (waiting on GitHub) must not be
+			// respawned, or the plan collides with the live instance and every
+			// recycled tick wedges the fleet. Skipping only advances to the
+			// next candidate, so the binding still un-livelocks.
+			schedulable = trickle(queued, liveIncarnations)
 		} else if err != nil {
 			return TickResult{}, err
 		}
@@ -115,7 +148,6 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		}
 		queues[binding.Profile.ID] = current
 	}
-	instances, host := e.Inventory.Observe(ctx)
 	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)

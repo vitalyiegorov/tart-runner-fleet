@@ -194,6 +194,7 @@ func (s InstanceState) CanTransitionTo(next InstanceState) bool {
 type Instance struct {
 	ID            string
 	Repo          string
+	Demand        DemandKey
 	Platform      Platform
 	Profile       ProfileID
 	Route         Route
@@ -220,6 +221,18 @@ const (
 )
 
 func (i Instance) Live() bool { return i.State != InstanceDeleted }
+
+// IncarnatesDemand reports whether the instance is a live, non-terminal
+// incarnation of a demand: one that still owns its demand key and will
+// consume its GitHub job. Terminal incarnations (deleted, failed) have
+// released the demand for legitimate (re)spawning, so they never block it;
+// every other state — from planned through the teardown chain — still holds
+// the demand's content-addressed identity, so planning a fresh spawn for the
+// same demand would collide with this instance. Callers guard on a non-zero
+// Demand key, since not every observed instance carries scheduling metadata.
+func (i Instance) IncarnatesDemand() bool {
+	return i.Demand != (DemandKey{}) && i.State != InstanceDeleted && i.State != InstanceFailed
+}
 
 // ConsumesHostResources distinguishes durable cleanup state from physical
 // CPU/RAM occupancy. A VM observed stopped while already tearing down remains

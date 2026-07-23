@@ -47,9 +47,17 @@ type Probe struct {
 	Runner   CommandRunner
 	Timeout  time.Duration
 	DiskPath string
-	Now      func() time.Time
-	mu       sync.Mutex
-	last     Snapshot
+	// PressureAccounting selects the kernel memory-pressure level as the primary
+	// availability signal. macOS keeps vm_stat "free" near zero by design
+	// (reclaimed RAM becomes file cache under other buckets), so the page formula
+	// understates real availability by gigabytes and serializes the host. When
+	// true and both sysctls read and parse, availability is memsize x level%;
+	// on any failure it falls back to the vm_stat page computation, which stays
+	// the critical fail-closed base. Default false preserves legacy behavior.
+	PressureAccounting bool
+	Now                func() time.Time
+	mu                 sync.Mutex
+	last               Snapshot
 }
 
 // Permissive advisory defaults cannot by themselves deny admission: full CPU
@@ -76,6 +84,14 @@ func (p *Probe) Snapshot(ctx context.Context) Snapshot {
 	availableMemoryMB, swapouts, err := parseVMStat(string(vmStat))
 	if err != nil {
 		return p.degraded(now, err)
+	}
+	// The vm_stat page figure is the fail-closed base. When pressure accounting
+	// is enabled it is superseded by the kernel memory-pressure level, but only
+	// when both sysctls read and parse; any failure keeps the page figure.
+	if p.PressureAccounting {
+		if pressureMemoryMB, ok := p.pressureAvailableMB(ctx); ok {
+			availableMemoryMB = pressureMemoryMB
+		}
 	}
 	disk, err := p.run(ctx, "df", "-k", p.diskPath())
 	if err != nil {
@@ -177,6 +193,60 @@ func parseVMStat(value string) (int64, int64, error) {
 	}
 	availablePages := pages["Pages free"] + pages["Pages speculative"] + pages["Pages inactive"]
 	return availablePages * pageSize / 1048576, pages["Swapouts"], nil
+}
+
+// pressureAvailableMB derives available memory from the kernel memory-pressure
+// level (kern.memorystatus_level, the same free percentage memory_pressure
+// prints) applied to physical memory (hw.memsize): memsize x level%. It returns
+// ok=false on any read or parse failure so the caller retains the vm_stat page
+// computation, the fail-closed base. Output is never logged (secret policy):
+// parse failures surface as static errors carried only inside ok=false.
+func (p *Probe) pressureAvailableMB(ctx context.Context) (int64, bool) {
+	levelOutput, err := p.run(ctx, "sysctl", "-n", "kern.memorystatus_level")
+	if err != nil {
+		return 0, false
+	}
+	level, err := parseMemorystatusLevel(string(levelOutput))
+	if err != nil {
+		return 0, false
+	}
+	memsizeOutput, err := p.run(ctx, "sysctl", "-n", "hw.memsize")
+	if err != nil {
+		return 0, false
+	}
+	memsize, err := parseMemsizeBytes(string(memsizeOutput))
+	if err != nil {
+		return 0, false
+	}
+	memsizeMB := memsize / 1048576
+	availableMB := memsizeMB * level / 100
+	// Never advertise more than physical memory even if the level reads high.
+	if availableMB > memsizeMB {
+		availableMB = memsizeMB
+	}
+	return availableMB, true
+}
+
+func parseMemorystatusLevel(value string) (int64, error) {
+	level, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, errors.New("memory pressure level is not an integer")
+	}
+	if level < 0 {
+		return 0, errors.New("memory pressure level is negative")
+	}
+	return level, nil
+}
+
+func parseMemsizeBytes(value string) (int64, error) {
+	memsize, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, errors.New("physical memory size is not an integer")
+	}
+	if memsize <= 0 {
+		return 0, errors.New("physical memory size is not positive")
+	}
+	return memsize, nil
 }
 
 func parseDisk(value string) (int64, error) {

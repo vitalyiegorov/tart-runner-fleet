@@ -43,6 +43,7 @@ func TestValidateBindingsCatchesConfigsThatValidateButCrashTheDaemon(t *testing.
 func TestBuildSchedulerConfigAndBindings(t *testing.T) {
 	cfg := config.Default()
 	cfg.MacOS.AdmissionPolicy = config.MacOSAdmissionExclusive
+	cfg.MacOS.MixedPlatformAdmission = true
 	cfg.Targets = []config.Target{{Type: "repo", Slug: "o/r", MaxActive: 3, SchedulingClass: domain.SchedulingControlPlane}}
 	cfg.GitHub.ScaleSets = []config.ScaleSet{
 		{Profile: "small", ID: 1, MaxCapacity: 4, Labels: []string{"self-hosted", "linux-tiered", "linux-small"}},
@@ -57,6 +58,9 @@ func TestBuildSchedulerConfigAndBindings(t *testing.T) {
 	}
 	if !schedulerConfig.MacOSExclusive {
 		t.Fatal("macos-exclusive admission policy was not mapped to the scheduler")
+	}
+	if !schedulerConfig.MixedPlatformAdmission {
+		t.Fatal("mixed-platform admission flag was not mapped to the scheduler")
 	}
 	if schedulerConfig.Profiles["small"].Route != "linux-small" || schedulerConfig.Profiles["builder"].Platform != domain.PlatformMacOS {
 		t.Fatalf("profiles = %#v", schedulerConfig.Profiles)
