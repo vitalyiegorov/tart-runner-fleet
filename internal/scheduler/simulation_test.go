@@ -398,7 +398,7 @@ func (w *simWorld) assertDrainSafety(plan Plan) {
 			stalled := inst.State == domain.InstanceAssigned && inst.Power == domain.InstancePowerRunning &&
 				!inst.RecoveryReady && w.config.AssignedTimeout > 0 && !inst.AssignedSince.IsZero() &&
 				w.now.Sub(inst.AssignedSince) >= w.config.AssignedTimeout
-			if !busy || !(confirmedInactive || stalled) {
+			if !busy || (!confirmedInactive && !stalled) {
 				w.t.Fatalf("recovery drain of unsafe instance %q state=%s power=%s recoveryReady=%v assignedSince=%s",
 					op.Instance, inst.State, inst.Power, inst.RecoveryReady, inst.AssignedSince)
 			}

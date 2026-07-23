@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -93,10 +94,10 @@ func TestRecordObservationDetailCarriesBoundedDiagnostic(t *testing.T) {
 	if got := health.Snapshot().Observations["host"]; got.Detail != "" {
 		t.Fatalf("detail not cleared: %#v", got)
 	}
-	if err := health.RecordObservationDetail("host", ObservationFreshness("bogus"), "x"); err != errInvalidObservation {
+	if err := health.RecordObservationDetail("host", ObservationFreshness("bogus"), "x"); !errors.Is(err, errInvalidObservation) {
 		t.Fatalf("invalid freshness err = %v", err)
 	}
-	if err := health.RecordObservationDetail("missing", ObservationFresh, "x"); err != errUnknownObservation {
+	if err := health.RecordObservationDetail("missing", ObservationFresh, "x"); !errors.Is(err, errUnknownObservation) {
 		t.Fatalf("unknown observation err = %v", err)
 	}
 }
