@@ -21,6 +21,7 @@ import (
 type PlanStore interface {
 	SchedulerState(context.Context) (operations.SchedulerState, error)
 	Instance(context.Context, string) (operations.Instance, error)
+	SpawnGeneration(context.Context, domain.DemandKey) (int, error)
 	ApplyPlan(context.Context, operations.Plan) (bool, error)
 }
 
@@ -154,18 +155,29 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 			next := instance
 			next.State, next.Version, next.DrainPhase, next.UpdatedAt = operations.StateDraining, instance.Version+1, drainPhase, now.UTC()
 			durable.Instances = append(durable.Instances, operations.InstanceIntent{ExpectedVersion: instance.Version, ExpectedState: instance.State, Instance: next})
-			durable.Operations = append(durable.Operations, outbox(operation, "deregister", instance.ID, instance.Ownership, now))
+			durable.Operations = append(durable.Operations, outbox(operation, operation.ID, "deregister", instance.ID, instance.Ownership, now))
 		case scheduler.OperationSpawn:
 			profile, ok := c.Profiles[operation.Profile]
 			if !ok || profile.Route != operation.Route || profile.Resources.CPU <= 0 || profile.Resources.MemoryMB <= 0 || profile.Resources.Slots <= 0 {
 				return operations.Plan{}, fmt.Errorf("spawn profile %q: %w", operation.Profile, operations.ErrInvalid)
 			}
-			name := instanceName(operation)
-			ownership := operations.Ownership{ControllerID: c.ControllerID, ResourceID: operation.Demand.String(), OperationID: operation.ID}
+			// A completed or failed prior attempt for this demand leaves a terminal
+			// instance tombstone and its durable clone operation behind. Scope the
+			// spawn identity to that terminal generation so the content-addressed
+			// identity remains idempotent within an attempt yet supersedes the
+			// tombstones on a legitimate respawn instead of wedging on a UNIQUE
+			// collision.
+			generation, err := c.Store.SpawnGeneration(ctx, operation.Demand)
+			if err != nil {
+				return operations.Plan{}, err
+			}
+			name := instanceName(operation, generation)
+			operationID := spawnIdentity(operation, generation)
+			ownership := operations.Ownership{ControllerID: c.ControllerID, ResourceID: operation.Demand.String(), OperationID: operationID}
 			instance := operations.Instance{ID: name, Repo: operation.Demand.Repo, Platform: profile.Platform, Profile: profile.ID, Route: profile.Route,
 				Resources: profile.Resources, Demand: operation.Demand, State: operations.StatePlanned, Version: 0, Ownership: ownership, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
 			durable.Instances = append(durable.Instances, operations.InstanceIntent{ExpectedVersion: -1, Instance: instance})
-			durable.Operations = append(durable.Operations, outbox(operation, "clone", name, ownership, now))
+			durable.Operations = append(durable.Operations, outbox(operation, operationID, "clone", name, ownership, now))
 		default:
 			return operations.Plan{}, fmt.Errorf("operation %q: %w", operation.Kind, operations.ErrInvalid)
 		}
@@ -173,7 +185,7 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 	return durable, nil
 }
 
-func outbox(source scheduler.Operation, kind, resource string, ownership operations.Ownership, now time.Time) operations.Operation {
+func outbox(source scheduler.Operation, id, kind, resource string, ownership operations.Ownership, now time.Time) operations.Operation {
 	payload, _ := json.Marshal(struct {
 		Repo      string               `json:"repo"`
 		Profile   string               `json:"profile"`
@@ -183,13 +195,37 @@ func outbox(source scheduler.Operation, kind, resource string, ownership operati
 		Attempt   int                  `json:"attempt"`
 		Ownership operations.Ownership `json:"ownership"`
 	}{source.Demand.Repo, string(source.Profile), string(source.Route), source.Demand.RunID, source.Demand.JobID, source.Demand.Attempt, ownership})
-	return operations.Operation{ID: source.ID, IdempotencyKey: source.ID, EffectKey: kind + ":" + resource, Kind: kind,
+	return operations.Operation{ID: id, IdempotencyKey: id, EffectKey: kind + ":" + resource, Kind: kind,
 		ResourceID: resource, Payload: payload, AvailableAt: now.UTC(), DependsOn: append([]string(nil), source.DependsOn...)}
 }
 
-func instanceName(operation scheduler.Operation) string {
-	sum := sha256.Sum256([]byte(operation.ID + "\x00" + operation.Demand.String()))
+func instanceName(operation scheduler.Operation, generation int) string {
+	sum := sha256.Sum256(generationSeed(operation.ID+"\x00"+operation.Demand.String(), generation))
 	return "trf-" + strings.ToLower(string(operation.Profile)) + "-" + hex.EncodeToString(sum[:8])
+}
+
+// spawnIdentity derives the durable spawn operation identity. Generation zero
+// preserves the scheduler's content address so first spawns — and replays of
+// the same attempt, which the plans-table idempotency gate already collapses —
+// keep their existing identity byte-for-byte. A later generation salts a
+// distinct identity that supersedes the terminal prior incarnation's tombstones
+// without disturbing them (the audit history and effect records stay intact).
+func spawnIdentity(operation scheduler.Operation, generation int) string {
+	if generation == 0 {
+		return operation.ID
+	}
+	sum := sha256.Sum256(generationSeed(operation.ID, generation))
+	return "op-" + hex.EncodeToString(sum[:12])
+}
+
+// generationSeed is the shared salting rule: generation zero hashes the base
+// preimage unchanged; a later generation appends a deterministic, randomness
+// free suffix so identity stays replay-safe and resumable.
+func generationSeed(base string, generation int) []byte {
+	if generation == 0 {
+		return []byte(base)
+	}
+	return []byte(base + "\x00gen=" + strconv.Itoa(generation))
 }
 
 func durablePlanID(mode Mode, schedulerID string, schedulerVersion int64) string {
