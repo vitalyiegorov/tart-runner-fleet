@@ -84,6 +84,10 @@ type Observation struct {
 	Freshness  string    `json:"freshness"`
 	ObservedAt time.Time `json:"observedAt"`
 	AgeSeconds float64   `json:"ageSeconds"`
+	// Detail is an optional bounded, credential-free diagnostic (e.g. the
+	// scheduler plan block reason) so `fleetctl status`/`doctor` can explain a
+	// non-fresh observation without exposing free-form error text.
+	Detail string `json:"detail,omitempty"`
 }
 
 type OperationSummary struct {

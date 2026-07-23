@@ -73,6 +73,9 @@ type InstanceMetrics struct {
 type ObservationMetric struct {
 	Freshness  ObservationFreshness
 	ObservedAt time.Time
+	// Detail is a bounded, credential-free diagnostic (e.g. a scheduler plan
+	// block reason). It is optional and empty for observations that carry none.
+	Detail string
 }
 
 type HostPressureMetric struct {
@@ -215,6 +218,13 @@ func (h *Health) RecordTick(successful bool) {
 }
 
 func (h *Health) RecordObservation(name string, freshness ObservationFreshness) error {
+	return h.RecordObservationDetail(name, freshness, "")
+}
+
+// RecordObservationDetail records a critical observation together with a
+// bounded, credential-free diagnostic detail. The detail is closed vocabulary
+// (see scheduler.Plan.Reason) and must never carry wrapped error text.
+func (h *Health) RecordObservationDetail(name string, freshness ObservationFreshness, detail string) error {
 	if !validFreshness(freshness) {
 		return errInvalidObservation
 	}
@@ -224,7 +234,7 @@ func (h *Health) RecordObservation(name string, freshness ObservationFreshness) 
 	if _, ok := h.critical[name]; !ok {
 		return errUnknownObservation
 	}
-	h.observations[name] = ObservationMetric{Freshness: freshness, ObservedAt: now}
+	h.observations[name] = ObservationMetric{Freshness: freshness, ObservedAt: now, Detail: detail}
 	h.revision++
 	return nil
 }
