@@ -40,15 +40,26 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		MacOSExclusive: cfg.MacOS.AdmissionPolicy == config.MacOSAdmissionExclusive}
 }
 
+// ValidateBindings runs the exact scheduler-config and binding construction the
+// daemon performs at startup (see cmd/fleetd) and surfaces any invariant
+// violation as an error. fleetctl config validate calls this so that a config it
+// accepts can never crash-loop the authority daemon on the runtime invariants
+// that Config.Validate does not cover (profile existence, positive durable IDs,
+// scale-set identity collisions).
+func ValidateBindings(cfg config.Config) error {
+	_, err := BuildBindings(cfg, BuildSchedulerConfig(cfg))
+	return err
+}
+
 func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Binding, error) {
 	if len(cfg.GitHub.Scopes) > 0 {
 		bindings := make([]Binding, 0)
 		seenKeys := map[int64]string{}
 		for _, scope := range cfg.GitHub.Scopes {
 			for _, scaleSet := range scope.ScaleSets {
-				profile, ok := schedulerConfig.Profiles[domain.ProfileID(scaleSet.Profile)]
-				if !ok || scaleSet.ID <= 0 {
-					return nil, fmt.Errorf("invalid scale set profile %q in scope %q", scaleSet.Profile, scope.Name)
+				profile, err := resolveScaleSetProfile(schedulerConfig, scaleSet, scope.Name)
+				if err != nil {
+					return nil, err
 				}
 				key := scopedStoreKey(scope.Name, scaleSet.ID)
 				identity := fmt.Sprintf("%s/%d", scope.Name, scaleSet.ID)
@@ -64,14 +75,34 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 	}
 	bindings := make([]Binding, 0, len(cfg.GitHub.ScaleSets))
 	for _, scaleSet := range cfg.GitHub.ScaleSets {
-		profile, ok := schedulerConfig.Profiles[domain.ProfileID(scaleSet.Profile)]
-		if !ok || scaleSet.ID <= 0 {
-			return nil, fmt.Errorf("invalid scale set profile %q", scaleSet.Profile)
+		profile, err := resolveScaleSetProfile(schedulerConfig, scaleSet, "")
+		if err != nil {
+			return nil, err
 		}
 		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID),
 			ScaleSetLabels: effectiveScaleSetLabels(scaleSet), Profile: profile})
 	}
 	return bindings, nil
+}
+
+// resolveScaleSetProfile enforces the two independent runtime invariants that
+// previously shared one opaque "invalid scale set profile" message: the profile
+// referenced by the scale set must exist in the scheduler profile map, and the
+// scale set must carry a positive durable ID. Scale set names, profile IDs, and
+// scope names are non-secret and safe to include for actionable diagnostics.
+func resolveScaleSetProfile(schedulerConfig scheduler.Config, scaleSet config.ScaleSet, scope string) (domain.Profile, error) {
+	where := ""
+	if scope != "" {
+		where = fmt.Sprintf(" in scope %q", scope)
+	}
+	profile, ok := schedulerConfig.Profiles[domain.ProfileID(scaleSet.Profile)]
+	if !ok {
+		return domain.Profile{}, fmt.Errorf("scale set %q%s references unknown profile %q", scaleSet.Name, where, scaleSet.Profile)
+	}
+	if scaleSet.ID <= 0 {
+		return domain.Profile{}, fmt.Errorf("scale set %q%s (profile %q) has non-positive durable ID %d; provision it first", scaleSet.Name, where, scaleSet.Profile, scaleSet.ID)
+	}
+	return profile, nil
 }
 
 func effectiveScaleSetLabels(scaleSet config.ScaleSet) []string {

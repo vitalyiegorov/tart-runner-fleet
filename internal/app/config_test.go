@@ -1,11 +1,44 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
+
+// TestValidateBindingsCatchesConfigsThatValidateButCrashTheDaemon pins the
+// incident: a config whose scale set references a nonexistent profile ("xl") or
+// carries a non-positive durable ID passes config.Validate yet would crash-loop
+// the authority daemon at BuildBindings. ValidateBindings must reject it, with a
+// distinct, actionable message per cause naming the offending scale set.
+func TestValidateBindingsCatchesConfigsThatValidateButCrashTheDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		scaleSet config.ScaleSet
+		want     string
+	}{
+		{"unknown profile", config.ScaleSet{Profile: "xl", Name: "fleet-repo-xl", ID: 1, MaxCapacity: 1}, "unknown profile"},
+		{"non-positive id", config.ScaleSet{Profile: "small", Name: "fleet-repo-small", ID: 0, MaxCapacity: 1}, "non-positive durable ID"},
+	} {
+		cfg := config.Default()
+		cfg.GitHub.ScaleSets = []config.ScaleSet{tc.scaleSet}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("%s: config.Validate rejected the config, so the gap cannot be demonstrated: %v", tc.name, err)
+		}
+		err := ValidateBindings(cfg)
+		if err == nil {
+			t.Fatalf("%s: ValidateBindings accepted a config that would crash the daemon", tc.name)
+		}
+		if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.scaleSet.Name) {
+			t.Fatalf("%s: error %q missing %q or scale set name %q", tc.name, err, tc.want, tc.scaleSet.Name)
+		}
+	}
+	if err := ValidateBindings(config.Default()); err != nil {
+		t.Fatalf("ValidateBindings rejected the default config: %v", err)
+	}
+}
 
 func TestBuildSchedulerConfigAndBindings(t *testing.T) {
 	cfg := config.Default()
