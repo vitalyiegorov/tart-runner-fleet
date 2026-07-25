@@ -42,6 +42,11 @@ func (f *fakeCommands) Run(_ context.Context, binary string, args ...string) ([]
 				return out, nil
 			}
 			return []byte("25769803776\n"), nil
+		case "hw.ncpu":
+			if out, ok := f.outputs["hw.ncpu"]; ok {
+				return out, nil
+			}
+			return []byte("10\n"), nil
 		}
 	}
 	return f.outputs[binary], nil

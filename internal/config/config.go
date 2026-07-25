@@ -113,6 +113,14 @@ type Guards struct {
 	// Default false preserves legacy behavior byte-for-byte; it is enabled
 	// per-host in fleet.json.
 	PressureMemoryAccounting bool
+	// ElasticHostEnvelope sizes the fleet against the observed physical host and
+	// its measured idle CPU instead of a static configured envelope, so the fleet
+	// runs as a second pilot on a machine with its own interactive tenant: it
+	// expands into idle capacity and yields as the host gets busy. MaxLinuxCPU and
+	// MaxLinuxMemoryMiB become Linux-only caps rather than the shared
+	// cross-platform envelope. Default false preserves ADR 0012 behavior
+	// byte-for-byte; it is enabled per-host in fleet.json.
+	ElasticHostEnvelope bool
 }
 
 const (
@@ -208,6 +216,7 @@ type wireConfig struct {
 	MaxLoadAverage            float64   `json:"maxLoadAverage,omitempty"`
 	MinCPUIdlePercent         float64   `json:"minCpuIdlePercent,omitempty"`
 	PressureMemoryAccounting  bool      `json:"pressureMemoryAccounting,omitempty"`
+	ElasticHostEnvelope       bool      `json:"elasticHostEnvelope,omitempty"`
 	GitHubTimeoutSeconds      int       `json:"githubTimeoutSeconds"`
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
@@ -303,6 +312,7 @@ func Encode(w io.Writer, cfg Config) error {
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
 		MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent, PressureMemoryAccounting: cfg.Guards.PressureMemoryAccounting,
+		ElasticHostEnvelope:       cfg.Guards.ElasticHostEnvelope,
 		GitHubTimeoutSeconds:      githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
@@ -371,7 +381,7 @@ func secondsOr(value, fallback int) time.Duration {
 func normalizeGuards(w wireConfig) Guards {
 	guards := Guards{MinFreeDiskGiB: w.MinFreeDiskGiB, MinAvailableMemoryMiB: w.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
-		PressureMemoryAccounting: w.PressureMemoryAccounting}
+		PressureMemoryAccounting: w.PressureMemoryAccounting, ElasticHostEnvelope: w.ElasticHostEnvelope}
 	if guards.MinAvailableMemoryMiB == 0 {
 		guards.MinAvailableMemoryMiB = defaultMinAvailableMemoryMiB
 	}

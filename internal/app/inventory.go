@@ -37,6 +37,10 @@ type ProductionInventory struct {
 	RecoveryConfirmationMaxAge time.Duration
 	Capacity                   domain.Resources
 	Guards                     macos.Guardrails
+	// ElasticHostEnvelope reports the physical machine and measured idle CPU so
+	// the scheduler can size the fleet against the host it shares rather than a
+	// static constant. Default false preserves the configured-envelope model.
+	ElasticHostEnvelope bool
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
@@ -45,7 +49,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 	}
 	now := time.Now().UTC()
 	hostSnapshot := p.Host.Snapshot(ctx)
-	host := hostObservation(hostSnapshot, p.Capacity, p.Guards)
+	host := hostObservation(hostSnapshot, p.Capacity, p.Guards, p.ElasticHostEnvelope)
 	stored, err := p.Store.LiveInstances(ctx)
 	if err != nil {
 		return domain.Unavailable[[]domain.Instance]("durable instance inventory unavailable"), host
@@ -122,7 +126,14 @@ func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {
 	return p.RecoveryConfirmationMaxAge
 }
 
-func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails) domain.Observation[domain.Host] {
+// hostObservation converts a host probe into the scheduler's admission facts.
+//
+// When elastic is false the CPU dimension echoes the configured capacity and no
+// physical total is advertised, preserving the static envelope byte-for-byte.
+// When true the observation additionally reports the real machine so aggregate
+// reservations can be bounded by it, and derives available CPU from measured
+// idle so the fleet yields as the host's own tenant gets busy.
+func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails, elastic bool) domain.Observation[domain.Host] {
 	switch snapshot.Freshness {
 	case macos.Fresh:
 		// Continue with explicit guardrails below.
@@ -143,6 +154,49 @@ func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards 
 		return observation
 	}
 	availableMemory := max(0, min(int(snapshot.AvailableMemoryMB-guards.MinAvailableMemoryMB), capacity.MemoryMB))
-	return domain.Fresh(domain.Host{Available: domain.Resources{CPU: capacity.CPU, MemoryMB: availableMemory, Slots: capacity.Slots},
-		Pressure: pressure}, snapshot.ObservedAt)
+	available := domain.Resources{CPU: capacity.CPU, MemoryMB: availableMemory, Slots: capacity.Slots}
+	physical := domain.Resources{}
+	if elastic {
+		// The measured residual memory figure is not capped by the configured
+		// envelope here: in elastic mode the physical total below is the bound, and
+		// clamping to configuration is what prevented the fleet from using the
+		// machine it actually runs on.
+		available.MemoryMB = max(0, int(snapshot.AvailableMemoryMB-guards.MinAvailableMemoryMB))
+		physical = physicalCapacity(snapshot, capacity, guards)
+		if physical.CPU > 0 {
+			available.CPU = idleCores(snapshot)
+		}
+	}
+	return domain.Fresh(domain.Host{Available: available, Capacity: physical, Pressure: pressure}, snapshot.ObservedAt)
+}
+
+// physicalCapacity reports the machine's real totals as an admission bound.
+// Dimensions the probe could not read stay zero, which the scheduler reads as
+// not-observed and ignores, so an unreadable fact degrades to the configured
+// envelope instead of closing admission. Slots have no physical analogue and
+// stay configured.
+func physicalCapacity(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails) domain.Resources {
+	physical := domain.Resources{Slots: capacity.Slots}
+	if snapshot.PhysicalCPU > 0 {
+		physical.CPU = int(snapshot.PhysicalCPU)
+	}
+	if snapshot.PhysicalMemoryMB > 0 {
+		physical.MemoryMB = max(0, int(snapshot.PhysicalMemoryMB-guards.MinAvailableMemoryMB))
+	}
+	return physical
+}
+
+// idleCores converts measured CPU idle into whole free cores, truncating so a
+// partially busy core is never advertised as available. This is what makes the
+// fleet a second pilot: it claims only the share the host is demonstrably not
+// using, and drops to zero on a saturated machine.
+func idleCores(snapshot macos.Snapshot) int {
+	idle := snapshot.CPUidlePercent
+	if idle <= 0 {
+		return 0
+	}
+	if idle > 100 {
+		idle = 100
+	}
+	return int(float64(snapshot.PhysicalCPU) * idle / 100)
 }

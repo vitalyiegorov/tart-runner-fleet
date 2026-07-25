@@ -166,12 +166,12 @@ func TestHostObservationCapsMemoryAndRejectsInvalidFreshness(t *testing.T) {
 	now := time.Now().UTC()
 	snapshot := healthySnapshot(now)
 	snapshot.AvailableMemoryMB = 99_999
-	got := hostObservation(snapshot, domain.Resources{CPU: 8, MemoryMB: 16_000, Slots: 4}, macos.Guardrails{})
+	got := hostObservation(snapshot, domain.Resources{CPU: 8, MemoryMB: 16_000, Slots: 4}, macos.Guardrails{}, false)
 	if got.Value.Available.MemoryMB != 16_000 {
 		t.Fatalf("available memory = %d", got.Value.Available.MemoryMB)
 	}
 	snapshot.Freshness = "bad"
-	if got := hostObservation(snapshot, domain.Resources{}, macos.Guardrails{}); got.State != domain.ObservationUnavailable {
+	if got := hostObservation(snapshot, domain.Resources{}, macos.Guardrails{}, false); got.State != domain.ObservationUnavailable {
 		t.Fatalf("invalid freshness = %#v", got)
 	}
 }

@@ -38,7 +38,8 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 	return scheduler.Config{LinuxCapacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
 		FairnessAge: cfg.ReservationAge, AssignedTimeout: cfg.Timeouts.Assigned, RepoCaps: caps, RepoSchedulingClasses: classes, Profiles: profiles,
 		MacOSExclusive:         cfg.MacOS.AdmissionPolicy == config.MacOSAdmissionExclusive,
-		MixedPlatformAdmission: cfg.MacOS.MixedPlatformAdmission}
+		MixedPlatformAdmission: cfg.MacOS.MixedPlatformAdmission,
+		ElasticHostEnvelope:    cfg.Guards.ElasticHostEnvelope}
 }
 
 // ValidateBindings runs the exact scheduler-config and binding construction the

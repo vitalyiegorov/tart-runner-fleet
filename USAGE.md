@@ -66,6 +66,34 @@ exhausts the configured CPU envelope and consequently runs alone. Values come
 from `fleet.json`, so treat the table as the example contract rather than a
 hidden default.
 
+### Second-pilot mode
+
+By default the envelope above is a static configured vector, which suits a
+dedicated CI host. On a Mac that also serves an interactive tenant it cannot
+adapt: host CPU load never narrows it, and an idle machine offers no more than a
+busy one.
+
+Set `"elasticHostEnvelope": true` in `fleet.json` to size the fleet against the
+machine it observes instead. Admission then takes the minimum of three bounds:
+
+- `maxLinuxCpu` / `maxLinuxMemoryMb` as a **Linux-only** cap. In this mode a
+  macOS VM no longer spends the Linux budget, so re-derive both values from the
+  physical machine rather than reusing a number hand-tuned as a shared total.
+- the **observed physical host** (`hw.ncpu`, `hw.memsize` less
+  `minAvailableMemoryMb`), charged for every live VM on either platform, so
+  aggregate reservations never exceed the real machine.
+- the **measured residual**: available CPU is `floor(cores x idle%)` and memory
+  is the pressure-derived figure. A saturated host advertises no free cores, so
+  the fleet waits for its share instead of competing for it.
+
+Physical facts the probe cannot read are reported as unobserved and impose no
+bound, falling back to the configured envelope rather than closing admission. All
+pressure guardrails, exact vectors, slot ceilings, repository caps, profile
+`maxActive`, and aging guarantees apply unchanged; the flag only changes how wide
+the envelope is. It ships off, and enabling it on a host is an operational action
+with the usual observe-then-promote evidence. See
+[`ADR 0018`](docs/adr/0018-second-pilot-elastic-host-envelope.md).
+
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
 it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
 experiment that must fill one macOS profile cohort without admitting new Linux

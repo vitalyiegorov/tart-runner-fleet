@@ -29,7 +29,15 @@ type Snapshot struct {
 	SwapOuts          int64
 	CPUidlePercent    float64
 	LoadAverage       float64
-	Cause             error
+	// PhysicalCPU and PhysicalMemoryMB are the machine's real totals, used to
+	// bound aggregate fleet reservations by the host that actually exists rather
+	// than by a configured constant. Zero means the fact could not be read and
+	// consumers must fall back to configuration: these are advisory, so an
+	// unreadable total never degrades the observation and never masquerades as a
+	// measurement of a zero-resource machine.
+	PhysicalCPU      int64
+	PhysicalMemoryMB int64
+	Cause            error
 }
 
 type CommandRunner interface {
@@ -116,6 +124,8 @@ func (p *Probe) Snapshot(ctx context.Context) Snapshot {
 		SwapUsedMB:        int64(p.advisory(ctx, hasPrior, float64(p.last.SwapUsedMB), permissiveSwapUsedMB, parseSwapFloat, "sysctl", "-n", "vm.swapusage")),
 		CPUidlePercent:    p.advisory(ctx, hasPrior, p.last.CPUidlePercent, permissiveCPUidlePercent, parseCPU, "top", "-l", "1", "-n", "0"),
 		LoadAverage:       p.advisory(ctx, hasPrior, p.last.LoadAverage, permissiveLoadAverage, parseLoad, "sysctl", "-n", "vm.loadavg"),
+		PhysicalCPU:       p.physical(ctx, p.last.PhysicalCPU, "hw.ncpu"),
+		PhysicalMemoryMB:  p.physicalMemoryMB(ctx),
 	}
 	p.last = snapshot
 	return snapshot
@@ -134,6 +144,36 @@ func (p *Probe) advisory(ctx context.Context, hasPrior bool, lastKnown, permissi
 		return lastKnown
 	}
 	return permissive
+}
+
+// physical reads one immutable positive machine total. A read or parse failure
+// yields the last good reading and then zero, which consumers interpret as
+// not-observed. It never fails the observation: the fleet must still schedule
+// inside its configured envelope when a physical fact is unreadable.
+func (p *Probe) physical(ctx context.Context, lastKnown int64, name string) int64 {
+	if output, err := p.run(ctx, "sysctl", "-n", name); err == nil {
+		if value, parseErr := parsePositiveInt(string(output)); parseErr == nil {
+			return value
+		}
+	}
+	return lastKnown
+}
+
+// physicalMemoryMB converts hw.memsize to MiB, preserving not-observed as zero.
+func (p *Probe) physicalMemoryMB(ctx context.Context) int64 {
+	bytes := p.physical(ctx, p.last.PhysicalMemoryMB*1048576, "hw.memsize")
+	return bytes / 1048576
+}
+
+func parsePositiveInt(value string) (int64, error) {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, errors.New("value is not an integer")
+	}
+	if parsed <= 0 {
+		return 0, errors.New("value is not positive")
+	}
+	return parsed, nil
 }
 
 func parseSwapFloat(value string) (float64, error) {
@@ -239,14 +279,7 @@ func parseMemorystatusLevel(value string) (int64, error) {
 }
 
 func parseMemsizeBytes(value string) (int64, error) {
-	memsize, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-	if err != nil {
-		return 0, errors.New("physical memory size is not an integer")
-	}
-	if memsize <= 0 {
-		return 0, errors.New("physical memory size is not positive")
-	}
-	return memsize, nil
+	return parsePositiveInt(value)
 }
 
 func parseDisk(value string) (int64, error) {
