@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted
+Accepted. Bounded by [ADR 0020](0020-diagnosable-drain-failures.md), which
+escalates past 720 attempts into a published dead letter, and completed by
+[ADR 0021](0021-dischargeable-dead-letters.md), which makes such a dead letter
+parked rather than busy and gives an operator a guarded way to discharge it.
+Neither shortens a retry: a refusal that a running job can still explain is still
+retried indefinitely.
 
 ## Context
 

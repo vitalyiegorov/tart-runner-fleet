@@ -103,6 +103,7 @@ type Snapshot struct {
 	OperationRetries   int
 	DeadOperations     int
 	OperationFailures  []OperationFailure
+	DeadLetters        []DeadLetter
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
@@ -136,6 +137,7 @@ type Health struct {
 	operationRetries   int
 	deadOperations     int
 	operationFailures  []OperationFailure
+	deadLetters        []DeadLetter
 	hostPressure       HostPressureMetric
 	revision           uint64
 }
@@ -322,6 +324,53 @@ func (h *Health) SetOperationFailures(failures []OperationFailure) error {
 	return nil
 }
 
+// DeadLetter is the identified view of one parked durable operation. It carries
+// the identity the aggregate withholds, because an operator cannot discharge a
+// count.
+type DeadLetter struct {
+	OperationID string
+	Kind        string
+	Code        string
+	ResourceID  string
+	Attempts    int
+	Parked      bool
+}
+
+// maxDeadLetters bounds the published document. Dead-lettering takes 720 failed
+// attempts, so a fleet with more parked operations than this has a systemic fault
+// that the failure aggregate and the degraded observation already report.
+const maxDeadLetters = 32
+
+// boundedResourceID is the grammar a published resource identity must satisfy. It
+// admits exactly the controller's own VM and operation identifiers, which keeps
+// any future producer from routing arbitrary text through the operator API.
+var boundedResourceID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
+
+// SetDeadLetters publishes the parked operations an operator may discharge. An
+// over-long or ungrammatical set is rejected outright rather than truncated, so a
+// rejected observation can never masquerade as "nothing is parked" — the reading
+// that would silently re-enable automatic updates on a fleet that is not parked
+// at all.
+func (h *Health) SetDeadLetters(letters []DeadLetter) error {
+	if len(letters) > maxDeadLetters {
+		return errInvalidMetric
+	}
+	recorded := make([]DeadLetter, 0, len(letters))
+	for _, letter := range letters {
+		if letter.Attempts < 0 || !boundedResourceID.MatchString(letter.OperationID) ||
+			!boundedResourceID.MatchString(letter.ResourceID) ||
+			!boundedFailureToken.MatchString(letter.Kind) || !boundedFailureToken.MatchString(letter.Code) {
+			return errInvalidMetric
+		}
+		recorded = append(recorded, letter)
+	}
+	h.mu.Lock()
+	h.revision++
+	h.deadLetters = recorded
+	h.mu.Unlock()
+	return nil
+}
+
 func (h *Health) SetOperations(retries, dead int) error {
 	if retries < 0 || dead < 0 {
 		return errInvalidMetric
@@ -377,6 +426,7 @@ func (h *Health) Snapshot() Snapshot {
 		Mode: h.mode, Queues: cloneMap(h.queues), Instances: cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
+		DeadLetters:  append([]DeadLetter(nil), h.deadLetters...),
 		HostPressure: h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }

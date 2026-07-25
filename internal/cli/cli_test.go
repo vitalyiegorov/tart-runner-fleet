@@ -31,6 +31,9 @@ type fakeClient struct {
 	metrics                       string
 	err                           error
 	liveErr, readyErr, metricsErr error
+	discharge                     adminapi.DischargeResult
+	dischargeErr                  error
+	discharged                    *adminapi.DischargeRequest
 }
 
 func (f fakeClient) Status(context.Context) (adminapi.StatusEnvelope, error) {
@@ -44,6 +47,12 @@ func (f fakeClient) Probe(_ context.Context, ready bool) (adminapi.Check, error)
 		return f.ready, f.readyErr
 	}
 	return f.live, f.liveErr
+}
+func (f fakeClient) Discharge(_ context.Context, request adminapi.DischargeRequest) (adminapi.DischargeResult, error) {
+	if f.discharged != nil {
+		*f.discharged = request
+	}
+	return f.discharge, f.dischargeErr
 }
 func (f fakeClient) Metrics(context.Context) (string, error) {
 	if f.err != nil {

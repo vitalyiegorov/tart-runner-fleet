@@ -21,6 +21,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/discharge"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -37,6 +38,7 @@ type runtimeStore interface {
 	DemandCursor(context.Context, int64) (int64, error)
 	OperationCounts(context.Context) (int, int, error)
 	OperationFailures(context.Context) ([]operations.OperationFailure, error)
+	operations.DeadLetterStore
 	Close() error
 }
 
@@ -240,6 +242,7 @@ type dependencies struct {
 	adminListen     func(string) (net.Listener, error)
 	cursor          func(context.Context, runtimeStore, int64) (int64, error)
 	newVM           func(runtimeStore, config.Config, lifecycle.DrainControl) lifecycle.VMControl
+	newReaper       func(runtimeStore, config.Config) discharge.VM
 	readiness       func(config.Config) lifecycle.Readiness
 	bootstrap       func(config.Config) lifecycle.Bootstrapper
 	now             func() time.Time
@@ -313,6 +316,12 @@ func defaultDependencies() dependencies {
 				MacOSVMPrefixes:      []string{"trf-" + strings.ToLower(cfg.MacOS.Builder.ID) + "-", "trf-" + strings.ToLower(cfg.MacOS.Maestro.ID) + "-"},
 				MacOSRootDiskOptions: cfg.MacOS.RootDiskOptions, MacOSSharedDirectoryPath: cfg.MacOS.SharedDirectoryPath,
 				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization}
+		},
+		// newReaper builds the discharge path's own Tart port. It deliberately omits
+		// Confirmation: Reap does not consult GitHub runner evidence, because the
+		// case it exists for is a registration that can never be confirmed released.
+		newReaper: func(store runtimeStore, cfg config.Config) discharge.VM {
+			return &tart.Adapter{Ownership: store, CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot}
 		},
 		readiness: func(cfg config.Config) lifecycle.Readiness {
 			return tartReadiness{Runner: tart.ExecRunner{}, Timeout: cfg.Timeouts.Boot,
@@ -410,7 +419,14 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		return fmt.Errorf("listen health: %w", err)
 	}
 	defer func() { _ = listener.Close() }()
-	adminServer, _ := telemetry.NewServer(health, serverConfig)
+	// Only the private socket server carries the mutator, so the loopback health
+	// listener has no mutating route at all. Authority gating is the daemon's, not
+	// the CLI's: a direct socket caller must meet the same bar.
+	adminConfig := serverConfig
+	adminConfig.Mutator = discharge.Service{Store: store, VM: d.newReaper(store, cfg),
+		Authority: opts.Mode == reconcile.Authority, Now: d.now,
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+	adminServer, _ := telemetry.NewServer(health, adminConfig)
 	adminListener, err := d.adminListen(opts.AdminSocket)
 	if err != nil {
 		return fmt.Errorf("listen admin: %w", err)
@@ -537,7 +553,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
-		operationFailures: store.OperationFailures}
+		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1108,6 +1124,7 @@ type engineTicker struct {
 	profiles          []string
 	operationCounts   func(context.Context) (int, int, error)
 	operationFailures func(context.Context) ([]operations.OperationFailure, error)
+	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
 }
 
 func (e engineTicker) Tick(ctx context.Context) error {
@@ -1126,13 +1143,17 @@ func (e engineTicker) Tick(ctx context.Context) error {
 		if e.operationCounts != nil {
 			retrying, dead, countErr := e.operationCounts(ctx)
 			failures, failureErr := e.operationFailureMetrics(ctx)
-			if countErr != nil || failureErr != nil {
+			letters, letterErr := e.deadLetterMetrics(ctx, result.Instances)
+			if countErr != nil || failureErr != nil || letterErr != nil {
 				// Rule 4: an unreadable aggregate degrades the observation. It never
-				// publishes an empty failure set, which would read as a healed fleet.
+				// publishes an empty failure set, which would read as a healed fleet, and
+				// never an empty dead-letter set, which would read as "nothing is parked"
+				// and wrongly release the update quiescence gate.
 				_ = e.health.RecordObservation("operations", telemetry.ObservationUnavailable)
 			} else {
 				_ = e.health.SetOperations(retrying, dead)
 				_ = e.health.SetOperationFailures(failures)
+				_ = e.health.SetDeadLetters(letters)
 				_ = e.health.RecordObservation("operations", telemetry.ObservationFresh)
 			}
 		}
@@ -1156,6 +1177,40 @@ func (e engineTicker) operationFailureMetrics(ctx context.Context) ([]telemetry.
 			Count: failure.Count, Attempts: failure.Attempts})
 	}
 	return failures, nil
+}
+
+// deadLetterMetrics identifies the parked operations from this tick's own
+// inventory. Parked means two things at once, and only this seam can see both:
+// the durable side proves no operation for the resource is pending or claimed,
+// and the inventory side proves the owning VM is observed STOPPED.
+//
+// Stopped is required rather than merely "not running". An unknown power state is
+// never treated as parked, so an instance the fleet cannot see clearly keeps
+// deferring release updates, and a resource with no live instance row at all is
+// not parked either — there is nothing left for an operator to reclaim, and
+// counting it would let the quiescence gate discount capacity that is still real.
+func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.Instance) ([]telemetry.DeadLetter, error) {
+	if e.deadLetters == nil {
+		return nil, nil
+	}
+	durable, err := e.deadLetters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stopped := make(map[string]struct{}, len(instances))
+	for _, instance := range instances {
+		if instance.Live() && instance.Power == domain.InstancePowerStopped {
+			stopped[instance.ID] = struct{}{}
+		}
+	}
+	letters := make([]telemetry.DeadLetter, 0, len(durable))
+	for _, letter := range durable {
+		_, idle := stopped[letter.ResourceID]
+		letters = append(letters, telemetry.DeadLetter{OperationID: letter.OperationID, Kind: letter.Kind,
+			Code: letter.Code, ResourceID: letter.ResourceID, Attempts: letter.Attempts,
+			Parked: idle && !letter.ResourceProgressing})
+	}
+	return letters, nil
 }
 
 func (e engineTicker) recordMetrics(result app.TickResult) {

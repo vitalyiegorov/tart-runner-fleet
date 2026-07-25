@@ -44,6 +44,7 @@ type apiClient interface {
 	Status(context.Context) (adminapi.StatusEnvelope, error)
 	Probe(context.Context, bool) (adminapi.Check, error)
 	Metrics(context.Context) (string, error)
+	Discharge(context.Context, adminapi.DischargeRequest) (adminapi.DischargeResult, error)
 }
 
 type dependencies struct {
@@ -148,16 +149,95 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		return runUpdate(ctx, args[1:], stdout, stderr, deps)
 	case "validate-config":
 		return runConfig(append([]string{"validate"}, args[1:]...), stdout, stderr)
-	case "status", "queues", "instances", "operations", "observations", "health", "doctor", "metrics":
-		remoteArgs := make([]string, 0, len(connectionArgs)+len(args)-1)
-		remoteArgs = append(remoteArgs, connectionArgs...)
-		remoteArgs = append(remoteArgs, args[1:]...)
-		return runRemote(ctx, args[0], remoteArgs, stdout, stderr, deps)
+	case "operations":
+		// `operations` stays the read-only view; only the explicit `discharge`
+		// subcommand mutates, so the guarded path can never be reached by a typo in
+		// an observation command.
+		if len(args) > 1 && args[1] == "discharge" {
+			return runDischarge(ctx, connectionArgs, args[2:], stdout, stderr, deps)
+		}
+		return runRemote(ctx, args[0], appendConnectionArgs(connectionArgs, args[1:]), stdout, stderr, deps)
+	case "status", "queues", "instances", "observations", "health", "doctor", "metrics":
+		return runRemote(ctx, args[0], appendConnectionArgs(connectionArgs, args[1:]), stdout, stderr, deps)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		writeHelp(stderr)
 		return exitUsage
 	}
+}
+
+func appendConnectionArgs(connectionArgs, args []string) []string {
+	remoteArgs := make([]string, 0, len(connectionArgs)+len(args))
+	remoteArgs = append(remoteArgs, connectionArgs...)
+	return append(remoteArgs, args...)
+}
+
+// runDischarge is the only mutating operator command. It mirrors the guarded
+// convention of `scale-sets provision`: an exact --confirm token, a non-empty
+// --reason, and a fail-closed refusal. The daemon re-checks every guard, so this
+// is defence in depth and not the safety boundary.
+//
+// --reap-instance is separate and additive because it is the destructive half: it
+// retires the phantom's durable row and then removes its stopped VM, in that
+// order. The reverse order would leave a live row owning an absent VM, which turns
+// the whole instance observation Unavailable and blocks planning host-wide with no
+// VM left to prove anything (see docs/OPERATIONS.md).
+func runDischarge(ctx context.Context, connectionArgs, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	flags := flag.NewFlagSet("fleet operations discharge", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	operation := flags.String("operation", "", "dead-lettered operation ID from `fleet operations`")
+	instance := flags.String("instance", "", "owning instance ID the operation names")
+	reap := flags.Bool("reap-instance", false, "also retire the instance row and delete its stopped VM")
+	confirm := flags.String("confirm", "", "exact mutation confirmation")
+	reason := flags.String("reason", "", "operator reason recorded in the audit log")
+	opts, code := parseRemoteInto(flags, append(connectionArgs, args...), stderr)
+	if code != exitSuccess {
+		return code
+	}
+	if *operation == "" || *instance == "" {
+		fmt.Fprintln(stderr, "usage: fleet operations discharge --operation ID --instance ID [--reap-instance] --confirm "+
+			adminapi.DischargeConfirmation+" --reason \"text\"")
+		return exitUsage
+	}
+	if *confirm != adminapi.DischargeConfirmation || strings.TrimSpace(*reason) == "" {
+		fmt.Fprintln(stderr, "unsafe discharge: require --confirm "+adminapi.DischargeConfirmation+" and a non-empty --reason")
+		return exitUnsafe
+	}
+	client, err := deps.newClient(opts.endpoint, opts.timeout)
+	if err != nil {
+		fmt.Fprintf(stderr, "connect: %v\n", err)
+		return exitUnavailable
+	}
+	result, err := client.Discharge(ctx, adminapi.DischargeRequest{OperationID: *operation, InstanceID: *instance,
+		ReapInstance: *reap, Confirm: *confirm, Reason: *reason})
+	if err != nil {
+		return dischargeError(stderr, err)
+	}
+	if opts.output == "json" {
+		if err := writeJSON(stdout, result); err != nil {
+			return exitFailure
+		}
+		return exitSuccess
+	}
+	fmt.Fprintf(stdout, "discharged %s\ninstance %s\noperation discharged %t\ninstance reaped %t\nvm deleted %t\n",
+		result.OperationID, result.InstanceID, result.OperationDischarged, result.InstanceReaped, result.VMDeleted)
+	return exitSuccess
+}
+
+// dischargeError reports the daemon's own bounded refusal code. A refused
+// mutation is exit 6 (unsafe) so a script can never read it as success, except an
+// unknown operation, which is exit 3 (not-found) because the operator simply named
+// something that is not there.
+func dischargeError(stderr io.Writer, err error) int {
+	var refusal adminapi.Refusal
+	if errors.As(err, &refusal) {
+		fmt.Fprintf(stderr, "discharge refused: %s\n", refusal.Code)
+		if refusal.Code == adminapi.RefusalUnknownOperation {
+			return exitNotFound
+		}
+		return exitUnsafe
+	}
+	return remoteError(stderr, err)
 }
 
 type execCommand struct{}
@@ -408,6 +488,13 @@ type remoteOptions struct {
 func parseRemote(command string, args []string, stderr io.Writer) (remoteOptions, int) {
 	flags := flag.NewFlagSet("fleet "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	return parseRemoteInto(flags, args, stderr)
+}
+
+// parseRemoteInto adds the shared connection and output flags to a caller's flag
+// set, so a guarded command accepts exactly the same --endpoint/--timeout/--output
+// grammar as an observation command without restating it.
+func parseRemoteInto(flags *flag.FlagSet, args []string, stderr io.Writer) (remoteOptions, int) {
 	opts := remoteOptions{}
 	flags.StringVar(&opts.endpoint, "endpoint", adminapi.DefaultEndpoint(), "local unix:// or loopback http:// endpoint")
 	flags.DurationVar(&opts.timeout, "timeout", 5*time.Second, "request timeout (maximum 30s)")
@@ -653,6 +740,14 @@ GUARDED BOOTSTRAP
   fleet scale-sets provision --config path --apply --write \
     --confirm provision-scale-sets --reason "operator reason"
 
+GUARDED DEAD-LETTER DISCHARGE
+  fleet operations discharge --operation op-ID --instance trf-ID \
+    --confirm discharge-dead-letter --reason "operator reason"
+  fleet operations discharge --operation op-ID --instance trf-ID --reap-instance \
+    --confirm discharge-dead-letter --reason "operator reason"
+  --reap-instance also retires the instance row and deletes its stopped VM. It
+  is refused while the VM is running. See docs/OPERATIONS.md.
+
 GUARDED RELEASE UPDATES
   fleet update adopt --release-dir /absolute/release --mode authority \
     --confirm adopt-current-generation
@@ -668,6 +763,6 @@ CONNECTION
 EXIT CODES
   0 success  1 failure  2 usage  3 not-found  4 unavailable  5 degraded  6 unsafe
 
-Mutation commands are intentionally absent while authority mode is disabled.
+Mutations are refused unless the daemon runs in authority mode.
 `)
 }

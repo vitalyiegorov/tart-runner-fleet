@@ -38,6 +38,7 @@ all changes as safety critical.
 - `internal/adminapi`: versioned read-only DTOs, Unix socket, and bounded client.
 - `internal/adapters`: GitHub, SQLite, Tart, and host implementations.
 - `internal/operations`: durable operations, leases, retries, and workers.
+- `internal/discharge`: the one guarded operator mutation and its ordering rules.
 - `internal/telemetry`: coherent status, health, readiness, and metrics.
 - `tests/{contract,integration,replay,chaos}`: cross-package safety evidence.
 - `docs/adr`: decisions that must be updated when architecture changes.
@@ -86,7 +87,8 @@ production cutover from unit or integration evidence.
 
 ## Prohibited actions
 
-- No direct modification of `fleet.db` or manual deletion of state rows.
+- No direct modification of `fleet.db` or manual deletion of state rows. A parked
+  dead letter is discharged through `fleet operations discharge`, never by hand.
 - No VM deletion without fresh ownership, runner, job, Tart, and host evidence.
 - No printing environment variables, Keychain values, JIT configuration, or
   operation payloads.

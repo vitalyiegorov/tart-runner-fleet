@@ -412,15 +412,28 @@ func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) err
 				Count int `json:"count"`
 			} `json:"instances"`
 			Operations struct {
-				Retrying int `json:"retrying"`
-				Dead     int `json:"dead"`
+				Retrying    int `json:"retrying"`
+				Dead        int `json:"dead"`
+				DeadLetters []struct {
+					ResourceID string `json:"resourceId"`
+					Parked     bool   `json:"parked"`
+				} `json:"deadLetters"`
 			} `json:"operations"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(body, &status) != nil || status.Data.ControllerVersion != current.Version || status.Data.ControllerMode != current.Mode {
 		return ErrInvalidGeneration
 	}
-	if status.Data.Operations.Retrying != 0 || status.Data.Operations.Dead != 0 {
+	// Only retrying operations are in flight. A dead letter is parked awaiting an
+	// operator: it holds no lease, `Claim` cannot select it, and a generation swap
+	// cannot interrupt it. Counting it as busy is what deadlocked production on
+	// 2026-07-25 — an un-completable deregister kept the fleet non-quiescent, so
+	// the updater refused for hours to install the release that bounded it, and a
+	// human had to swap the canonical plist by hand. Any permanently stuck cleanup
+	// would otherwise disable automatic updates forever. This does not shorten a
+	// retry: ADR 0007's unbounded cleanup and ADR 0020's 720-attempt escalation
+	// ceiling are untouched, and `retrying != 0` still defers activation.
+	if status.Data.Operations.Retrying != 0 {
 		return ErrBusy
 	}
 	for _, queue := range status.Data.Queues {
@@ -428,10 +441,27 @@ func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) err
 			return ErrBusy
 		}
 	}
+	// The same trap applies to the phantom's durable instance row, which kept
+	// publishing one maestro instance. An instance the daemon reports as parked —
+	// its only outstanding work is a dead letter and its VM is observed stopped —
+	// is not capacity a release can interrupt. Everything else, above all a
+	// running VM, still defers activation exactly as ADR 0011 requires. Parked
+	// resources are deduplicated because one instance can accumulate several dead
+	// letters, and the comparison is `> 0` so an inconsistent daemon reporting
+	// more parked resources than live instances cannot invent a new permanent
+	// block — the liveness bug this function exists to stop having.
+	live := 0
 	for _, instance := range status.Data.Instances {
-		if instance.Count != 0 {
-			return ErrBusy
+		live += instance.Count
+	}
+	parked := make(map[string]struct{}, len(status.Data.Operations.DeadLetters))
+	for _, letter := range status.Data.Operations.DeadLetters {
+		if letter.Parked && letter.ResourceID != "" {
+			parked[letter.ResourceID] = struct{}{}
 		}
+	}
+	if live-len(parked) > 0 {
+		return ErrBusy
 	}
 	return nil
 }

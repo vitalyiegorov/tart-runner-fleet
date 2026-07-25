@@ -62,6 +62,10 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	for _, failure := range status.Data.Operations.Failures {
 		fmt.Fprintf(output, "stuck: %s %s  count %d  attempts %d\n", failure.Kind, failure.Code, failure.Count, failure.Attempts)
 	}
+	for _, letter := range status.Data.Operations.DeadLetters {
+		fmt.Fprintf(output, "parked %t: %s on %s  %s  attempts %d\n", letter.Parked, letter.OperationID,
+			letter.ResourceID, letter.Code, letter.Attempts)
+	}
 	fmt.Fprintln(output, "\nOBSERVATIONS")
 	renderObservations(output, status.Data.Observations)
 }
@@ -84,6 +88,21 @@ func renderOperations(output io.Writer, summary adminapi.OperationSummary) {
 	fmt.Fprint(output, "\nKIND\tCODE\tCOUNT\tATTEMPTS\n")
 	for _, failure := range summary.Failures {
 		fmt.Fprintf(output, "%s\t%s\t%d\t%d\n", failure.Kind, failure.Code, failure.Count, failure.Attempts)
+	}
+	renderDeadLetters(output, summary.DeadLetters)
+}
+
+// renderDeadLetters names each parked operation with the identity
+// `fleet operations discharge` needs. Without it an operator can see that
+// something is wedged but has nothing to act on.
+func renderDeadLetters(output io.Writer, letters []adminapi.DeadLetter) {
+	if len(letters) == 0 {
+		return
+	}
+	fmt.Fprint(output, "\nOPERATION\tINSTANCE\tCODE\tATTEMPTS\tPARKED\n")
+	for _, letter := range letters {
+		fmt.Fprintf(output, "%s\t%s\t%s\t%d\t%t\n", letter.OperationID, letter.ResourceID,
+			letter.Code, letter.Attempts, letter.Parked)
 	}
 }
 

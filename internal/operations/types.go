@@ -58,6 +58,12 @@ const (
 	OperationClaimed   OperationStatus = "claimed"
 	OperationCompleted OperationStatus = "completed"
 	OperationDead      OperationStatus = "dead"
+	// OperationDischarged is terminal-by-operator: the effect never happened and
+	// never will, and a human accepted that. It is deliberately not "completed",
+	// which would tell dependents a prerequisite succeeded, and no longer "dead",
+	// which would keep the resource parked forever. Nothing claims it: `Claim`
+	// selects only pending and lease-expired claimed rows.
+	OperationDischarged OperationStatus = "discharged"
 )
 
 type Ownership struct {

@@ -54,7 +54,9 @@ previous snapshot rather than emitting repeated healthy messages. Track:
   `deregister:runner_forbidden` or `deregister:runner_scope_unresolved` is a
   fleet-side permission or configuration fault. Owned runner cleanup retries
   indefinitely by design (ADR 0007), so a high `attempts` value is a signal to
-  read the code, not evidence that retrying is broken;
+  read the code, not evidence that retrying is broken. Once an operation is dead,
+  `operations.deadLetters` names its ID, owning instance, closed failure code,
+  attempt count, and whether the resource is parked;
 - CPU, memory, swap, disk floor, and Linux/macOS exclusivity;
 - updater generation, last exit, and whether cleanup reached zero.
 
@@ -89,6 +91,14 @@ tail -n 100 "$STATE/update.stderr.log"
 ```
 
 Do not force an update through busy, checksum, mode, or readiness failures.
+
+`autoupdate: fleet is not quiescent` on every tick for hours is a defect symptom,
+not patience. Read `operations.deadLetters` from the status document: a parked dead
+letter no longer defers a release, so a persistent stall means either real work is
+running, or the daemon cannot prove a row is parked. If a cleanup has genuinely
+stopped retrying and can never complete, discharge it with the guarded command in
+[`OPERATIONS.md`](OPERATIONS.md#dead-letters) — never by swapping the plist or
+editing `fleet.db`.
 
 ## Handle a reproducible defect
 
