@@ -53,13 +53,32 @@ func TestControlRouterGeneratesJITDirectlyForPreassignedDemand(t *testing.T) {
 	}
 }
 
+// runnerJobQuery records the exact key RunnerActiveJob was asked for, so tests
+// can pin that busy evidence is scoped to the runner's own scale-set binding.
+type runnerJobQuery struct {
+	scaleSetID int64
+	runner     string
+}
+
 type fakeDemandReader struct {
-	record operations.DemandRecord
-	err    error
+	record    operations.DemandRecord
+	err       error
+	runnerJob bool
+	runnerErr error
+	// runnerQuery, when set, captures the arguments of the last RunnerActiveJob
+	// call. It is a pointer so the fake keeps value semantics.
+	runnerQuery *runnerJobQuery
 }
 
 func (f fakeDemandReader) DemandRecord(context.Context, int64, int64) (operations.DemandRecord, error) {
 	return f.record, f.err
+}
+
+func (f fakeDemandReader) RunnerActiveJob(_ context.Context, scaleSetID int64, runner string) (bool, error) {
+	if f.runnerQuery != nil {
+		*f.runnerQuery = runnerJobQuery{scaleSetID: scaleSetID, runner: runner}
+	}
+	return f.runnerJob, f.runnerErr
 }
 
 func TestControlRouterResolvesRegistrationAndFreshDrainState(t *testing.T) {

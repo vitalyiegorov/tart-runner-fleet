@@ -110,6 +110,13 @@ type DrainControl interface {
 	// lingering-runner recovery drain aborts the moment it becomes true: the
 	// idle runner picked up real work after the planning observation.
 	JobActive(context.Context, operations.Instance) (bool, error)
+	// RunnerBusy reports whether fresh evidence shows a workflow job executing on
+	// this instance's RUNNER, whichever demand GitHub brokered to it. It is
+	// deliberately not keyed by the demand the VM was spawned for: scale-set
+	// brokering is decoupled from the fleet's demand-keyed spawning, so a runner
+	// spawned for demand X may be executing a different matching job Y, and
+	// "demand X completed" then says nothing about whether the runner is idle.
+	RunnerBusy(context.Context, operations.Instance) (bool, error)
 }
 
 // ProvisionExecutor is a restartable state machine. One durable outbox
@@ -412,12 +419,35 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 					return e.abort(ctx, instance)
 				}
 			default:
+				// An event drain is issued when the demand this VM was spawned for
+				// reaches JobCompleted. Because GitHub's scale-set brokering is
+				// decoupled from the fleet's demand-keyed spawning, that premise does
+				// NOT imply the runner is finished: GitHub may have handed this runner a
+				// different matching job (2026-07-25 incident: a builder spawned for an
+				// iOS App Store submission was given the Android job instead, and the
+				// iOS completion then issued an event drain while the Android build was
+				// still running). Re-verify against runner-scoped evidence before any
+				// destructive step and abort when a job is executing; the guarded
+				// lingering-runner recovery reclaims the instance once its runner is
+				// genuinely idle.
+				if proceed, result := e.verifyRunnerIdle(ctx, instance); !proceed {
+					return result
+				}
 				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
 				if guardErr != nil || !safe {
 					return e.fail(ctx, instance, StageGuard)
 				}
 			}
 			if err := e.Control.Deregister(ctx, instance); err != nil {
+				// GitHub refuses to deregister a runner that is executing a job. That
+				// refusal is not a transient fault to retry: paired with fresh busy
+				// evidence it disproves the drain's premise, so abort exactly as the
+				// recovery phases do. Without busy evidence the refusal stays a
+				// retryable deregister-stage failure. This is what bounds the incident's
+				// 60+ attempt kill loop for every drain phase, not just the event drain.
+				if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
+					return e.abort(ctx, instance)
+				}
 				return e.fail(ctx, instance, StageDeregister)
 			}
 			if confirmErr := e.waitConfirmed(ctx, instance.ID); confirmErr != nil {
@@ -457,6 +487,23 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 		}
 	}
 	return safeError(StagePersist)
+}
+
+// verifyRunnerIdle re-verifies the premise every drain of a live runner
+// registration shares: no workflow job is executing on the runner itself.
+// proceed=false means Execute must return the accompanying result — an
+// acknowledged abort when fresh evidence shows a job running, or a guard-stage
+// retry when that evidence cannot be read. It stays fail-closed: an unreadable
+// observation neither kills nor aborts on a guess.
+func (e DrainExecutor) verifyRunnerIdle(ctx context.Context, instance operations.Instance) (bool, error) {
+	busy, err := e.Control.RunnerBusy(ctx, instance)
+	if err != nil {
+		return false, e.fail(ctx, instance, StageGuard)
+	}
+	if busy {
+		return false, e.abort(ctx, instance)
+	}
+	return true, nil
 }
 
 // abort cancels a recovery drain whose premise fresh evidence has disproven.
