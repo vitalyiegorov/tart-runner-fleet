@@ -106,6 +106,33 @@ host whose configured envelope was hand-tuned as a shared cross-platform total
 is widening two limits at once, and should re-derive both from the physical
 machine.
 
+## Swap pressure is measured as a rate, not a level
+
+The same "measure the host, do not assume it" principle applies to the swap
+guardrail, which gated admission on `SwapUsedMB` alone. macOS does not eagerly
+reclaim swap, so that level behaves closer to a high-water mark than a current
+pressure reading: once a burst has paged out, it stays high long after the
+pressure ended, and a level-only gate latches the entire fleet off a healthy
+host for as long as the residue persists.
+
+Observed on the production host on 2026-07-25: swap used 2134 MiB against a
+2048 MiB ceiling, so `fleet_host_admission_allowed` was 0 and nineteen jobs
+queued behind it -- while the host was 80% idle with 21 GiB available, memory
+pressure reported 86% free, and a 60-second sample measured *zero* swapouts. The
+machine was not paging at all.
+
+Exceeding the ceiling is now a necessary but insufficient condition: admission is
+refused only when the host is also paging out, derived as the swapout delta
+between consecutive observations. The level remains required, so paging while
+comfortably under the ceiling is treated as the normal virtual-memory behavior it
+is.
+
+This does not weaken the fail-closed contract. A rate needs two samples, so when
+it cannot be established honestly -- no prior observation, a non-advancing clock,
+or a counter that went backwards because the host rebooted -- it is reported as
+unmeasured and the level blocks on its own. An unmeasured rate is never read as a
+quiet host.
+
 ## Rollout
 
 The flag ships off. Enabling it on a host is an operational action requiring the
