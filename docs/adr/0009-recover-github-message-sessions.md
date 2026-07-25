@@ -3,6 +3,8 @@
 ## Status
 
 Accepted. The delivery-only queue-lookahead clauses are superseded by ADR 0013.
+The unconditional release-before-open clause is amended below: release failure
+no longer withholds recreation indefinitely.
 
 ## Context
 
@@ -49,6 +51,48 @@ healthy Tart runners. During a broad network outage, recovery attempts are
 bounded and retain the service loop's retry backoff. If broker-side cleanup
 cannot complete, the source remains unavailable and retries safely rather than
 creating overlapping consumers.
+
+## Amendment: bounded release, terminal classification, and stated reasons
+
+Release-before-open assumed the broker would always accept the release of a
+session it had just refused to serve. It does not. When GitHub invalidates a
+session, the subsequent `DELETE .../sessions/{id}` fails too, so an
+unconditional "release must succeed before open" rule pins that binding to a
+dead handle for the daemon's whole lifetime. One scope lost all ingestion for
+four hours while every other scope stayed fresh, and only a manual daemon
+restart recovered it. A successful release followed by a failed open had the same
+shape: the next attempt tried to release an already-released session, which can
+only fail.
+
+The decision is therefore amended:
+
+- ingest failures are classified terminal-for-this-session or transient. A
+  permanently rejected message-queue token, an unknown session identity, and a
+  scale set acquired by another session are terminal and recreate immediately;
+  rate limits, broker 5xx, secondary limits, and deadlines keep the session;
+- failures that cannot be classified escalate on a bound: after
+  `githubSessionMaxIngestFailures` consecutive failures for that binding, or once
+  `githubSessionFailureWindowSeconds` has elapsed since the first failure of the
+  run, the session is discarded even if the broker refuses to release it.
+  Defaults are 5 failures and 5 minutes, and both bounds are per binding;
+- a session whose release already succeeded is recorded as released, so a
+  retried recovery only opens a replacement and never deletes it twice;
+- a successful poll or a successful replacement clears the accumulator, so a
+  healthy binding never recreates and escalation cannot storm;
+- every ingest failure carries a closed-vocabulary reason (`session_expired`,
+  `session_release_failed`, `session_create_failed`,
+  `recreated_after_failures`, `message_poll_failed`,
+  `queue_observation_failed`, `queue_observation_stale`,
+  `queue_reconcile_failed`). It is published on the binding's observation
+  `Detail` and on the rate-limited component failure log. Concrete broker
+  errors, tokens, JIT configuration, and upstream bodies remain internal.
+
+Cursor semantics are unchanged: a replacement rereads the committed durable
+cursor, so an unacknowledged message is redelivered to the new session exactly
+once and at-least-once delivery survives a recreate. Discarding an unreleasable
+session accepts a bounded risk of one overlapping broker consumer instead of an
+unbounded scope outage; the scheduler still fails closed until the replacement
+completes a successful poll.
 
 One successor per profile remains visible to queue-SLO monitoring instead of
 being hidden behind GitHub's scale-set capacity head of line. Existing

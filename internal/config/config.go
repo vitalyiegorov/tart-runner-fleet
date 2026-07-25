@@ -130,6 +130,28 @@ const (
 	defaultMinCPUIdlePercent     = 5
 )
 
+// SessionRecovery bounds how long one GitHub Actions Scale Set broker session
+// may keep failing ingestion before the controller discards it and creates a
+// replacement, even when the failure cannot be proven terminal. A session
+// GitHub refuses to release would otherwise pin an entire scope's ingestion to
+// a dead handle until an operator restarts the daemon.
+type SessionRecovery struct {
+	// MaxConsecutiveFailures is the number of consecutive ingest failures for
+	// one binding that forces a session recreate.
+	MaxConsecutiveFailures int
+	// FailureWindow is the elapsed time since the first failure of the current
+	// run that forces a session recreate, whichever bound is reached first.
+	FailureWindow time.Duration
+}
+
+const (
+	defaultSessionMaxIngestFailures = 5
+	defaultSessionFailureWindow     = 5 * time.Minute
+	maxSessionMaxIngestFailures     = 100
+	minSessionFailureWindow         = 30 * time.Second
+	maxSessionFailureWindow         = time.Hour
+)
+
 const (
 	ScopeRepository   = "repository"
 	ScopeOrganization = "organization"
@@ -190,14 +212,15 @@ type ScaleSet struct {
 }
 
 type Config struct {
-	PollInterval   time.Duration
-	ReservationAge time.Duration
-	Linux          Linux
-	MacOS          MacOS
-	GitHub         GitHub
-	Timeouts       Timeouts
-	Guards         Guards
-	Targets        []Target
+	PollInterval    time.Duration
+	ReservationAge  time.Duration
+	Linux           Linux
+	MacOS           MacOS
+	GitHub          GitHub
+	Timeouts        Timeouts
+	Guards          Guards
+	SessionRecovery SessionRecovery
+	Targets         []Target
 }
 
 type wireConfig struct {
@@ -221,7 +244,12 @@ type wireConfig struct {
 	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
 	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
 	AssignedTimeoutSeconds    int       `json:"assignedTimeoutSeconds,omitempty"`
-	MacOSBurst                struct {
+	// GitHubSessionMaxIngestFailures and GitHubSessionFailureWindowSeconds are
+	// omitted while they hold the shipped defaults so a rewritten file stays
+	// decodable by older strict releases.
+	GitHubSessionMaxIngestFailures    int `json:"githubSessionMaxIngestFailures,omitempty"`
+	GitHubSessionFailureWindowSeconds int `json:"githubSessionFailureWindowSeconds,omitempty"`
+	MacOSBurst                        struct {
 		Enabled                bool                 `json:"enabled"`
 		AdmissionPolicy        MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
 		MixedPlatformAdmission bool                 `json:"mixedPlatformAdmission,omitempty"`
@@ -261,7 +289,7 @@ func Decode(r io.Reader) (Config, error) {
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
-		Guards: normalizeGuards(w), Targets: normalizeTargets(w.Targets),
+		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), Targets: normalizeTargets(w.Targets),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -303,6 +331,10 @@ func Encode(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	sessionWindowSeconds, err := wholeSeconds("session failure window", cfg.SessionRecovery.FailureWindow)
+	if err != nil {
+		return err
+	}
 
 	wire := wireConfig{
 		BaseVM: cfg.Linux.BaseVM, VMPrefix: cfg.Linux.VMPrefix,
@@ -316,6 +348,13 @@ func Encode(w io.Writer, cfg Config) error {
 		GitHubTimeoutSeconds:      githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
+	}
+	// Only non-default recovery bounds are emitted; see wireConfig.
+	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
+		wire.GitHubSessionMaxIngestFailures = cfg.SessionRecovery.MaxConsecutiveFailures
+	}
+	if cfg.SessionRecovery.FailureWindow != defaultSessionFailureWindow {
+		wire.GitHubSessionFailureWindowSeconds = sessionWindowSeconds
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
@@ -397,6 +436,18 @@ func normalizeGuards(w wireConfig) Guards {
 	return guards
 }
 
+func normalizeSessionRecovery(w wireConfig) SessionRecovery {
+	recovery := SessionRecovery{MaxConsecutiveFailures: w.GitHubSessionMaxIngestFailures,
+		FailureWindow: time.Duration(w.GitHubSessionFailureWindowSeconds) * time.Second}
+	if recovery.MaxConsecutiveFailures == 0 {
+		recovery.MaxConsecutiveFailures = defaultSessionMaxIngestFailures
+	}
+	if recovery.FailureWindow == 0 {
+		recovery.FailureWindow = defaultSessionFailureWindow
+	}
+	return recovery
+}
+
 func normalizeProfiles(in []Profile) []Profile {
 	out := make([]Profile, len(in))
 	for i, p := range in {
@@ -436,6 +487,8 @@ func Default() Config {
 		Guards: Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: defaultMinAvailableMemoryMiB,
 			MaxSwapUsedMiB: defaultMaxSwapUsedMiB, MaxLoadAverage: defaultMaxLoadAverage,
 			MinCPUIdlePercent: defaultMinCPUIdlePercent},
+		SessionRecovery: SessionRecovery{MaxConsecutiveFailures: defaultSessionMaxIngestFailures,
+			FailureWindow: defaultSessionFailureWindow},
 		Targets: []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
 	}
 }
@@ -472,6 +525,12 @@ func (c Config) Validate() error {
 	}
 	if c.Timeouts.Assigned < time.Minute || c.Timeouts.Assigned > time.Hour {
 		return errors.New("assigned timeout must be between 60 and 3600 seconds")
+	}
+	if c.SessionRecovery.MaxConsecutiveFailures < 1 || c.SessionRecovery.MaxConsecutiveFailures > maxSessionMaxIngestFailures {
+		return errors.New("github session max ingest failures must be between 1 and 100")
+	}
+	if c.SessionRecovery.FailureWindow < minSessionFailureWindow || c.SessionRecovery.FailureWindow > maxSessionFailureWindow {
+		return errors.New("github session failure window must be between 30 and 3600 seconds")
 	}
 	if c.Linux.BaseVM == "" || c.Linux.VMPrefix == "" {
 		return errors.New("linux base VM and prefix are required")

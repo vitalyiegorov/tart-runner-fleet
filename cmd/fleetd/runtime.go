@@ -59,13 +59,33 @@ type recoveringScaleSetSource struct {
 	open    scaleSetSourceFactory
 	limiter chan struct{}
 	closed  bool
+	// released records that the broker no longer owns the current session, so a
+	// later replacement must not try to delete it again. Without this, a
+	// successful release followed by a failed open pins the binding to a session
+	// whose second deletion can only fail.
+	released bool
+	policy   githubscaleset.SessionRecoveryPolicy
+	failures githubscaleset.SessionFailureState
+	now      func() time.Time
 }
 
-func newRecoveringScaleSetSource(source scaleSetSource, open scaleSetSourceFactory, limiter chan struct{}) (*recoveringScaleSetSource, error) {
-	if source == nil || open == nil || limiter == nil {
+type recoveringScaleSetConfig struct {
+	source  scaleSetSource
+	open    scaleSetSourceFactory
+	limiter chan struct{}
+	policy  githubscaleset.SessionRecoveryPolicy
+	now     func() time.Time
+}
+
+func newRecoveringScaleSetSource(c recoveringScaleSetConfig) (*recoveringScaleSetSource, error) {
+	if c.source == nil || c.open == nil || c.limiter == nil {
 		return nil, operations.ErrInvalid
 	}
-	return &recoveringScaleSetSource{source: source, open: open, limiter: limiter}, nil
+	if c.now == nil {
+		c.now = time.Now
+	}
+	return &recoveringScaleSetSource{source: c.source, open: c.open, limiter: c.limiter,
+		policy: c.policy, now: c.now}, nil
 }
 
 func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
@@ -84,16 +104,51 @@ func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(conte
 	}
 	err = source.Handle(ctx, commit)
 	release()
-	if err == nil || ctx.Err() != nil {
+	if err == nil {
+		s.clearFailures()
+		return nil
+	}
+	if ctx.Err() != nil {
 		return err
 	}
-	// Return the original bounded failure to the service loop. Recovery is an
-	// internal best effort and its concrete broker errors must not reach logs.
-	_ = s.replace(ctx, source)
-	return err
+	// The concrete broker failure never reaches a log line. It travels wrapped
+	// inside a closed-vocabulary reason so an operator can see why ingestion
+	// failed through the admin API without any upstream text being rendered.
+	decision := s.recordFailure(err)
+	reason := replacementReason(s.replace(ctx, source, decision.Discard), decision.Reason)
+	return &githubscaleset.SessionFailure{Reason: reason, Cause: err}
 }
 
-func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetSource) error {
+// replacementReason keeps the recovery outcome inside the closed vocabulary.
+func replacementReason(err error, classified string) string {
+	switch {
+	case errors.Is(err, errScaleSetClose):
+		return githubscaleset.ReasonSessionReleaseFailed
+	case errors.Is(err, errScaleSetOpen):
+		return githubscaleset.ReasonSessionCreateFailed
+	default:
+		return classified
+	}
+}
+
+func (s *recoveringScaleSetSource) recordFailure(err error) githubscaleset.SessionRecoveryDecision {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	decision := s.policy.OnFailure(s.failures, err, s.now())
+	s.failures = decision.State
+	return decision
+}
+
+func (s *recoveringScaleSetSource) clearFailures() {
+	s.mu.Lock()
+	s.failures = githubscaleset.SessionFailureState{}
+	s.mu.Unlock()
+}
+
+// replace discards the failed session and installs a replacement. discard means
+// the failure is terminal or has exceeded its bounded escalation, so a broker
+// that refuses to release the session must not keep the binding pinned to it.
+func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetSource, discard bool) error {
 	select {
 	case s.limiter <- struct{}{}:
 		defer func() { <-s.limiter }()
@@ -105,17 +160,22 @@ func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetS
 	if s.closed || s.source != failed {
 		return nil
 	}
-	closeCtx, cancel := context.WithTimeout(ctx, scaleSetCloseTimeout)
-	closeErr := failed.Close(closeCtx)
-	cancel()
-	if closeErr != nil {
-		return errScaleSetClose
+	if !s.released {
+		closeCtx, cancel := context.WithTimeout(ctx, scaleSetCloseTimeout)
+		closeErr := failed.Close(closeCtx)
+		cancel()
+		if closeErr != nil && !discard {
+			return errScaleSetClose
+		}
+		s.released = true
 	}
 	replacement, err := s.open(ctx)
 	if err != nil {
-		return errors.New("recreate scale-set session failed")
+		return errScaleSetOpen
 	}
 	s.source = replacement
+	s.released = false
+	s.failures = githubscaleset.SessionFailureState{}
 	return nil
 }
 
@@ -162,7 +222,7 @@ func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
 		return nil
 	}
 	s.closed = true
-	if s.source == nil {
+	if s.source == nil || s.released {
 		return nil
 	}
 	return s.source.Close(ctx)
@@ -210,7 +270,10 @@ const (
 	drainRetryMaximum          = 30 * time.Second
 )
 
-var errScaleSetClose = errors.New("scale-set session cleanup failed")
+var (
+	errScaleSetClose = errors.New("scale-set session cleanup failed")
+	errScaleSetOpen  = errors.New("recreate scale-set session failed")
+)
 
 func defaultDependencies() dependencies {
 	return dependencies{
@@ -413,7 +476,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				if err != nil {
 					return err
 				}
-				source, err := newRecoveringScaleSetSource(initial, openSource, recoveryLimiter)
+				source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial,
+					open: openSource, limiter: recoveryLimiter, now: d.now,
+					policy: githubscaleset.SessionRecoveryPolicy{
+						MaxConsecutiveFailures: cfg.SessionRecovery.MaxConsecutiveFailures,
+						FailureWindow:          cfg.SessionRecovery.FailureWindow}})
 				if err != nil {
 					if initial != nil {
 						_ = initial.Close(ctx)
@@ -913,22 +980,22 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	observation := r.observer.Refresh(ctx, r.previous)
 	if observation.Err != nil {
 		if r.health != nil && r.observation != "" {
-			freshness := telemetry.ObservationUnavailable
+			freshness, detail := telemetry.ObservationUnavailable, githubscaleset.ReasonQueueObservationFailed
 			if observation.Freshness == githubscaleset.Stale {
-				freshness = telemetry.ObservationStale
+				freshness, detail = telemetry.ObservationStale, githubscaleset.ReasonQueueObservationStale
 			}
-			_ = r.health.RecordObservation(r.observation, freshness)
+			_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 		}
 		return false, observation.Err
 	}
 	r.previous = observation.Snapshot
 	changed, err := r.coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
 	if r.health != nil && r.observation != "" {
-		freshness := telemetry.ObservationFresh
+		freshness, detail := telemetry.ObservationFresh, ""
 		if err != nil {
-			freshness = telemetry.ObservationUnavailable
+			freshness, detail = telemetry.ObservationUnavailable, githubscaleset.ReasonQueueReconcileFailed
 		}
-		_ = r.health.RecordObservation(r.observation, freshness)
+		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
 	return changed, err
 }
@@ -984,7 +1051,10 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 		if err != nil {
 			freshness = telemetry.ObservationUnavailable
 		}
-		_ = b.health.RecordObservation(b.observation, freshness)
+		// The detail is closed vocabulary. It explains why one binding's
+		// ingestion failed without exposing a token, a JIT configuration, or an
+		// upstream response body.
+		_ = b.health.RecordObservationDetail(b.observation, freshness, githubscaleset.IngestFailureDetail(err))
 	}
 	return changed, err
 }
@@ -1011,15 +1081,23 @@ func newFailureReporter(w io.Writer, now func() time.Time) *failureReporter {
 		logger: slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))}
 }
 
-func (r *failureReporter) report(component string) {
+func (r *failureReporter) report(component, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	if last, ok := r.last[component]; ok && now.Sub(last) < r.window {
+	// Rate limiting keys on component and reason together. The reason vocabulary
+	// is closed, so cardinality stays bounded while a changed reason — the
+	// signal an operator needs — is never suppressed by an older one.
+	key := component + "\x00" + reason
+	if last, ok := r.last[key]; ok && now.Sub(last) < r.window {
 		return
 	}
-	r.last[component] = now
-	r.logger.Warn("component loop failure", "component", component)
+	r.last[key] = now
+	if reason == "" {
+		r.logger.Warn("component loop failure", "component", component)
+		return
+	}
+	r.logger.Warn("component loop failure", "component", component, "reason", reason)
 }
 
 type engineTicker struct {

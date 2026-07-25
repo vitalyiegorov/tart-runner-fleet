@@ -82,8 +82,9 @@ func TestRESTQueueIngesterPollsPersistsWaitsAndReportsFailures(t *testing.T) {
 	if err := ingester.Ingest(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationFresh {
-		t.Fatal("fresh REST observation not reported")
+	if fresh := health.Snapshot().Observations["github-rest-legacy"]; fresh.Freshness != telemetry.ObservationFresh ||
+		fresh.Detail != "" {
+		t.Fatalf("fresh REST observation = %+v", fresh)
 	}
 	timed := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding},
 		observer: observer, interval: time.Second, now: time.Now, next: time.Now().Add(time.Millisecond)}
@@ -102,12 +103,16 @@ func TestRESTQueueIngesterPollsPersistsWaitsAndReportsFailures(t *testing.T) {
 		}), Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "token", nil })})
 	ingester.observer = broken
 	now = now.Add(2 * time.Second)
-	if _, err := ingester.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationStale {
+	if _, err := ingester.IngestChanged(ctx); err == nil ||
+		health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationStale ||
+		health.Snapshot().Observations["github-rest-legacy"].Detail != githubscaleset.ReasonQueueObservationStale {
 		t.Fatalf("stale REST failure = %v observation=%#v", err, health.Snapshot().Observations)
 	}
 	unavailable := &restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding}, observer: broken,
 		interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
-	if _, err := unavailable.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable {
+	if _, err := unavailable.IngestChanged(ctx); err == nil ||
+		health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable ||
+		health.Snapshot().Observations["github-rest-legacy"].Detail != githubscaleset.ReasonQueueObservationFailed {
 		t.Fatalf("unavailable REST failure = %v observation=%#v", err, health.Snapshot().Observations)
 	}
 	closed, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "closed.db"))
@@ -117,8 +122,9 @@ func TestRESTQueueIngesterPollsPersistsWaitsAndReportsFailures(t *testing.T) {
 	_ = closed.Close()
 	ingester = &restQueueIngester{coordinator: app.DemandCoordinator{Store: closed}, bindings: []app.Binding{binding}, observer: observer,
 		interval: time.Second, health: health, observation: "github-rest-legacy", now: func() time.Time { return now }}
-	if _, err := ingester.IngestChanged(ctx); err == nil || health.Snapshot().Observations["github-rest-legacy"].Freshness != telemetry.ObservationUnavailable {
-		t.Fatalf("REST persistence failure = %v", err)
+	if _, err := ingester.IngestChanged(ctx); err == nil ||
+		health.Snapshot().Observations["github-rest-legacy"].Detail != githubscaleset.ReasonQueueReconcileFailed {
+		t.Fatalf("REST persistence failure = %v observation=%#v", err, health.Snapshot().Observations)
 	}
 	if _, err := (*restQueueIngester)(nil).IngestChanged(ctx); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("nil ingester = %v", err)
@@ -704,24 +710,23 @@ func TestRunRecreatesBrokenScaleSetSessionWithoutDaemonRestart(t *testing.T) {
 }
 
 func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
-	if _, err := newRecoveringScaleSetSource(nil, func(context.Context) (scaleSetSource, error) {
-		return &fakeSource{}, nil
-	}, make(chan struct{}, 1)); err == nil {
+	open := func(context.Context) (scaleSetSource, error) { return &fakeSource{}, nil }
+	if _, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{open: open,
+		limiter: make(chan struct{}, 1)}); err == nil {
 		t.Fatal("nil initial source accepted")
 	}
-	if _, err := newRecoveringScaleSetSource(&fakeSource{}, nil, make(chan struct{}, 1)); err == nil {
+	if _, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: &fakeSource{},
+		limiter: make(chan struct{}, 1)}); err == nil {
 		t.Fatal("nil source factory accepted")
 	}
-	if _, err := newRecoveringScaleSetSource(&fakeSource{}, func(context.Context) (scaleSetSource, error) {
-		return &fakeSource{}, nil
-	}, nil); err == nil {
+	if _, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: &fakeSource{},
+		open: open}); err == nil {
 		t.Fatal("nil recovery limiter accepted")
 	}
 
 	initial := &fakeSource{}
-	source, err := newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
-		return &fakeSource{}, nil
-	}, make(chan struct{}, 1))
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial, open: open,
+		limiter: make(chan struct{}, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,31 +776,33 @@ func TestRecoveringScaleSetSourceDelegatesAndFailsClosed(t *testing.T) {
 func TestRecoveringScaleSetSourceBoundsReplacementFailures(t *testing.T) {
 	closeFailure := &failingCloseSource{err: errors.New("private close detail")}
 	openCalls := 0
-	source, err := newRecoveringScaleSetSource(closeFailure, func(context.Context) (scaleSetSource, error) {
-		openCalls++
-		return &fakeSource{}, nil
-	}, make(chan struct{}, 1))
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: closeFailure,
+		open: func(context.Context) (scaleSetSource, error) {
+			openCalls++
+			return &fakeSource{}, nil
+		}, limiter: make(chan struct{}, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := source.replace(context.Background(), closeFailure); !errors.Is(err, errScaleSetClose) || openCalls != 0 || strings.Contains(err.Error(), "private") {
+	if err := source.replace(context.Background(), closeFailure, false); !errors.Is(err, errScaleSetClose) || openCalls != 0 || strings.Contains(err.Error(), "private") {
 		t.Fatalf("close replacement err=%v opens=%d", err, openCalls)
 	}
 
 	initial := &fakeSource{}
-	source, _ = newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
-		return nil, errors.New("private open detail")
-	}, make(chan struct{}, 1))
-	if err := source.replace(context.Background(), initial); err == nil || strings.Contains(err.Error(), "private") {
+	source, _ = newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial,
+		open: func(context.Context) (scaleSetSource, error) {
+			return nil, errors.New("private open detail")
+		}, limiter: make(chan struct{}, 1)})
+	if err := source.replace(context.Background(), initial, false); err == nil || strings.Contains(err.Error(), "private") {
 		t.Fatalf("open replacement err=%v", err)
 	}
-	if err := source.replace(context.Background(), &fakeSource{}); err != nil {
+	if err := source.replace(context.Background(), &fakeSource{}, false); err != nil {
 		t.Fatalf("stale replacement err=%v", err)
 	}
 	source.limiter <- struct{}{}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := source.replace(canceled, initial); !errors.Is(err, context.Canceled) {
+	if err := source.replace(canceled, initial, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled replacement err=%v", err)
 	}
 	<-source.limiter
@@ -804,16 +811,16 @@ func TestRecoveringScaleSetSourceBoundsReplacementFailures(t *testing.T) {
 func TestRecoveringScaleSetSourceSuccessAndTerminalBranches(t *testing.T) {
 	initial := &successfulSessionSource{}
 	replacement := &fakeSource{}
-	source, err := newRecoveringScaleSetSource(initial, func(context.Context) (scaleSetSource, error) {
-		return replacement, nil
-	}, make(chan struct{}, 1))
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial,
+		open:    func(context.Context) (scaleSetSource, error) { return replacement, nil },
+		limiter: make(chan struct{}, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := source.Handle(context.Background(), func(context.Context, githubscaleset.Demand) error { return nil }); err != nil || initial.handled.Load() != 1 {
 		t.Fatalf("successful handle err=%v calls=%d", err, initial.handled.Load())
 	}
-	if err := source.replace(context.Background(), initial); err != nil {
+	if err := source.replace(context.Background(), initial, false); err != nil {
 		t.Fatal(err)
 	}
 	source.mu.RLock()
@@ -828,13 +835,13 @@ func TestRecoveringScaleSetSourceSuccessAndTerminalBranches(t *testing.T) {
 	if err := source.Handle(context.Background(), func(context.Context, githubscaleset.Demand) error { return nil }); err == nil {
 		t.Fatal("closed source accepted message ingestion")
 	}
-	if err := source.replace(context.Background(), replacement); err != nil {
+	if err := source.replace(context.Background(), replacement, false); err != nil {
 		t.Fatalf("closed source replacement err=%v", err)
 	}
 
-	empty, _ := newRecoveringScaleSetSource(&fakeSource{}, func(context.Context) (scaleSetSource, error) {
-		return &fakeSource{}, nil
-	}, make(chan struct{}, 1))
+	empty, _ := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: &fakeSource{},
+		open:    func(context.Context) (scaleSetSource, error) { return &fakeSource{}, nil },
+		limiter: make(chan struct{}, 1)})
 	empty.mu.Lock()
 	empty.source = nil
 	empty.mu.Unlock()
@@ -1309,23 +1316,40 @@ func TestFailureReporterLogsOncePerComponentPerWindow(t *testing.T) {
 	var buffer bytes.Buffer
 	now := time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC)
 	reporter := newFailureReporter(&buffer, func() time.Time { return now })
-	reporter.report("scheduler")
-	reporter.report("scheduler") // suppressed inside the window
-	reporter.report("ingest")
+	reporter.report("scheduler", "")
+	reporter.report("scheduler", "") // suppressed inside the window
+	reporter.report("ingest", githubscaleset.ReasonSessionExpired)
 	if got := strings.Count(buffer.String(), "component loop failure"); got != 2 {
 		t.Fatalf("in-window log lines = %d: %q", got, buffer.String())
 	}
 	if !strings.Contains(buffer.String(), "component=scheduler") || !strings.Contains(buffer.String(), "component=ingest") {
 		t.Fatalf("component names missing: %q", buffer.String())
 	}
+	// Four hours of "component=ingest" told an operator nothing. A distinct
+	// closed-vocabulary reason is logged and tracked separately.
+	if !strings.Contains(buffer.String(), "reason="+githubscaleset.ReasonSessionExpired) {
+		t.Fatalf("ingest reason missing: %q", buffer.String())
+	}
+	reporter.report("ingest", githubscaleset.ReasonRecreatedAfterFailures)
+	if !strings.Contains(buffer.String(), "reason="+githubscaleset.ReasonRecreatedAfterFailures) {
+		t.Fatalf("changed reason suppressed: %q", buffer.String())
+	}
+	reporter.report("ingest", githubscaleset.ReasonSessionExpired) // suppressed inside the window
+	if got := strings.Count(buffer.String(), "reason="+githubscaleset.ReasonSessionExpired); got != 1 {
+		t.Fatalf("repeated reason lines = %d: %q", got, buffer.String())
+	}
 	now = now.Add(2 * time.Minute)
-	reporter.report("scheduler") // window elapsed, logs again
+	reporter.report("scheduler", "") // window elapsed, logs again
 	if got := strings.Count(buffer.String(), "component=scheduler"); got != 2 {
 		t.Fatalf("post-window scheduler lines = %d: %q", got, buffer.String())
 	}
+	// An unclassified failure keeps the historical single-attribute line.
+	if strings.Contains(buffer.String(), "component=scheduler reason") {
+		t.Fatalf("empty reason emitted an attribute: %q", buffer.String())
+	}
 	// A nil clock falls back to the wall clock and still emits.
 	fallback := newFailureReporter(io.Discard, nil)
-	fallback.report("operations")
+	fallback.report("operations", "")
 }
 
 func TestEngineTickerMarksOperationSummaryUnavailable(t *testing.T) {

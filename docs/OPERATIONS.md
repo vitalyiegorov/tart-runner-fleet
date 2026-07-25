@@ -405,6 +405,42 @@ fleetctl doctor --endpoint unix://__STATE_DIR__/fleetd.sock
 The socket is `0600`, is unlinked on clean shutdown, and only a stale socket
 owned by the current user may be replaced. `fleetctl` never opens `fleet.db`.
 
+### Diagnosing an unavailable GitHub observation
+
+`scheduler ready FAIL: critical_observation_unavailable` names how many
+observations are unavailable but not why. Every ingest observation carries a
+bounded, credential-free reason in `detail`:
+
+```sh
+fleetctl status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
+  jq '.data.observations | to_entries | map(select(.value.freshness != "fresh"))'
+```
+
+| `detail` | Meaning | Action |
+| --- | --- | --- |
+| `session_expired` | GitHub invalidated the broker session; it is being recreated. | None. Expect `fresh` within one poll interval. |
+| `recreated_after_failures` | The failure could not be classified, so the bounded escalation discarded the session. | None, unless it repeats — then treat it as a broker or credential fault. |
+| `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. |
+| `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
+| `message_poll_failed` | Ordinary long-poll failure. | None if transient. |
+| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out. | Check API reachability and rate limits. |
+| `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |
+
+The rate-limited `component loop failure` warning now carries the same
+`reason=` attribute, so stderr and the admin API agree.
+
+A daemon restart is no longer a recovery step for a wedged session: recovery is
+per binding and bounded. `githubSessionMaxIngestFailures` (default 5) and
+`githubSessionFailureWindowSeconds` (default 300) tune the bound in `fleet.json`;
+both are omitted from a rewritten file while they hold the defaults.
+
+Jobs already queued against a discarded session are not redelivered to its
+replacement. GitHub binds a queued job to the session that existed when it was
+queued, so after a `session_expired` or `recreated_after_failures` event, any
+run that was already `queued` needs an operator-driven cancel and re-run. Those
+jobs stay visible in `queues` and still breach the queue SLO, so they are not
+silent — but the controller must never cancel a user workflow itself.
+
 ## Recovery
 
 1. Stop admission; do not delete uncertain VMs.
