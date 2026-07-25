@@ -457,8 +457,8 @@ func linuxFree(in Input) domain.Resources {
 
 // freeCapacity is the admission envelope given a set of occupying instances.
 // Taking the instances as a parameter lets callers ask the same question about a
-// hypothetical occupancy (see externallyBlocked) under whichever capacity model
-// is configured, so the two models can never drift apart.
+// hypothetical occupancy under whichever capacity model is configured, so the
+// static and elastic models can never drift apart.
 func freeCapacity(in Input, instances []domain.Instance) domain.Resources {
 	if in.Config.ElasticHostEnvelope {
 		return elasticFree(in, instances)
@@ -596,21 +596,24 @@ func copyReservation(reservation *domain.Reservation) *domain.Reservation {
 // safeBackfill reserves the full resource vector, then performs exact
 // admission only inside the component-wise remainder. Thus backfill can never
 // delay the reserved job once its non-resource blocker clears.
+//
+// When the reserved head does not fit the free envelope AT ALL that remainder is
+// empty, and holding the whole residual idle protects nothing: such a head is
+// blocked by live instances holding the resources it needs, so it cannot start
+// until they release no matter what backfill does — it is NOT waiting on
+// backfill to stop. This is the same distinction PR #78/#83 drew for a
+// resource-infeasible macOS head, and leaving it unhandled for the Linux head
+// froze the queue in the 2026-07-25 incident: an aged 4 CPU / 8192 MB `large`
+// head behind a macOS builder wedged in `draining` (7 CPU / 12288 MB, its
+// deregister refused because the runner was busy) starved five medium and five
+// large jobs for ~45 minutes on a host with 3 CPU / 4096 MB free — room for a
+// `medium`. Admission is therefore permitted in the residual envelope, and the
+// reservation contract is preserved by ordering, not by idleness: the reserved
+// head is re-checked FIRST on every later tick (see planLinux's reservedDemand
+// branch), so it wins the first vector large enough for it.
 func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, baseCounts map[string]int, reservation *domain.Reservation, alreadySelected []domain.Demand) []Operation {
 	backfillCapacity, ok := free.Sub(reservation.Resources)
 	if !ok {
-		// The reserved vector does not fit the residual, so the strict remainder
-		// is empty and nothing could ever be admitted beside it. When the
-		// reservation would still not fit with every live Linux instance gone,
-		// its blocker is not Linux capacity: it is a live macOS cohort or host
-		// pressure. Draining Linux cannot release it and it must wait for that
-		// foreign occupancy to clear regardless, so admitting work that fits the
-		// residual now cannot delay it by a single tick. Borrowing the residual
-		// is what keeps a bounded host working for the host's own tenant instead
-		// of stranding every free vCPU behind one infeasible reservation.
-		if !externallyBlocked(in, reservation.Resources) {
-			return nil
-		}
 		backfillCapacity = free
 	}
 	excluded := map[domain.DemandKey]bool{reservation.Demand: true}
@@ -635,29 +638,6 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 		operations = append(operations, spawnOperation(demand, nil))
 	}
 	return operations
-}
-
-// externallyBlocked reports whether a reserved vector is infeasible for a
-// reason Linux drain cannot repair: live macOS instances holding the shared
-// envelope, or a host observation that has shrunk below the vector. It measures
-// the envelope the reservation would see with every live Linux instance gone;
-// if the vector still does not fit there, only foreign occupancy or host
-// recovery can unblock it, and Linux backfill costs it nothing.
-//
-// A vector that does not even fit the bare configured envelope is deliberately
-// NOT treated as externally blocked: that is a misconfigured profile rather
-// than contention, and it keeps the strict, conservative remainder.
-func externallyBlocked(in Input, required domain.Resources) bool {
-	if !in.Config.LinuxCapacity.CanFit(required) {
-		return false
-	}
-	foreign := make([]domain.Instance, 0, len(in.Instances.Value))
-	for _, instance := range in.Instances.Value {
-		if instance.Platform != domain.PlatformLinux {
-			foreign = append(foreign, instance)
-		}
-	}
-	return !freeCapacity(in, foreign).CanFit(required)
 }
 
 func splitAged(now time.Time, age time.Duration, demands []domain.Demand) (aged, young []domain.Demand) {

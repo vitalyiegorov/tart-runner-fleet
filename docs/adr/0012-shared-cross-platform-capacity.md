@@ -5,8 +5,8 @@
 Accepted. Amended by
 [ADR 0014](0014-opt-in-macos-exclusive-admission.md), which preserves this
 decision as the default and adds an explicit macOS-exclusive policy;
-by [ADR 0017](0017-externally-blocked-reservation-backfill.md), which stops an
-externally blocked reservation from stranding the residual envelope; and by
+by [ADR 0017](0017-infeasible-reservation-residual-backfill.md), which stops an
+infeasible reservation from stranding the residual envelope; and by
 [ADR 0018](0018-second-pilot-elastic-host-envelope.md), which makes the single
 configured envelope an opt-in elastic one derived from the observed physical
 host, turning `maxLinuxCpu` into a Linux-only cap when enabled.

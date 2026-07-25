@@ -18,6 +18,34 @@ const (
 	hostPhysicalMemoryMB = 24_576
 )
 
+// elasticConfig mirrors the live Mac mini (Mac16,10: 10 cores, 24 GiB) at the
+// 2026-07-25 incident: an 8-vCPU/16-GiB configured Linux cap, a 7-vCPU macOS
+// builder capped at one active VM, and mixed-platform admission enabled. The cap
+// is deliberately left at the pre-incident 8 so these tests show what the
+// elastic model recovers that the static one cannot.
+func elasticConfig() Config {
+	cfg := testConfig()
+	cfg.LinuxCapacity = domain.Resources{CPU: 8, MemoryMB: 16_384, Slots: 4}
+	cfg.FairnessAge = 5 * time.Minute
+	cfg.MixedPlatformAdmission = true
+	cfg.RepoCaps["mac-a"] = 2
+	cfg.Profiles["builder"] = domain.Profile{ID: "builder", Platform: domain.PlatformMacOS, Route: "macos-builder",
+		Resources: domain.Resources{CPU: 7, MemoryMB: 12_288, Slots: 1}, MaxActive: 1}
+	return cfg
+}
+
+func elasticBuilder() domain.Instance {
+	return domain.Instance{ID: "trf-builder-35917ac43a789b33", Repo: "mac-a", Platform: domain.PlatformMacOS,
+		Profile: "builder", Route: "macos-builder", Resources: domain.Resources{CPU: 7, MemoryMB: 12_288, Slots: 1},
+		State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+}
+
+func elasticLinux(id, repo string, profile domain.ProfileID) domain.Instance {
+	p := elasticConfig().Profiles[profile]
+	return domain.Instance{ID: id, Repo: repo, Platform: domain.PlatformLinux, Profile: profile,
+		Route: p.Route, Resources: p.Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+}
+
 // elasticHost builds the host observation for a given measured idle percentage.
 // Capacity is the physical machine; Available is the measured residual, with CPU
 // derived as floor(cores x idle%) and memory as the pressure-derived figure.
@@ -34,10 +62,14 @@ func elasticHost(idlePercent float64, availableMemoryMB int) domain.Observation[
 // elasticInput queues Linux mediums behind the same aged macOS builder head and
 // aged larges seen in the incident, so admission has to come from the residual.
 func elasticInput(idlePercent float64, availableMemoryMB int, elastic bool) Input {
-	in := incidentInput(
+	demands := []domain.Demand{
+		demand("mac-a", 1, 37*time.Minute, "builder"),
+		demand("a/repo", 3, 27*time.Minute, "large"),
 		demand("b/repo", 7, 11*time.Minute, "medium"),
 		demand("c/repo", 8, 11*time.Minute, "medium"),
-	)
+	}
+	in := input(demands, []domain.Instance{elasticBuilder()}, State{})
+	in.Config = elasticConfig()
 	in.Config.ElasticHostEnvelope = elastic
 	in.Host = elasticHost(idlePercent, availableMemoryMB)
 	return in
@@ -169,8 +201,8 @@ func TestElasticEnvelopeRespectsLinuxCap(t *testing.T) {
 // and a VM that has released its host resources (drained and powered off) is not.
 // Getting the second wrong would strand capacity that no longer exists.
 func TestElasticEnvelopeChargesOnlyConsumingLinux(t *testing.T) {
-	consuming := liveLinux("trf-linux-live", "a/repo", "medium")
-	released := liveLinux("trf-linux-drained", "b/repo", "large")
+	consuming := elasticLinux("trf-linux-live", "a/repo", "medium")
+	released := elasticLinux("trf-linux-drained", "b/repo", "large")
 	released.State = domain.InstanceDraining
 	released.Power = domain.InstancePowerStopped
 	if released.ConsumesHostResources() {
@@ -199,7 +231,7 @@ func TestElasticEnvelopeClosesOnOversubscribedLinuxCap(t *testing.T) {
 	in := elasticInput(90, hostPhysicalMemoryMB, true)
 	in.Config.LinuxCapacity = domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}
 	in.Instances = domain.Fresh([]domain.Instance{
-		liveLinux("trf-linux-1", "a/repo", "large"),
+		elasticLinux("trf-linux-1", "a/repo", "large"),
 	}, testNow)
 
 	if free := linuxFree(in); free != (domain.Resources{}) {
