@@ -29,7 +29,26 @@ type Snapshot struct {
 	SwapOuts          int64
 	CPUidlePercent    float64
 	LoadAverage       float64
-	Cause             error
+	// SwapOutRatePerSecond is the page-out rate since the previous fresh
+	// observation, the signal that distinguishes a host paging RIGHT NOW from one
+	// merely carrying residue: macOS does not eagerly reclaim swap, so SwapUsedMB
+	// behaves closer to a high-water mark than a current pressure reading.
+	//
+	// SwapOutRateObserved separates a measured zero from "no prior sample to
+	// measure against". A rate needs two observations, so the first one after a
+	// daemon start cannot have it, and consumers must fail closed on the level
+	// rather than read an unmeasured rate as a quiet host.
+	SwapOutRatePerSecond float64
+	SwapOutRateObserved  bool
+	// PhysicalCPU and PhysicalMemoryMB are the machine's real totals, used to
+	// bound aggregate fleet reservations by the host that actually exists rather
+	// than by a configured constant. Zero means the fact could not be read and
+	// consumers must fall back to configuration: these are advisory, so an
+	// unreadable total never degrades the observation and never masquerades as a
+	// measurement of a zero-resource machine.
+	PhysicalCPU      int64
+	PhysicalMemoryMB int64
+	Cause            error
 }
 
 type CommandRunner interface {
@@ -107,18 +126,42 @@ func (p *Probe) Snapshot(ctx context.Context) Snapshot {
 	// fail-close admission fleet-wide, so each falls back to its last good
 	// reading and then to a permissive default. This is the difference between
 	// throttling on unmeasurable soft pressure and bricking the scheduler.
+	swapOutRate, swapOutRateObserved := p.swapOutRate(now, swapouts, hasPrior)
 	snapshot := Snapshot{
-		Freshness:         Fresh,
-		ObservedAt:        now,
-		AvailableMemoryMB: availableMemoryMB,
-		FreeDiskGB:        freeDiskGB,
-		SwapOuts:          swapouts,
-		SwapUsedMB:        int64(p.advisory(ctx, hasPrior, float64(p.last.SwapUsedMB), permissiveSwapUsedMB, parseSwapFloat, "sysctl", "-n", "vm.swapusage")),
-		CPUidlePercent:    p.advisory(ctx, hasPrior, p.last.CPUidlePercent, permissiveCPUidlePercent, parseCPU, "top", "-l", "1", "-n", "0"),
-		LoadAverage:       p.advisory(ctx, hasPrior, p.last.LoadAverage, permissiveLoadAverage, parseLoad, "sysctl", "-n", "vm.loadavg"),
+		Freshness:            Fresh,
+		ObservedAt:           now,
+		AvailableMemoryMB:    availableMemoryMB,
+		FreeDiskGB:           freeDiskGB,
+		SwapOuts:             swapouts,
+		SwapOutRatePerSecond: swapOutRate,
+		SwapOutRateObserved:  swapOutRateObserved,
+		SwapUsedMB:           int64(p.advisory(ctx, hasPrior, float64(p.last.SwapUsedMB), permissiveSwapUsedMB, parseSwapFloat, "sysctl", "-n", "vm.swapusage")),
+		CPUidlePercent:       p.advisory(ctx, hasPrior, p.last.CPUidlePercent, permissiveCPUidlePercent, parseCPU, "top", "-l", "1", "-n", "0"),
+		LoadAverage:          p.advisory(ctx, hasPrior, p.last.LoadAverage, permissiveLoadAverage, parseLoad, "sysctl", "-n", "vm.loadavg"),
+		PhysicalCPU:          p.physical(ctx, p.last.PhysicalCPU, "hw.ncpu"),
+		PhysicalMemoryMB:     p.physicalMemoryMB(ctx),
 	}
 	p.last = snapshot
 	return snapshot
+}
+
+// swapOutRate derives the page-out rate from consecutive observations. It
+// reports ok=false when the rate cannot be established honestly: no prior
+// sample, a non-advancing clock, or a counter that went backwards because the
+// host rebooted. A negative delta must never be published as a low rate.
+func (p *Probe) swapOutRate(now time.Time, swapouts int64, hasPrior bool) (float64, bool) {
+	if !hasPrior {
+		return 0, false
+	}
+	elapsed := now.Sub(p.last.ObservedAt).Seconds()
+	if elapsed <= 0 {
+		return 0, false
+	}
+	delta := swapouts - p.last.SwapOuts
+	if delta < 0 {
+		return 0, false
+	}
+	return float64(delta) / elapsed, true
 }
 
 // advisory reads one soft-pressure metric, degrading gracefully: a probe or
@@ -134,6 +177,36 @@ func (p *Probe) advisory(ctx context.Context, hasPrior bool, lastKnown, permissi
 		return lastKnown
 	}
 	return permissive
+}
+
+// physical reads one immutable positive machine total. A read or parse failure
+// yields the last good reading and then zero, which consumers interpret as
+// not-observed. It never fails the observation: the fleet must still schedule
+// inside its configured envelope when a physical fact is unreadable.
+func (p *Probe) physical(ctx context.Context, lastKnown int64, name string) int64 {
+	if output, err := p.run(ctx, "sysctl", "-n", name); err == nil {
+		if value, parseErr := parsePositiveInt(string(output)); parseErr == nil {
+			return value
+		}
+	}
+	return lastKnown
+}
+
+// physicalMemoryMB converts hw.memsize to MiB, preserving not-observed as zero.
+func (p *Probe) physicalMemoryMB(ctx context.Context) int64 {
+	bytes := p.physical(ctx, p.last.PhysicalMemoryMB*1048576, "hw.memsize")
+	return bytes / 1048576
+}
+
+func parsePositiveInt(value string) (int64, error) {
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, errors.New("value is not an integer")
+	}
+	if parsed <= 0 {
+		return 0, errors.New("value is not positive")
+	}
+	return parsed, nil
 }
 
 func parseSwapFloat(value string) (float64, error) {
@@ -239,14 +312,7 @@ func parseMemorystatusLevel(value string) (int64, error) {
 }
 
 func parseMemsizeBytes(value string) (int64, error) {
-	memsize, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-	if err != nil {
-		return 0, errors.New("physical memory size is not an integer")
-	}
-	if memsize <= 0 {
-		return 0, errors.New("physical memory size is not positive")
-	}
-	return memsize, nil
+	return parsePositiveInt(value)
 }
 
 func parseDisk(value string) (int64, error) {

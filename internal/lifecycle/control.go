@@ -21,6 +21,11 @@ type directJITControl interface {
 
 type DemandReader interface {
 	DemandRecord(context.Context, int64, int64) (operations.DemandRecord, error)
+	// RunnerActiveJob reports whether any durable demand in the scale set shows a
+	// workflow job currently executing on the named runner. The runner name — not
+	// the demand a VM was spawned for — is the only safe key for "is this runner
+	// busy", because scale-set brokering may hand a runner a different job.
+	RunnerActiveJob(context.Context, int64, string) (bool, error)
 }
 
 type SourceKey struct {
@@ -125,6 +130,24 @@ func (r ControlRouter) JobStarted(ctx context.Context, instance operations.Insta
 func (r ControlRouter) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
 	status, err := r.demandStatus(ctx, instance)
 	return status == operations.DemandJobStarted, err
+}
+
+// RunnerBusy reports whether fresh durable demand evidence shows a workflow job
+// currently executing on this instance's runner, whichever demand GitHub
+// brokered to it. JobStarted/JobActive both read the ONE demand the VM was
+// spawned for; that is the wrong key once brokering is decoupled from spawning,
+// because the runner may be executing a sibling job whose completion the fleet
+// is not waiting on. Scoping stays within the instance's own scale-set binding:
+// GitHub only brokers a scale set's jobs to that scale set's runners.
+func (r ControlRouter) RunnerBusy(ctx context.Context, instance operations.Instance) (bool, error) {
+	binding, err := r.binding(instance)
+	if err != nil {
+		return false, err
+	}
+	if r.Demand == nil || instance.ID == "" {
+		return false, operations.ErrUncertain
+	}
+	return r.Demand.RunnerActiveJob(ctx, binding.StoreKey, instance.ID)
 }
 
 func (r ControlRouter) demandStatus(ctx context.Context, instance operations.Instance) (operations.DemandEventKind, error) {

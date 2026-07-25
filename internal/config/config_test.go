@@ -104,6 +104,22 @@ func TestDecodeAndEncodeOptInFlags(t *testing.T) {
 			decoded:  func(c Config) bool { return c.Guards.PressureMemoryAccounting },
 			clear:    func(c *Config) { c.Guards.PressureMemoryAccounting = false },
 		},
+		{
+			name: "elastic host envelope",
+			raw: `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "elasticHostEnvelope":true,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`,
+			fragment: `"elasticHostEnvelope": true`,
+			decoded:  func(c Config) bool { return c.Guards.ElasticHostEnvelope },
+			clear:    func(c *Config) { c.Guards.ElasticHostEnvelope = false },
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

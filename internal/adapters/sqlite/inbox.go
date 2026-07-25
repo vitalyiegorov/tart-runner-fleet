@@ -226,6 +226,26 @@ func (s *Store) DemandRecord(ctx context.Context, scaleSetID, requestID int64) (
 		FROM runner_demands WHERE scale_set_id=? AND runner_request_id=?`, scaleSetID, requestID))
 }
 
+// RunnerActiveJob reports whether any durable demand in the scale set shows a
+// workflow job currently executing on the named runner. GitHub records the
+// runner it brokered a job to on that job's own demand row, so this is the only
+// evidence that answers "is THIS runner busy" independently of which demand the
+// fleet spawned the VM for. Only an exactly-JobStarted status counts as
+// executing: an assigned-but-unstarted job is re-queued by GitHub when its
+// runner goes away, which is what makes stalled-assignment reclaim safe.
+func (s *Store) RunnerActiveJob(ctx context.Context, scaleSetID int64, runnerName string) (bool, error) {
+	if scaleSetID <= 0 || runnerName == "" {
+		return false, operations.ErrInvalid
+	}
+	var active int
+	if err := s.dbRow(ctx, "inbox.runner.active", `SELECT COUNT(*) FROM runner_demands
+		WHERE scale_set_id=? AND runner_name=? AND status_rank=?`, scaleSetID, runnerName,
+		demandRank(operations.DemandJobStarted)).Scan(&active); err != nil {
+		return false, fmt.Errorf("count active runner jobs: %w", err)
+	}
+	return active > 0, nil
+}
+
 // ProjectDemandEvent advances the owned VM from the highest durable demand
 // rank, not merely from the delivered event. This makes redelivery monotonic.
 func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event operations.DemandEvent) error {

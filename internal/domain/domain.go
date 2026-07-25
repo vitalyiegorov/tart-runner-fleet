@@ -309,8 +309,20 @@ func DeriveHostMode(instances []Instance) (HostMode, error) {
 }
 
 type Host struct {
+	// Available is measured residual headroom: what the host has spare right
+	// now, already net of everything running on it, VMs included. It is a clamp
+	// and live instances are never subtracted from it a second time.
 	Available Resources
-	Pressure  HostPressure
+	// Capacity is the physical host total that live instances ARE subtracted
+	// from. It bounds what the fleet may hand out in aggregate, independently of
+	// any configured envelope, so a burst of freshly booted VMs cannot exceed the
+	// real machine before their load registers in Available.
+	//
+	// A zero dimension means "not observed" and imposes no bound. Never
+	// synthesize it from configuration: an unobserved physical total must not
+	// masquerade as a measurement.
+	Capacity Resources
+	Pressure HostPressure
 }
 
 // HostPressure is the bounded, credential-free host snapshot used to explain

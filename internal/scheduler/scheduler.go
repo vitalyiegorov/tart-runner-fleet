@@ -27,6 +27,17 @@ type Config struct {
 	// same capacity, MaxActive, single-cohort, and drain-safety invariants.
 	// Default false preserves the platform-exclusive behavior byte-for-byte.
 	MixedPlatformAdmission bool
+	// ElasticHostEnvelope makes the fleet a second pilot on its own host: the
+	// fleet-wide bound becomes the observed physical host (Host.Capacity minus
+	// live instances, clamped by the measured Host.Available residual) instead of
+	// a static configured constant, and LinuxCapacity reverts to what its name
+	// says -- a Linux-only cap that only Linux instances consume.
+	//
+	// This lets the fleet expand into an idle host and yield as the host's own
+	// tenant gets busy, which a static envelope cannot do in either direction.
+	// Default false keeps LinuxCapacity as the shared cross-platform envelope
+	// and preserves ADR 0012 behavior byte-for-byte.
+	ElasticHostEnvelope bool
 }
 
 type State struct {
@@ -441,8 +452,19 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 }
 
 func linuxFree(in Input) domain.Resources {
+	return freeCapacity(in, in.Instances.Value)
+}
+
+// freeCapacity is the admission envelope given a set of occupying instances.
+// Taking the instances as a parameter lets callers ask the same question about a
+// hypothetical occupancy under whichever capacity model is configured, so the
+// static and elastic models can never drift apart.
+func freeCapacity(in Input, instances []domain.Instance) domain.Resources {
+	if in.Config.ElasticHostEnvelope {
+		return elasticFree(in, instances)
+	}
 	free := in.Config.LinuxCapacity
-	for _, instance := range in.Instances.Value {
+	for _, instance := range instances {
 		if instance.ConsumesHostResources() {
 			var ok bool
 			free, ok = free.Sub(instance.Resources)
@@ -452,6 +474,56 @@ func linuxFree(in Input) domain.Resources {
 		}
 	}
 	return minResources(free, in.Host.Value.Available)
+}
+
+// elasticFree bounds admission by the observed physical host instead of a static
+// configured constant, so the fleet can expand into an idle host and yield as the
+// host's own tenant gets busy. Three bounds apply together:
+//
+//   - LinuxCapacity caps Linux only, which is what its name says. A macOS VM no
+//     longer consumes the Linux budget.
+//   - The observed physical total (Host.Capacity) is charged for every live
+//     instance regardless of platform, so aggregate reservations can never exceed
+//     the real machine even during a boot burst.
+//   - The measured residual (Host.Available) clamps the result. It is already net
+//     of everything running, so live instances are not charged against it twice.
+func elasticFree(in Input, instances []domain.Instance) domain.Resources {
+	free := in.Config.LinuxCapacity
+	live := domain.Resources{}
+	for _, instance := range instances {
+		if !instance.ConsumesHostResources() {
+			continue
+		}
+		live = domain.Resources{CPU: live.CPU + instance.Resources.CPU,
+			MemoryMB: live.MemoryMB + instance.Resources.MemoryMB, Slots: live.Slots + instance.Resources.Slots}
+		if instance.Platform != domain.PlatformLinux {
+			continue
+		}
+		remaining, ok := free.Sub(instance.Resources)
+		if !ok {
+			return domain.Resources{}
+		}
+		free = remaining
+	}
+	total := in.Host.Value.Capacity
+	free = domain.Resources{
+		CPU:      physicalBound(free.CPU, total.CPU, live.CPU),
+		MemoryMB: physicalBound(free.MemoryMB, total.MemoryMB, live.MemoryMB),
+		Slots:    physicalBound(free.Slots, total.Slots, live.Slots),
+	}
+	return minResources(free, in.Host.Value.Available)
+}
+
+// physicalBound narrows one configured dimension by the observed physical total
+// less what live instances already hold. A non-positive total means the adapter
+// did not observe that dimension, so the configured cap stands alone: an
+// unobserved physical total must never masquerade as a zero measurement and
+// silently close admission.
+func physicalBound(configured, total, live int) int {
+	if total <= 0 {
+		return configured
+	}
+	return min(configured, max(0, total-live))
 }
 
 func minResources(a, b domain.Resources) domain.Resources {
@@ -524,10 +596,25 @@ func copyReservation(reservation *domain.Reservation) *domain.Reservation {
 // safeBackfill reserves the full resource vector, then performs exact
 // admission only inside the component-wise remainder. Thus backfill can never
 // delay the reserved job once its non-resource blocker clears.
+//
+// When the reserved head does not fit the free envelope AT ALL that remainder is
+// empty, and holding the whole residual idle protects nothing: such a head is
+// blocked by live instances holding the resources it needs, so it cannot start
+// until they release no matter what backfill does — it is NOT waiting on
+// backfill to stop. This is the same distinction PR #78/#83 drew for a
+// resource-infeasible macOS head, and leaving it unhandled for the Linux head
+// froze the queue in the 2026-07-25 incident: an aged 4 CPU / 8192 MB `large`
+// head behind a macOS builder wedged in `draining` (7 CPU / 12288 MB, its
+// deregister refused because the runner was busy) starved five medium and five
+// large jobs for ~45 minutes on a host with 3 CPU / 4096 MB free — room for a
+// `medium`. Admission is therefore permitted in the residual envelope, and the
+// reservation contract is preserved by ordering, not by idleness: the reserved
+// head is re-checked FIRST on every later tick (see planLinux's reservedDemand
+// branch), so it wins the first vector large enough for it.
 func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, baseCounts map[string]int, reservation *domain.Reservation, alreadySelected []domain.Demand) []Operation {
 	backfillCapacity, ok := free.Sub(reservation.Resources)
 	if !ok {
-		return nil
+		backfillCapacity = free
 	}
 	excluded := map[domain.DemandKey]bool{reservation.Demand: true}
 	for _, demand := range alreadySelected {

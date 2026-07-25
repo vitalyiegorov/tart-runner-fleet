@@ -380,9 +380,21 @@ type fakeDrainControl struct {
 	jobStartedErr error
 	jobActive     bool
 	jobActiveErr  error
+	busy          bool
+	busyErr       error
+	busyCalls     int
 	deregisterErr error
 	confirmations []operations.DeletionConfirmation
 	confirmErr    error
+}
+
+// RunnerBusy is deliberately not recorded in calls: it is a runner-scoped
+// premise probe that every drain phase may run, and the existing call-sequence
+// assertions pin the phase-specific evidence order. Its invocation is asserted
+// through busyCalls instead.
+func (d *fakeDrainControl) RunnerBusy(_ context.Context, _ operations.Instance) (bool, error) {
+	d.busyCalls++
+	return d.busy, d.busyErr
 }
 
 func (d *fakeDrainControl) RunnerRegistered(_ context.Context, instance operations.Instance) (bool, error) {
