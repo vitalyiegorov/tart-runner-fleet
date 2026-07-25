@@ -63,6 +63,11 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.Guards != wantGuards {
 		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
 	}
+	wantRecovery := SessionRecovery{MaxConsecutiveFailures: defaultSessionMaxIngestFailures,
+		FailureWindow: defaultSessionFailureWindow}
+	if cfg.SessionRecovery != wantRecovery {
+		t.Fatalf("legacy session recovery defaults = %+v, want %+v", cfg.SessionRecovery, wantRecovery)
+	}
 }
 
 func TestDecodeAndEncodeOptInFlags(t *testing.T) {
@@ -119,6 +124,40 @@ func TestDecodeAndEncodeOptInFlags(t *testing.T) {
 			fragment: `"elasticHostEnvelope": true`,
 			decoded:  func(c Config) bool { return c.Guards.ElasticHostEnvelope },
 			clear:    func(c *Config) { c.Guards.ElasticHostEnvelope = false },
+		},
+		{
+			name: "session ingest failure bound",
+			raw: `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "githubSessionMaxIngestFailures":3,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`,
+			fragment: `"githubSessionMaxIngestFailures": 3`,
+			decoded:  func(c Config) bool { return c.SessionRecovery.MaxConsecutiveFailures == 3 },
+			clear: func(c *Config) {
+				c.SessionRecovery.MaxConsecutiveFailures = defaultSessionMaxIngestFailures
+			},
+		},
+		{
+			name: "session failure window",
+			raw: `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "githubSessionFailureWindowSeconds":90,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`,
+			fragment: `"githubSessionFailureWindowSeconds": 90`,
+			decoded:  func(c Config) bool { return c.SessionRecovery.FailureWindow == 90*time.Second },
+			clear:    func(c *Config) { c.SessionRecovery.FailureWindow = defaultSessionFailureWindow },
 		},
 	}
 	for _, test := range tests {
@@ -207,6 +246,14 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"invalid root disk mode":  func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
 		"relative shared path":    func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
 		"invalid mac admission":   func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
+		"unbounded session retry": func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
+		"excessive session retry": func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
+		"impatient session window": func(c *Config) {
+			c.SessionRecovery.FailureWindow = 29 * time.Second
+		},
+		"unbounded session window": func(c *Config) {
+			c.SessionRecovery.FailureWindow = time.Hour + time.Second
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -491,6 +538,12 @@ func TestEncodeRejectsInvalidConfigurationAndWriterFailure(t *testing.T) {
 	}
 	if err := Encode(nil, Default()); err == nil {
 		t.Fatal("Encode(nil) unexpectedly succeeded")
+	}
+	subSecond := Default()
+	subSecond.SessionRecovery.FailureWindow = 30*time.Second + 500*time.Millisecond
+	if err := Encode(&bytes.Buffer{}, subSecond); err == nil ||
+		!strings.Contains(err.Error(), "session failure window") {
+		t.Fatalf("Encode(sub-second session window) = %v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestServiceReportsGenericFailuresAndBacksOff(t *testing.T) {
 				return backoff
 			}
 			return make(chan time.Time)
-		}, OnFailure: func(component string) { failures <- component }}
+		}, OnFailure: func(component, _ string) { failures <- component }}
 	if err := service.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestServiceIngestAndWorkerErrorPaths(t *testing.T) {
 				return backoff
 			}
 			return make(chan time.Time)
-		}, OnFailure: func(s string) { failures <- s },
+		}, OnFailure: func(s, _ string) { failures <- s },
 	}
 	if err := service.Run(ctx); err != nil {
 		t.Fatal(err)
@@ -146,7 +147,7 @@ func TestServiceIngestAndWorkerErrorPaths(t *testing.T) {
 
 	ctx, cancel = context.WithCancel(context.Background())
 	service = Service{Ticker: tickFunc(func(context.Context) error { return nil }), Worker: workFunc(func(context.Context) error { return errors.New("x") }),
-		TickInterval: time.Hour, OnFailure: func(component string) { failures <- component; cancel() }}
+		TickInterval: time.Hour, OnFailure: func(component, _ string) { failures <- component; cancel() }}
 	if err := service.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -211,4 +212,64 @@ func TestServiceEventLoopCancellationAndCoalescingEdges(t *testing.T) {
 		cancel()
 		return nil
 	}, "worker", func() time.Duration { return 0 })
+}
+
+type reasonedFailure struct{ reason string }
+
+func (e reasonedFailure) Error() string         { return "bounded failure" }
+func (e reasonedFailure) FailureReason() string { return e.reason }
+
+// Regression: a wedged ingest binding logged only "component=ingest" for four
+// hours. The bounded hook must also carry the closed-vocabulary reason.
+func TestServiceIngestFailureCarriesBoundedReason(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{name: "classified failure", err: fmt.Errorf("ingest: %w", reasonedFailure{reason: "session_expired"}),
+			reason: "session_expired"},
+		{name: "unclassified failure", err: errors.New("secret upstream detail")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			reasons := make(chan string, 1)
+			backoff := make(chan time.Time, 1)
+			backoff <- time.Now()
+			calls := 0
+			service := Service{
+				Ticker: tickFunc(func(context.Context) error { return nil }),
+				Ingesters: []Ingester{ingestFunc(func(context.Context) error {
+					calls++
+					if calls == 1 {
+						return test.err
+					}
+					cancel()
+					return nil
+				})},
+				TickInterval: time.Hour, ErrorBackoff: time.Second,
+				After: func(d time.Duration) <-chan time.Time {
+					if d == time.Second {
+						return backoff
+					}
+					return make(chan time.Time)
+				},
+				OnFailure: func(component, reason string) {
+					if component == "ingest" {
+						select {
+						case reasons <- reason:
+						default:
+						}
+					}
+				},
+			}
+			if err := service.Run(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := <-reasons; got != test.reason {
+				t.Fatalf("reason = %q, want %q", got, test.reason)
+			}
+		})
+	}
 }

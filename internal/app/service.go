@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -23,9 +24,26 @@ type Service struct {
 	WorkInterval time.Duration
 	ErrorBackoff time.Duration
 	After        func(time.Duration) <-chan time.Time
-	// OnFailure deliberately receives only a bounded component name. This
-	// prevents an upstream error from reflecting a token or JIT secret to logs.
-	OnFailure func(component string)
+	// OnFailure deliberately receives only a bounded component name and a
+	// closed-vocabulary reason. This prevents an upstream error from reflecting
+	// a token or JIT secret to logs while still telling an operator why a
+	// component keeps failing. Reason is empty when the failure carries none.
+	OnFailure func(component, reason string)
+}
+
+// FailureReason lets an error carry a bounded, closed-vocabulary diagnostic to
+// the failure hook. Implementations must return a value from a closed
+// vocabulary; concrete upstream text never travels this path.
+type FailureReason interface {
+	FailureReason() string
+}
+
+func failureReason(err error) string {
+	var reason FailureReason
+	if errors.As(err, &reason) {
+		return reason.FailureReason()
+	}
+	return ""
 }
 
 func (s Service) Run(ctx context.Context) error {
@@ -66,7 +84,7 @@ func (s Service) schedulerLoop(ctx context.Context, wake <-chan struct{}) {
 			if ctx.Err() != nil {
 				return
 			}
-			s.failure("scheduler")
+			s.failure("scheduler", failureReason(err))
 			if !s.wait(ctx, s.errorBackoff()) {
 				return
 			}
@@ -104,7 +122,7 @@ func (s Service) ingestLoop(ctx context.Context, ingester Ingester, wake chan<- 
 		if ctx.Err() != nil {
 			return
 		}
-		s.failure("ingest")
+		s.failure("ingest", failureReason(err))
 		if !s.wait(ctx, s.errorBackoff()) {
 			return
 		}
@@ -126,7 +144,7 @@ func (s Service) loop(ctx context.Context, run func(context.Context) error, comp
 			if ctx.Err() != nil {
 				return
 			}
-			s.failure(component)
+			s.failure(component, failureReason(err))
 			delay = s.errorBackoff()
 		}
 		if delay <= 0 {
@@ -138,9 +156,9 @@ func (s Service) loop(ctx context.Context, run func(context.Context) error, comp
 	}
 }
 
-func (s Service) failure(component string) {
+func (s Service) failure(component, reason string) {
 	if s.OnFailure != nil {
-		s.OnFailure(component)
+		s.OnFailure(component, reason)
 	}
 }
 
