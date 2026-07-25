@@ -36,6 +36,7 @@ type runtimeStore interface {
 	lifecycle.DemandReader
 	DemandCursor(context.Context, int64) (int64, error)
 	OperationCounts(context.Context) (int, int, error)
+	OperationFailures(context.Context) ([]operations.OperationFailure, error)
 	Close() error
 }
 
@@ -535,7 +536,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
-	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts}
+	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
+		operationFailures: store.OperationFailures}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1101,10 +1103,11 @@ func (r *failureReporter) report(component, reason string) {
 }
 
 type engineTicker struct {
-	engine          app.Engine
-	health          *telemetry.Health
-	profiles        []string
-	operationCounts func(context.Context) (int, int, error)
+	engine            app.Engine
+	health            *telemetry.Health
+	profiles          []string
+	operationCounts   func(context.Context) (int, int, error)
+	operationFailures func(context.Context) ([]operations.OperationFailure, error)
 }
 
 func (e engineTicker) Tick(ctx context.Context) error {
@@ -1122,15 +1125,37 @@ func (e engineTicker) Tick(ctx context.Context) error {
 		e.recordMetrics(result)
 		if e.operationCounts != nil {
 			retrying, dead, countErr := e.operationCounts(ctx)
-			if countErr != nil {
+			failures, failureErr := e.operationFailureMetrics(ctx)
+			if countErr != nil || failureErr != nil {
+				// Rule 4: an unreadable aggregate degrades the observation. It never
+				// publishes an empty failure set, which would read as a healed fleet.
 				_ = e.health.RecordObservation("operations", telemetry.ObservationUnavailable)
 			} else {
 				_ = e.health.SetOperations(retrying, dead)
+				_ = e.health.SetOperationFailures(failures)
 				_ = e.health.RecordObservation("operations", telemetry.ObservationFresh)
 			}
 		}
 	}
 	return err
+}
+
+// operationFailureMetrics converts the durable failure aggregate into telemetry
+// values. A daemon without the aggregate port simply publishes none.
+func (e engineTicker) operationFailureMetrics(ctx context.Context) ([]telemetry.OperationFailure, error) {
+	if e.operationFailures == nil {
+		return nil, nil
+	}
+	durable, err := e.operationFailures(ctx)
+	if err != nil {
+		return nil, err
+	}
+	failures := make([]telemetry.OperationFailure, 0, len(durable))
+	for _, failure := range durable {
+		failures = append(failures, telemetry.OperationFailure{Kind: failure.Kind, Code: failure.Code,
+			Count: failure.Count, Attempts: failure.Attempts})
+	}
+	return failures, nil
 }
 
 func (e engineTicker) recordMetrics(result app.TickResult) {

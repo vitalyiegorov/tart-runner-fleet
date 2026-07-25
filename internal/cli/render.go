@@ -23,7 +23,7 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 	case "instances":
 		renderInstances(output, status.Data.Instances)
 	case "operations":
-		fmt.Fprintf(output, "STATUS\tCOUNT\nretrying\t%d\ndead\t%d\n", status.Data.Operations.Retrying, status.Data.Operations.Dead)
+		renderOperations(output, status.Data.Operations)
 	case "observations":
 		renderObservations(output, status.Data.Observations)
 	default:
@@ -59,6 +59,9 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	renderInstances(output, status.Data.Instances)
 	fmt.Fprintln(output, "\nOPERATIONS")
 	fmt.Fprintf(output, "retrying %d  dead %d\n", status.Data.Operations.Retrying, status.Data.Operations.Dead)
+	for _, failure := range status.Data.Operations.Failures {
+		fmt.Fprintf(output, "stuck: %s %s  count %d  attempts %d\n", failure.Kind, failure.Code, failure.Count, failure.Attempts)
+	}
 	fmt.Fprintln(output, "\nOBSERVATIONS")
 	renderObservations(output, status.Data.Observations)
 }
@@ -68,6 +71,20 @@ func admissionState(allowed bool) string {
 		return "allowed"
 	}
 	return "deferred"
+}
+
+// renderOperations keeps the terse counts a healthy fleet shows and appends the
+// bounded failure aggregate when operations are not progressing, so the cause of
+// a long retry is visible from the runbook's own inspection command.
+func renderOperations(output io.Writer, summary adminapi.OperationSummary) {
+	fmt.Fprintf(output, "STATUS\tCOUNT\nretrying\t%d\ndead\t%d\n", summary.Retrying, summary.Dead)
+	if len(summary.Failures) == 0 {
+		return
+	}
+	fmt.Fprint(output, "\nKIND\tCODE\tCOUNT\tATTEMPTS\n")
+	for _, failure := range summary.Failures {
+		fmt.Fprintf(output, "%s\t%s\t%d\t%d\n", failure.Kind, failure.Code, failure.Count, failure.Attempts)
+	}
 }
 
 func renderQueues(output io.Writer, queues []adminapi.Queue) {

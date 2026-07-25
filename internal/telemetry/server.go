@@ -153,13 +153,29 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Ready:    adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
 			QueueSLO: &queueCheck,
 			Queues:   queues, Instances: instances, Observations: observations,
-			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations},
+			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
+				Failures: operationFailures(snapshot.OperationFailures)},
 			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: snapshot.HostPressure.AvailableMemoryMiB,
 				FreeDiskGiB: snapshot.HostPressure.FreeDiskGiB, SwapUsedMiB: snapshot.HostPressure.SwapUsedMiB,
 				SwapOuts: snapshot.HostPressure.SwapOuts, CPUIdlePercent: snapshot.HostPressure.CPUIdlePercent,
 				LoadAverage: snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
 				AdmissionReason: snapshot.HostPressure.AdmissionReason},
 		}}
+}
+
+// operationFailures projects the bounded failure aggregate into the versioned
+// DTO. Nil stays nil so a healthy fleet omits the field entirely and older
+// clients see exactly the document they saw before.
+func operationFailures(failures []OperationFailure) []adminapi.OperationFailure {
+	if len(failures) == 0 {
+		return nil
+	}
+	projected := make([]adminapi.OperationFailure, 0, len(failures))
+	for _, failure := range failures {
+		projected = append(projected, adminapi.OperationFailure{Kind: failure.Kind, Code: failure.Code,
+			Count: failure.Count, Attempts: failure.Attempts})
+	}
+	return projected
 }
 
 func nonNilStrings(values []string) []string {
@@ -245,6 +261,21 @@ func renderMetrics(snapshot Snapshot) string {
 	fmt.Fprintf(&output, "fleet_operation_retries %d\n", snapshot.OperationRetries)
 	writeHelpType("fleet_operations_dead", "Dead durable operation count.", "gauge")
 	fmt.Fprintf(&output, "fleet_operations_dead %d\n", snapshot.DeadOperations)
+	if len(snapshot.OperationFailures) > 0 {
+		// The failure code is closed vocabulary, so label cardinality is bounded and
+		// an alert can name the cause: a cleanup stuck on a busy-runner refusal reads
+		// differently from one stuck on denied runner administration.
+		writeHelpType("fleet_operation_failures", "Operations not progressing by kind and bounded failure code.", "gauge")
+		for _, failure := range snapshot.OperationFailures {
+			fmt.Fprintf(&output, "fleet_operation_failures{kind=%s,code=%s} %d\n",
+				prometheusLabel(failure.Kind), prometheusLabel(failure.Code), failure.Count)
+		}
+		writeHelpType("fleet_operation_failure_attempts", "Worst attempt count among operations sharing a failure code.", "gauge")
+		for _, failure := range snapshot.OperationFailures {
+			fmt.Fprintf(&output, "fleet_operation_failure_attempts{kind=%s,code=%s} %d\n",
+				prometheusLabel(failure.Kind), prometheusLabel(failure.Code), failure.Attempts)
+		}
+	}
 
 	writeHelpType("fleet_host_available_memory_mib", "Host reclaimable memory available for admission in MiB.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_available_memory_mib %d\n", snapshot.HostPressure.AvailableMemoryMiB)

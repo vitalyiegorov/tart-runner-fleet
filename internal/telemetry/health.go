@@ -3,6 +3,7 @@ package telemetry
 import (
 	"errors"
 	"math"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -101,6 +102,7 @@ type Snapshot struct {
 	Observations       map[string]ObservationMetric
 	OperationRetries   int
 	DeadOperations     int
+	OperationFailures  []OperationFailure
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
@@ -133,6 +135,7 @@ type Health struct {
 	observations       map[string]ObservationMetric
 	operationRetries   int
 	deadOperations     int
+	operationFailures  []OperationFailure
 	hostPressure       HostPressureMetric
 	revision           uint64
 }
@@ -278,6 +281,47 @@ func (h *Health) SetInstances(profile string, count, cpu, memoryMiB int) error {
 	return nil
 }
 
+// OperationFailure is the bounded per-code view of durable operations that are
+// not progressing.
+type OperationFailure struct {
+	Kind     string
+	Code     string
+	Count    int
+	Attempts int
+}
+
+// maxOperationFailures bounds both the status document and the metric label
+// cardinality. The producing vocabulary is closed and far smaller than this.
+const maxOperationFailures = 32
+
+// boundedFailureToken is the grammar every published kind and code must satisfy.
+// The durable side already reduces stored text to a closed vocabulary; this is
+// the independent boundary check that keeps upstream text, URLs, and credential
+// material out of the operator API even if a future producer regresses.
+var boundedFailureToken = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}(:[a-z][a-z0-9_]{0,31})?$`)
+
+// SetOperationFailures publishes why operations are retrying or dead. An empty
+// aggregate is the healthy case; anything unbounded is rejected outright rather
+// than truncated, so a rejected observation never masquerades as "no failures".
+func (h *Health) SetOperationFailures(failures []OperationFailure) error {
+	if len(failures) > maxOperationFailures {
+		return errInvalidMetric
+	}
+	recorded := make([]OperationFailure, 0, len(failures))
+	for _, failure := range failures {
+		if failure.Count < 0 || failure.Attempts < 0 || !boundedFailureToken.MatchString(failure.Kind) ||
+			!boundedFailureToken.MatchString(failure.Code) {
+			return errInvalidMetric
+		}
+		recorded = append(recorded, failure)
+	}
+	h.mu.Lock()
+	h.revision++
+	h.operationFailures = recorded
+	h.mu.Unlock()
+	return nil
+}
+
 func (h *Health) SetOperations(retries, dead int) error {
 	if retries < 0 || dead < 0 {
 		return errInvalidMetric
@@ -332,7 +376,8 @@ func (h *Health) Snapshot() Snapshot {
 		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
 		Mode: h.mode, Queues: cloneMap(h.queues), Instances: cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
-		DeadOperations: h.deadOperations, HostPressure: h.hostPressure, ObservationTTL: h.criticalObservationTTL,
+		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
+		HostPressure: h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }
 

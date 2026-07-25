@@ -23,6 +23,7 @@ type workerStore struct {
 	renewed        int
 	renewedSignal  chan struct{}
 	retryAvailable time.Time
+	retryError     string
 }
 
 func (s *workerStore) Claim(_ context.Context, _ string, limit int, _ time.Time, _ time.Duration) ([]Operation, error) {
@@ -37,11 +38,12 @@ func (s *workerStore) Complete(context.Context, string, string, string, time.Tim
 	return true, s.completeErr
 }
 
-func (s *workerStore) Retry(_ context.Context, _, _, _ string, available time.Time, dead bool) error {
+func (s *workerStore) Retry(_ context.Context, _, _, message string, available time.Time, dead bool) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	s.retried++
 	s.retryAvailable = available
+	s.retryError = message
 	if dead {
 		s.dead++
 	}
