@@ -1,4 +1,4 @@
-package main
+package daemon
 
 import (
 	"context"
@@ -402,7 +402,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
 		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute})
-	serverConfig := telemetry.ServerConfig{ControllerVersion: version, ControllerMode: string(opts.Mode)}
+	serverConfig := telemetry.ServerConfig{ControllerVersion: opts.Version, ControllerMode: string(opts.Mode)}
 	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
 	if err != nil {
@@ -470,7 +470,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
 						ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
 						RequestTimeout: cfg.Timeouts.GitHub,
-						System:         "tart-runner-fleet", Version: version, Subsystem: "controller"})
+						System:         "tart-runner-fleet", Version: opts.Version, Subsystem: "controller"})
 				}
 				initial, err := openSource(ctx)
 				if err != nil {

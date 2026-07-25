@@ -29,8 +29,10 @@ all changes as safety critical.
 
 ## Repository map
 
-- `cmd/fleetd`: process lifecycle and dependency wiring only.
-- `cmd/fleetctl`: thin operator CLI; no direct SQLite or Tart access.
+- `cmd/fleet`: the single control-plane executable; subcommand dispatch only.
+- `internal/daemon`: process lifecycle and dependency wiring only.
+- `internal/cli`: operator interface; never imports the SQLite store (enforced by
+  a `depguard` rule, see ADR 0019).
 - `internal/domain`: immutable domain values and lifecycle rules.
 - `internal/scheduler`: pure deterministic policy.
 - `internal/adminapi`: versioned read-only DTOs, Unix socket, and bounded client.
@@ -47,13 +49,13 @@ database while the daemon is running.
 
 ```sh
 ROOT="$HOME/Library/Application Support/tart-runner-fleet"
-FLEETCTL="$ROOT/current/fleetctl"
+FLEET="$ROOT/current/fleet"
 ENDPOINT="unix://$ROOT/state/fleetd.sock"
-"$FLEETCTL" status --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" doctor --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" queues --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" instances --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" operations --endpoint "$ENDPOINT" --output json
+"$FLEET" status --endpoint "$ENDPOINT" --output json
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json
+"$FLEET" queues --endpoint "$ENDPOINT" --output json
+"$FLEET" instances --endpoint "$ENDPOINT" --output json
+"$FLEET" operations --endpoint "$ENDPOINT" --output json
 ```
 
 Interpret exit `4` as unavailable and exit `5` as coherent but degraded. Never
@@ -68,7 +70,7 @@ The full copy-paste monitoring and incident procedure is in
 3. Keep policy changes out of adapters and CLI rendering.
 4. Preserve JSON field names and enum values in `fleet.v1`.
 5. Never expose generic SQL, arbitrary process execution, or raw Tart/GitHub
-   passthrough commands through `fleetctl`.
+   passthrough commands through `fleet`.
 
 ## Required handoff evidence
 

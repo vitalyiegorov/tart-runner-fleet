@@ -10,10 +10,10 @@ substitutes for a coherent snapshot.
 ```sh
 ROOT="$HOME/Library/Application Support/tart-runner-fleet"
 STATE="$ROOT/state"
-FLEETCTL="$ROOT/current/fleetctl"
+FLEET="$ROOT/current/fleet"
 ENDPOINT="unix://$STATE/fleetd.sock"
 
-test -x "$FLEETCTL"
+test -x "$FLEET"
 readlink "$ROOT/current"
 cat "$STATE/installed-generation.json"
 ```
@@ -26,12 +26,12 @@ immutable release. The link target and `releaseDir` in
 ## Capture one coherent snapshot
 
 ```sh
-"$FLEETCTL" status --endpoint "$ENDPOINT" --require-ready --output json
-"$FLEETCTL" doctor --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" queues --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" instances --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" operations --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" observations --endpoint "$ENDPOINT" --output json
+"$FLEET" status --endpoint "$ENDPOINT" --require-ready --output json
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json
+"$FLEET" queues --endpoint "$ENDPOINT" --output json
+"$FLEET" instances --endpoint "$ENDPOINT" --output json
+"$FLEET" operations --endpoint "$ENDPOINT" --output json
+"$FLEET" observations --endpoint "$ENDPOINT" --output json
 ```
 
 A command exit status 0 is healthy. Exit 4 means unavailable. Exit 5 means a coherent but

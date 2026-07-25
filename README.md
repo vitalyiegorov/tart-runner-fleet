@@ -39,57 +39,57 @@ for the decisions and trade-offs.
 
 ## Operator experience
 
-`fleetctl` is the stable interface for humans and automation. It communicates
-with `fleetd` through a private `0600` Unix socket, receives a coherent daemon
+`fleet` is the stable interface for humans and automation. It communicates
+with `fleet` through a private `0600` Unix socket, receives a coherent daemon
 snapshot, and never reads or mutates SQLite directly.
 
 ```sh
 # One-screen operational summary
-fleetctl status
+fleet status
 
 # Stable, versioned output for agents and scripts
-fleetctl status --output json
+fleet status --output json
 
 # Focused views
-fleetctl queues
-fleetctl instances
-fleetctl operations
-fleetctl observations
+fleet queues
+fleet instances
+fleet operations
+fleet observations
 
 # Fast and deep checks
-fleetctl health
-fleetctl doctor
+fleet health
+fleet doctor
 
 # Prometheus exposition for local diagnostics
-fleetctl metrics
+fleet metrics
 
 # Plan first; creation and config persistence require explicit guards
-fleetctl scale-sets provision --config fleet.json
-fleetctl scale-sets provision --config fleet.json --apply --write \
+fleet scale-sets provision --config fleet.json
+fleet scale-sets provision --config fleet.json --apply --write \
   --confirm provision-scale-sets --reason "initial controlled rollout"
 ```
 
 Every network operation has a bounded deadline. Output data goes to stdout,
 diagnostics go to stderr, rows are deterministically ordered, and exit codes
-are stable. Runtime mutation stays in `fleetd`; the only local bootstrap
+are stable. Runtime mutation stays in `fleet`; the only local bootstrap
 mutation is the guarded, drift-checked `scale-sets provision` command.
 
-Run `fleetctl help` for the concise command contract or see
+Run `fleet help` for the concise command contract or see
 [`docs/CLI.md`](docs/CLI.md) and [`docs/API.md`](docs/API.md).
 
 ## Five-minute local start
 
 ```sh
 cp config/fleet.example.json fleet.json
-fleetctl config validate fleet.json
-fleetd run --mode observe --config fleet.json --database fleet.db
+fleet config validate fleet.json
+fleet run --mode observe --config fleet.json --database fleet.db
 ```
 
 In another terminal:
 
 ```sh
-fleetctl status
-fleetctl doctor
+fleet status
+fleet doctor
 ```
 
 The default socket is
@@ -97,8 +97,8 @@ The default socket is
 explicit location to both programs when desired:
 
 ```sh
-fleetd run --admin-socket /absolute/private/path/fleetd.sock ...
-fleetctl status --endpoint unix:///absolute/private/path/fleetd.sock
+fleet run --admin-socket /absolute/private/path/fleetd.sock ...
+fleet status --endpoint unix:///absolute/private/path/fleetd.sock
 ```
 
 ## Architecture
@@ -156,7 +156,7 @@ The repository requires Go 1.25.12. Canary requires exact `--canary-scope` and
 Useful focused loops:
 
 ```sh
-go test -race ./cmd/fleetctl ./internal/adminapi ./internal/telemetry
+go test -race ./internal/cli ./internal/adminapi ./internal/telemetry
 go test -fuzz=Fuzz -fuzztime=30s ./internal/scheduler
 ./scripts/check-coverage.sh 99.0
 ```

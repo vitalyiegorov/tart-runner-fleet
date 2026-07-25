@@ -35,7 +35,7 @@ func (c *fakeCommand) Run(_ context.Context, name string, args ...string) ([]byt
 		}
 	}
 	if strings.Contains(call, "status --require-ready") {
-		if strings.Contains(call, "/v1/fleetctl") && c.current != "" {
+		if strings.Contains(call, "/v1/fleet") && c.current != "" {
 			return []byte(c.current), c.currentErr
 		}
 		return []byte(c.ready), c.readyErr
@@ -63,13 +63,13 @@ func makeRelease(t *testing.T, root, version string) string {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	template := `<?xml version="1.0"?><plist><dict><key>Label</key><string>com.vitalyiegorov.tart-runner-fleet.authority</string><key>ProgramArguments</key><array><string>__RELEASE_DIR__/fleetd</string><string>--mode=authority</string><string>--config=__STATE_DIR__/fleet.json</string></array></dict></plist>`
+	template := `<?xml version="1.0"?><plist><dict><key>Label</key><string>com.vitalyiegorov.tart-runner-fleet.authority</string><key>ProgramArguments</key><array><string>__RELEASE_DIR__/fleet</string><string>--mode=authority</string><string>--config=__STATE_DIR__/fleet.json</string></array></dict></plist>`
 	files := map[string][]byte{
-		"RELEASE_VERSION": []byte(version + "\n"), "fleetd": []byte("daemon-" + version),
-		"fleetctl": []byte("ctl-" + version), "com.vitalyiegorov.tart-runner-fleet.authority.plist": []byte(template),
+		"RELEASE_VERSION": []byte(version + "\n"), "fleet": []byte("control-plane-" + version),
+		"com.vitalyiegorov.tart-runner-fleet.authority.plist": []byte(template),
 	}
 	var sums strings.Builder
-	for _, name := range []string{"RELEASE_VERSION", "fleetd", "fleetctl", "com.vitalyiegorov.tart-runner-fleet.authority.plist"} {
+	for _, name := range []string{"RELEASE_VERSION", "fleet", "com.vitalyiegorov.tart-runner-fleet.authority.plist"} {
 		body := files[name]
 		if err := os.WriteFile(filepath.Join(dir, name), body, 0o700); err != nil {
 			t.Fatal(err)
@@ -98,8 +98,8 @@ func hostFixture(t *testing.T) (*LocalHost, *fakeCommand, Generation, Generation
 	if err := os.WriteFile(configPath, []byte(`{"valid":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	v1 := Generation{Version: "v1", Mode: "authority", ReleaseDir: makeRelease(t, root, "v1"), ConfigPath: configPath, Endpoint: "unix:///state/fleetd.sock"}
-	v2 := Generation{Version: "v2", Mode: "authority", ReleaseDir: makeRelease(t, root, "v2"), ConfigPath: configPath, Endpoint: "unix:///state/fleetd.sock"}
+	v1 := Generation{Version: "v1", Mode: "authority", ReleaseDir: makeRelease(t, root, "v1"), ConfigPath: configPath, Endpoint: "unix:///state/fleet.sock"}
+	v2 := Generation{Version: "v2", Mode: "authority", ReleaseDir: makeRelease(t, root, "v2"), ConfigPath: configPath, Endpoint: "unix:///state/fleet.sock"}
 	installed, _ := json.Marshal(v1)
 	if err := os.WriteFile(filepath.Join(state, InstalledGenerationFile), installed, 0o600); err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 		t.Fatalf("journal survived commit: %v", err)
 	}
 	updater, err := os.ReadFile(filepath.Join(host.launchAgentsDir, UpdaterPlist))
-	if err != nil || !strings.Contains(string(updater), candidate.ReleaseDir+"/fleetctl") || !strings.Contains(string(updater), "<integer>300</integer>") ||
+	if err != nil || !strings.Contains(string(updater), candidate.ReleaseDir+"/fleet") || !strings.Contains(string(updater), "<integer>300</integer>") ||
 		!strings.Contains(string(updater), "<key>RunAtLoad</key><true/>") {
 		t.Fatalf("updater plist=%q err=%v", updater, err)
 	}
@@ -157,7 +157,7 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 		}
 	}
 	joined := strings.Join(command.calls, "\n")
-	for _, want := range []string{"fleetctl config validate --mode authority", "launchctl bootout", "launchctl bootstrap", "status --require-ready"} {
+	for _, want := range []string{"fleet config validate --mode authority", "launchctl bootout", "launchctl bootstrap", "status --require-ready"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in calls:\n%s", want, joined)
 		}
@@ -227,7 +227,7 @@ func TestLocalHostHandsALoadedUpdaterReloadToAnIndependentLaunchdJob(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, value := range []string{candidate.ReleaseDir + "/fleetctl", "finish-updater-handoff", "automatic-updater-handoff"} {
+	for _, value := range []string{candidate.ReleaseDir + "/fleet", "finish-updater-handoff", "automatic-updater-handoff"} {
 		if !strings.Contains(string(handoff), value) {
 			t.Fatalf("handoff plist missing %q: %s", value, handoff)
 		}
@@ -258,7 +258,7 @@ func TestLocalHostUpdaterHandoffReloadsAndVerifiesTheExactGeneration(t *testing.
 	if err := os.WriteFile(updaterPath, host.renderUpdater(candidate), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command.launchPrint = "program = " + candidate.ReleaseDir + "/fleetctl"
+	command.launchPrint = "program = " + candidate.ReleaseDir + "/fleet"
 
 	if err := host.FinishUpdaterHandoff(context.Background(), candidate); err != nil {
 		t.Fatal(err)
@@ -312,7 +312,7 @@ func TestLocalHostUpdaterHandoffRejectsGenerationOrPlistDrift(t *testing.T) {
 func TestLocalHostUpdaterHandoffRecoversAnUnloadedUpdater(t *testing.T) {
 	host, command, _, candidate, _ := committedHandoffFixture(t)
 	command.printFailures = 1
-	command.launchPrint = "program = " + candidate.ReleaseDir + "/fleetctl"
+	command.launchPrint = "program = " + candidate.ReleaseDir + "/fleet"
 
 	if err := host.FinishUpdaterHandoff(context.Background(), candidate); err != nil {
 		t.Fatal(err)
@@ -328,15 +328,15 @@ func TestLocalHostUpdaterHandoffFailsClosedAtLaunchdBoundaries(t *testing.T) {
 		configure func(*fakeCommand)
 	}{
 		{name: "bootout", configure: func(command *fakeCommand) {
-			command.launchPrint = "program = /old/fleetctl"
+			command.launchPrint = "program = /old/fleet"
 			command.fail = map[string]error{"launchctl bootout gui/501/com.vitalyiegorov.tart-runner-fleet.updater": errors.New("denied")}
 		}},
 		{name: "bootstrap", configure: func(command *fakeCommand) {
-			command.launchPrint = "program = /old/fleetctl"
+			command.launchPrint = "program = /old/fleet"
 			command.bootstrap = errors.New("denied")
 		}},
 		{name: "verification", configure: func(command *fakeCommand) {
-			command.launchPrint = "program = /stale/fleetctl"
+			command.launchPrint = "program = /stale/fleet"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -468,7 +468,7 @@ func TestLocalHostStopsBootstrapRecoveryWhenContextIsCanceled(t *testing.T) {
 
 func TestLocalHostRejectsTamperedOrMismatchedReleaseBeforeLaunchd(t *testing.T) {
 	host, command, _, candidate, _ := hostFixture(t)
-	if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, "fleetd"), []byte("tampered"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, "fleet"), []byte("tampered"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := (Controller{Host: host}).Apply(context.Background(), candidate); !errors.Is(err, ErrChecksum) {

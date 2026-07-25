@@ -9,6 +9,7 @@ linters:
   default: none
   enable:
     - bodyclose
+    - depguard
     - errcheck
     - errorlint
     - gosec
@@ -27,11 +28,22 @@ linters:
         linters: [gosec]
       - path: _test\.go
         linters: [errcheck]
-      - path: cmd/fleetctl/
+      - path: internal/cli/
         linters: [errcheck]
-      - path: cmd/fleetd/main\.go
+      - path: internal/daemon/daemon\.go
         linters: [errcheck]
   settings:
+    depguard:
+      rules:
+        # ADR 0019: merging fleetd and fleetctl into one executable removed the
+        # dependency-graph guarantee that the operator interface cannot reach
+        # the store. This rule restores it as a build gate.
+        operator-cli-never-touches-the-store:
+          files:
+            - "**/internal/cli/*.go"
+          deny:
+            - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite
+              desc: the operator interface must reach daemon state only through the admin API
     nolintlint:
       require-explanation: true
       require-specific: true

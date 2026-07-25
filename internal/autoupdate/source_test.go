@@ -289,8 +289,8 @@ func makeReleaseAssets(t *testing.T, root, version string, malicious bool, embed
 			t.Fatal(readErr)
 		}
 		name := entry.Name()
-		if malicious && name == "fleetd" {
-			name = "../fleetd"
+		if malicious && name == "fleet" {
+			name = "../fleet"
 		}
 		if err := tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0o700, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
 			t.Fatal(err)
@@ -331,7 +331,7 @@ func TestLatestProductionReleaseDownloadsVerifiesAndExtractsOnce(t *testing.T) {
 	if err != nil || release.Version != "v2" || release.Dir != filepath.Join(root, "releases", "v2") {
 		t.Fatalf("release=%+v err=%v", release, err)
 	}
-	if _, err := os.Stat(filepath.Join(release.Dir, "fleetd")); err != nil {
+	if _, err := os.Stat(filepath.Join(release.Dir, "fleet")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command); err != nil {

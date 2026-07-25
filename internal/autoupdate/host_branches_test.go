@@ -55,7 +55,7 @@ func TestLocalHostConstructionAndCurrentFailClosed(t *testing.T) {
 
 func TestAdoptRequiresMatchingHealthyBootAndNoTransaction(t *testing.T) {
 	host, _, current, _, canonical := hostFixture(t)
-	if err := os.WriteFile(canonical, []byte(current.ReleaseDir+"/fleetd --mode=authority"), 0o600); err != nil {
+	if err := os.WriteFile(canonical, []byte("<string>"+current.ReleaseDir+"/fleet</string><string>--mode=authority</string>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Adopt(context.Background(), current); err != nil {
@@ -80,7 +80,7 @@ func TestAdoptRequiresMatchingHealthyBootAndNoTransaction(t *testing.T) {
 		t.Fatalf("mismatched boot error=%v", err)
 	}
 	host, command, current, _, canonical := hostFixture(t)
-	if err := os.WriteFile(canonical, []byte(current.ReleaseDir+"/fleetd --mode=authority"), 0o600); err != nil {
+	if err := os.WriteFile(canonical, []byte("<string>"+current.ReleaseDir+"/fleet</string><string>--mode=authority</string>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	command.currentErr = errors.New("offline")
@@ -138,7 +138,7 @@ func TestValidationAndPreparationRejectEveryUntrustedBoundary(t *testing.T) {
 				t.Fatalf("mode=%s: %v", mode, err)
 			}
 			joined := strings.Join(command.calls, "\n")
-			if want := "fleetctl config validate --mode " + mode; !strings.Contains(joined, want) {
+			if want := "fleet config validate --mode " + mode; !strings.Contains(joined, want) {
 				t.Fatalf("mode=%s missing %q in calls:\n%s", mode, want, joined)
 			}
 		}
@@ -146,7 +146,7 @@ func TestValidationAndPreparationRejectEveryUntrustedBoundary(t *testing.T) {
 	t.Run("template placeholder", func(t *testing.T) {
 		host, _, current, candidate, _ := hostFixture(t)
 		path := filepath.Join(candidate.ReleaseDir, "com.vitalyiegorov.tart-runner-fleet.authority.plist")
-		if err := os.WriteFile(path, []byte("__RELEASE_DIR__/fleetd --config=__STATE_DIR__/fleet.json __UNKNOWN__"), 0o600); err != nil {
+		if err := os.WriteFile(path, []byte("__RELEASE_DIR__/fleet --config=__STATE_DIR__/fleet.json __UNKNOWN__"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := host.Prepare(context.Background(), current, candidate); !errors.Is(err, ErrInvalidGeneration) {
@@ -266,8 +266,8 @@ func TestChecksumVerifierRejectsMissingMalformedAndUnreadableEntries(t *testing.
 	for _, sums := range []string{
 		"malformed\n",
 		strings.Repeat("x", 2<<20),
-		strings.Repeat("0", 64) + "  ../fleetd\n",
-		strings.Repeat("0", 64) + "  fleetd\n",
+		strings.Repeat("0", 64) + "  ../fleet\n",
+		strings.Repeat("0", 64) + "  fleet\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums), 0o600); err != nil {
 			t.Fatal(err)
@@ -276,12 +276,12 @@ func TestChecksumVerifierRejectsMissingMalformedAndUnreadableEntries(t *testing.
 			t.Fatalf("unsafe sums accepted: %.20q", sums)
 		}
 	}
-	body := []byte("fleetd")
+	body := []byte("fleet")
 	digest := sha256.Sum256(body)
-	if err := os.WriteFile(filepath.Join(dir, "fleetd"), body, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fleet"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(hex.EncodeToString(digest[:])+"  fleetd\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(hex.EncodeToString(digest[:])+"  fleet\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyChecksums(dir); !errors.Is(err, ErrChecksum) {
@@ -495,7 +495,7 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 		host, command, current, candidate, _ := hostFixture(t)
 		current.Mode, candidate.Mode = "observe", "observe"
 		command.current = `{"data":{"controllerVersion":"v1","controllerMode":"observe","queues":[],"instances":[],"operations":{}}}`
-		if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, CanonicalPlist), []byte("__RELEASE_DIR__/fleetd --config=__STATE_DIR__/fleet.json --mode=observe"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(candidate.ReleaseDir, CanonicalPlist), []byte("__RELEASE_DIR__/fleet --config=__STATE_DIR__/fleet.json --mode=observe"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := host.Prepare(context.Background(), current, candidate); err != nil {
@@ -504,8 +504,8 @@ func TestRemainingGenerationFilesystemBoundaries(t *testing.T) {
 	})
 	t.Run("config argument cardinality", func(t *testing.T) {
 		for name, template := range map[string]string{
-			"missing":   "__RELEASE_DIR__/fleetd --mode=authority",
-			"duplicate": "__RELEASE_DIR__/fleetd --config=__STATE_DIR__/fleet.json --config=__STATE_DIR__/fleet.json --mode=authority",
+			"missing":   "__RELEASE_DIR__/fleet --mode=authority",
+			"duplicate": "__RELEASE_DIR__/fleet --config=__STATE_DIR__/fleet.json --config=__STATE_DIR__/fleet.json --mode=authority",
 		} {
 			t.Run(name, func(t *testing.T) {
 				host, _, current, candidate, _ := hostFixture(t)
@@ -802,5 +802,91 @@ func TestAtomicSymlinkReportsEveryDurabilityFailure(t *testing.T) {
 	}
 	if err := atomicSymlinkWith("/releases/v2", "/root/current", ops); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// retiredExecutables are the names ADR 0019 merged into `fleet`. Both are
+// extended by that new name, so `fleet` is a strict prefix of each: a bare
+// `strings.Contains(body, releaseDir+"/fleet")` is satisfied by a plist or a
+// launchd program that still resolves to the retired executable. Every boot and
+// handoff assertion must reject them.
+var retiredExecutables = []string{"fleetd", "fleetctl"}
+
+// TestAdoptRejectsACanonicalPlistNamingARetiredExecutable pins the precondition
+// the rename silently erased. ADR 0011 requires the boot tuple to name the exact
+// generation executable; before the merge, `fleetd` and `fleetctl` were distinct
+// strings and this check discriminated between them. Existing negative coverage
+// only ever supplied a wholly wrong plist body, which cannot detect the loss.
+func TestAdoptRejectsACanonicalPlistNamingARetiredExecutable(t *testing.T) {
+	for _, retired := range retiredExecutables {
+		t.Run(retired, func(t *testing.T) {
+			host, _, current, _, canonical := hostFixture(t)
+			body := "<string>" + current.ReleaseDir + "/" + retired + "</string>\n<string>--mode=authority</string>"
+			if err := os.WriteFile(canonical, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := host.Adopt(context.Background(), current); !errors.Is(err, ErrInvalidGeneration) {
+				t.Fatalf("adopted a generation whose boot plist launches %q: err=%v", retired, err)
+			}
+		})
+	}
+}
+
+// TestAdoptAcceptsACanonicalPlistNamingTheExactExecutable keeps the tightened
+// precondition satisfiable by a plist rendered from the shipped template, so the
+// fix cannot be a blanket rejection.
+func TestAdoptAcceptsACanonicalPlistNamingTheExactExecutable(t *testing.T) {
+	host, _, current, _, canonical := hostFixture(t)
+	body := "<string>" + current.ReleaseDir + "/fleet</string>\n<string>--mode=authority</string>"
+	if err := os.WriteFile(canonical, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Adopt(context.Background(), current); err != nil {
+		t.Fatalf("rejected a correctly rendered boot plist: %v", err)
+	}
+}
+
+// TestFinishUpdaterHandoffRejectsALoadedRetiredExecutable pins ADR 0011's gate
+// that launchd's loaded program names the exact candidate release. The handoff is
+// the most defect-prone path in this repository, so a program name that merely
+// starts with the committed one must not satisfy it.
+func TestFinishUpdaterHandoffRejectsALoadedRetiredExecutable(t *testing.T) {
+	for _, retired := range retiredExecutables {
+		t.Run(retired, func(t *testing.T) {
+			host, command, _, candidate, _ := committedHandoffFixture(t)
+			command.launchPrint = "\tprogram = " + candidate.ReleaseDir + "/" + retired + "\n"
+			if err := host.FinishUpdaterHandoff(context.Background(), candidate); !errors.Is(err, ErrInvalidGeneration) {
+				t.Fatalf("handoff accepted launchd running %q: err=%v", retired, err)
+			}
+		})
+	}
+}
+
+// TestFinishUpdaterHandoffRejectsOutputNamingNoProgram fails closed when
+// launchd's output cannot be shown to name the committed executable at all,
+// rather than treating an unrecognised format as proof of success.
+func TestFinishUpdaterHandoffRejectsOutputNamingNoProgram(t *testing.T) {
+	host, command, _, candidate, _ := committedHandoffFixture(t)
+	command.launchPrint = "\tstate = running\n\tpid = 1234\n"
+	if err := host.FinishUpdaterHandoff(context.Background(), candidate); !errors.Is(err, ErrInvalidGeneration) {
+		t.Fatalf("handoff accepted output that names no program: err=%v", err)
+	}
+}
+
+// TestFinishUpdaterHandoffAcceptsTheRealLaunchctlShapes keeps both shapes real
+// `launchctl print` emits satisfiable: the `program =` line, and argv[0] listed
+// on its own line inside the `arguments = { ... }` block.
+func TestFinishUpdaterHandoffAcceptsTheRealLaunchctlShapes(t *testing.T) {
+	for name, output := range map[string]string{
+		"program line": "\tprogram = %s\n\tstate = running\n",
+		"arguments":    "\tstate = running\n\targuments = {\n\t\t%s\n\t\tupdate\n\t}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			host, command, _, candidate, _ := committedHandoffFixture(t)
+			command.launchPrint = strings.Replace(output, "%s", candidate.ReleaseDir+"/fleet", 1)
+			if err := host.FinishUpdaterHandoff(context.Background(), candidate); err != nil {
+				t.Fatalf("handoff rejected a real launchctl shape: %v", err)
+			}
+		})
 	}
 }

@@ -43,8 +43,8 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 }
 
 // ValidateBindings runs the exact scheduler-config and binding construction the
-// daemon performs at startup (see cmd/fleetd) and surfaces any invariant
-// violation as an error. fleetctl config validate calls this so that a config it
+// daemon performs at startup (see internal/daemon) and surfaces any invariant
+// violation as an error. `fleet config validate` calls this so that a config it
 // accepts can never crash-loop the authority daemon on the runtime invariants
 // that Config.Validate does not cover (profile existence, positive durable IDs,
 // scale-set identity collisions).
