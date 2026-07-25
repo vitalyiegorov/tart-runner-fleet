@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted. Completed by [ADR 0021](0021-dischargeable-dead-letters.md): this ADR
+made a wedge nameable and terminable, and 0021 makes it remediable without
+disabling automatic updates in the meantime.
 
 ## Context
 

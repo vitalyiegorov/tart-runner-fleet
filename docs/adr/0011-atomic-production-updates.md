@@ -3,6 +3,10 @@
 ## Status
 
 Accepted. Amended by
+[ADR 0021](0021-dischargeable-dead-letters.md), which narrows rule 5 below: a
+dead-lettered operation, and an instance the daemon can prove is parked on one, no
+longer defer activation. Retrying operations, queued jobs, and every instance not
+provably parked — above all a running VM — still do. Also amended by
 [ADR 0019](0019-single-fleet-binary.md), which merges the `fleetd` daemon and the
 `fleetctl` operator interface into one `fleet` executable. Every mention of
 `fleetd` or `fleetctl` below now denotes a subcommand of that single binary:
@@ -43,7 +47,8 @@ path:
 3. rejects traversal, links, duplicate members, oversized members, and checksum
    or `RELEASE_VERSION` mismatches;
 4. validates the persisted config with the candidate `fleetctl`;
-5. defers activation while any queue, VM, retry, or dead operation exists;
+5. defers activation while any queue, live VM, or retrying operation exists (see
+   ADR 0021 for the parked exception);
 6. durably stages the prior and candidate boot generations before launchd is
    touched;
 7. restarts in exactly the existing mode and requires exact version, mode, and

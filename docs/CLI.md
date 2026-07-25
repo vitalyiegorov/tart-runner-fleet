@@ -2,9 +2,9 @@
 
 `fleet` is the bounded control-plane client for operators and agents. Status
 commands use a private Unix socket owned by `fleet` and never read SQLite.
-Bootstrap mutations are limited to explicit, guarded scale-set provisioning and
-production-generation adoption/update; arbitrary Tart, GitHub, shell, and SQL
-passthroughs do not exist.
+Mutations are limited to explicit, guarded scale-set provisioning,
+production-generation adoption/update, and dead-letter discharge; arbitrary Tart,
+GitHub, shell, and SQL passthroughs do not exist.
 
 ## Commands
 
@@ -13,7 +13,8 @@ passthroughs do not exist.
 | `status` | Complete controller, host pressure/admission, queue, instance, observation, and operation summary |
 | `queues` | Jobs and oldest age by bounded profile |
 | `instances` | VM count, vCPU, and memory by bounded profile |
-| `operations` | Retrying and dead durable-operation counts, plus the bounded failure code and worst attempt count for anything not progressing |
+| `operations` | Retrying and dead durable-operation counts, the bounded failure code and worst attempt count for anything not progressing, and the identity of each parked dead letter |
+| `operations discharge` | Close one dead-lettered cleanup an operator has established can never complete; optionally retire the phantom instance row and its stopped VM |
 | `observations` | Scheduler observation freshness and age |
 | `health` | Liveness and readiness probes |
 | `doctor` | Deterministic API, liveness, readiness, and metrics checks |
@@ -60,10 +61,10 @@ rejected.
 | 0 | Successful and, when required, healthy |
 | 1 | Local operation/configuration failure |
 | 2 | Invalid command or flags |
-| 3 | Requested bounded resource not found (reserved for list/get expansion) |
+| 3 | Requested bounded resource not found (e.g. an unknown dead letter) |
 | 4 | Daemon unavailable, timeout, canceled request, or invalid API response |
 | 5 | Coherent degraded/not-ready state |
-| 6 | Unsafe or failed precondition (reserved for future guarded mutations) |
+| 6 | Unsafe or failed precondition, including every guarded-mutation refusal |
 
 ## Agent examples
 
@@ -80,5 +81,20 @@ Exit 4 and 5 are evidence, not permission to assume zero demand or delete VMs.
 `scale-sets provision` is plan-only unless `--apply --write`, an exact
 confirmation phrase, and a non-empty reason are supplied. `update adopt` and
 `update apply-latest` likewise require distinct exact confirmation phrases and
-preserve controller mode, readiness, checksums, and rollback. Generic `exec`,
-SQL, VM deletion, and backend passthrough commands are permanently out of scope.
+preserve controller mode, readiness, checksums, and rollback.
+
+`operations discharge` requires `--confirm discharge-dead-letter` and a non-empty
+`--reason`, and is refused unless the daemon runs in authority mode. It reaches
+exactly one durable row and, only with `--reap-instance`, exactly one owned VM
+whose ownership and stopped power state are freshly re-observed. It never stops a
+running guest and never removes a VM the controller does not own. It is the one
+narrow exception to "no VM deletion", and it exists because a GitHub registration
+that can never be released leaves no other permitted remedy — see
+[`docs/OPERATIONS.md`](OPERATIONS.md). Generic `exec`, SQL, unqualified VM
+deletion, and backend passthrough commands remain permanently out of scope.
+
+```sh
+fleet operations --output json | jq '.deadLetters'
+fleet operations discharge --operation op-ID --instance trf-ID --reap-instance \
+  --confirm discharge-dead-letter --reason "operator reason"
+```

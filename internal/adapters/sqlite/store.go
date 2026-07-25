@@ -732,10 +732,14 @@ func (s *Store) LiveInstances(ctx context.Context) ([]operations.Instance, error
 // OperationCounts returns bounded aggregate telemetry without exposing payloads
 // or coupling callers to the operations table schema.
 func (s *Store) OperationCounts(ctx context.Context) (retrying, dead int, err error) {
+	// A discharged operation is terminal: it is neither retrying (nothing will
+	// claim it again) nor dead (an operator already closed it), so it must leave
+	// both counts or `fleet update` would keep deferring on a closed wedge.
 	err = s.db.QueryRowContext(ctx, `SELECT
-		COALESCE(SUM(CASE WHEN attempts>0 AND status NOT IN (?,?) THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN attempts>0 AND status NOT IN (?,?,?) THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END),0)
-		FROM operations`, operations.OperationCompleted, operations.OperationDead, operations.OperationDead).Scan(&retrying, &dead)
+		FROM operations`, operations.OperationCompleted, operations.OperationDead,
+		operations.OperationDischarged, operations.OperationDead).Scan(&retrying, &dead)
 	if err != nil {
 		return 0, 0, fmt.Errorf("summarize operations: %w", err)
 	}

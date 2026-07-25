@@ -386,6 +386,158 @@ After rollback, drain only Go-owned VMs and retain the failed authority plist,
 database, and logs as one immutable incident bundle. Do not delete or rewrite
 incumbent state.
 
+## Dead letters
+
+### Discharging a dead-lettered cleanup
+
+A dead letter is an operation that has stopped retrying and is parked awaiting an
+operator. It is not in flight: it holds no lease, `Claim` cannot select it, and no
+tick will advance it. `fleet operations` names each one.
+
+```sh
+ROOT="$HOME/Library/Application Support/tart-runner-fleet"
+FLEET="$ROOT/current/fleet"
+ENDPOINT="unix://$ROOT/state/fleetd.sock"
+"$FLEET" operations --endpoint "$ENDPOINT" --output json |
+  jq '{retrying, dead, deadLetters}'
+```
+
+```json
+{
+  "retrying": 0,
+  "dead": 1,
+  "deadLetters": [
+    {
+      "operationId": "op-ea9b705d234ad29f14e79b6d",
+      "kind": "deregister",
+      "code": "deregister:runner_busy",
+      "resourceId": "trf-maestro-096ffcb3a52d8624",
+      "attempts": 835,
+      "parked": true
+    }
+  ]
+}
+```
+
+`parked` is the fleet's own judgement that nothing will advance this resource
+without you: no operation for it is pending or claimed, and its owned VM is
+observed **stopped**. `fleet_operations_parked` publishes the same count for
+alerting. A dead letter with `parked: false` needs no action yet — either work is
+still progressing, or the fleet cannot currently see the VM's power state, and in
+both cases a release update keeps deferring as it should.
+
+**Before discharging, establish that the cleanup genuinely cannot complete.**
+Discharging records that a human accepted an effect the fleet will never perform;
+it is not a way to skip a slow retry. Check the `code` against the case studies
+below, confirm no workflow run owns the runner, and confirm the VM is not running.
+
+Discharge the operation only:
+
+```sh
+"$FLEET" operations discharge --endpoint "$ENDPOINT" \
+  --operation op-ea9b705d234ad29f14e79b6d \
+  --instance trf-maestro-096ffcb3a52d8624 \
+  --confirm discharge-dead-letter \
+  --reason "GitHub 422 runner_busy: permanent registration leak"
+```
+
+Discharge it and retire the phantom instance row and its stopped VM:
+
+```sh
+"$FLEET" operations discharge --endpoint "$ENDPOINT" \
+  --operation op-ea9b705d234ad29f14e79b6d \
+  --instance trf-maestro-096ffcb3a52d8624 --reap-instance \
+  --confirm discharge-dead-letter \
+  --reason "GitHub 422 runner_busy: permanent registration leak"
+```
+
+Both forms require the exact `--confirm discharge-dead-letter` token and a
+non-empty `--reason`, which is written to the daemon's audit log with both
+identities and the applied effects. The daemon re-checks every guard itself, so a
+direct socket caller is held to the same bar, and the mutation is refused outright
+unless the controller runs in authority mode.
+
+#### Ordering: the row goes first, the VM second
+
+`--reap-instance` retires the durable row **before** deleting the VM, and that
+order is load-bearing. A *stopped* VM belonging to a live instance row is
+load-bearing state:
+
+- **VM deleted first, row still live** → `internal/app/inventory.go` turns the
+  ENTIRE instance observation `Unavailable` with `owned VM <id> missing from
+  Tart`, which blocks planning for the whole host. It is unrepairable by
+  observation, because the VM that would have proved anything is gone.
+- **Row retired first, VM still present** → the observation is also blocked, with
+  `untracked controller VM requires reconciliation`, but that state is trivially
+  repairable: the VM still exists, and re-running the same discharge command
+  removes it.
+
+So never delete a controller VM by hand while its row is live. If the command
+reports `discharge refused: vm_delete_failed`, the durable half already applied —
+re-run the identical command until `vm deleted true`. The mutation is idempotent:
+a repeat reports `false` for the steps that were already done.
+
+#### Refusal codes
+
+| Code | Exit | Meaning |
+| --- | --- | --- |
+| `unknown_operation` | 3 | No operation with that ID. Re-read `fleet operations`. |
+| `resource_mismatch` | 6 | The operation does not belong to the named instance. |
+| `operation_not_dead` | 6 | The operation is still pending, claimed, or already completed. Nothing to discharge. |
+| `resource_not_parked` | 6 | Another operation for the same resource is pending or claimed; let it finish. |
+| `instance_not_reapable` | 6 | The row is not in a cleanup or terminal state. Retiring it would abandon a live runner. |
+| `vm_running` | 6 | Fresh Tart evidence shows the guest is running. `Reap` never stops a VM. |
+| `vm_state_unknown` | 6 | Tart could not be read. Fail closed and retry. |
+| `not_authority` | 6 | The controller is not in authority mode. |
+| `unconfirmed` / `reason_required` | 6 | The confirmation token or reason is missing. |
+| `vm_delete_failed` | 6 | The durable half applied; the VM survives. Re-run the command. |
+| `store_unavailable` | 6 | The database could not be read or written. |
+
+#### Why a dead letter no longer defers a release update
+
+Until v0.1.282, `fleet update` treated `dead != 0` and any live instance row as
+"busy". A cleanup that can never complete therefore made the fleet permanently
+non-quiescent, and the automatic updater logged
+
+```
+apply production release: prepare update: autoupdate: fleet is not quiescent
+```
+
+every 300s for hours while refusing to install the release that bounded the very
+wedge blocking it. Now only *retrying* operations, queued jobs, and instances the
+daemon cannot prove parked defer activation. A running VM still defers, always.
+
+### Case study: `deregister:runner_busy` — a permanent GitHub registration leak
+
+On 2026-07-25 a scale-set runner registration in the `budgie-at` organization
+reached a contradictory state: `status=offline`, `busy=True`, `labels=[]`. GitHub
+refused to remove it:
+
+```
+DELETE /orgs/budgie-at/actions/runners/3175
+-> HTTP 422 {"message":"Bad request - Runner trf-maestro-096ffcb3a52d8624 is
+    currently running a job and cannot be deleted."}
+```
+
+Established facts, so nobody re-litigates them during the next incident:
+
+- A privileged token **with `admin:org` fails identically**. This is GitHub-side
+  state, not a permissions problem, and escalating the token does not help.
+- GitHub's own six-hour maximum job duration elapsed — the runner was over nine
+  hours old — without the registration being released.
+- **No workflow run held it.** Sixty recent runs' jobs were swept for
+  `runner_name` with zero hits, `--status in_progress` was empty, and cancelling
+  the two candidate stuck runs did not release it. The documented remedy for a
+  busy runner, cancelling the owning run, therefore did not exist for this case.
+- Conclusion: this registration can never be deregistered. The fleet is right to
+  refuse to invent absence, and right to stop retrying at ADR 0020's ceiling.
+
+The remedy is the discharge above, with `--reap-instance`, recording the 422 in
+`--reason`. Do not delete the runner registration expectation from configuration
+and do not force the deregister to "succeed": a 401/403 must never be read as
+absence, or a permissions regression would release the teardown of instances the
+fleet cannot actually deregister.
+
 ## Health
 
 - `GET /healthz`: event-loop liveness.

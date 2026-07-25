@@ -99,6 +99,10 @@ type OperationSummary struct {
 	// permission regression without opening the database. Absent on older
 	// daemons, which published only the counts.
 	Failures []OperationFailure `json:"failures,omitempty"`
+	// DeadLetters names the individual parked operations behind the dead count, so
+	// an operator can discharge one by identity instead of guessing it from logs.
+	// Absent on older daemons and on a fleet with no dead letters.
+	DeadLetters []DeadLetter `json:"deadLetters,omitempty"`
 }
 
 // OperationFailure is the bounded per-code view of operations that are not

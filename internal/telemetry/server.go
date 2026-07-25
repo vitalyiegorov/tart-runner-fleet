@@ -36,6 +36,14 @@ var (
 	errServerFailed        = errors.New("telemetry: server failed")
 )
 
+// Mutator is the daemon-side authority for guarded operator mutations. It is
+// wired only into the private Unix-socket server; the loopback health listener
+// leaves it nil and therefore never registers a mutating route at all, so the
+// read-only surface stays read-only by construction rather than by check.
+type Mutator interface {
+	DischargeDeadLetter(context.Context, adminapi.DischargeRequest) (adminapi.DischargeResult, error)
+}
+
 type ServerConfig struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
@@ -44,6 +52,7 @@ type ServerConfig struct {
 	MaxHeaderBytes    int
 	ControllerVersion string
 	ControllerMode    string
+	Mutator           Mutator
 }
 
 type Server struct {
@@ -82,6 +91,9 @@ func NewServer(health *Health, config ServerConfig) (*Server, error) {
 	mux.HandleFunc("/readyz", healthHandler(health.Ready, "ready", "not_ready"))
 	mux.HandleFunc("/metrics", metricsHandler(health))
 	mux.HandleFunc(adminapi.StatusPath, statusHandler(health, config.ControllerVersion, config.ControllerMode))
+	if config.Mutator != nil {
+		mux.HandleFunc(adminapi.DischargePath, dischargeHandler(config.Mutator))
+	}
 	return &Server{httpServer: &http.Server{
 		Handler: mux, ReadTimeout: config.ReadTimeout, WriteTimeout: config.WriteTimeout,
 		IdleTimeout: config.IdleTimeout, ReadHeaderTimeout: config.ReadHeaderTimeout,
@@ -116,6 +128,54 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 			return
 		}
 	}
+}
+
+// dischargeHandler serves the one guarded mutation. It accepts POST only, reads a
+// bounded body, and answers a refusal with its closed-vocabulary code so an
+// operator learns which guard refused instead of reading an HTTP status. It never
+// echoes the request reason or any upstream text back to the caller.
+func dischargeHandler(mutator Mutator) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			response.Header().Set("Allow", http.MethodPost)
+			http.Error(response, "method_not_allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(request.Body, adminapi.MaxRequestBytes+1))
+		if err != nil || len(body) > adminapi.MaxRequestBytes {
+			writeRefusal(response, adminapi.RefusalInvalidRequest)
+			return
+		}
+		var decoded adminapi.DischargeRequest
+		if json.Unmarshal(body, &decoded) != nil {
+			writeRefusal(response, adminapi.RefusalInvalidRequest)
+			return
+		}
+		result, err := mutator.DischargeDeadLetter(request.Context(), decoded)
+		response.Header().Set("Cache-Control", "no-store")
+		if err != nil {
+			var refusal adminapi.Refusal
+			if errors.As(err, &refusal) && adminapi.ValidRefusalCode(refusal.Code) {
+				writeRefusal(response, refusal.Code)
+				return
+			}
+			writeRefusal(response, adminapi.RefusalStoreUnavailable)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(response).Encode(result)
+	}
+}
+
+func writeRefusal(response http.ResponseWriter, code string) {
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.Header().Set("Cache-Control", "no-store")
+	response.WriteHeader(adminapi.RefusalStatus(code))
+	_ = json.NewEncoder(response).Encode(struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Code       string `json:"code"`
+	}{adminapi.APIVersion, adminapi.RefusalKind, code})
 }
 
 func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready, queueSLO HealthResult) adminapi.StatusEnvelope {
@@ -154,7 +214,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			QueueSLO: &queueCheck,
 			Queues:   queues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
-				Failures: operationFailures(snapshot.OperationFailures)},
+				Failures:    operationFailures(snapshot.OperationFailures),
+				DeadLetters: deadLetters(snapshot.DeadLetters)},
 			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: snapshot.HostPressure.AvailableMemoryMiB,
 				FreeDiskGiB: snapshot.HostPressure.FreeDiskGiB, SwapUsedMiB: snapshot.HostPressure.SwapUsedMiB,
 				SwapOuts: snapshot.HostPressure.SwapOuts, CPUIdlePercent: snapshot.HostPressure.CPUIdlePercent,
@@ -174,6 +235,21 @@ func operationFailures(failures []OperationFailure) []adminapi.OperationFailure 
 	for _, failure := range failures {
 		projected = append(projected, adminapi.OperationFailure{Kind: failure.Kind, Code: failure.Code,
 			Count: failure.Count, Attempts: failure.Attempts})
+	}
+	return projected
+}
+
+// deadLetters projects the identified parked operations into the versioned DTO.
+// Nil stays nil so a fleet with nothing parked emits exactly the document older
+// clients already saw.
+func deadLetters(letters []DeadLetter) []adminapi.DeadLetter {
+	if len(letters) == 0 {
+		return nil
+	}
+	projected := make([]adminapi.DeadLetter, 0, len(letters))
+	for _, letter := range letters {
+		projected = append(projected, adminapi.DeadLetter{OperationID: letter.OperationID, Kind: letter.Kind,
+			Code: letter.Code, ResourceID: letter.ResourceID, Attempts: letter.Attempts, Parked: letter.Parked})
 	}
 	return projected
 }
@@ -261,6 +337,18 @@ func renderMetrics(snapshot Snapshot) string {
 	fmt.Fprintf(&output, "fleet_operation_retries %d\n", snapshot.OperationRetries)
 	writeHelpType("fleet_operations_dead", "Dead durable operation count.", "gauge")
 	fmt.Fprintf(&output, "fleet_operations_dead %d\n", snapshot.DeadOperations)
+	// Parked is the alertable subset: a dead letter whose resource cannot advance
+	// without an operator running `fleet operations discharge`. It is also exactly
+	// what `fleet update` discounts from the quiescence gate, so an alert on a
+	// non-zero value is an alert on capacity nothing will reclaim on its own.
+	writeHelpType("fleet_operations_parked", "Dead-lettered operations whose resource cannot advance without an operator.", "gauge")
+	parked := 0
+	for _, letter := range snapshot.DeadLetters {
+		if letter.Parked {
+			parked++
+		}
+	}
+	fmt.Fprintf(&output, "fleet_operations_parked %d\n", parked)
 	if len(snapshot.OperationFailures) > 0 {
 		// The failure code is closed vocabulary, so label cardinality is bounded and
 		// an alert can name the cause: a cleanup stuck on a busy-runner refusal reads

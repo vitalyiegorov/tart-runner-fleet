@@ -225,7 +225,6 @@ func TestQuiescenceRejectsInvalidIdentityAndOperations(t *testing.T) {
 		`not-json`,
 		`{"data":{"controllerVersion":"wrong","controllerMode":"authority"}}`,
 		`{"data":{"controllerVersion":"v1","controllerMode":"authority","operations":{"retrying":1}}}`,
-		`{"data":{"controllerVersion":"v1","controllerMode":"authority","operations":{"dead":1}}}`,
 		`{"data":{"controllerVersion":"v1","controllerMode":"authority","instances":[{"count":1}]}}`,
 	} {
 		host, command, current, _, _ := hostFixture(t)
