@@ -284,26 +284,35 @@ func (s *ScaleSet) GenerateJIT(ctx context.Context, name, workFolder string) (*J
 
 func (s *ScaleSet) Registered(ctx context.Context, name string) (bool, error) {
 	if s.runners == nil || !validScaleSetToken.MatchString(name) {
-		return false, errors.New("runner administration is unavailable")
+		return false, ErrRunnerAdminUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.requestTimeout)
 	defer cancel()
 	runner, err := s.runners.GetRunnerByName(ctx, name)
 	if err != nil {
-		return false, fmt.Errorf("observe scale-set runner: %w", err)
+		return false, fmt.Errorf("observe scale-set runner: %w: %w", ErrRunnerLookup, err)
 	}
 	return runner != nil, nil
 }
 
 func (s *ScaleSet) Deregister(ctx context.Context, name string) error {
 	if s.runners == nil || !validScaleSetToken.MatchString(name) {
-		return errors.New("runner administration is unavailable")
+		return ErrRunnerAdminUnavailable
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.requestTimeout)
 	defer cancel()
 	runner, err := s.runners.GetRunnerByName(ctx, name)
 	if err != nil {
-		return fmt.Errorf("observe scale-set runner before removal: %w", err)
+		// The deregistration post-condition is "this runner is not registered".
+		// GitHub proving it has no such runner satisfies that condition whichever
+		// call carries the proof, so the actions service answering the observation
+		// with its own runner-not-found signal completes the effect exactly as an
+		// empty observation does. No other failure may conclude absence: a denied
+		// or unreadable observation leaves existence unknown.
+		if errors.Is(err, scaleset.RunnerNotFoundError) {
+			return nil
+		}
+		return fmt.Errorf("observe scale-set runner before removal: %w: %w", ErrRunnerLookup, err)
 	}
 	if runner == nil {
 		return nil
@@ -316,7 +325,7 @@ func (s *ScaleSet) Deregister(ctx context.Context, name string) error {
 		if errors.Is(err, scaleset.RunnerNotFoundError) {
 			return nil
 		}
-		return fmt.Errorf("remove scale-set runner: %w", err)
+		return fmt.Errorf("remove scale-set runner: %w: %w", ErrRunnerRemoval, err)
 	}
 	return nil
 }

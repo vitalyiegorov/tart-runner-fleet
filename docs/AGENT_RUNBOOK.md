@@ -47,7 +47,14 @@ previous snapshot rather than emitting repeated healthy messages. Track:
 - controller version, mode, readiness, and observation freshness;
 - queued jobs by profile and age, plus admission reasons;
 - instances by lifecycle state and owned Tart identity;
-- retrying or dead operations and their bounded, redacted error class;
+- retrying or dead operations and their bounded, redacted error class, read
+  from `operations.failures` (`kind`, `code`, `count`, `attempts`) rather than
+  from the counts alone; a cleanup stuck on `deregister:runner_busy` is GitHub
+  refusing to release a runner it still considers busy, while
+  `deregister:runner_forbidden` or `deregister:runner_scope_unresolved` is a
+  fleet-side permission or configuration fault. Owned runner cleanup retries
+  indefinitely by design (ADR 0007), so a high `attempts` value is a signal to
+  read the code, not evidence that retrying is broken;
 - CPU, memory, swap, disk floor, and Linux/macOS exclusivity;
 - updater generation, last exit, and whether cleanup reached zero.
 

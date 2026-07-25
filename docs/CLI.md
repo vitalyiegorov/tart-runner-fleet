@@ -13,7 +13,7 @@ passthroughs do not exist.
 | `status` | Complete controller, host pressure/admission, queue, instance, observation, and operation summary |
 | `queues` | Jobs and oldest age by bounded profile |
 | `instances` | VM count, vCPU, and memory by bounded profile |
-| `operations` | Retrying and dead durable-operation counts |
+| `operations` | Retrying and dead durable-operation counts, plus the bounded failure code and worst attempt count for anything not progressing |
 | `observations` | Scheduler observation freshness and age |
 | `health` | Liveness and readiness probes |
 | `doctor` | Deterministic API, liveness, readiness, and metrics checks |

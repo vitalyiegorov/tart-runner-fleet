@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
@@ -165,7 +166,11 @@ func (r ControlRouter) demandStatus(ctx context.Context, instance operations.Ins
 func (r ControlRouter) Deregister(ctx context.Context, instance operations.Instance) error {
 	binding, err := r.binding(instance)
 	if err != nil {
-		return err
+		// An instance whose repo/profile pair is no longer a configured
+		// registration scope cannot be deregistered at all. Name that so a
+		// configuration gap is never triaged as a GitHub outage; the uncertainty
+		// sentinel is preserved for existing callers.
+		return fmt.Errorf("deregister %s: %w: %w", instance.Profile, githubscaleset.ErrRunnerScopeUnresolved, err)
 	}
 	return binding.Source.Deregister(ctx, instance.ID)
 }

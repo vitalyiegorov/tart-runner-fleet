@@ -46,7 +46,13 @@ func provisionFixture(stateValue operations.State) (ProvisionExecutor, *memorySt
 
 func expectStage(t *testing.T, err error, stage Stage, state *memoryState, expectedState operations.State) {
 	t.Helper()
-	if err == nil || err.Error() != safeError(stage).Error() {
+	if err == nil {
+		t.Fatalf("error=nil want stage=%s", stage)
+	}
+	// A failure may carry a closed-vocabulary runner-administration reason (the
+	// deregister stage does). The stage must still be exactly the expected one and
+	// the code must stay inside the closed vocabulary.
+	if got, _, _ := strings.Cut(FailureCode(err.Error()), ":"); got != string(stage) {
 		t.Fatalf("error=%v want stage=%s", err, stage)
 	}
 	if state.instance.State != expectedState || state.instance.LastError != "" || len(state.changes) != 0 {

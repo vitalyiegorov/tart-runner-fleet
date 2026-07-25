@@ -46,9 +46,55 @@ const (
 	StagePersist    Stage = "persist"
 )
 
-type stageError struct{ stage Stage }
+// stageError is the only failure shape a lifecycle operation persists. The
+// optional reason is a closed-vocabulary runner-administration code, never
+// upstream text: a durable operation row and the operator API both render it.
+type stageError struct {
+	stage  Stage
+	reason string
+}
 
-func (e stageError) Error() string { return "runner lifecycle failed at " + string(e.stage) }
+func (e stageError) Error() string {
+	if e.reason == "" {
+		return "runner lifecycle failed at " + string(e.stage)
+	}
+	return "runner lifecycle failed at " + string(e.stage) + " (" + e.reason + ")"
+}
+
+// FailureReason exposes the bounded diagnostic to programmatic callers, exactly
+// as githubscaleset.SessionFailure does for the ingest path. An unrecognized
+// reason is withheld rather than surfaced.
+func (e stageError) FailureReason() string {
+	if !githubscaleset.ValidRunnerFailureReason(e.reason) {
+		return ""
+	}
+	return e.reason
+}
+
+// CodeUnclassified is the withheld code for a durable failure string outside the
+// closed vocabulary, so telemetry can aggregate failures without ever echoing
+// stored text (an executor panic message, for instance).
+const CodeUnclassified = "unclassified"
+
+var failureStages = [...]Stage{StageClone, StageStart, StageReady, StageAcquire, StageBootstrap, StageRegister,
+	StageGuard, StageDeregister, StageConfirm, StageStop, StageDelete, StagePersist}
+
+// FailureCode maps a persisted lifecycle failure back to exactly one closed
+// code, either "<stage>" or "<stage>:<reason>". It is total by exact match, so
+// nothing an executor did not author can reach an operator surface.
+func FailureCode(persisted string) string {
+	for _, stage := range failureStages {
+		if persisted == (stageError{stage: stage}).Error() {
+			return string(stage)
+		}
+		for _, reason := range githubscaleset.RunnerFailureReasons() {
+			if persisted == (stageError{stage: stage, reason: reason}).Error() {
+				return string(stage) + ":" + reason
+			}
+		}
+	}
+	return CodeUnclassified
+}
 
 // StateChange is a compare-and-swap request. Implementations must atomically
 // check both the state and version; the executor never assumes direct mutation
@@ -438,7 +484,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 					return e.fail(ctx, instance, StageGuard)
 				}
 			}
-			if err := e.Control.Deregister(ctx, instance); err != nil {
+			if deregisterErr := e.Control.Deregister(ctx, instance); deregisterErr != nil {
 				// GitHub refuses to deregister a runner that is executing a job. That
 				// refusal is not a transient fault to retry: paired with fresh busy
 				// evidence it disproves the drain's premise, so abort exactly as the
@@ -448,7 +494,12 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
 					return e.abort(ctx, instance)
 				}
-				return e.fail(ctx, instance, StageDeregister)
+				// ADR 0007 keeps owned cleanup retrying through a refusal rather than
+				// abandoning an owned VM, so this failure may repeat for hours. It must
+				// therefore say WHY: one closed-vocabulary runner-administration reason
+				// travels with the stage into the durable operation row, which is what
+				// the 2026-07-25 incident's 397 identical attempts could not do.
+				return classifiedError(StageDeregister, deregisterErr)
 			}
 			if confirmErr := e.waitConfirmed(ctx, instance.ID); confirmErr != nil {
 				if ctx.Err() != nil {
@@ -545,6 +596,13 @@ func (e DrainExecutor) advance(ctx context.Context, instance operations.Instance
 
 func (e DrainExecutor) fail(_ context.Context, _ operations.Instance, stage Stage) error {
 	return safeError(stage)
+}
+
+// classifiedError records a stage failure together with the closed-vocabulary
+// reason classified from the adapter error. RunnerFailureDetail is total, so the
+// cause itself is never persisted and never has to be.
+func classifiedError(stage Stage, cause error) error {
+	return stageError{stage: stage, reason: githubscaleset.RunnerFailureDetail(cause)}
 }
 
 func (e DrainExecutor) now() time.Time {

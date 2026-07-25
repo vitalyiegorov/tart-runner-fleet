@@ -48,11 +48,25 @@ in-memory revision so future watch clients can use conditional polling.
     "queues": [],
     "instances": [],
     "observations": [],
-    "operations": {"retrying": 0, "dead": 0}
+    "operations": {
+      "retrying": 1,
+      "dead": 0,
+      "failures": [
+        {"kind": "deregister", "code": "deregister:runner_busy", "count": 1, "attempts": 397}
+      ]
+    }
   },
   "warnings": []
 }
 ```
+
+`operations.failures` explains the counts. Each entry pairs an operation kind
+with one closed-vocabulary failure code — `<stage>` or `<stage>:<reason>`, for
+example `deregister:runner_busy`, `deregister:runner_forbidden`,
+`deregister:runner_scope_unresolved`, or `unclassified` — plus how many
+operations share it and the worst attempt count among them. Persisted upstream
+text is never rendered. The field is omitted while nothing is failing and is
+absent on daemons that published only the counts.
 
 DTOs are intentionally separate from domain and persistence structs. New
 optional fields may be added within `fleet.v1`; removals, renames, changed enum

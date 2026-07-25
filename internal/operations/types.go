@@ -136,6 +136,18 @@ func (o Operation) DependenciesValid() bool {
 	return true
 }
 
+// OperationFailure is bounded aggregate telemetry for operations that are not
+// making progress: one row per operation kind and closed failure code, with how
+// many operations share it and the worst attempt count among them. Code is
+// always a closed vocabulary value, never stored free-form text, so it is safe
+// to render through the operator API.
+type OperationFailure struct {
+	Kind     string
+	Code     string
+	Count    int
+	Attempts int
+}
+
 type Transition struct {
 	InstanceID      string
 	ExpectedState   State

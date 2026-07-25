@@ -9,8 +9,18 @@ type RetryPolicy struct {
 	Jitter      func(attempt int, delay time.Duration) time.Duration
 }
 
+// DurableCleanupMaxAttempts is the escalation ceiling for owned runner cleanup,
+// not a retry budget. ADR 0007 requires cleanup to keep retrying for as long as
+// GitHub may legitimately refuse to remove a runner that is still executing a
+// job, and GitHub's own maximum job duration is six hours; at the thirty-second
+// backoff ceiling that is 720 attempts. Past it, no refusal can still be
+// legitimate, so the operation dead-letters: it stops retrying invisibly and
+// becomes a published dead letter carrying its classified reason. Cleanup is
+// surfaced, never forced — nothing is deleted on its behalf.
+const DurableCleanupMaxAttempts = 720
+
 func DurableCleanupRetryPolicy(maximum time.Duration) RetryPolicy {
-	return RetryPolicy{Maximum: maximum}
+	return RetryPolicy{Maximum: maximum, MaxAttempts: DurableCleanupMaxAttempts}
 }
 
 func (p RetryPolicy) Next(attempt int, now time.Time) (time.Time, bool) {

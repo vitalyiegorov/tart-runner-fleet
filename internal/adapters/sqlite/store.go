@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -739,6 +740,49 @@ func (s *Store) OperationCounts(ctx context.Context) (retrying, dead int, err er
 		return 0, 0, fmt.Errorf("summarize operations: %w", err)
 	}
 	return retrying, dead, nil
+}
+
+// OperationFailures reports why the operations that are not progressing are
+// failing. Persisted failure text is never returned: each stored message is
+// reduced to one closed lifecycle code, and anything the executors did not
+// author is withheld as unclassified. This is the diagnosability the 2026-07-25
+// incident lacked, when 397 identical attempts were visible only as a count.
+func (s *Store) OperationFailures(ctx context.Context) ([]operations.OperationFailure, error) {
+	rows, err := s.dbQuery(ctx, "operations.failures.query", `SELECT kind,last_error,COUNT(*),MAX(attempts)
+		FROM operations WHERE last_error<>'' AND status IN (?,?) GROUP BY kind,last_error`,
+		operations.OperationPending, operations.OperationDead)
+	if err != nil {
+		return nil, fmt.Errorf("summarize operation failures: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	merged := map[operations.OperationFailure]operations.OperationFailure{}
+	for rows.Next() {
+		var kind, lastError string
+		var count, attempts int
+		if err := rows.Scan(&kind, &lastError, &count, &attempts); err != nil {
+			return nil, fmt.Errorf("scan operation failure: %w", err)
+		}
+		key := operations.OperationFailure{Kind: kind, Code: lifecycle.FailureCode(lastError)}
+		total := merged[key]
+		total.Kind, total.Code = key.Kind, key.Code
+		total.Count += count
+		total.Attempts = max(total.Attempts, attempts)
+		merged[key] = total
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operation failures: %w", err)
+	}
+	failures := make([]operations.OperationFailure, 0, len(merged))
+	for _, failure := range merged {
+		failures = append(failures, failure)
+	}
+	sort.Slice(failures, func(i, j int) bool {
+		if failures[i].Kind != failures[j].Kind {
+			return failures[i].Kind < failures[j].Kind
+		}
+		return failures[i].Code < failures[j].Code
+	})
+	return failures, nil
 }
 
 type rowScanner interface {

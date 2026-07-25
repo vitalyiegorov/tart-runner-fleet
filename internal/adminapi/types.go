@@ -93,6 +93,22 @@ type Observation struct {
 type OperationSummary struct {
 	Retrying int `json:"retrying"`
 	Dead     int `json:"dead"`
+	// Failures explains the retrying and dead counts. Each entry pairs an
+	// operation kind with one closed-vocabulary failure code — never stored
+	// upstream text — so an operator can tell a busy-runner refusal from a
+	// permission regression without opening the database. Absent on older
+	// daemons, which published only the counts.
+	Failures []OperationFailure `json:"failures,omitempty"`
+}
+
+// OperationFailure is the bounded per-code view of operations that are not
+// progressing. Attempts is the worst attempt count in the group, which is what
+// distinguishes a momentary retry from a cleanup that has been stuck for hours.
+type OperationFailure struct {
+	Kind     string `json:"kind"`
+	Code     string `json:"code"`
+	Count    int    `json:"count"`
+	Attempts int    `json:"attempts"`
 }
 
 type Warning struct {
