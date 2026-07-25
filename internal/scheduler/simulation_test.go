@@ -65,6 +65,11 @@ type simWorld struct {
 	// held in Running with JobInactive set so its RunningSince ages past the
 	// idle-runner deadline, exactly tonight's 74-minute lingerer incident.
 	lingering map[string]bool
+	// wedged[id] marks an instance whose drain cannot complete: it is held in
+	// Draining forever while still consuming the host, modelling the 2026-07-25
+	// incident where GitHub refused to deregister a runner busy with a brokered
+	// job and the deregister operation retried 60+ times.
+	wedged map[string]bool
 	// jobID hands out unique, deterministic demand identifiers.
 	jobID int64
 
@@ -93,6 +98,7 @@ func newSimWorld(t *testing.T, cfg Config, host domain.Host, seed int64) *simWor
 		jobTicksLeft:         map[string]int{},
 		stuck:                map[string]bool{},
 		lingering:            map[string]bool{},
+		wedged:               map[string]bool{},
 		spawnedAt:            map[domain.DemandKey]int{},
 		feasiblePendingTicks: map[domain.DemandKey]int{},
 		everFeasible:         map[domain.DemandKey]bool{},
@@ -271,6 +277,12 @@ func (w *simWorld) advanceInstance(inst domain.Instance, drained bool) (domain.I
 		}
 		inst.State = w.mustTransition(inst.State, domain.InstanceDraining)
 	case domain.InstanceDraining:
+		if w.wedged[inst.ID] {
+			// A drain that cannot complete: the runner is busy with a brokered job
+			// GitHub will not deregister, so the instance stays in Draining while it
+			// keeps consuming the host.
+			return inst, true
+		}
 		inst.State = w.mustTransition(inst.State, domain.InstanceDeregistering)
 	case domain.InstanceDeregistering:
 		inst.State = w.mustTransition(inst.State, domain.InstanceStopping)
@@ -813,6 +825,58 @@ func TestSimulationNoPermanentStarvationBehindRepoCappedHead(t *testing.T) {
 	if lateAdmitted == 0 {
 		t.Fatalf("small feasible stream latched shut: no admissions in the final quarter")
 	}
+}
+
+// TestSimulationWedgedDrainDoesNotStarveFeasibleQueue is the 2026-07-25
+// incident as a multi-tick liveness property, and the harness proof for the
+// safeBackfill repair. A macOS builder is wedged in Draining forever (its
+// deregister is refused because the runner is busy with a brokered job) while
+// still consuming 7 CPU / 12288 MB. That leaves 3 CPU / 4096 MB free: too small
+// for the aged `large` FIFO head, big enough for a `medium`. The scheduler must
+// keep admitting the feasible residual every tick instead of holding the
+// stranded envelope idle behind a head that cannot start until the wedged
+// instance releases. Every safety oracle (drain-safety, capacity, mac cohort,
+// go-forward host bound) runs on every tick, so liveness is not bought by
+// overcommitting the host or draining a busy VM. When the wedge finally clears,
+// the reserved head must win the vector — backfill may use stranded capacity but
+// may never take the head's turn.
+func TestSimulationWedgedDrainDoesNotStarveFeasibleQueue(t *testing.T) {
+	const ticks = 200
+	const unwedgeAt = 150
+	const K = 40
+	cfg, _ := incidentLinuxHeadConfig()
+	// Host equals LinuxCapacity so the go-forward Host.Available oracle is exact
+	// for a fleet seeded before tick zero. The residual envelope behind the wedged
+	// builder is unchanged from the incident: 3 CPU / 4096 MB.
+	w := newSimWorld(t, cfg, domain.Host{Available: cfg.LinuxCapacity}, 17)
+	w.enforceHostBound = true
+	wedged := wedgedBuilderInstance(cfg)
+	w.instances = append(w.instances, wedged)
+	w.wedged[wedged.ID] = true
+	// The aged infeasible head, oldest of all, plus a feasible medium stream.
+	head := w.addDemand("a/repo", 45, "large")
+	arrive := func(w *simWorld, tick int) {
+		if tick == unwedgeAt {
+			delete(w.wedged, wedged.ID)
+		}
+		if tick >= ticks-K-10 {
+			return
+		}
+		w.addDemand("b/repo", 10, "medium")
+	}
+	w.run(simOptions{ticks: ticks, arrive: arrive})
+
+	if w.spawnedCount == 0 {
+		t.Fatalf("wedged drain starved the whole queue: nothing admitted over %d ticks while %#v stayed free",
+			ticks, domain.Resources{CPU: 3, MemoryMB: 4_096, Slots: 3})
+	}
+	if spawnsSince(w, unwedgeAt/2) == 0 {
+		t.Fatal("admission latched shut behind the infeasible head instead of using the stranded envelope every tick")
+	}
+	if _, admitted := w.spawnedAt[head.Key]; !admitted {
+		t.Fatal("the reserved head was never admitted after the wedge cleared: backfill took its turn")
+	}
+	assertNoStarvation(t, w, K)
 }
 
 // spawnsSince counts demands spawned at or after the given tick.

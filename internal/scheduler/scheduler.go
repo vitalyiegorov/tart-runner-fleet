@@ -524,10 +524,25 @@ func copyReservation(reservation *domain.Reservation) *domain.Reservation {
 // safeBackfill reserves the full resource vector, then performs exact
 // admission only inside the component-wise remainder. Thus backfill can never
 // delay the reserved job once its non-resource blocker clears.
+//
+// When the reserved head does not fit the free envelope AT ALL that remainder is
+// empty, and holding the whole residual idle protects nothing: such a head is
+// blocked by live instances holding the resources it needs, so it cannot start
+// until they release no matter what backfill does — it is NOT waiting on
+// backfill to stop. This is the same distinction PR #78/#83 drew for a
+// resource-infeasible macOS head, and leaving it unhandled for the Linux head
+// froze the queue in the 2026-07-25 incident: an aged 4 CPU / 8192 MB `large`
+// head behind a macOS builder wedged in `draining` (7 CPU / 12288 MB, its
+// deregister refused because the runner was busy) starved five medium and five
+// large jobs for ~45 minutes on a host with 3 CPU / 4096 MB free — room for a
+// `medium`. Admission is therefore permitted in the residual envelope, and the
+// reservation contract is preserved by ordering, not by idleness: the reserved
+// head is re-checked FIRST on every later tick (see planLinux's reservedDemand
+// branch), so it wins the first vector large enough for it.
 func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, baseCounts map[string]int, reservation *domain.Reservation, alreadySelected []domain.Demand) []Operation {
 	backfillCapacity, ok := free.Sub(reservation.Resources)
 	if !ok {
-		return nil
+		backfillCapacity = free
 	}
 	excluded := map[domain.DemandKey]bool{reservation.Demand: true}
 	for _, demand := range alreadySelected {
