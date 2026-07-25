@@ -157,7 +157,7 @@ func TestLaunchdTemplateCanResolveRequiredOperatorTools(t *testing.T) {
 		"/usr/bin:/bin:/usr/sbin:/sbin",
 	} {
 		if !strings.Contains(text, required) {
-			t.Errorf("launchd template must contain %q so fleetd can resolve tart on Intel and Apple Silicon hosts", required)
+			t.Errorf("launchd template must contain %q so the daemon can resolve tart on Intel and Apple Silicon hosts", required)
 		}
 	}
 }
@@ -197,7 +197,7 @@ func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, required := range []string{"/opt/tart runner fleet/v1/fleetd", "/tmp/fleet state/fleet.json", "--mode=canary", "--canary-scope=fleet-repo", "--canary-profile=small"} {
+	for _, required := range []string{"/opt/tart runner fleet/v1/fleet", "/tmp/fleet state/fleet.json", "--mode=canary", "--canary-scope=fleet-repo", "--canary-profile=small"} {
 		if !strings.Contains(text, required) {
 			t.Errorf("rendered canary is missing %q", required)
 		}

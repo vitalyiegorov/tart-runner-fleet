@@ -2,7 +2,7 @@
 
 ## Promotion contract
 
-`fleetd` supports `observe`, `shadow`, `canary`, and `authority`. Canary and
+`fleet` supports `observe`, `shadow`, `canary`, and `authority`. Canary and
 authority acquire a renewable singleton lease, recover expired outbox leases,
 and stop on lease loss. Canary additionally requires exact scope/profile flags
 and runs at most one lifecycle operation concurrently. Promotion is never
@@ -38,7 +38,7 @@ Self-hosting uses a two-generation rule to avoid circular upgrades:
    that pinned generation; it does not depend on GitHub Actions being available.
 
 If all dynamic runners are unavailable, recovery is deliberately local: restore
-the pinned incumbent launchd unit, run `fleetctl doctor`, and verify one disposable
+the pinned incumbent launchd unit, run `fleet doctor`, and verify one disposable
 Linux canary before releasing queued work. A workflow cannot repair a stopped
 runner controller because that would recreate the same dependency cycle.
 
@@ -58,7 +58,7 @@ slot envelopes first. A fresh macOS probe then preserves `minFreeDiskGb` and
 `minAvailableMemoryMb`, defers while swap exceeds `maxSwapUsedMb`, and treats
 CPU as pressured only when both `maxLoadAverage` is exceeded and idle CPU falls
 below `minCpuIdlePercent`. Missing values decode to the safe defaults in
-`config/fleet.example.json`. Inspect the evidence through `fleetctl status` or
+`config/fleet.example.json`. Inspect the evidence through `fleet status` or
 the bounded `fleet_host_*` metrics; do not infer pressure from queue age alone.
 
 Pressure stops new admission, never an active job. Owned ephemeral runners
@@ -68,7 +68,7 @@ deleted. Recover disk by resolving visible owned cleanup failures, not by
 blindly pruning Tart state.
 
 ```sh
-fleetd run \
+fleet run \
   --mode observe \
   --config "$HOME/Library/Application Support/tart-runner-fleet/fleet.json" \
   --database "$HOME/Library/Application Support/tart-runner-fleet/fleet.db" \
@@ -84,7 +84,7 @@ new field. Upgrade without weakening rollback:
 2. install and independently verify the new immutable release candidate;
 3. copy the current configuration to a versioned candidate file and set only
    the controller target to `"schedulingClass": "control-plane"`;
-4. validate that file with the new candidate's `fleetctl config validate`;
+4. validate that file with the new candidate's `fleet config validate`;
 5. start or restart only the observe candidate with the versioned file;
 6. retain the previous binary and previous configuration as one rollback unit.
 
@@ -156,7 +156,7 @@ large, `1` for builder, and `2` for Maestro. Do not add a delivery-only slot.
 For an existing authority that still uses inflated lookahead, first grant the
 read-only App permission and validate a versioned candidate with
 `canonicalJobInventory: true` and truthful capacity using the candidate
-`fleetctl`. Prove complete queue visibility in canonical observe while the
+`fleet`. Prove complete queue visibility in canonical observe while the
 incumbent remains authority. Run shadow only after the incumbent no longer
 consumes the same scale-set sessions, then run the exact-scope canary. Change
 live scale-set capacity only while it owns no active job. Keep the running
@@ -165,9 +165,9 @@ authority configuration unchanged until those gates pass.
 Provisioning is explicit, drift-failing, and plan-first:
 
 ```sh
-fleetctl config validate fleet.json
-fleetctl scale-sets provision --config fleet.json
-fleetctl scale-sets provision --config fleet.json --apply --write \
+fleet config validate fleet.json
+fleet scale-sets provision --config fleet.json
+fleet scale-sets provision --config fleet.json --apply --write \
   --confirm provision-scale-sets \
   --reason "initial GitHub Actions scale-set bootstrap"
 ```
@@ -223,7 +223,7 @@ has been atomically installed at
 once:
 
 ```sh
-fleetctl update adopt \
+fleet update adopt \
   --release-dir "$RELEASE_DIR" \
   --mode authority \
   --confirm adopt-current-generation
@@ -241,7 +241,7 @@ the previous generation on any failure. Updates are strictly forward-only.
 Both generated plists use `RunAtLoad`; the daemon additionally uses
 restart-on-failure `KeepAlive`, while the updater uses a five-minute
 `StartInterval`. Every committed update rewrites the updater to the new immutable
-`fleetctl`. If the updater is already loaded, a distinct retrying handoff job
+`fleet`. If the updater is already loaded, a distinct retrying handoff job
 waits for the durable commit, unloads the old updater, bootstraps the rewritten
 plist, and verifies launchd loaded the exact committed executable. The updater
 never boots out itself. The plist on disk and launchd's cached
@@ -257,7 +257,7 @@ execute through that convenience link.
 
 The updater itself is a periodic one-shot process. It is expected to be `not running`
 between invocations. Treat that state as healthy only when launchd
-reports exit status 0, the program path is the committed immutable `fleetctl`,
+reports exit status 0, the program path is the committed immutable `fleet`,
 and bounded updater logs contain no newer error. Process absence alone is not a
 failure and process presence alone is not readiness.
 
@@ -270,7 +270,7 @@ maintain parity automatically.
 
 If a legacy updater terminated itself after writing a newer plist, leave the
 transaction journal and rollback files intact. First require a quiescent fleet,
-download `fleetctl` and `SHA256SUMS` from the latest normal production release,
+download `fleet` and `SHA256SUMS` from the latest normal production release,
 and verify the binary against that release. Run the verified binary as an
 independent operator process with `update apply-latest`; because the updater is
 not loaded, the guarded commit can bootstrap the corrected updater without
@@ -287,7 +287,7 @@ generation. Do not delete it to hide a parity failure.
 To run the same idempotent check manually:
 
 ```sh
-fleetctl update apply-latest \
+fleet update apply-latest \
   --mode authority \
   --confirm automatic-release-update
 ```
@@ -299,7 +299,7 @@ operation is empty, and rollback restores the prior config/plist tuple if the
 daemon does not return ready:
 
 ```sh
-fleetctl update apply-latest \
+fleet update apply-latest \
   --mode authority \
   --config /absolute/path/to/fleet-experiment.json \
   --confirm automatic-release-update
@@ -315,8 +315,8 @@ readiness rather than treating process presence as health:
 ```sh
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater
-fleetctl status --require-ready --output json
-fleetctl doctor --output json
+fleet status --require-ready --output json
+fleet doctor --output json
 ```
 
 ```sh
@@ -398,12 +398,12 @@ The operator API uses a private Unix socket. With the launchd template it is
 `__STATE_DIR__/fleetd.sock`:
 
 ```sh
-fleetctl status --endpoint unix://__STATE_DIR__/fleetd.sock
-fleetctl doctor --endpoint unix://__STATE_DIR__/fleetd.sock
+fleet status --endpoint unix://__STATE_DIR__/fleetd.sock
+fleet doctor --endpoint unix://__STATE_DIR__/fleetd.sock
 ```
 
 The socket is `0600`, is unlinked on clean shutdown, and only a stale socket
-owned by the current user may be replaced. `fleetctl` never opens `fleet.db`.
+owned by the current user may be replaced. `fleet` never opens `fleet.db`.
 
 ### Diagnosing an unavailable GitHub observation
 
@@ -445,6 +445,6 @@ silent — but the controller must never cancel a user workflow itself.
 
 1. Stop admission; do not delete uncertain VMs.
 2. Preserve `fleet.db`, `fleet.db-wal`, and `fleet.db-shm` together.
-3. Run `PRAGMA quick_check` through a normal `fleetd` startup.
+3. Run `PRAGMA quick_check` through a normal `fleet` startup.
 4. Reconcile Tart inventory, GitHub runners/jobs, ownership, and outbox leases.
 5. Resume observe, then shadow. Never jump directly to authority.

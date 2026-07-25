@@ -56,10 +56,10 @@ jobs:
           test "$(cat dist/RELEASE_VERSION)" = "$VERSION"
           for file in \
             BUILDINFO.txt RELEASE_VERSION SHA256SUMS \
-            fleetd fleetctl \
+            fleet \
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
-            fleetd.cdx.json fleetctl.cdx.json \
+            fleet.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
             tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
             com.vitalyiegorov.tart-runner-fleet.plist \
@@ -73,8 +73,7 @@ jobs:
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
           EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n' \
-            BUILDINFO.txt RELEASE_VERSION fleetctl fleetctl.cdx.json \
-            fleetd fleetd.cdx.json \
+            BUILDINFO.txt RELEASE_VERSION fleet fleet.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
@@ -98,12 +97,10 @@ jobs:
             dist/SHA256SUMS
             dist/BUILDINFO.txt
             dist/RELEASE_VERSION
-            dist/fleetd
-            dist/fleetctl
+            dist/fleet
             dist/tart-runner-fleet-bootstrap-darwin-arm64
             dist/tart-runner-fleet-bootstrap-linux-arm64
-            dist/fleetd.cdx.json
-            dist/fleetctl.cdx.json
+            dist/fleet.cdx.json
             dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
             dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json
             dist/com.vitalyiegorov.tart-runner-fleet.plist

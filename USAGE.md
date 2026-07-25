@@ -1,12 +1,12 @@
 # Operate the fleet
 
-Use the `fleetctl` binary from the installed immutable generation. Humans and
+Use the `fleet` binary from the installed immutable generation. Humans and
 agents should not scrape `launchctl`, open SQLite, or infer an empty queue from
 an unavailable daemon when the versioned API can answer the question.
 
 ```sh
 ROOT="$HOME/Library/Application Support/tart-runner-fleet"
-FLEETCTL="$ROOT/current/fleetctl"
+FLEET="$ROOT/current/fleet"
 ENDPOINT="unix://$ROOT/state/fleetd.sock"
 ```
 
@@ -19,13 +19,13 @@ rollback or executable identity. Confirm it against
 ## Daily cockpit
 
 ```sh
-"$FLEETCTL" status --endpoint "$ENDPOINT"
-"$FLEETCTL" status --endpoint "$ENDPOINT" --require-ready --output json
-"$FLEETCTL" queues --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" instances --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" operations --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" observations --endpoint "$ENDPOINT" --output json
-"$FLEETCTL" doctor --endpoint "$ENDPOINT" --output json
+"$FLEET" status --endpoint "$ENDPOINT"
+"$FLEET" status --endpoint "$ENDPOINT" --require-ready --output json
+"$FLEET" queues --endpoint "$ENDPOINT" --output json
+"$FLEET" instances --endpoint "$ENDPOINT" --output json
+"$FLEET" operations --endpoint "$ENDPOINT" --output json
+"$FLEET" observations --endpoint "$ENDPOINT" --output json
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json
 ```
 
 Exit `4` means unavailable. Exit `5` means coherent but degraded. Neither means
@@ -132,7 +132,7 @@ tail -n 100 "$ROOT/state/update.stderr.log"
 Run the same idempotent forward-only check on demand:
 
 ```sh
-"$FLEETCTL" update apply-latest \
+"$FLEET" update apply-latest \
   --repo owner/tart-runner-fleet \
   --mode authority \
   --endpoint "$ENDPOINT" \

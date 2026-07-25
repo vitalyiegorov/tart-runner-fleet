@@ -5,8 +5,8 @@ mode `0600`. Its parent directory is created with mode `0700`; a regular file,
 foreign-owned socket, relative path, non-canonical path, or oversized Unix path
 fails closed. A stale socket owned by the current user is safely replaced.
 
-`fleetd` keeps the existing loopback health/Prometheus listener for monitoring,
-but `fleetctl` defaults to the Unix socket.
+`fleet` keeps the existing loopback health/Prometheus listener for monitoring,
+but `fleet` defaults to the Unix socket.
 
 ## Endpoints
 
@@ -79,5 +79,5 @@ observation; it never fabricates a healthy pressure sample.
 The first interface exposes aggregate state needed for safe operation. Exact
 demand, instance, operation, reservation, and plan read models will be added as
 bounded, paginated `fleet.v1` resources after their coherent SQLite read
-transaction is implemented. `fleetctl` will not bypass that work with direct DB
+transaction is implemented. `fleet` will not bypass that work with direct DB
 queries.

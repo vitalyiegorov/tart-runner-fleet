@@ -17,7 +17,7 @@ latency bounded and preserving jobs across controller failure or upgrade.
 
 Retain the existing safety core:
 
-- one `fleetd` authority process;
+- one `fleet` authority process;
 - one local SQLite WAL database;
 - the official GitHub Actions runner scale-set protocol;
 - a pure deterministic scheduler;
@@ -385,7 +385,7 @@ The stable launcher:
 
 - reads `installed-generation.json`;
 - verifies owner, mode, canonical paths, manifest and hashes;
-- executes the exact generation's `fleetd` or update command;
+- executes the exact generation's `fleet` or update command;
 - contains no scheduler, GitHub, Tart, or migration policy.
 
 An update stages one immutable generation containing:
@@ -562,7 +562,7 @@ Exit criteria:
 Implementation boundary of the accompanying change: steps 1--4 are complete
 except ETag/change caching, step 5 is complete for health/readiness metrics,
 and terminal runner/VM correlation uses authoritative runner-name assignment.
-Source-divergence rendering in `fleetctl`, workflow-concurrency classification,
+Source-divergence rendering in `fleet`, workflow-concurrency classification,
 REST-only reservations, and the production capacity change remain follow-up
 work. REST reconciliation currently performs a bounded full active-run
 snapshot; caching is a performance optimization, not a correctness dependency.
@@ -574,7 +574,7 @@ snapshot; caching is a performance optimization, not a correctness dependency.
    protocol correlation fields without inventing either value.
 3. Add cached active-run/job REST reconciliation.
 4. Persist scale-set aggregate statistics.
-5. Expose source divergence and end-to-end queue age in `fleetctl`.
+5. Expose source divergence and end-to-end queue age in `fleet`.
 6. After canary and shadow prove complete visibility, remove inflated capacity
    and set each production scale set to its truthful executable maximum.
 
@@ -711,7 +711,7 @@ true under representative peak load:
 - controller restart and update do not interrupt running jobs;
 - runner and VM cleanup converges without destructive guesses;
 - queue SLO, source divergence, host pressure and updater generation are visible
-  through `fleetctl`;
+  through `fleet`;
 - production configuration, policy and executable form one verified immutable
   generation;
 - all historical incident replays pass under the simplified design.

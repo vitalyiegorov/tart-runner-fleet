@@ -1,7 +1,7 @@
-# fleetctl operator contract
+# fleet operator contract
 
-`fleetctl` is the bounded control-plane client for operators and agents. Status
-commands use a private Unix socket owned by `fleetd` and never read SQLite.
+`fleet` is the bounded control-plane client for operators and agents. Status
+commands use a private Unix socket owned by `fleet` and never read SQLite.
 Bootstrap mutations are limited to explicit, guarded scale-set provisioning and
 production-generation adoption/update; arbitrary Tart, GitHub, shell, and SQL
 passthroughs do not exist.
@@ -68,9 +68,9 @@ rejected.
 ## Agent examples
 
 ```sh
-fleetctl status --output json
-fleetctl status --require-ready --output json
-fleetctl doctor --output json
+fleet status --output json
+fleet status --require-ready --output json
+fleet doctor --output json
 ```
 
 Exit 4 and 5 are evidence, not permission to assume zero demand or delete VMs.

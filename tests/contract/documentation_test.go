@@ -92,8 +92,8 @@ func TestOperationalDocsTrackCurrentRuntimeContracts(t *testing.T) {
 	root := documentationRoot(t)
 	requireText := map[string][]string{
 		"README.md":             {"Linux medium runner", "docs/AGENT_RUNBOOK.md"},
-		"USAGE.md":              {"$ROOT/current/fleetctl"},
-		"docs/AGENT_RUNBOOK.md": {"$ROOT/current/fleetctl", "installed-generation.json", "exit status 0"},
+		"USAGE.md":              {"$ROOT/current/fleet"},
+		"docs/AGENT_RUNBOOK.md": {"$ROOT/current/fleet", "installed-generation.json", "exit status 0"},
 		"docs/OPERATIONS.md":    {"five-minute readiness budget", "launchd bootstrap", "not running", "exit status 0"},
 	}
 	for name, fragments := range requireText {

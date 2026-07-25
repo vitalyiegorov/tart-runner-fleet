@@ -6,7 +6,7 @@
   <string>com.vitalyiegorov.tart-runner-fleet.shadow</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__RELEASE_DIR__/fleetd</string>
+    <string>__RELEASE_DIR__/fleet</string>
     <string>run</string>
     <string>--mode=shadow</string>
     <string>--config=__STATE_DIR__/fleet.json</string>

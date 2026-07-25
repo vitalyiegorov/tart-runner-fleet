@@ -40,8 +40,8 @@ tar -xzf "$DOWNLOAD/tart-runner-fleet-$VERSION-darwin-arm64.tar.gz" -C "$RELEASE
 install -m 0600 "$DOWNLOAD/SHA256SUMS" "$RELEASE_DIR/SHA256SUMS"
 install -m 0600 "$DOWNLOAD/tart-runner-fleet-$VERSION-darwin-arm64.tar.gz" \
   "$RELEASE_DIR/tart-runner-fleet-$VERSION-darwin-arm64.tar.gz"
-chmod 0700 "$RELEASE_DIR/fleetctl" "$RELEASE_DIR/fleetd" "$RELEASE_DIR/render-launchd.sh"
-"$RELEASE_DIR/fleetctl" version
+chmod 0700 "$RELEASE_DIR/fleet" "$RELEASE_DIR/fleet" "$RELEASE_DIR/render-launchd.sh"
+"$RELEASE_DIR/fleet" version
 ```
 
 The remaining sections assume these variables stay exported in the same shell;
@@ -60,7 +60,7 @@ STATE_DIR="$ROOT/state"
 mkdir -p "$STATE_DIR"
 chmod 0700 "$ROOT" "$STATE_DIR"
 install -m 0600 config/fleet.example.json "$STATE_DIR/fleet.json"
-"$RELEASE_DIR/fleetctl" config validate "$STATE_DIR/fleet.json"
+"$RELEASE_DIR/fleet" config validate "$STATE_DIR/fleet.json"
 ```
 
 The checked-in example is an observe-mode starting point. Before shadow,
@@ -76,8 +76,8 @@ history.
 Create or reconcile runner scale sets with a plan-first command:
 
 ```sh
-"$RELEASE_DIR/fleetctl" scale-sets provision --config "$STATE_DIR/fleet.json"
-"$RELEASE_DIR/fleetctl" scale-sets provision \
+"$RELEASE_DIR/fleet" scale-sets provision --config "$STATE_DIR/fleet.json"
+"$RELEASE_DIR/fleet" scale-sets provision \
   --config "$STATE_DIR/fleet.json" --apply --write \
   --confirm provision-scale-sets --reason "initial fleet installation"
 ```
@@ -117,7 +117,7 @@ launchctl kickstart -k gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.author
 Adopt only the exact installed, running, ready generation:
 
 ```sh
-"$RELEASE_DIR/fleetctl" update adopt \
+"$RELEASE_DIR/fleet" update adopt \
   --repo "$REPOSITORY" \
   --release-dir "$RELEASE_DIR" \
   --mode authority \
@@ -139,11 +139,11 @@ After installation, log out/in or reboot once and run:
 
 ```sh
 ENDPOINT="unix://$HOME/Library/Application Support/tart-runner-fleet/state/fleetd.sock"
-FLEETCTL="$HOME/Library/Application Support/tart-runner-fleet/current/fleetctl"
+FLEET="$HOME/Library/Application Support/tart-runner-fleet/current/fleet"
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.authority
 launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.updater
-"$FLEETCTL" status --endpoint "$ENDPOINT" --require-ready --output json
-"$FLEETCTL" doctor --endpoint "$ENDPOINT" --output json
+"$FLEET" status --endpoint "$ENDPOINT" --require-ready --output json
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json
 ```
 
 Success means both LaunchAgents are loaded, the daemon reports the exact

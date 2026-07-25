@@ -68,7 +68,7 @@ func (h *LocalHost) Adopt(ctx context.Context, candidate Generation) error {
 		return err
 	}
 	canonical, err := os.ReadFile(filepath.Join(h.launchAgentsDir, CanonicalPlist)) // #nosec G304 -- fixed launch agent path.
-	if err != nil || !strings.Contains(string(canonical), candidate.ReleaseDir+"/fleetd") ||
+	if err != nil || !strings.Contains(string(canonical), candidate.ReleaseDir+"/fleet") ||
 		!strings.Contains(string(canonical), "--mode="+candidate.Mode) {
 		return ErrInvalidGeneration
 	}
@@ -127,7 +127,7 @@ func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
 	if err := verifyChecksums(candidate.ReleaseDir); err != nil {
 		return err
 	}
-	if _, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleetctl"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
+	if _, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
 		return fmt.Errorf("candidate config validation: %w", err)
 	}
 	return nil
@@ -139,7 +139,7 @@ func verifyChecksums(releaseDir string) error {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	required := map[string]bool{"RELEASE_VERSION": false, "fleetd": false, "fleetctl": false,
+	required := map[string]bool{"RELEASE_VERSION": false, "fleet": false,
 		"com.vitalyiegorov.tart-runner-fleet.authority.plist": false}
 	scanner := bufio.NewScanner(io.LimitReader(file, 1<<20))
 	for scanner.Scan() {
@@ -262,7 +262,7 @@ func (h *LocalHost) Activate(ctx context.Context, candidate Generation) error {
 func (h *LocalHost) Ready(ctx context.Context, candidate Generation) error {
 	var last error
 	for attempt := 0; attempt < h.readyAttempts; attempt++ {
-		body, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleetctl"), "status", "--require-ready", "--output", "json", "--endpoint", candidate.Endpoint)
+		body, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", candidate.Endpoint)
 		if err == nil {
 			var status struct {
 				Data struct {
@@ -357,14 +357,14 @@ func (h *LocalHost) FinishUpdaterHandoff(ctx context.Context, candidate Generati
 		return fmt.Errorf("bootstrap automatic updater: %w", err)
 	}
 	loaded, err := h.command.Run(ctx, "launchctl", "print", updaterLabel)
-	if err != nil || !strings.Contains(string(loaded), candidate.ReleaseDir+"/fleetctl") {
+	if err != nil || !strings.Contains(string(loaded), candidate.ReleaseDir+"/fleet") {
 		return fmt.Errorf("verify automatic updater generation: %w", ErrInvalidGeneration)
 	}
 	return nil
 }
 
 func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) error {
-	body, err := h.command.Run(ctx, filepath.Join(current.ReleaseDir, "fleetctl"), "status", "--require-ready", "--output", "json", "--endpoint", current.Endpoint)
+	body, err := h.command.Run(ctx, filepath.Join(current.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", current.Endpoint)
 	if err != nil {
 		return err
 	}
@@ -514,7 +514,7 @@ func (h *LocalHost) clearTransaction() error {
 }
 
 func (h *LocalHost) renderUpdater(candidate Generation) []byte {
-	values := []string{filepath.Join(candidate.ReleaseDir, "fleetctl"), "update", "apply-latest", "--repo", h.repository,
+	values := []string{filepath.Join(candidate.ReleaseDir, "fleet"), "update", "apply-latest", "--repo", h.repository,
 		"--root", h.rootDir, "--state-dir", h.stateDir, "--launch-agents-dir", h.launchAgentsDir,
 		"--mode", candidate.Mode, "--config", candidate.ConfigPath, "--endpoint", candidate.Endpoint, "--domain", h.domain,
 		"--confirm", "automatic-release-update"}
@@ -543,7 +543,7 @@ func (h *LocalHost) renderUpdater(candidate Generation) []byte {
 }
 
 func (h *LocalHost) renderUpdaterHandoff(candidate Generation) []byte {
-	values := []string{filepath.Join(candidate.ReleaseDir, "fleetctl"), "update", "finish-updater-handoff",
+	values := []string{filepath.Join(candidate.ReleaseDir, "fleet"), "update", "finish-updater-handoff",
 		"--repo", h.repository, "--root", h.rootDir, "--state-dir", h.stateDir,
 		"--launch-agents-dir", h.launchAgentsDir, "--mode", candidate.Mode, "--config", candidate.ConfigPath,
 		"--endpoint", candidate.Endpoint, "--domain", h.domain, "--release-dir", candidate.ReleaseDir,

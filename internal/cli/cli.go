@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"context"
@@ -9,10 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
@@ -38,8 +36,9 @@ const (
 	updateReadyDelay    = 2 * time.Second
 )
 
-var version = "dev"
-var exit = os.Exit
+// defaultVersion is reported when no build identity was injected, which is the
+// case for `go run` and for tests.
+const defaultVersion = "dev"
 
 type apiClient interface {
 	Status(context.Context) (adminapi.StatusEnvelope, error)
@@ -54,6 +53,16 @@ type dependencies struct {
 	openProvision  func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
 	writeConfig    func(string, config.Config) error
 	command        autoupdate.Command
+	version        string
+}
+
+// buildVersion reports the injected build identity, falling back to the
+// development default when the CLI is constructed without one.
+func (d dependencies) buildVersion() string {
+	if d.version == "" {
+		return defaultVersion
+	}
+	return d.version
 }
 
 type loadedSecret interface {
@@ -95,13 +104,17 @@ func defaultDependencies() dependencies {
 		},
 		writeConfig: atomicWriteConfig,
 		command:     execCommand{},
+		version:     defaultVersion,
 	}
 }
 
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	exit(executeWith(ctx, os.Args[1:], os.Stdout, os.Stderr, defaultDependencies()))
+// Execute runs the operator command surface. The caller owns process exit and
+// signal handling; version is injected by the single fleet entry point so the
+// CLI and the daemon can never report different builds.
+func Execute(ctx context.Context, args []string, stdout, stderr io.Writer, version string) int {
+	deps := defaultDependencies()
+	deps.version = version
+	return executeWith(ctx, args, stdout, stderr, deps)
 }
 
 func execute(args []string, stdout, stderr io.Writer) int {
@@ -119,10 +132,10 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		writeHelp(stdout)
 		return exitSuccess
 	case "version":
-		return runVersion(args[1:], stdout, stderr)
+		return runVersion(args[1:], stdout, stderr, deps.buildVersion())
 	case "api-version":
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: fleetctl api-version")
+			fmt.Fprintln(stderr, "usage: fleet api-version")
 			return exitUsage
 		}
 		fmt.Fprintln(stdout, adminapi.APIVersion)
@@ -155,11 +168,11 @@ func (execCommand) Run(ctx context.Context, name string, args ...string) ([]byte
 
 func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
 	if len(args) == 0 || (args[0] != "adopt" && args[0] != "apply-latest" && args[0] != "finish-updater-handoff") {
-		fmt.Fprintln(stderr, "usage: fleetctl update adopt|apply-latest|finish-updater-handoff [guarded flags]")
+		fmt.Fprintln(stderr, "usage: fleet update adopt|apply-latest|finish-updater-handoff [guarded flags]")
 		return exitUsage
 	}
 	operation := args[0]
-	flags := flag.NewFlagSet("fleetctl update "+operation, flag.ContinueOnError)
+	flags := flag.NewFlagSet("fleet update "+operation, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	home, _ := os.UserHomeDir()
 	rootDefault := filepath.Join(home, "Library", "Application Support", "tart-runner-fleet")
@@ -244,10 +257,10 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 
 func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
 	if len(args) == 0 || args[0] != "provision" {
-		fmt.Fprintln(stderr, "usage: fleetctl scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text]")
+		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text]")
 		return exitUsage
 	}
-	flags := flag.NewFlagSet("fleetctl scale-sets provision", flag.ContinueOnError)
+	flags := flag.NewFlagSet("fleet scale-sets provision", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "fleet configuration path")
 	output := flags.String("output", "table", "output format: table or json")
@@ -281,7 +294,7 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
 		return exitFailure
 	}
-	result, err := provision.Run(ctx, provision.Request{Config: cfg, Apply: *apply, LoadKey: deps.loadPrivateKey, Open: deps.openProvision, Version: version})
+	result, err := provision.Run(ctx, provision.Request{Config: cfg, Apply: *apply, LoadKey: deps.loadPrivateKey, Open: deps.openProvision, Version: deps.buildVersion()})
 	if err != nil {
 		fmt.Fprintf(stderr, "provision scale sets: %v\n", err)
 		if errors.Is(err, operations.ErrConflict) || errors.Is(err, operations.ErrUncertain) {
@@ -393,7 +406,7 @@ type remoteOptions struct {
 }
 
 func parseRemote(command string, args []string, stderr io.Writer) (remoteOptions, int) {
-	flags := flag.NewFlagSet("fleetctl "+command, flag.ContinueOnError)
+	flags := flag.NewFlagSet("fleet "+command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	opts := remoteOptions{}
 	flags.StringVar(&opts.endpoint, "endpoint", adminapi.DefaultEndpoint(), "local unix:// or loopback http:// endpoint")
@@ -533,8 +546,8 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	return exitSuccess
 }
 
-func runVersion(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("fleetctl version", flag.ContinueOnError)
+func runVersion(args []string, stdout, stderr io.Writer, version string) int {
+	flags := flag.NewFlagSet("fleet version", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	output := flags.String("output", "table", "output format: table or json")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || (*output != "table" && *output != "json") {
@@ -556,10 +569,10 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 
 func runConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "validate" {
-		fmt.Fprintln(stderr, "usage: fleetctl config validate [--mode observe|shadow|canary|authority] [--output table|json] <path>")
+		fmt.Fprintln(stderr, "usage: fleet config validate [--mode observe|shadow|canary|authority] [--output table|json] <path>")
 		return exitUsage
 	}
-	flags := flag.NewFlagSet("fleetctl config validate", flag.ContinueOnError)
+	flags := flag.NewFlagSet("fleet config validate", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	mode := flags.String("mode", string(reconcile.Observe), "controller mode: observe, shadow, canary, or authority")
 	output := flags.String("output", "table", "output format: table or json")
@@ -625,30 +638,30 @@ func writeJSON(output io.Writer, value any) error {
 }
 
 func writeHelp(output io.Writer) {
-	fmt.Fprint(output, `fleetctl — safe operator interface for Tart Runner Fleet
+	fmt.Fprint(output, `fleet — safe operator interface for Tart Runner Fleet
 
 READ-ONLY COMMANDS (observe/shadow safe)
-  fleetctl status [--output table|json] [--require-ready]
-  fleetctl queues|instances|operations|observations [--output table|json]
-  fleetctl health|doctor [--output table|json]
-  fleetctl metrics
-  fleetctl config validate [--mode observe|shadow|canary|authority] <path>
-  fleetctl version | api-version
+  fleet status [--output table|json] [--require-ready]
+  fleet queues|instances|operations|observations [--output table|json]
+  fleet health|doctor [--output table|json]
+  fleet metrics
+  fleet config validate [--mode observe|shadow|canary|authority] <path>
+  fleet version | api-version
 
 GUARDED BOOTSTRAP
-  fleetctl scale-sets provision --config path
-  fleetctl scale-sets provision --config path --apply --write \
+  fleet scale-sets provision --config path
+  fleet scale-sets provision --config path --apply --write \
     --confirm provision-scale-sets --reason "operator reason"
 
 GUARDED RELEASE UPDATES
-  fleetctl update adopt --release-dir /absolute/release --mode authority \
+  fleet update adopt --release-dir /absolute/release --mode authority \
     --confirm adopt-current-generation
-  fleetctl update apply-latest --mode authority \
+  fleet update apply-latest --mode authority \
     --confirm automatic-release-update
 
 CONNECTION
-  fleetctl [--endpoint unix:///path/to/fleetd.sock] <remote-command>
-  fleetctl <remote-command> [--endpoint unix:///path/to/fleetd.sock]
+  fleet [--endpoint unix:///path/to/fleetd.sock] <remote-command>
+  fleet <remote-command> [--endpoint unix:///path/to/fleetd.sock]
   --timeout 5s may appear in either position; the default endpoint uses the
   private tart-runner-fleet state directory.
 

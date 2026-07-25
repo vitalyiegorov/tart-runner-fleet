@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"bytes"
@@ -82,11 +82,11 @@ func makeUpdateRelease(t *testing.T, root string) string {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	template := []byte(`<plist><dict><string>__RELEASE_DIR__/fleetd</string><string>--mode=authority</string><string>__STATE_DIR__/fleet.json</string></dict></plist>`)
-	files := map[string][]byte{"RELEASE_VERSION": []byte("v2\n"), "fleetd": []byte("fleetd"), "fleetctl": []byte("fleetctl"),
+	template := []byte(`<plist><dict><string>__RELEASE_DIR__/fleet</string><string>--mode=authority</string><string>__STATE_DIR__/fleet.json</string></dict></plist>`)
+	files := map[string][]byte{"RELEASE_VERSION": []byte("v2\n"), "fleet": []byte("fleet"),
 		"com.vitalyiegorov.tart-runner-fleet.authority.plist": template}
 	var sums strings.Builder
-	for _, name := range []string{"RELEASE_VERSION", "fleetd", "fleetctl", "com.vitalyiegorov.tart-runner-fleet.authority.plist"} {
+	for _, name := range []string{"RELEASE_VERSION", "fleet", "com.vitalyiegorov.tart-runner-fleet.authority.plist"} {
 		body := files[name]
 		if err := os.WriteFile(filepath.Join(dir, name), body, 0o700); err != nil {
 			t.Fatal(err)
@@ -116,7 +116,7 @@ func TestGuardedAutomaticUpdateAdoptionAndIdempotentLatest(t *testing.T) {
 		t.Fatal(err)
 	}
 	canonical := filepath.Join(agents, autoupdate.CanonicalPlist)
-	if err := os.WriteFile(canonical, []byte(`<string>`+release+`/fleetd</string><string>--mode=authority</string>`), 0o600); err != nil {
+	if err := os.WriteFile(canonical, []byte(`<string>`+release+`/fleet</string><string>--mode=authority</string>`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	command := &fakeUpdateCommand{}
@@ -129,7 +129,7 @@ func TestGuardedAutomaticUpdateAdoptionAndIdempotentLatest(t *testing.T) {
 	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
 		t.Fatalf("adopt code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	command.launchPrint = "program = " + release + "/fleetctl"
+	command.launchPrint = "program = " + release + "/fleet"
 	args = append([]string{"update", "finish-updater-handoff"}, common...)
 	args = append(args, "--release-dir", release, "--confirm", "automatic-updater-handoff")
 	stdout.Reset()
@@ -271,7 +271,7 @@ func TestOperatorCommandsHumanAndJSON(t *testing.T) {
 		{name: "metrics", args: []string{"metrics"}, contains: []string{"fleet_mode 1"}},
 		{name: "api version", args: []string{"api-version"}, contains: []string{adminapi.APIVersion}},
 		{name: "version json", args: []string{"version", "--output", "json"}, contains: []string{`"version": "dev"`}},
-		{name: "help", args: []string{"help"}, contains: []string{"fleetctl status", "READ-ONLY"}},
+		{name: "help", args: []string{"help"}, contains: []string{"fleet status", "READ-ONLY"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -399,7 +399,7 @@ func TestConfigValidationAndLegacyAlias(t *testing.T) {
 		}
 	}
 	// A config that decodes and passes Config.Validate but references a
-	// nonexistent scale set profile must still fail validation, because fleetd
+	// nonexistent scale set profile must still fail validation, because the daemon
 	// would crash-loop building bindings at startup (production incident).
 	runtimeGap := filepath.Join(dir, "runtime-gap.json")
 	if err := os.WriteFile(runtimeGap, []byte(strings.Replace(raw, `"targets":`,
@@ -485,15 +485,16 @@ func TestRemoteSecondaryErrorsAndBrokenOutput(t *testing.T) {
 	}
 }
 
-func TestMainDelegatesExitCode(t *testing.T) {
-	originalArgs, originalExit := os.Args, exit
-	t.Cleanup(func() { os.Args, exit = originalArgs, originalExit })
-	os.Args = []string{"fleetctl", "version"}
-	got := -1
-	exit = func(code int) { got = code }
-	main()
-	if got != 0 {
-		t.Fatalf("exit code = %d", got)
+// TestExecuteReportsInjectedVersion pins that the operator surface reports the
+// build identity it is handed rather than the development default, which is
+// what lets one executable guarantee the daemon and the CLI agree.
+func TestExecuteReportsInjectedVersion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Execute(context.Background(), []string{"version"}, &stdout, &stderr, "v4.5.6+test"); code != exitSuccess {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "v4.5.6+test" {
+		t.Fatalf("stdout=%q", stdout.String())
 	}
 }
 
