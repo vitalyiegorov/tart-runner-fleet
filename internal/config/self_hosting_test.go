@@ -197,7 +197,17 @@ func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	for _, required := range []string{"/opt/tart runner fleet/v1/fleet", "/tmp/fleet state/fleet.json", "--mode=canary", "--canary-scope=fleet-repo", "--canary-profile=small"} {
+	// Match complete ProgramArguments elements, never bare path fragments. ADR
+	// 0019 merged `fleetd` and `fleetctl` into a name that is a strict prefix of
+	// both, so `Contains(text, ".../v1/fleet")` is also satisfied by a plist that
+	// launches `.../v1/fleetd` and can no longer prove the daemon is invoked.
+	for _, required := range []string{
+		"<string>/opt/tart runner fleet/v1/fleet</string>",
+		"<string>--config=/tmp/fleet state/fleet.json</string>",
+		"<string>--mode=canary</string>",
+		"<string>--canary-scope=fleet-repo</string>",
+		"<string>--canary-profile=small</string>",
+	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("rendered canary is missing %q", required)
 		}

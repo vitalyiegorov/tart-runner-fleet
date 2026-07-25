@@ -412,7 +412,7 @@ observations are unavailable but not why. Every ingest observation carries a
 bounded, credential-free reason in `detail`:
 
 ```sh
-fleetctl status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
+fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
   jq '.data.observations | to_entries | map(select(.value.freshness != "fresh"))'
 ```
 

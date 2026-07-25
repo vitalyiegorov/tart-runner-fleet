@@ -38,7 +38,7 @@ func execute(ctx context.Context, args []string, _ io.Writer, stderr io.Writer, 
 	configPath := flags.String("config", "fleet.json", "configuration path")
 	databasePath := flags.String("database", "fleet.db", "SQLite state path")
 	healthAddress := flags.String("health-address", "127.0.0.1:9876", "local health listener")
-	adminSocket := flags.String("admin-socket", adminapi.DefaultSocketPath(), "private fleetctl Unix socket")
+	adminSocket := flags.String("admin-socket", adminapi.DefaultSocketPath(), "private operator Unix socket")
 	mode := flags.String("mode", string(reconcile.Observe), "observe, shadow, canary, or authority")
 	canaryScope := flags.String("canary-scope", "", "exact GitHub scope selected for canary mutation")
 	canaryProfile := flags.String("canary-profile", "", "exact runner profile selected for canary mutation")

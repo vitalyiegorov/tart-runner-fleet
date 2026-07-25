@@ -40,7 +40,7 @@ tar -xzf "$DOWNLOAD/tart-runner-fleet-$VERSION-darwin-arm64.tar.gz" -C "$RELEASE
 install -m 0600 "$DOWNLOAD/SHA256SUMS" "$RELEASE_DIR/SHA256SUMS"
 install -m 0600 "$DOWNLOAD/tart-runner-fleet-$VERSION-darwin-arm64.tar.gz" \
   "$RELEASE_DIR/tart-runner-fleet-$VERSION-darwin-arm64.tar.gz"
-chmod 0700 "$RELEASE_DIR/fleet" "$RELEASE_DIR/fleet" "$RELEASE_DIR/render-launchd.sh"
+chmod 0700 "$RELEASE_DIR/fleet" "$RELEASE_DIR/render-launchd.sh"
 "$RELEASE_DIR/fleet" version
 ```
 

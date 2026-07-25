@@ -5,8 +5,8 @@ mode `0600`. Its parent directory is created with mode `0700`; a regular file,
 foreign-owned socket, relative path, non-canonical path, or oversized Unix path
 fails closed. A stale socket owned by the current user is safely replaced.
 
-`fleet` keeps the existing loopback health/Prometheus listener for monitoring,
-but `fleet` defaults to the Unix socket.
+`fleet run` keeps the existing loopback health/Prometheus listener for
+monitoring, while the operator commands default to the Unix socket.
 
 ## Endpoints
 

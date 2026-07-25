@@ -96,13 +96,34 @@ The installed updater of generation *N* rewrites the updater plist to the
 that omits `fleetctl` is therefore not installable by an already-deployed
 updater.
 
-Migration is a **one-time manual re-adoption**, not an automatic update:
+Migration is a **one-time manual re-adoption**, not an automatic update. The
+order matters: `fleet update adopt` records an *already-running* generation. It
+reads the canonical plist and refuses unless that file already names the
+candidate's `fleet` and mode, then requires the daemon to report the candidate
+version, mode, and readiness. It writes only the updater plist — never the
+canonical one. So the boot plist must be rendered, installed, and the daemon job
+restarted **before** adopt, which is exactly the sequence
+[`INSTALL.md`](../../INSTALL.md) §4 (render and validate launchd) then §5 (adopt
+automatic production updates) already prescribes:
 
 1. drain the fleet through the existing quiescence path;
-2. install the first `fleet` release beside the incumbent;
-3. `fleet adopt` the new generation, writing both LaunchAgent plists;
-4. verify loaded program names and readiness evidence;
-5. retain the incumbent generation as the rollback target.
+2. unload the incumbent updater job, so the commit does not have to hand its own
+   replacement to the retrying handoff job;
+3. install and verify the first `fleet` release beside the incumbent;
+4. render the new canonical plist from that release, install it, and restart the
+   daemon job (`INSTALL.md` §4);
+5. verify the daemon reports the exact new version, the unchanged mode, and
+   readiness;
+6. `fleet update adopt` the running generation, which enables the updater
+   (`INSTALL.md` §5);
+7. verify both loaded program names resolve inside the new release directory and
+   that the updater's last exit status is zero;
+8. retain the incumbent generation as the rollback target.
+
+Rollback is the same sequence run against the incumbent release: restore its
+canonical plist, restart the daemon job, then `fleetctl update adopt` from the
+incumbent directory, which restores the installed generation, the `current` link,
+and the updater plist as one unit.
 
 Automatic updates resume from the following release onward, unchanged.
 

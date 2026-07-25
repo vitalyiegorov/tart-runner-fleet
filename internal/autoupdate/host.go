@@ -68,8 +68,8 @@ func (h *LocalHost) Adopt(ctx context.Context, candidate Generation) error {
 		return err
 	}
 	canonical, err := os.ReadFile(filepath.Join(h.launchAgentsDir, CanonicalPlist)) // #nosec G304 -- fixed launch agent path.
-	if err != nil || !strings.Contains(string(canonical), candidate.ReleaseDir+"/fleet") ||
-		!strings.Contains(string(canonical), "--mode="+candidate.Mode) {
+	if err != nil || !namesPlistArgument(string(canonical), candidate.ReleaseDir+"/fleet") ||
+		!namesPlistArgument(string(canonical), "--mode="+candidate.Mode) {
 		return ErrInvalidGeneration
 	}
 	if err := h.Ready(ctx, candidate); err != nil {
@@ -357,10 +357,43 @@ func (h *LocalHost) FinishUpdaterHandoff(ctx context.Context, candidate Generati
 		return fmt.Errorf("bootstrap automatic updater: %w", err)
 	}
 	loaded, err := h.command.Run(ctx, "launchctl", "print", updaterLabel)
-	if err != nil || !strings.Contains(string(loaded), candidate.ReleaseDir+"/fleet") {
+	if err != nil || !launchdNamesProgram(string(loaded), filepath.Join(candidate.ReleaseDir, "fleet")) {
 		return fmt.Errorf("verify automatic updater generation: %w", ErrInvalidGeneration)
 	}
 	return nil
+}
+
+// namesPlistArgument reports whether a launchd plist body carries value as a
+// complete `ProgramArguments` element. ADR 0019 merged `fleetd` and `fleetctl`
+// into `fleet`, which is a strict prefix of both retired names, so a bare
+// substring test on a path can no longer prove which executable a boot tuple
+// names. ADR 0011 requires the exact generation executable, so match the element.
+func namesPlistArgument(body, value string) bool {
+	return strings.Contains(body, "<string>"+value+"</string>")
+}
+
+// launchdNamesProgram reports whether `launchctl print` output names program as
+// a complete path. Real output carries it twice: as a `program = <path>` line and
+// as argv[0] on its own line inside the `arguments = { ... }` block. Comparing a
+// whole line keeps ADR 0011's gate exact, where a substring test would accept a
+// job still running `<releaseDir>/fleetd`. Output that names no program at all is
+// rejected rather than assumed healthy.
+func launchdNamesProgram(output, program string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		field := strings.TrimSpace(line)
+		if remainder, isProgram := strings.CutPrefix(field, "program"); isProgram {
+			if remainder = strings.TrimSpace(remainder); strings.HasPrefix(remainder, "=") {
+				if strings.TrimSpace(strings.TrimPrefix(remainder, "=")) == program {
+					return true
+				}
+				continue
+			}
+		}
+		if field == program {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) error {

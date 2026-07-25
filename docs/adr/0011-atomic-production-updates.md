@@ -2,7 +2,16 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by
+[ADR 0019](0019-single-fleet-binary.md), which merges the `fleetd` daemon and the
+`fleetctl` operator interface into one `fleet` executable. Every mention of
+`fleetd` or `fleetctl` below now denotes a subcommand of that single binary:
+`fleetctl update` is `fleet update`, the candidate `fleetctl` that validates
+configuration is `fleet config validate`, and the updater plist is rewritten to
+the new immutable `fleet`. The transaction, quiescence, readiness, commit, and
+rollback rules are unchanged, as is the rule that an updater must never `bootout`
+its own launchd job. Releases from before that merge still ship both executables
+and remain valid rollback targets.
 
 ## Context
 
