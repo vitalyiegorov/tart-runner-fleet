@@ -232,7 +232,24 @@ const (
 	InstancePowerUnknown InstancePower = ""
 	InstancePowerRunning InstancePower = "running"
 	InstancePowerStopped InstancePower = "stopped"
+	// InstancePowerAbsent means a SUCCESSFUL Tart enumeration did not list the
+	// owned VM at all: absence proven, never inferred from a failed probe, which
+	// stays an unavailable observation. It is deliberately distinct from Stopped
+	// (the VM exists and is powered off) and from Unknown (nothing was read), so
+	// no caller can confuse "gone" with "unread".
+	InstancePowerAbsent InstancePower = "absent"
 )
+
+// ProvenIdle reports that a successful host observation established the VM is
+// executing nothing: it was enumerated powered off, or it was not enumerated at
+// all. Unknown is excluded by construction, because an unread power state is
+// never proof of anything. Callers use it for non-destructive judgements about
+// what the host is doing; it is deliberately NOT the predicate that authorizes a
+// destructive recovery, which keys on an explicitly stopped VM so an enumeration
+// miss can never plan a kill (see internal/scheduler.assignmentRecoveries).
+func (p InstancePower) ProvenIdle() bool {
+	return p == InstancePowerStopped || p == InstancePowerAbsent
+}
 
 func (i Instance) Live() bool { return i.State != InstanceDeleted }
 
@@ -248,24 +265,35 @@ func (i Instance) IncarnatesDemand() bool {
 	return i.Demand != (DemandKey{}) && i.State != InstanceDeleted && i.State != InstanceFailed
 }
 
+// TearingDown reports whether the instance state is one of the cleanup states:
+// it can never execute work again, and a durable drain operation is the actor
+// that finishes it. Every judgement that treats cleanup differently from live
+// work shares this one list so they cannot drift apart.
+func (s InstanceState) TearingDown() bool {
+	switch s {
+	case InstanceDraining, InstanceDeregistering, InstanceStopping:
+		return true
+	default:
+		return false
+	}
+}
+
 // ConsumesHostResources distinguishes durable cleanup state from physical
-// CPU/RAM occupancy. A VM observed stopped while already tearing down remains
-// live until GitHub deregistration and Tart deletion complete, but cannot
-// execute again and must not reserve the host's compute envelope forever.
-// Unknown power and all non-teardown states remain fail-closed.
+// CPU/RAM occupancy. A VM proven idle while already tearing down remains live
+// until GitHub deregistration and Tart deletion complete, but cannot execute
+// again and must not reserve the host's compute envelope forever. A VM proven
+// absent occupies strictly less than one proven stopped, so it must free the
+// vector wherever stopped does — otherwise a deleted VM would pin the host to
+// its platform harder than a live one. Unknown power and all non-cleanup states
+// remain fail-closed.
 func (i Instance) ConsumesHostResources() bool {
 	if !i.Live() {
 		return false
 	}
-	if i.Power != InstancePowerStopped {
+	if !i.Power.ProvenIdle() {
 		return true
 	}
-	switch i.State {
-	case InstanceDraining, InstanceDeregistering, InstanceStopping:
-		return false
-	default:
-		return true
-	}
+	return !i.State.TearingDown()
 }
 
 func (i Instance) CanRetry(now time.Time, maxAttempts int) bool {

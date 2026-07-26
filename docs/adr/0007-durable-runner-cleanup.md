@@ -7,7 +7,10 @@ escalates past 720 attempts into a published dead letter, and completed by
 [ADR 0021](0021-dischargeable-dead-letters.md), which makes such a dead letter
 parked rather than busy and gives an operator a guarded way to discharge it.
 Neither shortens a retry: a refusal that a running job can still explain is still
-retried indefinitely.
+retried indefinitely. Amended by
+[ADR 0022](0022-absent-owned-vm-is-a-per-instance-fact.md), which adds a third
+observed existence state — an owned VM a successful Tart read did not enumerate —
+without letting it authorize any destructive step.
 
 ## Context
 

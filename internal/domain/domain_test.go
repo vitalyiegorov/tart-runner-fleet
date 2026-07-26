@@ -167,9 +167,28 @@ func TestStoppedTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
 		{ID: "running-drain", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerRunning},
 		{ID: "unknown-drain", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerUnknown},
 		{ID: "stopped-assigned", Platform: PlatformMacOS, State: InstanceAssigned, Power: InstancePowerStopped},
+		{ID: "absent-assigned", Platform: PlatformMacOS, State: InstanceAssigned, Power: InstancePowerAbsent},
 	} {
 		if !instance.ConsumesHostResources() {
 			t.Fatalf("unsafe instance stopped consuming resources: %#v", instance)
+		}
+	}
+}
+
+// A VM a successful Tart enumeration proves absent occupies strictly less of the
+// host than one it proves stopped, so absence during cleanup must free the vector
+// wherever stopped already frees it — otherwise a deleted VM would pin the host
+// to its platform harder than a live one and starve the other platform. Outside a
+// cleanup state, and for an unknown power reading, the fail-closed answer is
+// unchanged (asserted above).
+func TestAbsentTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
+	for _, state := range []InstanceState{InstanceDraining, InstanceDeregistering, InstanceStopping} {
+		absent := Instance{ID: "absent", Platform: PlatformMacOS, State: state, Power: InstancePowerAbsent}
+		if absent.ConsumesHostResources() {
+			t.Fatalf("absent %s instance consumed host resources", state)
+		}
+		if mode, err := DeriveHostMode([]Instance{absent}); err != nil || mode != HostIdle {
+			t.Fatalf("absent %s mode = %s, %v", state, mode, err)
 		}
 	}
 }

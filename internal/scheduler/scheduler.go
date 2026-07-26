@@ -308,6 +308,11 @@ func assignmentRecoveries(now time.Time, assignedTimeout time.Duration, instance
 		confirmedInactive := instance.Power == domain.InstancePowerRunning && instance.RecoveryReady
 		stalled := stalledAssignment(now, assignedTimeout, instance)
 		lingering := lingeringRunner(now, assignedTimeout, instance)
+		// The stopped gate is an exact power comparison, not domain.ProvenIdle: an
+		// owned VM merely missing from a Tart enumeration must never plan a kill.
+		// Absence cannot even reach here for an assigned or running instance — that
+		// observation is still host-wide unavailable (internal/app/inventory.go) — and
+		// if it ever could, no destructive operation may be derived from it.
 		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled && !lingering {
 			continue
 		}

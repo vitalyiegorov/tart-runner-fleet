@@ -463,10 +463,13 @@ unless the controller runs in authority mode.
 order is load-bearing. A *stopped* VM belonging to a live instance row is
 load-bearing state:
 
-- **VM deleted first, row still live** → `internal/app/inventory.go` turns the
+- **VM deleted first, row still live** → for a row outside the cleanup states
+  (`draining`, `deregistering`, `stopping`), `internal/app/inventory.go` turns the
   ENTIRE instance observation `Unavailable` with `owned VM <id> missing from
   Tart`, which blocks planning for the whole host. It is unrepairable by
-  observation, because the VM that would have proved anything is gone.
+  observation, because the VM that would have proved anything is gone. A cleanup
+  row degrades to `absent` power per instance instead of blocking the host (ADR
+  0022), but there is still no reason to create that state by hand.
 - **Row retired first, VM still present** → the observation is also blocked, with
   `untracked controller VM requires reconciliation`, but that state is trivially
   repairable: the VM still exists, and re-running the same discharge command

@@ -94,7 +94,10 @@ state and fresh Tart evidence that the VM is not running.
 
 **5. Ordering: the durable row first, the VM second.** `internal/app/inventory.go`
 turns the entire instance observation `Unavailable` when a live row's owned VM is
-absent, blocking planning host-wide with no VM left to prove anything. It also
+absent, blocking planning host-wide with no VM left to prove anything.
+([ADR 0022](0022-absent-owned-vm-is-a-per-instance-fact.md) later narrowed that to
+rows outside the cleanup states; the ordering rule is unchanged, and this decision
+never depended on the blast radius being host-wide.) It also
 blocks on an untracked `trf-` VM with no row — but that state is repairable by
 re-running the same command, because the VM still exists. So the discharge retires
 the row inside the transaction and removes the VM afterwards, reports a failed
