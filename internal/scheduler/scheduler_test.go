@@ -259,6 +259,27 @@ func TestStoppedDrainingOrphanCannotStarveUnrelatedCapacity(t *testing.T) {
 	}
 }
 
+// An owned VM a successful Tart enumeration proves absent widens no destructive
+// authority. It frees its vector exactly as a stopped cleanup row does, and it
+// plans NO operation of its own: the recovery gates key on an explicitly stopped
+// VM, or a powered-on one past a deadline, so an enumeration miss can never be
+// turned into a deregistration or a delete.
+func TestAbsentOwnedVMFreesItsVectorAndAuthorizesNoOperation(t *testing.T) {
+	absent := domain.Instance{ID: "absent", Repo: "a/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, State: domain.InstanceDraining, Power: domain.InstancePowerAbsent}
+	queued := demand("b/repo", 9, time.Minute, "small")
+	if got := spawnedKeys(PlanTick(input([]domain.Demand{queued}, []domain.Instance{absent}, State{}))); !reflect.DeepEqual(got, []domain.DemandKey{queued.Key}) {
+		t.Fatalf("absent draining instance starved unrelated work")
+	}
+	for _, state := range []domain.InstanceState{domain.InstanceDraining, domain.InstanceAssigned, domain.InstanceRunning} {
+		candidate := absent
+		candidate.State = state
+		if plan := PlanTick(input(nil, []domain.Instance{candidate}, State{})); len(plan.Operations) != 0 {
+			t.Fatalf("absent %s instance planned %#v", state, plan.Operations)
+		}
+	}
+}
+
 func TestQueuedSiblingsRemainDistinctWhenRunIsInProgress(t *testing.T) {
 	first := demand("a/repo", 11, time.Minute, "small")
 	second := demand("a/repo", 12, time.Minute, "small")

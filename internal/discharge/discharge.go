@@ -47,16 +47,18 @@ type Service struct {
 
 // DischargeDeadLetter closes one dead letter and reports precisely what changed.
 //
-// The ordering is the safety property, and it is not interchangeable. A live
-// instance row whose owned VM is absent turns the ENTIRE instance observation
-// Unavailable (internal/app/inventory.go: "owned VM %s missing from Tart"),
-// which blocks planning for the whole host and cannot be repaired by observation,
-// because the VM that would have proved anything is gone. A cleared row whose VM
-// still exists also blocks planning ("untracked controller VM requires
-// reconciliation"), but that wedge is trivially repairable: the VM is still there
-// and re-running this command removes it. So the durable row is always retired
-// FIRST and the VM removed SECOND, and a failure of the second step is reported
-// as a refusal with the durable half already applied, for the operator to retry.
+// The ordering is the safety property, and it is not interchangeable. Removing
+// the VM first would leave a live instance row with no owned VM, and the reverse
+// order is never better: for a row outside the cleanup states that observation
+// still turns the ENTIRE instance inventory Unavailable ("owned VM %s missing
+// from Tart"), blocking planning for the whole host with nothing left to prove
+// anything, and even for a cleanup row it degrades the row to absent power for no
+// benefit. A cleared row whose VM still exists also blocks planning ("untracked
+// controller VM requires reconciliation"), but that wedge is trivially repairable:
+// the VM is still there and re-running this command removes it. So the durable row
+// is always retired FIRST and the VM removed SECOND, and a failure of the second
+// step is reported as a refusal with the durable half already applied, for the
+// operator to retry.
 //
 // Refusals never reach the destructive half: an unconfirmed request, a
 // non-authority daemon, a running VM, an unreadable Tart observation, an

@@ -34,8 +34,13 @@ func TestParkedDeadLettersRequireAStoppedVMAndNoProgressingWork(t *testing.T) {
 		parked      bool
 	}{
 		"stopped VM with nothing progressing": {instances: []domain.Instance{phantomInstance(domain.InstancePowerStopped)}, parked: true},
-		"running VM":                          {instances: []domain.Instance{phantomInstance(domain.InstancePowerRunning)}},
-		"unknown power":                       {instances: []domain.Instance{phantomInstance(domain.InstancePowerUnknown)}},
+		// A VM a successful Tart enumeration proves absent cannot be interrupted by a
+		// generation swap either, and it is strictly stronger evidence than stopped.
+		// Refusing to park it would let exactly the wedge ADR 0021 removed survive in a
+		// new shape: a dead letter whose VM is already gone disabling updates forever.
+		"absent VM with nothing progressing": {instances: []domain.Instance{phantomInstance(domain.InstancePowerAbsent)}, parked: true},
+		"running VM":                         {instances: []domain.Instance{phantomInstance(domain.InstancePowerRunning)}},
+		"unknown power":                      {instances: []domain.Instance{phantomInstance(domain.InstancePowerUnknown)}},
 		"another operation can still advance it": {instances: []domain.Instance{phantomInstance(domain.InstancePowerStopped)},
 			progressing: true},
 		"no live instance row at all": {instances: nil},

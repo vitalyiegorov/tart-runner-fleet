@@ -86,6 +86,66 @@ func TestProductionInventoryMarksStoppedOwnedRunner(t *testing.T) {
 	}
 }
 
+// A VM that a SUCCESSFUL `tart list` does not enumerate is a proven per-instance
+// fact, not a host-wide probe failure. While an instance is tearing down it is
+// also an expected intermediate observation: DrainExecutor deletes the VM and
+// only then advances the row to deleted, and the tick reads the durable rows and
+// Tart at two different instants, so any interleaving observes a live cleanup row
+// with no VM. Turning the whole observation Unavailable there stops planning for
+// every profile on the host over one instance whose cleanup is already finishing
+// (Stop and Delete are absent-idempotent), so absence during cleanup is reported
+// per instance and the rest of the inventory stays fresh.
+func TestAbsentOwnedVMDuringCleanupIsPerInstanceNotHostWide(t *testing.T) {
+	now := time.Now().UTC()
+	for _, state := range []operations.State{operations.StateDraining, operations.StateDeregistering, operations.StateStopping} {
+		t.Run(string(state), func(t *testing.T) {
+			absent := inventoryInstance(state)
+			healthy := inventoryInstance(operations.StateRunning)
+			healthy.ID = "trf-small-2"
+			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{absent, healthy}},
+				Tart: fakeTart{values: []tart.VM{{Name: "trf-small-2", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+				Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+			instances, _ := inv.Observe(context.Background())
+			if instances.State != domain.ObservationFresh || len(instances.Value) != 2 {
+				t.Fatalf("observation = %#v", instances)
+			}
+			if got := instances.Value[0]; got.Power != domain.InstancePowerAbsent || got.ConsumesHostResources() {
+				t.Fatalf("absent instance = %#v", got)
+			}
+			if got := instances.Value[1]; got.Power != domain.InstancePowerRunning {
+				t.Fatalf("healthy instance = %#v", got)
+			}
+		})
+	}
+}
+
+// The narrowing is bounded by the controller invariant that produces it: a row
+// leaves Planned only after Clone succeeded, so every other live state means the
+// VM was removed out of band with no cleanup operation reconciling it and no
+// non-destructive reclamation available. That stays host-wide fail-closed, and so
+// does a Tart probe that failed rather than proved absence.
+func TestAbsentOwnedVMOutsideCleanupStaysHostWideUnavailable(t *testing.T) {
+	now := time.Now().UTC()
+	for _, state := range []operations.State{operations.StateCloning, operations.StateBooting, operations.StateReachable,
+		operations.StateRegistering, operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning, operations.StateFailed} {
+		t.Run(string(state), func(t *testing.T) {
+			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(state)}},
+				Tart: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+			instances, _ := inv.Observe(context.Background())
+			if instances.State != domain.ObservationUnavailable || instances.Reason != "owned VM trf-small-1 missing from Tart" {
+				t.Fatalf("observation = %#v", instances)
+			}
+		})
+	}
+	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateDraining)}},
+		Tart: fakeTart{err: errors.New("tart is unreachable")}, Host: fakeHost{healthySnapshot(now)},
+		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+	instances, _ := inv.Observe(context.Background())
+	if instances.State != domain.ObservationUnavailable || instances.Reason != "Tart inventory unavailable" {
+		t.Fatalf("unreadable probe = %#v", instances)
+	}
+}
+
 func TestProductionInventoryMarksRunningCompletedRunnerRecoverableFromFreshEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	confirmation := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}

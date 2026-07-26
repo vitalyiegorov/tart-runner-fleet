@@ -1182,13 +1182,18 @@ func (e engineTicker) operationFailureMetrics(ctx context.Context) ([]telemetry.
 // deadLetterMetrics identifies the parked operations from this tick's own
 // inventory. Parked means two things at once, and only this seam can see both:
 // the durable side proves no operation for the resource is pending or claimed,
-// and the inventory side proves the owning VM is observed STOPPED.
+// and the inventory side proves the owning VM is PROVEN IDLE — enumerated by a
+// successful Tart read as powered off, or not enumerated at all.
 //
-// Stopped is required rather than merely "not running". An unknown power state is
+// Proof is required rather than merely "not running". An unknown power state is
 // never treated as parked, so an instance the fleet cannot see clearly keeps
 // deferring release updates, and a resource with no live instance row at all is
 // not parked either — there is nothing left for an operator to reclaim, and
 // counting it would let the quiescence gate discount capacity that is still real.
+// An absent VM is admitted for the same reason a stopped one is, and it is the
+// stronger evidence of the two: a generation swap cannot interrupt a guest that
+// does not exist. Withholding it would let the wedge ADR 0021 removed return in a
+// new shape — a dead letter whose VM is already gone disabling updates forever.
 func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.Instance) ([]telemetry.DeadLetter, error) {
 	if e.deadLetters == nil {
 		return nil, nil
@@ -1197,15 +1202,15 @@ func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.
 	if err != nil {
 		return nil, err
 	}
-	stopped := make(map[string]struct{}, len(instances))
+	provenIdle := make(map[string]struct{}, len(instances))
 	for _, instance := range instances {
-		if instance.Live() && instance.Power == domain.InstancePowerStopped {
-			stopped[instance.ID] = struct{}{}
+		if instance.Live() && instance.Power.ProvenIdle() {
+			provenIdle[instance.ID] = struct{}{}
 		}
 	}
 	letters := make([]telemetry.DeadLetter, 0, len(durable))
 	for _, letter := range durable {
-		_, idle := stopped[letter.ResourceID]
+		_, idle := provenIdle[letter.ResourceID]
 		letters = append(letters, telemetry.DeadLetter{OperationID: letter.OperationID, Kind: letter.Kind,
 			Code: letter.Code, ResourceID: letter.ResourceID, Attempts: letter.Attempts,
 			Parked: idle && !letter.ResourceProgressing})
