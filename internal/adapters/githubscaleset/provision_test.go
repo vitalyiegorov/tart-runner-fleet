@@ -37,6 +37,12 @@ func (f *fakeScaleSetAdmin) GetRunnerGroupByName(_ context.Context, name string)
 	return f.group, f.err
 }
 
+// UpdateRunnerScaleSet satisfies the admin interface. The default fake never
+// reconciles drift, so a call here means a test exercised repair without opting in.
+func (f *fakeScaleSetAdmin) UpdateRunnerScaleSet(context.Context, int, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error) {
+	return nil, errors.New("unexpected reconcile in a fail-closed fake")
+}
+
 func (f *fakeScaleSetAdmin) GetRunnerScaleSet(_ context.Context, groupID int, name string) (*scaleset.RunnerScaleSet, error) {
 	f.groupID, f.lookupName = groupID, name
 	if f.lookupErr != nil {

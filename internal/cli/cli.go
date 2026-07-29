@@ -48,13 +48,14 @@ type apiClient interface {
 }
 
 type dependencies struct {
-	newClient      func(string, time.Duration) (apiClient, error)
-	openConfig     func(string) (io.ReadCloser, error)
-	loadPrivateKey func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
-	openProvision  func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
-	writeConfig    func(string, config.Config) error
-	command        autoupdate.Command
-	version        string
+	newClient                func(string, time.Duration) (apiClient, error)
+	openConfig               func(string) (io.ReadCloser, error)
+	loadPrivateKey           func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
+	openProvision            func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
+	openReconcilingProvision func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
+	writeConfig              func(string, config.Config) error
+	command                  autoupdate.Command
+	version                  string
 }
 
 // buildVersion reports the injected build identity, falling back to the
@@ -102,6 +103,14 @@ func defaultDependencies() dependencies {
 		}),
 		openProvision: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
 			return githubscaleset.NewProvisioner(cfg)
+		},
+		openReconcilingProvision: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
+			provisioner, err := githubscaleset.NewProvisioner(cfg)
+			if err != nil {
+				return nil, err
+			}
+			provisioner.ReconcileDrift = true
+			return provisioner, nil
 		},
 		writeConfig: atomicWriteConfig,
 		command:     execCommand{},
@@ -337,7 +346,7 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 
 func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
 	if len(args) == 0 || args[0] != "provision" {
-		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text]")
+		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text] [--reconcile-drift]")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet scale-sets provision", flag.ContinueOnError)
@@ -348,6 +357,8 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 	write := flags.Bool("write", false, "atomically persist returned IDs to the configuration")
 	confirm := flags.String("confirm", "", "exact mutation confirmation")
 	reason := flags.String("reason", "", "operator reason recorded outside secret material")
+	reconcileDrift := flags.Bool("reconcile-drift", false,
+		"repair an existing scale set whose GitHub object no longer matches configuration")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *path == "" || (*output != "table" && *output != "json") {
 		return exitUsage
 	}
@@ -374,7 +385,15 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
 		return exitFailure
 	}
-	result, err := provision.Run(ctx, provision.Request{Config: cfg, Apply: *apply, LoadKey: deps.loadPrivateKey, Open: deps.openProvision, Version: deps.buildVersion()})
+	// Repairing an existing GitHub object is a strictly larger authority than
+	// creating a missing one, so it needs its own opt-in rather than riding along
+	// on the provision confirmation.
+	open := deps.openProvision
+	if *reconcileDrift {
+		open = deps.openReconcilingProvision
+	}
+	result, err := provision.Run(ctx, provision.Request{Config: cfg, Apply: *apply, ReconcileDrift: *reconcileDrift,
+		LoadKey: deps.loadPrivateKey, Open: open, Version: deps.buildVersion()})
 	if err != nil {
 		fmt.Fprintf(stderr, "provision scale sets: %v\n", err)
 		if errors.Is(err, operations.ErrConflict) || errors.Is(err, operations.ErrUncertain) {

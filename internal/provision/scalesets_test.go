@@ -216,7 +216,9 @@ func TestRunFailsClosedDuringPlanning(t *testing.T) {
 		want         error
 	}{
 		{name: "open", openErr: errors.New("client unavailable"), want: errors.New("client unavailable")},
-		{name: "inspect action", plan: githubscaleset.ScaleSetPlan{Action: "update", ID: 7}, want: operations.ErrUncertain},
+		// "update" became a recognized action when drift repair landed, so an
+		// unrecognized action needs a token the provisioner will never emit.
+		{name: "inspect action", plan: githubscaleset.ScaleSetPlan{Action: "unrecognized-action", ID: 7}, want: operations.ErrUncertain},
 		{name: "configured id conflict", plan: githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetReuse, ID: 8}, configuredID: 7, want: operations.ErrConflict},
 	}
 	for _, tt := range tests {

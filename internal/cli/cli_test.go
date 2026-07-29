@@ -650,7 +650,9 @@ func TestScaleSetProvisionCommandFailureGuardsAndSecretRedaction(t *testing.T) {
 		}, code: exitUnsafe, text: "provision scale sets"},
 		{name: "uncertain", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {
 			d.openProvision = func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error) {
-				return &fakeProvisioner{plan: githubscaleset.ScaleSetPlan{Action: "update"}}, nil
+				// "update" became a recognized action when drift repair landed; this case
+				// proves an action the provisioner never emits still fails closed.
+				return &fakeProvisioner{plan: githubscaleset.ScaleSetPlan{Action: "unrecognized-action"}}, nil
 			}
 		}, code: exitUnsafe, text: "uncertain"},
 		{name: "ordinary provision failure", args: []string{"scale-sets", "provision", "--config", "fleet.json"}, edit: func(d *dependencies) {

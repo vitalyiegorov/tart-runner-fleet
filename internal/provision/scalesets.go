@@ -19,11 +19,16 @@ type Client interface {
 }
 
 type Request struct {
-	Config  config.Config
-	Apply   bool
-	LoadKey func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
-	Open    func(githubscaleset.GitHubAppAdminConfig) (Client, error)
-	Version string
+	Config config.Config
+	Apply  bool
+	// ReconcileDrift permits repairing an existing scale set whose GitHub object no
+	// longer matches configuration. Default false keeps drift failing closed, so a
+	// run intended to create missing scale sets can never silently mutate existing
+	// ones.
+	ReconcileDrift bool
+	LoadKey        func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
+	Open           func(githubscaleset.GitHubAppAdminConfig) (Client, error)
+	Version        string
 }
 
 type Change struct {
@@ -96,7 +101,8 @@ func Run(ctx context.Context, request Request) (Result, error) {
 			if err != nil {
 				return Result{}, fmt.Errorf("inspect %s/%s: %w", scope.Name, set.Profile, err)
 			}
-			if plan.Action != githubscaleset.ScaleSetCreate && plan.Action != githubscaleset.ScaleSetReuse {
+			if plan.Action != githubscaleset.ScaleSetCreate && plan.Action != githubscaleset.ScaleSetReuse &&
+				plan.Action != githubscaleset.ScaleSetUpdate {
 				return Result{}, operations.ErrUncertain
 			}
 			if set.ID > 0 && plan.ID > 0 && set.ID != plan.ID {
@@ -111,7 +117,7 @@ func Run(ctx context.Context, request Request) (Result, error) {
 	}
 	for index, item := range plans {
 		id := item.plan.ID
-		if item.plan.Action == githubscaleset.ScaleSetCreate {
+		if item.plan.Action == githubscaleset.ScaleSetCreate || item.plan.Action == githubscaleset.ScaleSetUpdate {
 			created, err := item.client.Ensure(ctx, item.spec)
 			if err != nil {
 				return result, fmt.Errorf("provision %s/%s: %w", result.Changes[index].Scope, result.Changes[index].Profile, err)
