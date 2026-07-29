@@ -1150,7 +1150,13 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	detail := result.Plan.Reason
 	if err != nil {
 		freshness = telemetry.ObservationUnavailable
-		detail = schedulerFailureDetail(err)
+		// The planner's own reason is more specific than the failure token, and on
+		// the commit path the tick returns a populated result, so it may already be
+		// set. Prefer it and fall back to the classification when the planner said
+		// nothing -- every early error return yields a zero TickResult.
+		if detail == "" {
+			detail = schedulerFailureDetail(err)
+		}
 	} else if !success {
 		freshness = telemetry.ObservationStale
 	}

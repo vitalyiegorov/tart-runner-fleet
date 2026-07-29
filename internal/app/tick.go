@@ -50,6 +50,16 @@ type TickResult struct {
 	Host        domain.Host
 }
 
+// commitFailureReason names why a commit failed. A non-ready plan never reached
+// the durable write at all, so reporting it as a commit failure would send an
+// operator to the database instead of to the inventory that produced the plan.
+func commitFailureReason(status scheduler.PlanStatus) string {
+	if status != scheduler.PlanReady {
+		return ReasonPlanInvalid
+	}
+	return ReasonPlanCommitFailed
+}
+
 // trickle degrades a fail-closed binding by admitting a single demand while
 // statistics are unavailable. queued is age-sorted oldest-first, so it returns
 // the oldest demand that has no live incarnation, letting the freshly spawned
@@ -172,5 +182,5 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value},
-		classifyTick(ReasonPlanCommitFailed, err)
+		classifyTick(commitFailureReason(plan.Status), err)
 }
