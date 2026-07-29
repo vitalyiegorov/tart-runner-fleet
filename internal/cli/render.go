@@ -20,6 +20,7 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 	switch command {
 	case "queues":
 		renderQueues(output, status.Data.Queues)
+		renderScopeQueues(output, status.Data.ScopeQueues)
 	case "instances":
 		renderInstances(output, status.Data.Instances)
 	case "operations":
@@ -111,6 +112,22 @@ func renderQueues(output io.Writer, queues []adminapi.Queue) {
 	fmt.Fprintln(table, "PROFILE\tJOBS\tOLDEST")
 	for _, queue := range queues {
 		fmt.Fprintf(table, "%s\t%d\t%s\n", queue.Profile, queue.Jobs, formatAge(queue.OldestAgeSeconds))
+	}
+	_ = table.Flush()
+}
+
+// renderScopeQueues prints the per-scope breakdown. It is a separate table
+// because the aggregate above answers "what is queued" while this answers "whose
+// demand is it", and an incident needs the second question answered first.
+func renderScopeQueues(output io.Writer, rows []adminapi.ScopeQueue) {
+	if len(rows) == 0 {
+		return
+	}
+	table := tabwriter.NewWriter(output, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(table, "SCOPE\tPROFILE\tSCALE SET\tJOBS\tOLDEST")
+	for _, row := range rows {
+		fmt.Fprintf(table, "%s\t%s\t%d\t%d\t%s\n", row.Scope, row.Profile, row.ScaleSetID, row.Jobs,
+			formatAge(row.OldestAgeSeconds))
 	}
 	_ = table.Flush()
 }

@@ -189,6 +189,16 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 		queues = append(queues, adminapi.Queue{Profile: profile, Jobs: metric.Count,
 			OldestEnqueuedAt: metric.OldestEnqueuedAt, OldestAgeSeconds: age.Seconds()})
 	}
+	scopeQueues := make([]adminapi.ScopeQueue, 0, len(snapshot.ScopeQueues))
+	for _, row := range snapshot.ScopeQueues {
+		age := time.Duration(0)
+		if !row.OldestEnqueuedAt.IsZero() && snapshot.Now.After(row.OldestEnqueuedAt) {
+			age = snapshot.Now.Sub(row.OldestEnqueuedAt)
+		}
+		scopeQueues = append(scopeQueues, adminapi.ScopeQueue{Scope: row.Scope, Profile: row.Profile,
+			ScaleSetID: row.ScaleSetID, Jobs: row.Count, OldestEnqueuedAt: row.OldestEnqueuedAt,
+			OldestAgeSeconds: age.Seconds()})
+	}
 	instances := make([]adminapi.Instance, 0, len(snapshot.Instances))
 	for _, profile := range sortedKeys(snapshot.Instances) {
 		metric := snapshot.Instances[profile]
@@ -212,7 +222,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Live:     adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
 			Ready:    adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
 			QueueSLO: &queueCheck,
-			Queues:   queues, Instances: instances, Observations: observations,
+			Queues:   queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
 				DeadLetters: deadLetters(snapshot.DeadLetters)},

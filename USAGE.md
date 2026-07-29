@@ -31,6 +31,26 @@ rollback or executable identity. Confirm it against
 Exit `4` means unavailable. Exit `5` means coherent but degraded. Neither means
 zero demand and neither authorizes cleanup.
 
+`queues` reports two views. The per-profile rows are the aggregate across every
+scope bound to that profile; the per-scope rows attribute the same demand to the
+scope and scale set that own it:
+
+```
+PROFILE  JOBS  OLDEST
+builder  5     10m
+
+SCOPE        PROFILE  SCALE SET  JOBS  OLDEST
+budgie-org   builder  1          4     10h
+sudoku-repo  builder  1          1     30s
+```
+
+Ask the second table first during an incident. A host serving several scopes can
+report a healthy-looking `builder 5` while one scope contributes four jobs that
+have never been served -- the aggregate cannot distinguish an idle scope from a
+busy one sharing its profile. `--output json` returns `{profiles, scopes}` when a
+breakdown is present and the bare profile array when it is not, so older
+consumers keep parsing.
+
 ## Operational objective
 
 Operate for maximum **useful** utilization: the highest sustainable completion
