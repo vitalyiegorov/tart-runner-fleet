@@ -584,6 +584,24 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 The rate-limited `component loop failure` warning now carries the same
 `reason=` attribute, so stderr and the admin API agree.
 
+The scheduler component classifies its own failures the same way. Each token
+names a distinct repair, so a reasonless `component=scheduler` warning is now a
+bug rather than the norm:
+
+| `reason` | Meaning | Action |
+| --- | --- | --- |
+| `engine_invalid` | The engine is wired without a store, inventory, controller identity, valid mode, or advancing clock. | A deployment fault. Check the generation and its arguments. |
+| `scheduler_state_unreadable` | The durable `scheduler_state` row could not be read. | Check the database and disk. |
+| `scheduler_state_reseed_failed` | The row was missing and the cold-start reseed was refused. | Check that the database is writable. |
+| `scheduler_state_corrupt` | The stored optimization state did not decode. | Recoverable: the row is reseeded on the next tick. Investigate if it repeats. |
+| `demand_unreadable` | Durable demand for a binding could not be read. | Check the database; distinct from a stale-statistics binding, which trickles instead of failing. |
+| `queue_summary_unreadable` | The canonical queue summary could not be produced. | Check REST reachability and rate limits. |
+| `plan_commit_failed` | The plan was computed but its durable commit was refused. | Check the database, the authority lease, and operation leases. |
+
+A blocked plan is not a loop failure. Fail-closed admission on a stale or
+unavailable observation returns no error, so it is visible as a non-`ready` plan
+status and in `observations` rather than as a warning.
+
 A daemon restart is no longer a recovery step for a wedged session: recovery is
 per binding and bounded. `githubSessionMaxIngestFailures` (default 5) and
 `githubSessionFailureWindowSeconds` (default 300) tune the bound in `fleet.json`;
