@@ -114,6 +114,35 @@ the envelope is. It ships off, and enabling it on a host is an operational actio
 with the usual observe-then-promote evidence. See
 [`ADR 0018`](docs/adr/0018-second-pilot-elastic-host-envelope.md).
 
+### Repairing a drifted scale set
+
+`scale-sets provision` creates what is missing and reuses what already matches.
+A scale set whose GitHub object has diverged from `fleet.json` -- labels, runner
+group, or runner setting -- fails the plan closed with a conflict, because
+silently rewriting a live routing object is not something a create-missing run
+should do.
+
+Add `--reconcile-drift` to make that divergence repairable. The plan then reports
+`update` for the affected set, and applying repairs it **in place**, preserving
+the scale-set id so jobs GitHub already routed to it are not orphaned. The write
+is verified against desired state afterwards; an accepted-but-still-different
+object is reported uncertain rather than provisioned. An exactly matching set is
+never rewritten.
+
+```sh
+"$FLEET" scale-sets provision --config fleet.json --reconcile-drift
+"$FLEET" scale-sets provision --config fleet.json --reconcile-drift   --apply --write --confirm provision-scale-sets --reason "repair drifted labels"
+```
+
+Plan first. `--reconcile-drift` is deliberately a separate flag rather than part
+of the confirmation token: repairing an existing object is larger authority than
+creating a missing one. See
+[`ADR 0023`](docs/adr/0023-repairable-scale-set-drift.md).
+
+Capacity is not a drift dimension: the Actions API models no capacity field on a
+runner scale set, so a set matching on name, runner group, labels, and runner
+setting is exact as far as reconciliation is concerned.
+
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
 it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
 experiment that must fill one macOS profile cohort without admitting new Linux
