@@ -33,6 +33,7 @@ type Status struct {
 	QueueSLO           *Check           `json:"queueSlo,omitempty"`
 	Queues             []Queue          `json:"queues"`
 	Instances          []Instance       `json:"instances"`
+	ScopeQueues        []ScopeQueue     `json:"scopeQueues,omitempty"`
 	Observations       []Observation    `json:"observations"`
 	Operations         OperationSummary `json:"operations"`
 	HostPressure       HostPressure     `json:"hostPressure"`
@@ -70,6 +71,18 @@ type Queue struct {
 	Jobs             int       `json:"jobs"`
 	OldestEnqueuedAt time.Time `json:"oldestEnqueuedAt"`
 	OldestAgeSeconds float64   `json:"oldestAgeSeconds"`
+}
+
+// ScopeQueue attributes queue depth to the scope and scale set that own it. The
+// aggregated Queue rows above cannot distinguish an idle scope from a busy one
+// sharing a profile, which is the question an incident asks first.
+type ScopeQueue struct {
+	Scope            string    `json:"scope"`
+	Profile          string    `json:"profile"`
+	ScaleSetID       int64     `json:"scaleSetId"`
+	Jobs             int       `json:"jobs"`
+	OldestEnqueuedAt time.Time `json:"oldestEnqueuedAt"`
+	OldestAgeSeconds float64   `json:"ageSeconds"`
 }
 
 type Instance struct {

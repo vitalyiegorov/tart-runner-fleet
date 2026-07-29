@@ -149,6 +149,17 @@ type QueueSummary struct {
 	Oldest time.Time
 }
 
+// ScopeQueue is one binding's queue depth attributed to the scope and scale set
+// that own it, so an idle scope stays distinguishable from a busy one sharing the
+// same profile.
+type ScopeQueue struct {
+	Scope      string
+	Profile    domain.ProfileID
+	ScaleSetID int64
+	Count      int
+	Oldest     time.Time
+}
+
 func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, executable []domain.Demand) (QueueSummary, error) {
 	summary := QueueSummary{Count: len(executable)}
 	for _, demand := range executable {

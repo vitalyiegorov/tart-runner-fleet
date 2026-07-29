@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -35,14 +36,18 @@ type Engine struct {
 }
 
 type TickResult struct {
-	At        time.Time
-	Plan      scheduler.Plan
-	Applied   bool
-	Demands   []domain.Demand
-	Queues    map[domain.ProfileID]QueueSummary
-	Instances []domain.Instance
-	HostMode  domain.HostMode
-	Host      domain.Host
+	At      time.Time
+	Plan    scheduler.Plan
+	Applied bool
+	Demands []domain.Demand
+	Queues  map[domain.ProfileID]QueueSummary
+	// ScopeQueues reports the same demand without collapsing the scope. The
+	// per-profile aggregate above cannot distinguish an idle scope from a busy one
+	// sharing its profile, which is the question an incident actually asks.
+	ScopeQueues []ScopeQueue
+	Instances   []domain.Instance
+	HostMode    domain.HostMode
+	Host        domain.Host
 }
 
 // trickle degrades a fail-closed binding by admitting a single demand while
@@ -95,6 +100,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	}
 	demands := make([]domain.Demand, 0)
 	queues := make(map[domain.ProfileID]QueueSummary, len(e.Bindings))
+	scopeQueues := make([]ScopeQueue, 0, len(e.Bindings))
 	coordinator := e.Demand
 	if coordinator.Store == nil {
 		coordinator.Store = e.Store
@@ -147,11 +153,24 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			current.Oldest = summary.Oldest
 		}
 		queues[binding.Profile.ID] = current
+		scopeQueues = append(scopeQueues, ScopeQueue{Scope: binding.Scope, Profile: binding.Profile.ID,
+			ScaleSetID: binding.ScaleSetID, Count: summary.Count, Oldest: summary.Oldest})
 	}
+	// Deterministic order so operators, JSON consumers, and replay fixtures never
+	// depend on map or binding iteration order.
+	sort.Slice(scopeQueues, func(i, j int) bool {
+		if scopeQueues[i].Scope != scopeQueues[j].Scope {
+			return scopeQueues[i].Scope < scopeQueues[j].Scope
+		}
+		if scopeQueues[i].Profile != scopeQueues[j].Profile {
+			return scopeQueues[i].Profile < scopeQueues[j].Profile
+		}
+		return scopeQueues[i].ScaleSetID < scopeQueues[j].ScaleSetID
+	})
 	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
-	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues,
+	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value},
 		classifyTick(ReasonPlanCommitFailed, err)
 }

@@ -562,6 +562,12 @@ func runRemote(ctx context.Context, command string, args []string, stdout, stder
 func viewFor(command string, status adminapi.StatusEnvelope) any {
 	switch command {
 	case "queues":
+		if len(status.Data.ScopeQueues) > 0 {
+			return struct {
+				Profiles []adminapi.Queue      `json:"profiles"`
+				Scopes   []adminapi.ScopeQueue `json:"scopes"`
+			}{Profiles: status.Data.Queues, Scopes: status.Data.ScopeQueues}
+		}
 		return status.Data.Queues
 	case "instances":
 		return status.Data.Instances

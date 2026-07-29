@@ -1262,6 +1262,15 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 			oldest time.Time
 		}{count: summary.Count, oldest: summary.Oldest}
 	}
+	// The per-scope breakdown is published as a whole set: a binding removed from
+	// configuration must stop being reported, which a partial update cannot say.
+	scopeRows := make([]telemetry.ScopeQueueMetrics, 0, len(result.ScopeQueues))
+	for _, row := range result.ScopeQueues {
+		scopeRows = append(scopeRows, telemetry.ScopeQueueMetrics{Scope: row.Scope,
+			Profile: string(row.Profile), ScaleSetID: row.ScaleSetID, Count: row.Count,
+			OldestEnqueuedAt: row.Oldest})
+	}
+	_ = e.health.SetScopeQueues(scopeRows)
 	for _, instance := range result.Instances {
 		if !instance.Live() {
 			continue

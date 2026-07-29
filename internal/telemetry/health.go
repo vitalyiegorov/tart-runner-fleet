@@ -65,6 +65,16 @@ type QueueMetrics struct {
 	OldestEnqueuedAt time.Time
 }
 
+// ScopeQueueMetrics is one binding's queue depth attributed to its scope, so the
+// per-profile aggregate above never hides an idle scope behind a busy one.
+type ScopeQueueMetrics struct {
+	Scope            string
+	Profile          string
+	ScaleSetID       int64
+	Count            int
+	OldestEnqueuedAt time.Time
+}
+
 type InstanceMetrics struct {
 	Count     int
 	CPU       int
@@ -98,6 +108,7 @@ type Snapshot struct {
 	LastSuccessfulTick time.Time
 	Mode               Mode
 	Queues             map[string]QueueMetrics
+	ScopeQueues        []ScopeQueueMetrics
 	Instances          map[string]InstanceMetrics
 	Observations       map[string]ObservationMetric
 	OperationRetries   int
@@ -132,6 +143,7 @@ type Health struct {
 	lastSuccessfulTick time.Time
 	mode               Mode
 	queues             map[string]QueueMetrics
+	scopeQueues        []ScopeQueueMetrics
 	instances          map[string]InstanceMetrics
 	observations       map[string]ObservationMetric
 	operationRetries   int
@@ -265,6 +277,21 @@ func (h *Health) SetQueue(profile string, count int, oldestEnqueuedAt time.Time)
 		oldestEnqueuedAt = time.Time{}
 	}
 	h.queues[profile] = QueueMetrics{Count: count, OldestEnqueuedAt: oldestEnqueuedAt}
+	return nil
+}
+
+// SetScopeQueues replaces the per-scope breakdown. It is a whole-set replacement
+// because a binding that disappears from configuration must stop being reported,
+// and a partial update cannot express that.
+func (h *Health) SetScopeQueues(rows []ScopeQueueMetrics) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, row := range rows {
+		if row.Scope == "" || row.Profile == "" || row.Count < 0 {
+			return errInvalidMetric
+		}
+	}
+	h.scopeQueues = append([]ScopeQueueMetrics(nil), rows...)
 	h.revision++
 	return nil
 }
@@ -423,7 +450,8 @@ func (h *Health) Snapshot() Snapshot {
 	defer h.mu.RUnlock()
 	return Snapshot{
 		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
-		Mode: h.mode, Queues: cloneMap(h.queues), Instances: cloneMap(h.instances),
+		Mode: h.mode, Queues: cloneMap(h.queues), ScopeQueues: append([]ScopeQueueMetrics(nil), h.scopeQueues...),
+		Instances:    cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
 		DeadLetters:  append([]DeadLetter(nil), h.deadLetters...),
