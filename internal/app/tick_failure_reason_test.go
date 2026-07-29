@@ -144,3 +144,51 @@ func TestTickFailureReasonVocabularyIsClosed(t *testing.T) {
 		}
 	}
 }
+
+// TestEngineTickSeparatesAnInvalidPlanFromARefusedWrite proves the reason
+// distinguishes two situations Commit reports through one error path. A plan the
+// scheduler could not form (an instance platform it does not recognize, which
+// surfaces as PlanInvalidObservation) is a domain problem needing inventory
+// repair. A refused durable write is a database problem. Reporting both as
+// plan_commit_failed sends an operator to the wrong subsystem.
+//
+// Observed in production on 2026-07-29: every classified scheduler warning read
+// `reason=plan_commit_failed`, roughly one to three per hour, with no way to tell
+// which of the two it was.
+func TestEngineTickSeparatesAnInvalidPlanFromARefusedWrite(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+
+	// A live instance with an unrecognized platform makes the plan invalid; the
+	// durable store is healthy.
+	unknown := domain.Instance{ID: "trf-weird", Repo: "a/repo", Platform: domain.Platform("plan9"),
+		Profile: "small", Route: "tiered", Resources: domain.Resources{CPU: 1, MemoryMB: 1024, Slots: 1},
+		State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+	invalidStore := &tickStore{}
+	invalidPlan := Engine{Store: invalidStore, Demand: DemandCoordinator{Store: invalidStore},
+		Inventory: fakeInventory{instances: domain.Fresh([]domain.Instance{unknown}, now),
+			host: domain.Fresh(domain.Host{Available: tickConfig().LinuxCapacity}, now)},
+		Config: tickConfig(), ControllerID: "c", Mode: reconcile.Authority,
+		Now: func() time.Time { return now }}
+	_, err := invalidPlan.Tick(context.Background())
+	if err == nil {
+		t.Fatal("an unrecognized instance platform must not produce a committed plan")
+	}
+	if got := failureReason(err); got != ReasonPlanInvalid {
+		t.Fatalf("invalid plan reason = %q, want %q", got, ReasonPlanInvalid)
+	}
+
+	// A healthy plan whose durable write is refused keeps the commit reason.
+	writeStore := &tickStore{applyErr: errors.New("database is locked")}
+	refusedWrite := Engine{Store: writeStore, Demand: DemandCoordinator{Store: writeStore},
+		Inventory: fakeInventory{instances: domain.Fresh([]domain.Instance(nil), now),
+			host: domain.Fresh(domain.Host{Available: tickConfig().LinuxCapacity}, now)},
+		Config: tickConfig(), ControllerID: "c", Mode: reconcile.Authority,
+		Now: func() time.Time { return now }}
+	_, err = refusedWrite.Tick(context.Background())
+	if err == nil {
+		t.Fatal("a refused ApplyPlan must surface as an error")
+	}
+	if got := failureReason(err); got != ReasonPlanCommitFailed {
+		t.Fatalf("refused write reason = %q, want %q", got, ReasonPlanCommitFailed)
+	}
+}

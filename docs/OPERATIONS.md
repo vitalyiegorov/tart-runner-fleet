@@ -597,6 +597,7 @@ bug rather than the norm:
 | `demand_unreadable` | Durable demand for a binding could not be read. | Check the database; distinct from a stale-statistics binding, which trickles instead of failing. |
 | `queue_summary_unreadable` | The canonical queue summary could not be produced. | Check REST reachability and rate limits. |
 | `plan_commit_failed` | The plan was computed but its durable commit was refused. | Check the database, the authority lease, and operation leases. |
+| `plan_invalid` | The scheduler could not form a usable plan, e.g. a live instance with an unrecognized platform. The durable write was never attempted. | Reconcile the inventory; this is not a database fault. |
 
 A blocked plan is not a loop failure. Fail-closed admission on a stale or
 unavailable observation returns no error, so it is visible as a non-`ready` plan

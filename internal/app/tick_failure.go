@@ -16,6 +16,11 @@ const (
 	ReasonDemandUnreadable           = "demand_unreadable"
 	ReasonQueueSummaryUnreadable     = "queue_summary_unreadable"
 	ReasonPlanCommitFailed           = "plan_commit_failed"
+	// ReasonPlanInvalid separates a plan the scheduler could not form from a plan
+	// it formed but could not persist. Commit reports both through one error, yet
+	// they need different repairs: an unrecognized instance platform is inventory
+	// reconciliation, a refused write is the database.
+	ReasonPlanInvalid = "plan_invalid"
 )
 
 // tickReasons is the closed set the failure hook may publish. A reason outside
@@ -30,6 +35,7 @@ var tickReasons = map[string]bool{
 	ReasonDemandUnreadable:           true,
 	ReasonQueueSummaryUnreadable:     true,
 	ReasonPlanCommitFailed:           true,
+	ReasonPlanInvalid:                true,
 }
 
 // tickFailure attaches a bounded reason to a scheduler tick error. It wraps
