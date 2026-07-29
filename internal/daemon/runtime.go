@@ -1127,17 +1127,34 @@ type engineTicker struct {
 	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
 }
 
+// schedulerFailureDetail extracts the bounded reason a classified tick error
+// carries. An unclassified error yields no detail rather than free-form text, so
+// no store message, token, or JIT payload can reach the API through this path.
+func schedulerFailureDetail(err error) string {
+	var reason app.FailureReason
+	if errors.As(err, &reason) {
+		return reason.FailureReason()
+	}
+	return ""
+}
+
 func (e engineTicker) Tick(ctx context.Context) error {
 	result, err := e.engine.Tick(ctx)
 	success := err == nil && result.Plan.Status == "ready"
 	e.health.RecordTick(success)
 	freshness := telemetry.ObservationFresh
+	// A blocked plan explains itself through the plan reason. An error has no
+	// plan at all -- every failing return yields a zero TickResult -- so the
+	// detail comes from the error's bounded classification instead, which is what
+	// makes the admin API name the same cause the stderr warning does.
+	detail := result.Plan.Reason
 	if err != nil {
 		freshness = telemetry.ObservationUnavailable
+		detail = schedulerFailureDetail(err)
 	} else if !success {
 		freshness = telemetry.ObservationStale
 	}
-	_ = e.health.RecordObservationDetail("scheduler", freshness, result.Plan.Reason)
+	_ = e.health.RecordObservationDetail("scheduler", freshness, detail)
 	if err == nil {
 		e.recordMetrics(result)
 		if e.operationCounts != nil {
