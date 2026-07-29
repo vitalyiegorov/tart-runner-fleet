@@ -62,14 +62,14 @@ func trickle(queued []domain.Demand, liveIncarnations map[domain.DemandKey]bool)
 
 func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	if e.Store == nil || e.Inventory == nil || e.ControllerID == "" || !e.Mode.Valid() {
-		return TickResult{}, operations.ErrInvalid
+		return TickResult{}, classifyTick(ReasonEngineInvalid, operations.ErrInvalid)
 	}
 	now := time.Now().UTC()
 	if e.Now != nil {
 		now = e.Now().UTC()
 	}
 	if now.IsZero() {
-		return TickResult{}, operations.ErrInvalid
+		return TickResult{}, classifyTick(ReasonEngineInvalid, operations.ErrInvalid)
 	}
 	priorRecord, err := e.Store.SchedulerState(ctx)
 	if errors.Is(err, operations.ErrSchedulerStateMissing) {
@@ -80,17 +80,17 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		// safe optimization-state loss the scheduler rebuilds from durable demand;
 		// authoritative instance and operation state is never resynthesized here.
 		if repairErr := e.Store.ReseedSchedulerState(ctx); repairErr != nil {
-			return TickResult{}, repairErr
+			return TickResult{}, classifyTick(ReasonSchedulerStateReseedFailed, repairErr)
 		}
 		priorRecord, err = e.Store.SchedulerState(ctx)
 	}
 	if err != nil {
-		return TickResult{}, err
+		return TickResult{}, classifyTick(ReasonSchedulerStateUnreadable, err)
 	}
 	var prior scheduler.State
 	if len(priorRecord.Data) > 0 {
 		if err := json.Unmarshal(priorRecord.Data, &prior); err != nil {
-			return TickResult{}, fmt.Errorf("decode scheduler state: %w", err)
+			return TickResult{}, classifyTick(ReasonSchedulerStateCorrupt, fmt.Errorf("decode scheduler state: %w", err))
 		}
 	}
 	demands := make([]domain.Demand, 0)
@@ -134,12 +134,12 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			// next candidate, so the binding still un-livelocks.
 			schedulable = trickle(queued, liveIncarnations)
 		} else if err != nil {
-			return TickResult{}, err
+			return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
 		}
 		demands = append(demands, schedulable...)
 		summary, err := coordinator.QueueSummary(ctx, binding, queued)
 		if err != nil {
-			return TickResult{}, err
+			return TickResult{}, classifyTick(ReasonQueueSummaryUnreadable, err)
 		}
 		current := queues[binding.Profile.ID]
 		current.Count += summary.Count
@@ -152,5 +152,6 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues,
-		Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value}, err
+			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value},
+		classifyTick(ReasonPlanCommitFailed, err)
 }
