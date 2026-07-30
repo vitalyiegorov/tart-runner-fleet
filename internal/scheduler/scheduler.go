@@ -406,11 +406,18 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 	// envelope. Production owns at most four Linux VM slots even if an adapter
 	// accidentally reports a larger host slot count.
 	free.Slots = min(free.Slots, 4)
+	// Demands past the fairness age are measured against the starvation-guard
+	// envelope, which lifts only the advisory CPU-idle clamp. Young admission and
+	// backfill keep the throttled envelope: politeness stays for fresh work.
+	agedFree := linuxFreeAged(in)
+	agedFree.Slots = min(agedFree.Slots, 4)
 	baseCounts := activeRepoCounts(in.Instances.Value)
 
 	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok {
 		profile := in.Config.Profiles[reserved.Profile]
-		if feasible(profile.Resources, free, reserved.Key.Repo, baseCounts, nil, in.Config.RepoCaps) {
+		// A reservation is only ever held by an aged head, so its feasibility is
+		// judged against the starvation envelope.
+		if feasible(profile.Resources, agedFree, reserved.Key.Repo, baseCounts, nil, in.Config.RepoCaps) {
 			plan.Operations = append(plan.Operations, spawnOperation(reserved, nil))
 			plan.Next.Reservation = nil
 		} else {
@@ -430,7 +437,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		for _, candidate := range aged {
 			profile := in.Config.Profiles[candidate.Profile]
 			selected := spawnedDemands(plan.Operations)
-			if !feasible(profile.Resources, free, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps) {
+			if !feasible(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps) {
 				plan.Next.Reservation = &domain.Reservation{Demand: candidate.Key, Profile: candidate.Profile, Resources: profile.Resources, Since: in.Now}
 				backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, selected)
 				plan.Operations = append(plan.Operations, backfill...)
@@ -440,7 +447,13 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 				break
 			}
 			plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
-			free, _ = free.Sub(profile.Resources)
+			// An admitted aged spawn consumes real capacity in both envelopes.
+			agedFree, _ = agedFree.Sub(profile.Resources)
+			if remaining, ok := free.Sub(profile.Resources); ok {
+				free = remaining
+			} else {
+				free = domain.Resources{}
+			}
 		}
 		return plan
 	}
@@ -457,16 +470,26 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 }
 
 func linuxFree(in Input) domain.Resources {
-	return freeCapacity(in, in.Instances.Value)
+	return freeCapacity(in, in.Instances.Value, false)
+}
+
+// linuxFreeAged is the starvation-guard envelope for demands past the fairness
+// age. It differs from linuxFree in exactly one term: the advisory CPU-idle
+// clamp does not apply. Every hard bound is untouched -- the Linux-only cap, the
+// physical total net of live reservations, the measured memory residual, and the
+// slot ceiling -- so aged work can wait on real capacity but never on a quiet
+// moment that a host with an active tenant may never produce.
+func linuxFreeAged(in Input) domain.Resources {
+	return freeCapacity(in, in.Instances.Value, true)
 }
 
 // freeCapacity is the admission envelope given a set of occupying instances.
 // Taking the instances as a parameter lets callers ask the same question about a
 // hypothetical occupancy under whichever capacity model is configured, so the
 // static and elastic models can never drift apart.
-func freeCapacity(in Input, instances []domain.Instance) domain.Resources {
+func freeCapacity(in Input, instances []domain.Instance, aged bool) domain.Resources {
 	if in.Config.ElasticHostEnvelope {
-		return elasticFree(in, instances)
+		return elasticFree(in, instances, aged)
 	}
 	free := in.Config.LinuxCapacity
 	for _, instance := range instances {
@@ -492,7 +515,7 @@ func freeCapacity(in Input, instances []domain.Instance) domain.Resources {
 //     the real machine even during a boot burst.
 //   - The measured residual (Host.Available) clamps the result. It is already net
 //     of everything running, so live instances are not charged against it twice.
-func elasticFree(in Input, instances []domain.Instance) domain.Resources {
+func elasticFree(in Input, instances []domain.Instance, aged bool) domain.Resources {
 	free := in.Config.LinuxCapacity
 	live := domain.Resources{}
 	for _, instance := range instances {
@@ -516,7 +539,18 @@ func elasticFree(in Input, instances []domain.Instance) domain.Resources {
 		MemoryMB: physicalBound(free.MemoryMB, total.MemoryMB, live.MemoryMB),
 		Slots:    physicalBound(free.Slots, total.Slots, live.Slots),
 	}
-	return minResources(free, in.Host.Value.Available)
+	available := in.Host.Value.Available
+	// Instantaneous CPU idle is an advisory throttle, and the probe's own design
+	// forbids advisory signals from fail-closing admission indefinitely. For a
+	// demand past the fairness age the clamp is lifted: ADR 0012 promises aging
+	// prevents starvation, and FIFO position is worthless if the envelope never
+	// opens. vCPUs time-share, so admitting an aged job against the physical
+	// bound degrades gracefully; memory does not time-share, so its measured
+	// residual stays hard for aged work too.
+	if aged {
+		available.CPU = free.CPU
+	}
+	return minResources(free, available)
 }
 
 // physicalBound narrows one configured dimension by the observed physical total
@@ -645,9 +679,15 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 	return operations
 }
 
+// demandAged reports whether one demand has crossed the fairness age, using the
+// same rule splitAged applies to whole lanes.
+func demandAged(now time.Time, age time.Duration, demand domain.Demand) bool {
+	return age > 0 && !demand.CreatedAt.IsZero() && now.Sub(demand.CreatedAt) >= age
+}
+
 func splitAged(now time.Time, age time.Duration, demands []domain.Demand) (aged, young []domain.Demand) {
 	for _, demand := range demands {
-		if age > 0 && !demand.CreatedAt.IsZero() && now.Sub(demand.CreatedAt) >= age {
+		if demandAged(now, age, demand) {
 			aged = append(aged, demand)
 		} else {
 			young = append(young, demand)
@@ -1381,13 +1421,30 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 	if available <= 0 {
 		return plan
 	}
+	agedFree := linuxFreeAged(in)
 	ordered := priorityOrder(in, demands)
 	selected := make([]domain.Demand, 0, available)
 	for _, demand := range ordered {
-		if len(selected) >= available || !free.CanFit(profile.Resources) {
+		if len(selected) >= available {
 			break
 		}
-		free, _ = free.Sub(profile.Resources)
+		// A demand past the fairness age is judged against the starvation-guard
+		// envelope, which lifts only the advisory CPU-idle clamp; young demands
+		// keep the throttled envelope. Both consume from both, so a young spawn
+		// this tick cannot double-spend capacity an aged spawn already took.
+		envelope := free
+		if demandAged(in.Now, in.Config.FairnessAge, demand) {
+			envelope = agedFree
+		}
+		if !envelope.CanFit(profile.Resources) {
+			break
+		}
+		agedFree, _ = agedFree.Sub(profile.Resources)
+		if remaining, ok := free.Sub(profile.Resources); ok {
+			free = remaining
+		} else {
+			free = domain.Resources{}
+		}
 		selected = append(selected, demand)
 	}
 	for _, demand := range selected {

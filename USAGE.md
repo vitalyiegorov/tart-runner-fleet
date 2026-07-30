@@ -107,7 +107,13 @@ machine it observes instead. Admission then takes the minimum of three bounds:
   the fleet waits for its share instead of competing for it.
 
 Physical facts the probe cannot read are reported as unobserved and impose no
-bound, falling back to the configured envelope rather than closing admission. All
+bound, falling back to the configured envelope rather than closing admission.
+
+The idle-derived CPU residual throttles **young** work only. A demand past
+`linuxReservationAgeSeconds` escapes that advisory clamp and is bounded by the
+hard constraints alone -- physical cores net of live reservations, the memory
+residual, and every cap -- so a large job cannot starve waiting for a quiet
+moment the host's own tenant never provides. All
 pressure guardrails, exact vectors, slot ceilings, repository caps, profile
 `maxActive`, and aging guarantees apply unchanged; the flag only changes how wide
 the envelope is. It ships off, and enabling it on a host is an operational action

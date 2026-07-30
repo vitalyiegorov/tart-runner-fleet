@@ -133,6 +133,36 @@ or a counter that went backwards because the host rebooted -- it is reported as
 unmeasured and the level blocks on its own. An unmeasured rate is never read as a
 quiet host.
 
+## The CPU residual is advisory and yields to the aging starvation guard
+
+Production falsified one consequence of the original decision within a day of
+enablement. The measured CPU residual is instantaneous, and taking the minimum
+with it makes it a hard gate: a demand needing R cores is admitted only at a
+tick where idle >= R/cores. A 6-vCPU builder therefore needs a 60%-idle moment,
+which a host with an active interactive tenant may never produce. Observed on
+2026-07-30: builder jobs starved for 23 hours across two scopes while smaller
+profiles kept flowing around them.
+
+That contradicted the fleet's own doctrine twice. The host probe classifies CPU
+idle, load, and swap as advisory throttles that must never fail-close admission
+indefinitely -- and this decision had silently promoted one of them into a hard
+bound. And ADR 0012 promises that "aging promotes old work to global FIFO so
+large jobs cannot starve" -- a guarantee that is void when the envelope itself
+never opens, because FIFO position is worthless without capacity to admit into.
+
+The repair restores both: a demand past the fairness age escapes the advisory
+CPU-idle clamp. Nothing else moves. The Linux-only cap, the physical total net
+of live reservations, the measured memory residual, the slot ceiling, repository
+caps, and profile `maxActive` all bind aged work exactly as before -- vCPUs
+time-share, so admitting an aged job against the physical bound degrades
+gracefully, while memory does not time-share and its residual stays hard.
+
+Young work keeps the throttle. The division of politeness is deliberate: fresh
+work defers to the host's tenant, old work receives a guaranteed floor. Backfill
+behind a reservation also keeps the throttled envelope even for aged candidates;
+they are bounded by their head's wait rather than by a quiet moment, which is a
+wait with an owner and an end.
+
 ## Rollout
 
 The flag ships off. Enabling it on a host is an operational action requiring the
