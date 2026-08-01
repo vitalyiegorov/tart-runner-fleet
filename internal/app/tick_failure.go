@@ -21,6 +21,11 @@ const (
 	// they need different repairs: an unrecognized instance platform is inventory
 	// reconciliation, a refused write is the database.
 	ReasonPlanInvalid = "plan_invalid"
+	// ReasonPlanCommitSuperseded names a lost optimistic race: ApplyPlan's
+	// version guards found the snapshot stale because lifecycle progress landed
+	// between the tick's read and its write. The next tick re-plans from fresh
+	// state; this is snapshot concurrency working, not a store fault.
+	ReasonPlanCommitSuperseded = "plan_commit_superseded"
 )
 
 // tickReasons is the closed set the failure hook may publish. A reason outside
@@ -36,6 +41,7 @@ var tickReasons = map[string]bool{
 	ReasonQueueSummaryUnreadable:     true,
 	ReasonPlanCommitFailed:           true,
 	ReasonPlanInvalid:                true,
+	ReasonPlanCommitSuperseded:       true,
 }
 
 // tickFailure attaches a bounded reason to a scheduler tick error. It wraps

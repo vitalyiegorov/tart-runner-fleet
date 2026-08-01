@@ -192,3 +192,41 @@ func TestEngineTickSeparatesAnInvalidPlanFromARefusedWrite(t *testing.T) {
 		t.Fatalf("refused write reason = %q, want %q", got, ReasonPlanCommitFailed)
 	}
 }
+
+// TestEngineTickSeparatesASupersededPlanFromARefusedWrite proves a lost
+// optimistic race is named as what it is. ApplyPlan guards every instance write
+// with WHERE version=? and the scheduler row with an expected version; a
+// lifecycle worker advancing an instance between the tick's snapshot and its
+// commit makes those guards match zero rows, ApplyPlan returns ErrConflict, and
+// the next tick re-plans from fresh state. That is snapshot concurrency working
+// as designed -- at-least-once, idempotent -- yet it was reported as
+// plan_commit_failed, indistinguishable from a genuinely refused write.
+//
+// Observed on the production host: ~45 plan_commit_failed warnings per day,
+// every one unexplained, clustering with VM lifecycle churn. Once this reason
+// deploys, production itself settles the hypothesis: conflicts that rename
+// themselves plan_commit_superseded are benign; anything still reporting
+// plan_commit_failed is a real store fault worth chasing.
+func TestEngineTickSeparatesASupersededPlanFromARefusedWrite(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+
+	superseded := reasonEngine(&tickStore{applyErr: operations.ErrConflict},
+		DemandCoordinator{Store: &tickStore{}}, nil, now)
+	_, err := superseded.Tick(context.Background())
+	if err == nil {
+		t.Fatal("a conflicted ApplyPlan must surface as an error so the tick retries")
+	}
+	if got := failureReason(err); got != ReasonPlanCommitSuperseded {
+		t.Fatalf("conflict reason = %q, want %q", got, ReasonPlanCommitSuperseded)
+	}
+	if !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("classification lost the ErrConflict identity: %v", err)
+	}
+
+	refused := reasonEngine(&tickStore{applyErr: errors.New("disk I/O error")},
+		DemandCoordinator{Store: &tickStore{}}, nil, now)
+	_, err = refused.Tick(context.Background())
+	if got := failureReason(err); got != ReasonPlanCommitFailed {
+		t.Fatalf("genuine write failure reason = %q, want %q", got, ReasonPlanCommitFailed)
+	}
+}

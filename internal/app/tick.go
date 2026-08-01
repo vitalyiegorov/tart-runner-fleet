@@ -53,9 +53,17 @@ type TickResult struct {
 // commitFailureReason names why a commit failed. A non-ready plan never reached
 // the durable write at all, so reporting it as a commit failure would send an
 // operator to the database instead of to the inventory that produced the plan.
-func commitFailureReason(status scheduler.PlanStatus) string {
+func commitFailureReason(status scheduler.PlanStatus, err error) string {
 	if status != scheduler.PlanReady {
 		return ReasonPlanInvalid
+	}
+	// A conflict is the optimistic version guard refusing a stale snapshot, not
+	// a refused write: lifecycle progress landed between the tick's read and its
+	// commit, and the next tick re-plans from fresh state. Naming it separately
+	// keeps plan_commit_failed meaning what it says -- a durable write that
+	// should have succeeded and did not.
+	if errors.Is(err, operations.ErrConflict) {
+		return ReasonPlanCommitSuperseded
 	}
 	return ReasonPlanCommitFailed
 }
@@ -182,5 +190,5 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value},
-		classifyTick(commitFailureReason(plan.Status), err)
+		classifyTick(commitFailureReason(plan.Status, err), err)
 }

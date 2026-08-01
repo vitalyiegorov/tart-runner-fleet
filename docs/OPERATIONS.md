@@ -596,7 +596,8 @@ bug rather than the norm:
 | `scheduler_state_corrupt` | The stored optimization state did not decode. | Recoverable: the row is reseeded on the next tick. Investigate if it repeats. |
 | `demand_unreadable` | Durable demand for a binding could not be read. | Check the database; distinct from a stale-statistics binding, which trickles instead of failing. |
 | `queue_summary_unreadable` | The canonical queue summary could not be produced. | Check REST reachability and rate limits. |
-| `plan_commit_failed` | The plan was computed but its durable commit was refused. | Check the database, the authority lease, and operation leases. |
+| `plan_commit_failed` | The plan was computed but its durable write failed. | Check the database and disk; with `plan_commit_superseded` split out, this now always means a real store fault. |
+| `plan_commit_superseded` | ApplyPlan's version guards found the snapshot stale: lifecycle progress landed between the tick's read and its commit. The next tick re-plans from fresh state. | None. This is optimistic concurrency working; investigate only if it dominates every tick. |
 | `plan_invalid` | The scheduler could not form a usable plan, e.g. a live instance with an unrecognized platform. The durable write was never attempted. | Reconcile the inventory; this is not a database fault. |
 
 A blocked plan is not a loop failure. Fail-closed admission on a stale or
