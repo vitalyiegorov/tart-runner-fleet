@@ -94,6 +94,21 @@ func TestDecodeAndEncodeOptInFlags(t *testing.T) {
 			clear:    func(c *Config) { c.MacOS.MixedPlatformAdmission = false },
 		},
 		{
+			name: "mixed profile cohorts",
+			raw: `{
+      "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",
+      "pollSeconds":20, "maxLinuxWhenMacosIdle":4,
+      "maxLinuxCpu":8, "maxLinuxMemoryMb":16384,
+      "linuxReservationAgeSeconds":300, "minFreeDiskGb":60,
+      "linuxProfiles":[{"id":"small","label":"linux-small","cpu":1,"memoryMb":2048,"diskGb":40}],
+      "macosBurst":{"enabled":false, "mixedProfileCohorts":true},
+      "targets":[{"type":"repo","slug":"owner/repo","maxActive":3}]
+    }`,
+			fragment: `"mixedProfileCohorts": true`,
+			decoded:  func(c Config) bool { return c.MacOS.MixedProfileCohorts },
+			clear:    func(c *Config) { c.MacOS.MixedProfileCohorts = false },
+		},
+		{
 			name: "pressure memory accounting",
 			raw: `{
       "baseVm":"linux-runner-base", "vmPrefix":"gha-linux",

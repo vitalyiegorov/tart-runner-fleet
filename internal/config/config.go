@@ -82,13 +82,17 @@ type MacOS struct {
 	// live Linux) instead of the platform-exclusive one-platform-per-tick model.
 	// Default false preserves today's admission behavior byte-for-byte.
 	MixedPlatformAdmission bool
-	BaseVM                 string
-	VMPrefix               string
-	Builder                Profile
-	Maestro                Profile
-	RootDiskOptions        string
-	SharedDirectoryPath    string
-	NestedVirtualization   bool
+	// MixedProfileCohorts lets two macOS profiles run side by side when their
+	// exact vectors fit, completing for profiles what mixedPlatformAdmission did
+	// for platforms. Default false preserves single-cohort drain-and-switch.
+	MixedProfileCohorts  bool
+	BaseVM               string
+	VMPrefix             string
+	Builder              Profile
+	Maestro              Profile
+	RootDiskOptions      string
+	SharedDirectoryPath  string
+	NestedVirtualization bool
 }
 
 type Timeouts struct {
@@ -253,6 +257,7 @@ type wireConfig struct {
 		Enabled                bool                 `json:"enabled"`
 		AdmissionPolicy        MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
 		MixedPlatformAdmission bool                 `json:"mixedPlatformAdmission,omitempty"`
+		MixedProfileCohorts    bool                 `json:"mixedProfileCohorts,omitempty"`
 		BaseVM                 string               `json:"baseVm"`
 		VMPrefix               string               `json:"vmPrefix"`
 		Builder                Profile              `json:"builder"`
@@ -282,7 +287,8 @@ func Decode(r io.Reader) (Config, error) {
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
 			NestedVirtualization: w.LinuxNestedVirtualization},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
-			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
+			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
+			BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
 			NestedVirtualization: w.MacOSBurst.NestedVirtualization},
@@ -361,6 +367,7 @@ func Encode(w io.Writer, cfg Config) error {
 		wire.MacOSBurst.AdmissionPolicy = MacOSAdmissionExclusive
 	}
 	wire.MacOSBurst.MixedPlatformAdmission = cfg.MacOS.MixedPlatformAdmission
+	wire.MacOSBurst.MixedProfileCohorts = cfg.MacOS.MixedProfileCohorts
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
