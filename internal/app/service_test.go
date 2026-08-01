@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
 type tickFunc func(context.Context) error
@@ -271,5 +274,81 @@ func TestServiceIngestFailureCarriesBoundedReason(t *testing.T) {
 				t.Fatalf("reason = %q, want %q", got, test.reason)
 			}
 		})
+	}
+}
+
+// TestSchedulerLoopRetriesContentionWithoutSpendingTheErrorBackoff is the
+// regression case for the 2026-08-01 saturation incident. A tick that lost an
+// optimistic-concurrency race was paced identically to a dead database: the loop
+// waited the full five-second error backoff on a five-second tick interval, so
+// every self-healing conflict cost the queue a whole scheduling round on top of
+// the one it had already lost. The daemon logged that outcome once a minute for
+// eight consecutive minutes while queued jobs aged past their SLO.
+//
+// A transient failure must be retried promptly, the delay must grow so a conflict
+// that is not clearing degrades to the ordinary backoff instead of spinning
+// against the store it contends with, and a success must reset the escalation.
+// Nothing about reporting changes: every failure still reaches the hook.
+func TestSchedulerLoopRetriesContentionWithoutSpendingTheErrorBackoff(t *testing.T) {
+	outcomes := []error{
+		tickFailure{reason: ReasonPlanCommitContended, err: operations.ErrConflict},
+		tickFailure{reason: ReasonPlanCommitContended, err: operations.ErrConflict},
+		nil,
+		tickFailure{reason: ReasonPlanCommitContended, err: operations.ErrConflict},
+		tickFailure{reason: ReasonPlanCommitFailed, err: errors.New("database is locked")},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var attempt int
+	var delays []time.Duration
+	var reasons []string
+	service := Service{TickInterval: time.Minute, ErrorBackoff: 5 * time.Second,
+		Ticker: tickFunc(func(context.Context) error {
+			if attempt >= len(outcomes) {
+				cancel()
+				return nil
+			}
+			err := outcomes[attempt]
+			attempt++
+			return err
+		}),
+		OnFailure: func(_, reason string) { reasons = append(reasons, reason) },
+		After: func(delay time.Duration) <-chan time.Time {
+			delays = append(delays, delay)
+			ready := make(chan time.Time, 1)
+			ready <- time.Time{}
+			return ready
+		}}
+	service.schedulerLoop(ctx, make(chan struct{}))
+
+	// Two consecutive conflicts escalate 250ms -> 500ms; the success between them
+	// resets the escalation, so the fourth tick's conflict starts over at 250ms;
+	// the store failure is not transient and pays the full backoff. Successful
+	// ticks contribute the ordinary tick interval.
+	wantDelays := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Minute,
+		250 * time.Millisecond, 5 * time.Second, time.Minute}
+	if !reflect.DeepEqual(delays, wantDelays) {
+		t.Fatalf("delays = %v, want %v", delays, wantDelays)
+	}
+	wantReasons := []string{ReasonPlanCommitContended, ReasonPlanCommitContended,
+		ReasonPlanCommitContended, ReasonPlanCommitFailed}
+	if !reflect.DeepEqual(reasons, wantReasons) {
+		t.Fatalf("reported reasons = %v, want %v", reasons, wantReasons)
+	}
+}
+
+// TestContentionDelayIsBoundedByTheErrorBackoff proves the escalation saturates:
+// a conflict that never clears must neither out-wait nor out-spin the backoff the
+// loop already applies to every other failure.
+func TestContentionDelayIsBoundedByTheErrorBackoff(t *testing.T) {
+	service := Service{ErrorBackoff: time.Second}
+	for _, attempt := range []int{0, 1, 2, 3, 4, 5, 9, 64, 1 << 20} {
+		delay := service.contentionDelay(attempt)
+		if delay < contentionRetryBase || delay > time.Second {
+			t.Fatalf("contentionDelay(%d) = %v, want within [%v, %v]", attempt, delay, contentionRetryBase, time.Second)
+		}
+	}
+	if got := service.contentionDelay(1); got != contentionRetryBase {
+		t.Fatalf("first retry = %v, want %v", got, contentionRetryBase)
 	}
 }

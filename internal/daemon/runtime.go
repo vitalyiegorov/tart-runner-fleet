@@ -266,6 +266,15 @@ const (
 	authorityLeaseAcquireWindow = authorityLeaseTTL * 3 / 2
 	// authorityLeaseAcquireRetry paces reacquisition attempts inside the window.
 	authorityLeaseAcquireRetry = 1 * time.Second
+	// authorityLeaseRenewTimeout bounds one renewal attempt. It is deliberately
+	// far shorter than the TTL so a wedged attempt leaves room for grace retries
+	// inside the same lease.
+	authorityLeaseRenewTimeout = 5 * time.Second
+	// authorityLeaseRenewRetry paces grace retries after a transient renewal
+	// failure. Two seconds inside a thirty-second TTL leaves roughly nine
+	// attempts after the first scheduled renewal, which is far more resilience
+	// than the single attempt that has been ending the process.
+	authorityLeaseRenewRetry   = 2 * time.Second
 	deletionConfirmationMaxAge = 30 * time.Second
 	scaleSetCloseTimeout       = 20 * time.Second
 	scaleSetCloseConcurrency   = 4
@@ -889,28 +898,79 @@ func startAuthorityLease(ctx context.Context, store operations.Store, owner stri
 	return guard, nil
 }
 
+// renew keeps the durable authority lease alive.
+//
+// A renewal that merely fails to COMPLETE is not evidence that authority moved.
+// The durable row still names this owner until ExpiresAt, and the store is
+// reached over one serialized SQLite connection shared with the scheduler's plan
+// commit and the operations worker, so a saturated host turns a five-second
+// attempt into a timeout while the lease still holds twenty seconds of validity.
+// Incident 2026-08-01: three daemon exits inside seventy minutes, each
+// "controller authority lost: renew lease: context deadline exceeded", each
+// costing a launchd restart plus a successor's wait for the abandoned lease to
+// drain — scheduling gaps measured in minutes, caused by a transient I/O blip.
+//
+// So a transient failure is retried INSIDE the lease's own validity, and the
+// guard surrenders the moment it can no longer prove it holds the lease. This
+// only ever narrows the window in which the process claims authority: no attempt
+// may outlive ExpiresAt, and an expired lease is reported as lost rather than
+// renewed. A fencing loss (ErrLeaseLost — another owner or a deleted row) or a
+// malformed request (ErrInvalid) is reported immediately and unchanged: those are
+// proof, not a blip.
 func (g *authorityLease) renew(ctx context.Context, after func(time.Duration) <-chan time.Time) {
 	defer close(g.done)
+	delay := authorityLeaseRenewInterval
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-after(authorityLeaseRenewInterval):
-			g.mu.Lock()
-			lease := g.lease
-			g.mu.Unlock()
-			renewCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			renewed, err := g.store.RenewLease(renewCtx, lease, g.now().UTC(), authorityLeaseTTL)
-			cancel()
-			if err != nil {
-				g.errors <- err
-				return
-			}
+		case <-after(delay):
+		}
+		g.mu.Lock()
+		lease := g.lease
+		g.mu.Unlock()
+		budget := renewBudget(g.now().UTC(), lease.ExpiresAt)
+		if budget <= 0 {
+			g.errors <- fmt.Errorf("renew lease: %w", operations.ErrLeaseLost)
+			return
+		}
+		renewCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+		renewed, err := g.store.RenewLease(renewCtx, lease, g.now().UTC(), authorityLeaseTTL)
+		cancel()
+		if err == nil {
 			g.mu.Lock()
 			g.lease = renewed
 			g.mu.Unlock()
+			delay = authorityLeaseRenewInterval
+			continue
 		}
+		if !transientRenewFailure(err) || !renewRetryFits(g.now().UTC(), lease.ExpiresAt) {
+			g.errors <- err
+			return
+		}
+		delay = authorityLeaseRenewRetry
 	}
+}
+
+// renewBudget bounds one renewal attempt so it can never outlive the lease it is
+// renewing. Blocking past ExpiresAt would leave this process acting on authority
+// a successor is already entitled to acquire.
+func renewBudget(now, expiresAt time.Time) time.Duration {
+	return min(authorityLeaseRenewTimeout, expiresAt.Sub(now))
+}
+
+// renewRetryFits reports whether another grace retry can still complete while
+// this lease is provably held. When it cannot, the guard fails closed instead of
+// scheduling an attempt that would land after expiry.
+func renewRetryFits(now, expiresAt time.Time) bool {
+	return now.Add(authorityLeaseRenewRetry).Before(expiresAt)
+}
+
+// transientRenewFailure separates "the renewal did not complete" from "the lease
+// is no longer ours". Only the latter is durable evidence of lost authority; the
+// former is an I/O outcome that the remaining TTL exists to absorb.
+func transientRenewFailure(err error) bool {
+	return !errors.Is(err, operations.ErrLeaseLost) && !errors.Is(err, operations.ErrInvalid)
 }
 
 func (g *authorityLease) Close() {

@@ -21,6 +21,23 @@ const (
 	// they need different repairs: an unrecognized instance platform is inventory
 	// reconciliation, a refused write is the database.
 	ReasonPlanInvalid = "plan_invalid"
+	// ReasonPlanCommitContended is an optimistic-concurrency loss: the durable
+	// state moved between the observation this plan was built from and the
+	// compare-and-set that would have persisted it. Nothing is broken and no
+	// operator action applies — the next tick reads the newer state and proceeds.
+	// It is named separately because the operator response is "ignore" while
+	// plan_commit_failed's is "look at the database", and because the rate
+	// limiter keys on reason: collapsing the two lets a frequent, harmless
+	// conflict suppress a genuine write failure for a whole minute.
+	ReasonPlanCommitContended = "plan_commit_contended"
+	// ReasonPlanCommitRejected is a plan the durable layer refused as malformed:
+	// an unknown profile, a drain of an instance whose durable state cannot be
+	// drained, a dangling operation dependency. Unlike a conflict this does not
+	// clear on its own — the same inputs produce the same rejection on every
+	// tick — so it is the one commit failure that warrants an operator. During
+	// the 2026-08-01 incident an eight-minute run of identical warnings could not
+	// be told apart from ordinary contention because both logged the same token.
+	ReasonPlanCommitRejected = "plan_commit_rejected"
 )
 
 // tickReasons is the closed set the failure hook may publish. A reason outside
@@ -36,6 +53,8 @@ var tickReasons = map[string]bool{
 	ReasonQueueSummaryUnreadable:     true,
 	ReasonPlanCommitFailed:           true,
 	ReasonPlanInvalid:                true,
+	ReasonPlanCommitContended:        true,
+	ReasonPlanCommitRejected:         true,
 }
 
 // tickFailure attaches a bounded reason to a scheduler tick error. It wraps
@@ -64,6 +83,14 @@ func (e tickFailure) FailureReason() string {
 	}
 	return e.reason
 }
+
+// Transient reports whether this failure clears without operator action and
+// without any change to the inputs the tick observed. Only an optimistic
+// concurrency loss qualifies: the writer that won already advanced the durable
+// state, so re-observing is exactly the repair. Everything else in the
+// vocabulary — a corrupt scheduler row, an unreachable store, a rejected plan —
+// persists until something outside this loop changes.
+func (e tickFailure) Transient() bool { return e.reason == ReasonPlanCommitContended }
 
 // classifyTick wraps a tick error with its reason, preserving a nil error so
 // call sites can classify unconditionally.

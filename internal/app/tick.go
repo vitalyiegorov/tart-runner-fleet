@@ -53,11 +53,24 @@ type TickResult struct {
 // commitFailureReason names why a commit failed. A non-ready plan never reached
 // the durable write at all, so reporting it as a commit failure would send an
 // operator to the database instead of to the inventory that produced the plan.
-func commitFailureReason(status scheduler.PlanStatus) string {
-	if status != scheduler.PlanReady {
+//
+// Beyond that split the commit path itself reports four different incidents
+// through one error value, and until now all four logged one token. A lost
+// compare-and-set is routine and self-healing; a plan the durable layer refuses
+// as malformed repeats forever and needs an operator; anything else is the
+// store. Classify by the sentinel the durable layer already returns so the
+// closed vocabulary keeps the promise its own doc comment makes.
+func commitFailureReason(status scheduler.PlanStatus, err error) string {
+	switch {
+	case status != scheduler.PlanReady:
 		return ReasonPlanInvalid
+	case errors.Is(err, operations.ErrConflict):
+		return ReasonPlanCommitContended
+	case errors.Is(err, operations.ErrInvalid):
+		return ReasonPlanCommitRejected
+	default:
+		return ReasonPlanCommitFailed
 	}
-	return ReasonPlanCommitFailed
 }
 
 // trickle degrades a fail-closed binding by admitting a single demand while
@@ -182,5 +195,5 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value},
-		classifyTick(commitFailureReason(plan.Status), err)
+		classifyTick(commitFailureReason(plan.Status, err), err)
 }
