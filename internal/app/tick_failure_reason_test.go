@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -138,7 +139,8 @@ func TestTickFailureReasonVocabularyIsClosed(t *testing.T) {
 	}
 	for _, reason := range []string{ReasonEngineInvalid, ReasonSchedulerStateUnreadable,
 		ReasonSchedulerStateReseedFailed, ReasonSchedulerStateCorrupt, ReasonDemandUnreadable,
-		ReasonQueueSummaryUnreadable, ReasonPlanCommitFailed} {
+		ReasonQueueSummaryUnreadable, ReasonPlanCommitFailed, ReasonPlanCommitContended,
+		ReasonPlanCommitRejected} {
 		if got := (tickFailure{reason: reason, err: errors.New("x")}).FailureReason(); got != reason {
 			t.Fatalf("FailureReason() withheld a vocabulary member %q, got %q", reason, got)
 		}
@@ -190,5 +192,76 @@ func TestEngineTickSeparatesAnInvalidPlanFromARefusedWrite(t *testing.T) {
 	}
 	if got := failureReason(err); got != ReasonPlanCommitFailed {
 		t.Fatalf("refused write reason = %q, want %q", got, ReasonPlanCommitFailed)
+	}
+}
+
+// TestEngineTickSeparatesContentionFromARefusedWrite is the regression case for
+// the 2026-08-01 saturation incident. Between 18:15:48Z and 18:23:58Z the
+// authority daemon logged `component=scheduler reason=plan_commit_failed` once a
+// minute for eight consecutive minutes — the reporter's rate limit, so the real
+// rate was per tick — while `scheduler_state.version` never left 2000. One token
+// covered every way a commit can fail, so the log could not say whether the fleet
+// was losing a harmless compare-and-set race or being refused by the durable
+// layer, and the two need opposite operator responses.
+//
+// ApplyPlan already returns the distinguishing sentinel. Classify by it: a
+// conflict is contention that the next tick repairs by re-observing, an invalid
+// plan is a rejection that repeats until inputs change, and anything else stays
+// the database failure the token has always meant.
+func TestEngineTickSeparatesContentionFromARefusedWrite(t *testing.T) {
+	now := time.Date(2026, 8, 1, 18, 20, 0, 0, time.UTC)
+	for _, testCase := range []struct {
+		name      string
+		applyErr  error
+		reason    string
+		transient bool
+	}{
+		{name: "optimistic concurrency loss", applyErr: operations.ErrConflict,
+			reason: ReasonPlanCommitContended, transient: true},
+		{name: "durable layer rejected the plan", applyErr: operations.ErrInvalid,
+			reason: ReasonPlanCommitRejected},
+		{name: "wrapped conflict from the drain translation", reason: ReasonPlanCommitContended,
+			applyErr: fmt.Errorf("drain trf-xl in state running: %w", operations.ErrConflict), transient: true},
+		{name: "store failure keeps the original token", applyErr: errors.New("database is locked"),
+			reason: ReasonPlanCommitFailed},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := &tickStore{applyErr: testCase.applyErr}
+			engine := Engine{Store: store, Demand: DemandCoordinator{Store: store},
+				Inventory: fakeInventory{instances: domain.Fresh([]domain.Instance(nil), now),
+					host: domain.Fresh(domain.Host{Available: tickConfig().LinuxCapacity}, now)},
+				Config: tickConfig(), ControllerID: "c", Mode: reconcile.Authority,
+				Now: func() time.Time { return now }}
+			_, err := engine.Tick(context.Background())
+			if err == nil {
+				t.Fatal("a refused ApplyPlan must surface as an error")
+			}
+			if got := failureReason(err); got != testCase.reason {
+				t.Fatalf("reason = %q, want %q", got, testCase.reason)
+			}
+			if got := transientFailure(err); got != testCase.transient {
+				t.Fatalf("transient = %v, want %v", got, testCase.transient)
+			}
+			// Classification is additive: every errors.Is check callers already
+			// perform against the durable sentinel keeps working.
+			if testCase.applyErr != nil && !errors.Is(err, testCase.applyErr) {
+				t.Fatalf("classification dropped the underlying error: %v", err)
+			}
+		})
+	}
+}
+
+// TestTickFailureTransienceIsNarrow proves only a commit conflict may claim to be
+// self-healing. Every other member of the vocabulary persists until something
+// outside the scheduler loop changes, so pacing a fast retry on it would spin.
+func TestTickFailureTransienceIsNarrow(t *testing.T) {
+	for reason := range tickReasons {
+		want := reason == ReasonPlanCommitContended
+		if got := (tickFailure{reason: reason, err: errors.New("x")}).Transient(); got != want {
+			t.Fatalf("%s Transient() = %v, want %v", reason, got, want)
+		}
+	}
+	if transientFailure(errors.New("unclassified")) {
+		t.Fatal("an unclassified error must not claim transience")
 	}
 }

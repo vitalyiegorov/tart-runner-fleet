@@ -9,6 +9,16 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
+const (
+	// contentionRetryBase is the first retry delay after a self-healing commit
+	// conflict: short enough that the tick is not lost, long enough that the
+	// winning writer's transaction has drained off the single store connection.
+	contentionRetryBase = 250 * time.Millisecond
+	// contentionRetryShiftLimit caps the doubling so the shift can never
+	// overflow; the error backoff clamps the resulting delay anyway.
+	contentionRetryShiftLimit = 8
+)
+
 type TickRunner interface{ Tick(context.Context) error }
 type Ingester interface{ Ingest(context.Context) error }
 type ChangeIngester interface {
@@ -38,12 +48,25 @@ type FailureReason interface {
 	FailureReason() string
 }
 
+// TransientFailure lets an error declare that it clears by itself: the losing
+// side of a race whose winner already advanced the durable state. Nothing else
+// may claim it, and claiming it changes only retry pacing — never whether the
+// failure is reported.
+type TransientFailure interface {
+	Transient() bool
+}
+
 func failureReason(err error) string {
 	var reason FailureReason
 	if errors.As(err, &reason) {
 		return reason.FailureReason()
 	}
 	return ""
+}
+
+func transientFailure(err error) bool {
+	var transient TransientFailure
+	return errors.As(err, &transient) && transient.Transient()
 }
 
 func (s Service) Run(ctx context.Context) error {
@@ -79,13 +102,21 @@ func (s Service) Run(ctx context.Context) error {
 }
 
 func (s Service) schedulerLoop(ctx context.Context, wake <-chan struct{}) {
+	contended := 0
 	for ctx.Err() == nil {
 		if err := s.Ticker.Tick(ctx); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			s.failure("scheduler", failureReason(err))
-			if !s.wait(ctx, s.errorBackoff()) {
+			delay := s.errorBackoff()
+			if transientFailure(err) {
+				contended++
+				delay = s.contentionDelay(contended)
+			} else {
+				contended = 0
+			}
+			if !s.wait(ctx, delay) {
 				return
 			}
 			// The next tick observes every durable change accumulated during the
@@ -96,6 +127,7 @@ func (s Service) schedulerLoop(ctx context.Context, wake <-chan struct{}) {
 			}
 			continue
 		}
+		contended = 0
 		select {
 		case <-ctx.Done():
 			return
@@ -103,6 +135,27 @@ func (s Service) schedulerLoop(ctx context.Context, wake <-chan struct{}) {
 		case <-s.after(s.tickInterval()):
 		}
 	}
+}
+
+// contentionDelay paces the retry after a scheduler tick lost an optimistic
+// concurrency race. The winning writer has already committed, so the state the
+// next tick reads is newer and the condition has usually cleared in
+// milliseconds; charging the full error backoff instead throws away that tick's
+// admission decisions entirely. On 2026-08-01 a saturated host produced a
+// commit conflict at least once a minute for eight consecutive minutes, and each
+// one bought a five-second stall on a five-second tick — the queue paid twice
+// for a condition that repaired itself.
+//
+// The delay doubles per consecutive conflict and saturates at the ordinary error
+// backoff, so a conflict that is NOT clearing degrades to exactly today's
+// behaviour rather than spinning against the store it is contending with. The
+// growth also walks the retry off the fixed cadence of the operations worker
+// whose writes produce these conflicts, without introducing randomness into a
+// loop AGENTS.md requires to stay deterministic.
+func (s Service) contentionDelay(attempt int) time.Duration {
+	backoff := s.errorBackoff()
+	delay := contentionRetryBase << min(max(attempt, 1)-1, contentionRetryShiftLimit)
+	return min(delay, backoff)
 }
 
 func (s Service) ingestLoop(ctx context.Context, ingester Ingester, wake chan<- struct{}) {
