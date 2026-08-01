@@ -149,6 +149,21 @@ Capacity is not a drift dimension: the Actions API models no capacity field on a
 runner scale set, so a set matching on name, runner group, labels, and runner
 setting is exact as far as reconciliation is concerned.
 
+### Mixed macOS profile cohorts
+
+By default the fleet runs one macOS profile cohort at a time: spawning a builder
+drains idle maestros first, and a busy maestro blocks the builder entirely. On a
+build-and-test topology that serializes every build against every test wave.
+
+Set `"mixedProfileCohorts": true` inside `macosBurst` to let macOS profiles
+coexist whenever their exact vectors fit -- the same law ADR 0012 applied to
+platforms. A 6-vCPU builder and a 4-vCPU maestro share a 10-core machine instead
+of taking turns. Every hard bound is unchanged: the physical total, profile
+`maxActive`, repository caps, the elastic envelope, and drain safety (a busy
+instance is never touched; the idle drain-and-switch fallback remains for
+profiles that do not fit side by side). See
+[`ADR 0024`](docs/adr/0024-mixed-macos-profile-cohorts.md).
+
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
 it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
 experiment that must fill one macOS profile cohort without admitting new Linux

@@ -39,6 +39,7 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		FairnessAge: cfg.ReservationAge, AssignedTimeout: cfg.Timeouts.Assigned, RepoCaps: caps, RepoSchedulingClasses: classes, Profiles: profiles,
 		MacOSExclusive:         cfg.MacOS.AdmissionPolicy == config.MacOSAdmissionExclusive,
 		MixedPlatformAdmission: cfg.MacOS.MixedPlatformAdmission,
+		MixedProfileCohorts:    cfg.MacOS.MixedProfileCohorts,
 		ElasticHostEnvelope:    cfg.Guards.ElasticHostEnvelope}
 }
 

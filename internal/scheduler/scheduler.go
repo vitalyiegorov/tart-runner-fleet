@@ -27,6 +27,14 @@ type Config struct {
 	// same capacity, MaxActive, single-cohort, and drain-safety invariants.
 	// Default false preserves the platform-exclusive behavior byte-for-byte.
 	MixedPlatformAdmission bool
+	// MixedProfileCohorts lets two macOS profiles run side by side when their
+	// exact vectors fit, under the same law as everything else: the physical
+	// bound, profile MaxActive, repository caps, and drain safety. It completes
+	// what ADR 0012 did for platforms -- profile identity, like platform
+	// identity, is not itself a resource. Default false preserves the
+	// single-cohort behavior byte-for-byte: one macOS profile at a time, with
+	// drain-and-switch between them.
+	MixedProfileCohorts bool
 	// ElasticHostEnvelope makes the fleet a second pilot on its own host: the
 	// fleet-wide bound becomes the observed physical host (Host.Capacity minus
 	// live instances, clamped by the measured Host.Available residual) instead of
@@ -1170,7 +1178,12 @@ func macProfileCanGrow(in Input, target domain.ProfileID) bool {
 			continue
 		}
 		if instance.Profile != target {
-			return false
+			// A live foreign profile vetoes growth only under the single-cohort
+			// rule. With mixed cohorts the veto is the envelope, not identity.
+			if !in.Config.MixedProfileCohorts {
+				return false
+			}
+			continue
 		}
 		active++
 	}
@@ -1367,6 +1380,18 @@ func removeInstance(instances []domain.Instance, id string) []domain.Instance {
 
 func planMacOS(in Input, plan Plan, demands []domain.Demand) Plan {
 	profile := chosenMacProfile(in, demands)
+	// Coexistence first: when profiles may mix and the chosen profile fits
+	// beside the live foreign cohort, spawn without draining anything. The
+	// envelope inside appendMacSpawns already charges every live instance
+	// against the physical bound, so a spawn here can never overcommit. Only
+	// when nothing fits does the drain-and-switch fallback below run, exactly
+	// as it always has -- and it still never touches a busy instance.
+	if in.Config.MixedProfileCohorts {
+		attempted := appendMacSpawns(in, plan, demandsForProfile(demands, profile), nil)
+		if containsSpawn(attempted.Operations[len(plan.Operations):]) {
+			return attempted
+		}
+	}
 	var drains []Operation
 	allSwitchable := true
 	filtered := append([]domain.Instance(nil), in.Instances.Value...)
