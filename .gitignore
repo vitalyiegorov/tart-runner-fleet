@@ -5,4 +5,7 @@
 /.idea/
 /.vscode/
 /.tools/
+# Local agent state and agent worktrees. Nothing under it is tracked today, and
+# in a public repository an accidental commit would publish local transcripts.
+/.claude/
 .DS_Store

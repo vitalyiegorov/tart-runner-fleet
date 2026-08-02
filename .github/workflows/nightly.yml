@@ -17,6 +17,9 @@ env:
 
 jobs:
   resilience:
+    # Only this repository owns the self-hosted fleet these labels resolve to.
+    # A fork must not schedule nightly work it cannot serve.
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
     runs-on: [self-hosted, linux-tiered, linux-large]
     timeout-minutes: 20
     steps:

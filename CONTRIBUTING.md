@@ -46,6 +46,27 @@ Pull request bodies must explain the change, its safety proof, and the checks
 used to validate it. Add `release-skip` only when a pull request should be
 omitted from generated notes.
 
+## Continuous integration for external contributions
+
+Every verification job in this repository runs on a self-hosted fleet of
+ephemeral Tart virtual machines hosted on a maintainer's personal hardware.
+Running a proposed change there is equivalent to granting the author shell
+access to that machine, so **pull requests opened from a fork are never
+scheduled onto the fleet**, with or without a maintainer's approval of the run.
+
+What this means in practice:
+
+- A fork pull request skips all verification jobs, and the `Required CI` check
+  fails with an explanation instead of reporting a misleading pass.
+- A maintainer validates an external contribution by pushing the proposed
+  branch into this repository and opening a pull request from that branch,
+  after reading the diff. Review precedes execution, never the reverse.
+- Everything needed to reproduce the full pipeline locally is in the `Makefile`:
+  `make verify` runs the same preflight, quality, unit, race, and build gates
+  that CI runs. Please paste its result into the pull request body.
+- Workflow runs in a fork of this repository are skipped by design, because the
+  runner labels they request only resolve inside this repository.
+
 ## Versions and releases
 
 Release tags use Go-compatible semantic versions beginning with `v`. The

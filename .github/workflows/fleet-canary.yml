@@ -13,6 +13,9 @@ concurrency:
 jobs:
   linux-small:
     name: Prove one Go-managed ephemeral runner
+    # The canary proves this repository's own fleet. A fork has no such fleet
+    # and would queue a job that can never be served.
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
     runs-on: [self-hosted, linux-tiered, linux-small, tart-fleet-canary]
     timeout-minutes: 5
     steps:
