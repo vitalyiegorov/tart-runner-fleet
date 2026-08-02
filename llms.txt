@@ -1,0 +1,69 @@
+# Tart Runner Fleet
+
+> A fail-closed control plane that schedules ephemeral GitHub Actions runners as
+> Tart VMs on a single Apple-silicon Mac.
+
+One daemon holds a singleton authority lease, subscribes to GitHub Actions
+runner scale sets, clones an immutable Tart VM per queued job, registers a
+just-in-time ephemeral runner inside it, and deletes the VM when that job ends.
+State is durable SQLite (WAL + operation outbox). Under
+`~/Library/Application Support/tart-runner-fleet/`: the binary is
+`current/fleet` and the default endpoint is `unix://.../state/fleetd.sock`.
+
+Invariants an agent must respect:
+
+- Read-only commands (`status`, `queues`, `instances`, `operations`,
+  `observations`, `health`, `doctor`, `metrics`, `config validate`, `version`,
+  `api-version`) are always safe. Parse `-o json` (`apiVersion: fleet.v1`);
+  never scrape human tables, `launchctl`, or SQLite.
+- Guarded commands (`scale-sets provision --apply --write`,
+  `operations discharge`, `update adopt`, `update apply-latest`) need an exact
+  `--confirm` token, the two operator mutations also `--reason`, and all are
+  refused outside `authority` mode. Run them only under an operational task.
+- Exit codes: 0 ok, 1 local failure, 2 usage, 3 not found, 4 unavailable,
+  5 degraded/not ready, 6 unsafe precondition. Exit 4 or 5 is evidence, never
+  permission to assume zero demand or delete VMs.
+- Never hand-edit the state directory (`fleet.json`, `fleet.db*`,
+  `installed-generation.json`); never delete a VM without fresh ownership,
+  runner, job, Tart, and host evidence.
+- Updates are forward-only and quiescence-gated: the 5-minute updater defers
+  while any queue, VM, retry, or dead operation exists, and rolls back if the
+  new generation does not become ready. A busy-fleet refusal is a success.
+
+## Docs
+
+- [README.md](README.md): value proposition, architecture sketch, quickstart, CLI table, real-world `runs-on` examples.
+- [USAGE.md](USAGE.md): daily cockpit, resource model, scheduling principles, drift repair, incident workflow.
+- [INSTALL.md](INSTALL.md): verified release install, launchd rendering, updater adoption, reboot proof.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md): promotion, rollback, dead letters, update parity, observation diagnosis, recovery.
+- [docs/AGENT_RUNBOOK.md](docs/AGENT_RUNBOOK.md): shortest safe inspection and incident path for an agent.
+- [AGENTS.md](AGENTS.md): mandatory coding-agent workflow, repository map, prohibited actions.
+- [CONTRIBUTING.md](CONTRIBUTING.md): Conventional Commit PR titles, versioning, release notes.
+
+## Architecture
+
+- [docs/FLEET_ARCHITECTURE_PLAN.md](docs/FLEET_ARCHITECTURE_PLAN.md): target architecture, SLOs, and implementation sequence.
+- [docs/adr/0002-official-scale-set-protocol.md](docs/adr/0002-official-scale-set-protocol.md): demand comes from the official scale-set protocol.
+- [docs/adr/0003-sqlite-outbox.md](docs/adr/0003-sqlite-outbox.md): SQLite WAL state and idempotent operation outbox.
+- [docs/adr/0004-bounded-control-plane-priority.md](docs/adr/0004-bounded-control-plane-priority.md): bounded control-plane scheduling priority.
+- [docs/adr/0010-ephemeral-guest-shutdown.md](docs/adr/0010-ephemeral-guest-shutdown.md): the guest powers off when its ephemeral runner exits.
+- [docs/adr/0011-atomic-production-updates.md](docs/adr/0011-atomic-production-updates.md): atomic, forward-only production updates.
+- [docs/adr/0012-shared-cross-platform-capacity.md](docs/adr/0012-shared-cross-platform-capacity.md): Linux and macOS share one capacity envelope.
+- [docs/adr/0021-dischargeable-dead-letters.md](docs/adr/0021-dischargeable-dead-letters.md): a dead letter is parked and operator-dischargeable.
+- [docs/adr/0025-saturation-is-not-durable-failure.md](docs/adr/0025-saturation-is-not-durable-failure.md): a saturated host is not evidence of failure.
+- [docs/adr/0026-queued-demand-expires-on-proven-absence.md](docs/adr/0026-queued-demand-expires-on-proven-absence.md): queued demand expires only on proven absence.
+
+## Reference
+
+- [docs/CLI.md](docs/CLI.md): complete command, flag, output, and exit-code contract (`fleet help` is authoritative).
+- [docs/API.md](docs/API.md): `fleet.v1` DTOs, compatibility promise, and socket security contract.
+- [config/fleet.example.json](config/fleet.example.json): observe-mode starting configuration with bounded profiles and targets.
+- [Makefile](Makefile): `make preflight`, `quality`, `verify`/`ci` (the gates CI runs).
+- [README.md#real-world-examples](README.md#real-world-examples): how consumer repos map `runs-on` labels onto fleet profiles.
+
+## Optional
+
+- [docs/SECURITY.md](docs/SECURITY.md): threat model and secret handling.
+- [docs/TESTING.md](docs/TESTING.md): unit, contract, integration, replay, and chaos layers.
+- [docs/RELEASING.md](docs/RELEASING.md): release channels, version selection, retry semantics.
+- [docs/adr/](docs/adr): all 26 architecture decision records.

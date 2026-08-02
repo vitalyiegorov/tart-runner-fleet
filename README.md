@@ -1,254 +1,293 @@
 # Tart Runner Fleet
 
-Private, fail-closed control plane for dynamically scheduling ephemeral GitHub
-Actions runners on a single Apple Silicon host using Tart.
+Tart Runner Fleet turns a single Apple-silicon Mac into a self-hosted GitHub
+Actions runner pool. One daemon subscribes to GitHub Actions **runner scale
+sets**, clones an immutable [Tart](https://tart.run/) VM per queued job,
+registers a just-in-time **ephemeral** runner inside it, and destroys the VM
+when that one job finishes. Admission is bounded twice — by exact CPU/memory/slot
+vectors *and* by a live host probe (free disk, reclaimable memory, swap, CPU
+idle, load) — so the machine never overcommits and can remain someone's daily
+driver. It exists for teams that need real macOS and Linux CI capacity on
+hardware they own, without a long-lived runner accumulating state or
+credentials. All state is durable SQLite; all operator access goes through one
+`fleet` binary over a private `0600` Unix socket; secrets are never logged or
+persisted.
 
-The daemon supports observe, shadow, an exact one-scope/one-profile canary, and
-full authority. Promotion is an operator action; the incumbent remains an
-immediate rollback until the dedicated real-runner canary is green.
+macOS on Apple silicon only. Private and proprietary — see [`LICENSE`](LICENSE).
 
-## Core value: maximum useful utilization
-
-The fleet exists to turn the Mac's bounded CPU, memory, disk, and VM slots into
-the largest sustainable rate of completed CI work. The goal is not merely to
-keep VMs running: it is to minimize stranded capacity and queue time while
-never exceeding resource envelopes, weakening ownership, or scheduling from
-stale observations.
-
-The scheduler therefore follows four ordered principles:
-
-1. **Admit only proven-safe work.** Fresh GitHub, Tart, lifecycle, and host
-   observations plus exact CPU, memory, slot, repository, and profile limits
-   are hard constraints.
-2. **Choose cross-platform admission explicitly.** The default `shared` policy
-   packs Linux and macOS whenever their combined vectors fit. Experiments that
-   need a fully isolated macOS cohort may opt into `macos-exclusive`.
-3. **Optimize throughput generically.** Among young jobs in the same scheduling
-   lane, lower dominant resource share is considered first and the exact
-   allocator chooses the maximum-cardinality feasible set. Profile names such
-   as `small` or `large` do not encode policy.
-4. **Bound every optimization with fairness.** Deterministic repository
-   round-robin prevents one source from monopolizing a resource band, while
-   aging promotes old work to global FIFO so large jobs cannot starve.
-
-In short: maximize useful work per host, subject to non-negotiable safety,
-fairness, and recovery guarantees. See
-[`ADR 0012`](docs/adr/0012-shared-cross-platform-capacity.md) and its opt-in
-amendment in [`ADR 0014`](docs/adr/0014-opt-in-macos-exclusive-admission.md)
-for the decisions and trade-offs.
-
-## Operator experience
-
-`fleet` is the stable interface for humans and automation. It communicates
-with `fleet` through a private `0600` Unix socket, receives a coherent daemon
-snapshot, and never reads or mutates SQLite directly.
-
-```sh
-# One-screen operational summary
-fleet status
-
-# Stable, versioned output for agents and scripts
-fleet status --output json
-
-# Focused views
-fleet queues
-fleet instances
-fleet operations
-fleet observations
-
-# Fast and deep checks
-fleet health
-fleet doctor
-
-# Prometheus exposition for local diagnostics
-fleet metrics
-
-# Plan first; creation and config persistence require explicit guards
-fleet scale-sets provision --config fleet.json
-fleet scale-sets provision --config fleet.json --apply --write \
-  --confirm provision-scale-sets --reason "initial controlled rollout"
-```
-
-Every network operation has a bounded deadline. Output data goes to stdout,
-diagnostics go to stderr, rows are deterministically ordered, and exit codes
-are stable. Runtime mutation stays in `fleet`; the only local bootstrap
-mutation is the guarded, drift-checked `scale-sets provision` command.
-
-Run `fleet help` for the concise command contract or see
-[`docs/CLI.md`](docs/CLI.md) and [`docs/API.md`](docs/API.md).
-
-## Five-minute local start
-
-```sh
-cp config/fleet.example.json fleet.json
-fleet config validate fleet.json
-fleet run --mode observe --config fleet.json --database fleet.db
-```
-
-In another terminal:
-
-```sh
-fleet status
-fleet doctor
-```
-
-The default socket is
-`$HOME/Library/Application Support/tart-runner-fleet/state/fleetd.sock` on macOS. Pass the same
-explicit location to both programs when desired:
-
-```sh
-fleet run --admin-socket /absolute/private/path/fleetd.sock ...
-fleet status --endpoint unix:///absolute/private/path/fleetd.sock
-```
-
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
-  SS["GitHub Scale Set messages"] --> SNAP["Immutable observation snapshot"]
-  REST["Bounded REST compatibility"] --> SNAP
-  HOST["macOS host probe"] --> SNAP
-  TART["Tart inventory"] --> SNAP
+  SS["GitHub scale-set sessions"] --> SNAP["Immutable observation snapshot"]
+  REST["Bounded Actions REST inventory"] --> SNAP
+  HOST["macOS host pressure probe"] --> SNAP
+  TART["Tart VM inventory"] --> SNAP
   SNAP --> CORE["Pure deterministic scheduler"]
   DB[("SQLite WAL: state + plans + outbox")] --> CORE
   CORE --> DB
   DB --> EXEC["Leased idempotent operation workers"]
   EXEC --> TART
   EXEC --> SS
-  EXEC --> RECON["Fresh-state reconciliation"]
-  RECON --> DB
 ```
 
-The design follows ports and adapters rather than a class hierarchy. Domain
-values and state transitions are explicit; scheduler functions are pure;
-GitHub, SQLite, Tart, clocks, randomness, and host probes are replaceable ports.
-This keeps policy testable and prevents backend mechanics from leaking into
-fairness or safety decisions.
+- **One authority.** Exactly one daemon holds a renewable singleton lease and
+  stops on lease loss. Modes escalate `observe` → `shadow` → `canary` →
+  `authority`; promotion is always an explicit operator action.
+- **Durable state, no hidden queues.** SQLite WAL holds instances, demand,
+  plans, and an operation outbox. External effects are leased, idempotent, and
+  retried with bounded backoff, so a restart resumes state instead of guessing
+  from process presence ([ADR 0003](docs/adr/0003-sqlite-outbox.md)).
+- **Demand comes from GitHub, and fails closed.** Official scale-set message
+  sessions supply queued jobs; a bounded REST inventory supplies canonical job
+  truth. A stale or unavailable observation never decodes as "no work"
+  ([ADR 0002](docs/adr/0002-official-scale-set-protocol.md)).
+- **One ephemeral VM per job.** plan → clone → boot → JIT register → assign →
+  drain → deregister → stop → delete, driven by a single state machine per
+  instance. An in-guest helper powers the VM off when the one-shot listener
+  exits ([ADR 0010](docs/adr/0010-ephemeral-guest-shutdown.md)).
+- **Admission is exact and pressure-aware.** Profile vectors, repository caps,
+  and profile `maxActive` first; then a fresh host probe that defers on disk,
+  memory, swap, or CPU pressure. Linux and macOS share one envelope by default
+  ([ADR 0012](docs/adr/0012-shared-cross-platform-capacity.md)).
+- **Scheduling is fair by construction.** Young work is ordered by dominant
+  resource share and packed for maximum cardinality; aging promotes old work to
+  global FIFO so a large job cannot starve; a `control-plane` target gets one
+  bounded quantum ahead of *young* standard work
+  ([ADR 0004](docs/adr/0004-bounded-control-plane-priority.md)).
 
-## Engineering contract
+## Quickstart
 
-- deterministic functional scheduling core;
-- durable SQLite WAL state and idempotent operation outbox;
-- official GitHub Actions Scale Set protocol for demand and JIT registration;
-- explicit host-mode and instance state machines;
-- bounded host-pressure admission with operator-visible disk, reclaimable
-  memory, swap, CPU-idle, load, and decision telemetry;
-- fail closed when GitHub, Tart, or host observations are stale/unavailable;
-- no Linux/macOS overlap beyond configured, proven resource envelopes;
-- aged global FIFO with bounded control-plane priority and throughput-first
-  dominant-resource ordering for young work, with aging as an absolute
-  starvation guard;
-- a durable one-shot smallest-tier backfill budget during blocked macOS
-  handoff;
-- ephemeral runners and two-phase drain before deletion;
-- secrets never persisted or emitted;
-- race detector, replay/contract/chaos tests, and at least 99% statement coverage.
-
-## Local development
+Prerequisites: Apple-silicon macOS with Tart at `/opt/homebrew/bin/tart`; an
+authenticated `gh`; a GitHub App installed on every served repo/org; immutable
+Linux and macOS Tart bases containing `$HOME/actions-runner/run.sh` and the
+released `tart-runner-fleet-bootstrap` helper at
+`/usr/local/libexec/tart-runner-fleet-bootstrap`. Run as an unprivileged
+logged-in user — never `sudo`.
 
 ```sh
-make verify
+REPOSITORY=vitalyiegorov/tart-runner-fleet
+VERSION=$(gh release view --repo "$REPOSITORY" --json tagName --jq .tagName)
+ROOT="$HOME/Library/Application Support/tart-runner-fleet"
+STATE_DIR="$ROOT/state"
+RELEASE_DIR="$ROOT/releases/$VERSION"
 ```
 
-The repository requires Go 1.25.12. Canary requires exact `--canary-scope` and
-`--canary-profile` selectors and is internally capped at one lifecycle worker.
+1. **Install a verified release.** Download the release assets, `shasum -a 256
+   -c SHA256SUMS`, extract into `$RELEASE_DIR`, and run `"$RELEASE_DIR/fleet"
+   version`. Full sequence, including launchd rendering and the reboot proof:
+   [`INSTALL.md`](INSTALL.md).
+2. **Configure.** `install -m 0600 config/fleet.example.json
+   "$STATE_DIR/fleet.json"`, add the scoped `github` block, then
+   `"$RELEASE_DIR/fleet" config validate "$STATE_DIR/fleet.json"`.
+3. **Provision scale sets — plan first, then apply.**
 
-Useful focused loops:
+   ```sh
+   "$RELEASE_DIR/fleet" scale-sets provision --config "$STATE_DIR/fleet.json"
+   "$RELEASE_DIR/fleet" scale-sets provision --config "$STATE_DIR/fleet.json" \
+     --apply --write --confirm provision-scale-sets --reason "initial rollout"
+   ```
+
+4. **Verify.**
+
+   ```sh
+   FLEET="$ROOT/current/fleet"
+   "$FLEET" status
+   "$FLEET" doctor
+   "$FLEET" status --require-ready -o json
+   ```
+
+Try the binary without touching a real fleet (observe mode reads nothing it can
+mutate; it reports `NOT READY` against the unmodified example config because no
+GitHub scope is configured):
 
 ```sh
-go test -race ./internal/cli ./internal/adminapi ./internal/telemetry
-go test -fuzz=Fuzz -fuzztime=30s ./internal/scheduler
-./scripts/check-coverage.sh 99.0
+go build -o bin/fleet ./cmd/fleet
+cp config/fleet.example.json fleet.json
+./bin/fleet config validate fleet.json
+./bin/fleet run --mode observe --config fleet.json --database fleet.db \
+  --admin-socket "$PWD/run/fleetd.sock" --health-address 127.0.0.1:9877
+# in another terminal
+./bin/fleet status --endpoint "unix://$PWD/run/fleetd.sock"
 ```
 
-The blocking CI pipeline is intentionally layered and uses only dynamically
-provisioned self-hosted Linux runners:
+## CLI at a glance
 
-- small preflight: module integrity, formatting, actionlint, SHA pinning;
-- medium quality: vet, golangci-lint with gosec, CPD, official deadcode,
-  govulncheck;
-- medium unit/coverage and large race jobs run concurrently;
-- a required build gate on a Linux medium runner produces verified macOS ARM64
-  binaries.
+`fleet help` prints the authoritative contract. Read-only commands are always
+safe: they take a coherent snapshot over the admin socket and never open SQLite.
 
-`Required CI` fails closed for unsuccessful upstream gates but does not survive
-workflow cancellation, so a superseded commit cannot retain the concurrency
-group and starve its successor.
+| Read-only command | Purpose |
+| --- | --- |
+| `fleet status [--require-ready]` | Controller, host pressure, queues, instances, observations, operations |
+| `fleet queues` | Queued jobs and oldest age, per profile and per scope |
+| `fleet instances` | Live VM count, vCPU, and memory by profile |
+| `fleet operations` | Retrying and dead durable operations, plus each parked dead letter |
+| `fleet observations` | Freshness and age of every scheduler observation |
+| `fleet health` / `fleet doctor` | Liveness+readiness probes / deterministic API, live, ready, metrics checks |
+| `fleet metrics` | Raw Prometheus exposition |
+| `fleet config validate PATH` | Decode and validate a config without starting the daemon |
+| `fleet version` / `fleet api-version` | Build version / machine API compatibility (`fleet.v1`) |
 
-Every authority-mode Linux profile also declares a `diskGb` floor. Provisioning
-applies that floor with Tart before first boot, accepts an already-larger base,
-and never shrinks a disk. The default 50 GB sparse capacity follows Tart's
-official Linux runner guidance while copy-on-write keeps host allocation tied
-to actual writes. Observe mode can still decode legacy profiles without the
-field, but authority fails closed until they are migrated. See
-[`ADR 0006`](docs/adr/0006-per-profile-disk-floors.md).
+Common flags: `--endpoint unix:///absolute/path/fleetd.sock` (default is the
+private state directory), `--timeout 5s` (max 30s), `--output table|json` (`-o`).
 
-All Go analysis tools are pinned through Go 1.25 tool directives, every action
-uses an immutable commit SHA, and Go 1.25.12 is the minimum toolchain because it
-contains the required standard-library vulnerability fixes. Nightly CI repeats
-replay/contract/integration/chaos tests and fuzzes the deterministic scheduler.
-Every successful `main` CI run publishes its already-verified artifact as a
-normal immutable GitHub Release named
-`v0.1.<CI-run-number>+main.<commit-prefix>`. The privileged publisher runs only
-after trusted `push` CI succeeds, verifies the artifact version, allowlisted
-contents, archive contents, and SHA-256 manifest, and is retry-safe. It does not
-promote the daemon's launchd authority. Manually dispatched or non-generated
-tag releases independently rebuild each macOS ARM64 binary twice, compare both
-binaries and their CycloneDX 1.6 SBOMs byte-for-byte, and publish SHA-256
-manifests. Conventional Commit PR titles, automatic release-note categories,
-version selection, and immutable retry semantics are documented in
-[`docs/RELEASING.md`](docs/RELEASING.md). Releases also contain secret-safe
-ARM64 guest bootstrap helpers for
-Linux and macOS; install the matching helper at
-`/usr/local/libexec/tart-runner-fleet-bootstrap` in each immutable base VM. The
-helper supervises the one-job ephemeral listener and powers the guest off after
-the listener exits, allowing the durable ownership-safe cleanup state machine
-to reclaim its resources even if a broker completion message is lost.
-Controller and base helper must come from the same verified release; see
-[`ADR 0010`](docs/adr/0010-ephemeral-guest-shutdown.md).
+**Guarded commands** mutate GitHub, the installed generation, or durable rows.
+Each requires an exact `--confirm` token — a typo is a refusal, not a prompt —
+and the two operator mutations also require a non-empty `--reason` recorded with
+the action. Mutations are refused unless the daemon runs in `authority` mode.
 
-The controller is itself a permanent fleet target. Its three parallel CI jobs
-exactly fill the Linux envelope, while the installed release or pinned incumbent
-remains authority long enough to build and verify its successor. CI tests this
-self-hosting capacity invariant on every change; upgrades never replace the
-running controller before the successor has completed Required CI. See the
-two-generation bootstrap procedure in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
-Automatic upgrades also use a distinct retrying launchd handoff: the updater
-commits the verified generation, and the handoff replaces and verifies the
-loaded updater executable without letting the updater terminate its own commit.
+```sh
+# create/reconcile scale sets (plan-only without --apply --write)
+fleet scale-sets provision --config PATH --apply --write \
+  --confirm provision-scale-sets --reason "operator reason"
 
-The controller target uses `"schedulingClass": "control-plane"`. That class
-receives the next compatible quantum ahead of only *young* standard work across
-Linux and macOS arbitration. Once standard work reaches
-`linuxReservationAgeSeconds`, global FIFO moves it ahead of all young
-control-plane demand. Repository caps, exact resource vectors, and the durable
-round-robin cursor remain in force; this is a bounded repair lane, not an
-unlimited jump-the-queue flag. See
-[`ADR 0004`](docs/adr/0004-bounded-control-plane-priority.md).
+# close one dead-lettered cleanup that can never complete
+fleet operations discharge --operation op-ID --instance trf-ID \
+  --confirm discharge-dead-letter --reason "operator reason"
+
+# adopt the running generation / apply the latest forward-only release
+fleet update adopt --release-dir /absolute/release --mode authority \
+  --confirm adopt-current-generation
+fleet update apply-latest --mode authority --confirm automatic-release-update
+```
+
+Exit codes: `0` success, `1` local failure, `2` usage, `3` not found, `4` daemon
+unavailable, `5` degraded/not ready, `6` unsafe precondition (every guarded
+refusal). **Exit 4 and 5 are evidence, never permission** to assume zero demand
+or delete VMs.
+
+## Real-world examples
+
+These repositories run their entire CI on one Mac mini through this fleet:
+`vitalyiegorov/tart-runner-fleet` (self-hosting), `vitalyiegorov/suuudokuuu`,
+`vitalyiegorov/knee-doctor`, `vitalyiegorov/hotel-provence`, and the
+`budgie-at` organization. Consumers only ever write `runs-on` labels; the fleet
+maps each label set to a bounded profile.
+
+| Labels | Profile | Shape (production `fleet.json`) |
+| --- | --- | --- |
+| `[self-hosted, linux-tiered, linux-small\|medium\|large]` | Linux tiers | 1 vCPU/2 GiB · 2 vCPU/4 GiB · 4 vCPU/8 GiB |
+| `[self-hosted, linux-tiered, linux-xl]` | Linux xl | 6 vCPU / 12 GiB |
+| `[self-hosted, macOS, ARM64, macos-builder]` | macOS builder | 6 vCPU / 12 GiB, `maxActive: 1` |
+| `[self-hosted, macOS, ARM64, macos-maestro]` | macOS maestro | 4 vCPU / 7 GiB, `maxActive: 2` |
+
+Profiles are configuration, not built-ins: [`config/fleet.example.json`](config/fleet.example.json)
+ships a similar set, and labels are declared per scale set.
+
+```yaml
+# Xcode / Gradle release builds: heaviest single job, so it takes the whole
+# macOS builder and runs alone (maxActive 1).
+jobs:
+  build-ios-e2e-app:
+    runs-on: [self-hosted, macOS, ARM64, macos-builder]
+
+# Maestro UI tests need a real macOS GUI VM with a booted simulator, and two
+# fit side by side — so shards map 1:1 onto the maestro profile's two slots.
+  e2e-ios:
+    runs-on: [self-hosted, macOS, ARM64, macos-maestro]
+    strategy: { fail-fast: false, max-parallel: 2, matrix: { shard: [1, 2] } }
+
+# Android E2E: a privileged Redroid container claims 4 CPU / 6 GiB, so one xl
+# VM beats two mediums — Android cannot usefully shard on this host.
+  e2e-android:
+    runs-on: [self-hosted, linux-tiered, linux-xl]
+```
+
+Pick the tier by job weight, not by habit: lint/typecheck and script-only jobs
+on `linux-small`, test and quality gates on a Linux medium runner
+(`linux-medium`), bundlers and compiles on `linux-large`. This repository's own CI does exactly that —
+preflight on `small`, lint/coverage/build on `medium`, the race suite on
+`large` — and `knee-doctor` splits its PR pipeline the same way. `budgie-at`
+additionally attaches `linux-ci` and `linux-burst` to its `linux-large` set so
+existing workflow labels keep routing unchanged. Smaller vectors are admitted
+first and packed for maximum cardinality, so right-sizing jobs directly raises
+host throughput.
+
+## Operating it
+
+Everything lives under `$ROOT = ~/Library/Application Support/tart-runner-fleet`:
+
+| Path | What it is |
+| --- | --- |
+| `releases/<version>/` | Immutable generations; launchd always executes an exact versioned path |
+| `current` | Atomic convenience symlink to the committed generation (safe for humans and agents) |
+| `state/fleet.json` | Live configuration |
+| `state/fleet.db{,-wal,-shm}` | Durable state — **never** open or edit by hand |
+| `state/fleetd.sock` | `0600` admin socket; default `--endpoint` |
+| `state/installed-generation.json` | Committed generation identity; cross-check against `current` |
+| `state/fleet-authority.stderr.log` | Daemon diagnostics |
+| `state/update.{stdout,stderr}.log` | Updater diagnostics |
+
+LaunchAgents: `com.vitalyiegorov.tart-runner-fleet.authority` (the daemon,
+`RunAtLoad` + restart-on-failure, installed from
+`~/Library/LaunchAgents/com.vitalyiegorov.tart-runner-fleet.plist`),
+`com.vitalyiegorov.tart-runner-fleet.updater` (a one-shot with a 300-second
+`StartInterval`), and the short-lived `...updater-handoff`. The updater being
+`not running` between ticks is healthy.
+
+**Auto-update** is forward-only and quiescence-gated: every five minutes the
+updater checks the latest normal production release, verifies checksums and
+artifacts, validates the existing config against the candidate, and **defers
+while any queue, VM, retry, or dead operation exists**. It then swaps plists
+atomically, requires the exact new version and same mode to become ready, and
+rolls back otherwise ([ADR 0011](docs/adr/0011-atomic-production-updates.md)).
+`production generation is current` and a busy-fleet refusal are both successes.
+
+**Reading `fleet status`:** `READY` means ready and inside the queue SLO;
+`DEGRADED` means ready but the queue SLO is breached (the `queue SLO:` line
+names why); `NOT READY` means readiness failed (the `blocked:` line names why,
+e.g. `critical_observation_unavailable`). Health is also on
+`127.0.0.1:9876` — `/healthz`, `/readyz`, `/metrics` — loopback only.
+
+Runbooks for promotion, rollback, dead letters, drifted scale sets, and
+observation diagnosis: [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Daily cockpit
+and resource model: [`USAGE.md`](USAGE.md). Decisions:
+[`docs/adr/`](docs/adr).
+
+## For AI agents
+
+Start with [`llms.txt`](llms.txt), then [`AGENTS.md`](AGENTS.md) (mandatory
+workflow) and [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) (copy-paste
+inspection and incident procedure).
+
+```sh
+ROOT="$HOME/Library/Application Support/tart-runner-fleet"
+FLEET="$ROOT/current/fleet"
+ENDPOINT="unix://$ROOT/state/fleetd.sock"
+"$FLEET" status --endpoint "$ENDPOINT" -o json
+```
+
+- Every read-only command above is safe to run at any time, in any mode.
+- Use `-o json` for parsing (`apiVersion: fleet.v1`; UTC RFC3339 timestamps;
+  arrays are never `null`). Never scrape human tables, `launchctl`, or SQLite.
+- Guarded commands need an exact `--confirm` token, and `scale-sets provision`
+  and `operations discharge` also need `--reason`. Do not run them without an
+  explicit operational task.
+- Never hand-edit `state/`, delete VMs without fresh ownership evidence, or
+  treat exit 4/5 as an empty queue.
+
+## Development
+
+```sh
+make verify   # preflight + quality + coverage + race + build (same gates as CI)
+make fmt
+git diff --check
+```
+
+Requires Go 1.25.12. Coverage floor is 99% statements; changes are test-first
+and PR titles are Conventional Commits — see [`CONTRIBUTING.md`](CONTRIBUTING.md)
+and [`AGENTS.md`](AGENTS.md). CI runs entirely on runners this fleet schedules
+for itself, under a two-generation rule: the installed generation stays
+authority long enough to build and verify its successor.
 
 ## Documentation
 
-- [`INSTALL.md`](INSTALL.md) — verified immutable installation, auto-updates, and reboot proof
-- [`USAGE.md`](USAGE.md) — daily cockpit, resource model, scheduling, and incident workflow
-- [`docs/CLI.md`](docs/CLI.md) — operator commands, output, and exit codes
-- [`docs/API.md`](docs/API.md) — local API compatibility and security contract
-- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — deployment and rollout
-- [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) — copy-paste inspection and
-  incident workflow for agents
+- [`INSTALL.md`](INSTALL.md) — verified install, launchd, auto-update adoption, reboot proof
+- [`USAGE.md`](USAGE.md) — daily cockpit, resource model, scheduling, incidents
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — promotion, rollback, dead letters, recovery
+- [`docs/CLI.md`](docs/CLI.md) — full command, flag, output, and exit-code contract
+- [`docs/API.md`](docs/API.md) — `fleet.v1` compatibility and security contract
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model and secret handling
-- [`docs/TESTING.md`](docs/TESTING.md) — TDD and verification layers
-- [`AGENTS.md`](AGENTS.md) — mandatory workflow for coding agents
-
-## Promotion gates
-
-- **Observe:** ingest and persist facts; emit no mutations.
-- **Shadow:** compute plans and compare them with incumbent decisions.
-- **Canary:** own one dedicated scale set/profile with bounded capacity.
-- **Authority:** take all configured profiles after a zero-overlap handoff.
-- **Rollback:** stop admission, drain owned instances, atomically reactivate the
-  pinned incumbent release.
-
-The daemon enforces a renewable singleton authority lease, restartable durable
-operations, exact scope/profile canary selection, and fail-closed lease-loss
-shutdown. See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for provisioning and
-the rollback-preserving rollout.
+- [`docs/TESTING.md`](docs/TESTING.md) · [`docs/RELEASING.md`](docs/RELEASING.md) — verification layers, release process
+- [`docs/FLEET_ARCHITECTURE_PLAN.md`](docs/FLEET_ARCHITECTURE_PLAN.md) — target architecture, SLOs, sequencing
+- [`docs/adr/`](docs/adr) — 26 architecture decision records
