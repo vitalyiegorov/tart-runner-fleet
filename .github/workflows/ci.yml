@@ -19,9 +19,36 @@ env:
   GOTOOLCHAIN: local
   GOLANGCI_LINT_VERSION: v2.12.2
 
+# Self-hosted execution policy for a public repository.
+#
+# Every job below that carries a `self-hosted` label runs untrusted-by-default
+# repository content on the maintainer's physical Mac mini inside an ephemeral
+# Tart VM. A pull request opened from a fork is arbitrary code, so no fork head
+# may ever be scheduled onto the fleet, even after a maintainer approves the
+# run. Each self-hosted job therefore repeats the same admission condition
+# instead of relying on `needs:` propagation alone:
+#
+#   * `github.repository == 'vitalyiegorov/tart-runner-fleet'` keeps downstream
+#     forks from queueing jobs that only this fleet advertises labels for, and
+#     keeps a renamed or transferred copy of the repository from inheriting
+#     access to the fleet.
+#   * the `pull_request` clause admits only branches that live in this
+#     repository, so `push`, `merge_group`, and same-repo pull requests keep
+#     their existing behaviour while fork heads are skipped.
+#
+# `Required CI` is deliberately NOT self-hosted and NOT fork-gated: it executes
+# no repository content, and it must still report a *failing* required check
+# when the gates above were skipped. A skipped required status check counts as
+# satisfied by GitHub, so leaving it out of the run would make an unverified
+# fork pull request appear mergeable.
+
 jobs:
   preflight:
     name: Preflight
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux-tiered, linux-small]
     timeout-minutes: 10
     steps:
@@ -41,6 +68,10 @@ jobs:
   quality:
     name: Lint, CPD, deadcode, and vulnerabilities
     needs: preflight
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux-tiered, linux-medium]
     timeout-minutes: 15
     steps:
@@ -67,6 +98,10 @@ jobs:
   unit:
     name: Unit tests and exact coverage
     needs: preflight
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux-tiered, linux-medium]
     timeout-minutes: 15
     steps:
@@ -89,6 +124,10 @@ jobs:
   race:
     name: Race detector
     needs: preflight
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux-tiered, linux-large]
     timeout-minutes: 15
     steps:
@@ -103,6 +142,10 @@ jobs:
   build:
     name: Verified builds
     needs: [quality, unit, race]
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux-tiered, linux-medium]
     timeout-minutes: 10
     steps:
@@ -139,10 +182,31 @@ jobs:
     needs: [quality, unit, race, build]
     # Run after upstream success or failure, but terminate with a superseded or
     # manually cancelled workflow. GitHub preserves always() jobs on cancel.
-    if: ${{ !cancelled() }}
-    runs-on: [self-hosted, linux-tiered, linux-small]
+    # This gate never runs on the fleet and never checks out repository content,
+    # so a fork pull request reaches a red required check instead of a skipped
+    # one, without a single line of untrusted code executing anywhere.
+    if: ${{ !cancelled() && github.repository == 'vitalyiegorov/tart-runner-fleet' }}
+    runs-on: ubuntu-latest
+    permissions: {}
     timeout-minutes: 5
     steps:
+      - name: Explain why a fork pull request has no verification
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          set -euo pipefail
+          cat >&2 <<'POLICY'
+          This repository verifies changes on a self-hosted fleet of ephemeral
+          Tart VMs running on a maintainer's personal hardware. Pull requests
+          opened from a fork are never scheduled onto that hardware, so this
+          required check reports failure by design.
+
+          A maintainer validates external contributions by pushing the proposed
+          branch into this repository and opening a pull request from it. See
+          CONTRIBUTING.md, "Continuous integration for external contributions".
+          POLICY
+          exit 1
       - name: Require every blocking gate to succeed
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
