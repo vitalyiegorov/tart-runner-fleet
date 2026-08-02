@@ -13,7 +13,9 @@ credentials. All state is durable SQLite; all operator access goes through one
 `fleet` binary over a private `0600` Unix socket; secrets are never logged or
 persisted.
 
-macOS on Apple silicon only. Private and proprietary — see [`LICENSE`](LICENSE).
+macOS on Apple silicon only. Licensed under [AGPL-3.0](LICENSE); commercial
+licenses are available — contact the owner. Contributions require signing the
+[CLA](CLA.md).
 
 ## How it works
 
