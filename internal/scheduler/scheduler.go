@@ -1062,11 +1062,47 @@ func mixedRemainderInput(in Input, plan Plan) (Input, bool) {
 	return augmented, true
 }
 
+// demandsAwaitingAdmission drops the demands this plan already spawns.
+//
+// mixedRemainderInput teaches a complementary pass what the first pass COST —
+// appendPlannedSpawns models the planned spawns as live occupancy — but never
+// which demands it already claimed, and both passes receive the same queue. A
+// demand admitted by a bounded handoff backfill and then again by the remainder
+// pass yields two operations with one content address and two instance intents
+// with one instance name. reconcile.Controller.Commit translates both and the
+// durable layer refuses the second INSERT with a UNIQUE violation, which the
+// tick reports as plan_commit_failed. Because the plan is a pure function of its
+// inputs, every later tick rebuilds the same collision: the scheduler wedges
+// until the demand or the instance disappears (incident 2026-08-02, ADR 0027).
+//
+// Filtering here rather than deduplicating the finished plan keeps the second
+// pass's own budget honest: a demand the first pass claimed must not be counted
+// again against slots, repo caps, or the residual envelope.
+func demandsAwaitingAdmission(demands []domain.Demand, operations []Operation) []domain.Demand {
+	spawned := make(map[domain.DemandKey]bool, len(operations))
+	for _, operation := range operations {
+		if operation.Kind == OperationSpawn {
+			spawned[operation.Demand] = true
+		}
+	}
+	if len(spawned) == 0 {
+		return demands
+	}
+	result := make([]domain.Demand, 0, len(demands))
+	for _, demand := range demands {
+		if !spawned[demand.Key] {
+			result = append(result, demand)
+		}
+	}
+	return result
+}
+
 // fillLinuxRemainder admits Linux work in the envelope left after the macOS head
 // has planned. It never drains and never latches, so it is safe to run beside a
 // live macOS cohort or a freshly planned macOS spawn. The Linux allocator owns
 // the reservation and DRR cursor, so the second pass adopts them.
 func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
+	linux = demandsAwaitingAdmission(linux, plan.Operations)
 	if len(linux) == 0 {
 		return plan
 	}
@@ -1090,6 +1126,7 @@ func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
 // macOS profile switch can be started as a side effect of a Linux tick; the
 // Linux head keeps ownership of the DRR fairness cursor.
 func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
+	macos = demandsAwaitingAdmission(macos, plan.Operations)
 	if len(macos) == 0 || plan.Next.Reservation != nil {
 		return plan
 	}
