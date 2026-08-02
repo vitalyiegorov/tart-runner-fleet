@@ -610,6 +610,44 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 11: %w", err)
 		}
 	}
+	if version < 12 {
+		now := time.Now().UTC().UnixNano()
+		// Ghost demand evidence (issue #113). GitHub kept advertising one
+		// acquirable job for 11 hours after the backing job was cancelled by a
+		// force-push, so the broker alone can never retract queued demand.
+		// corroborated_at/absent_since/absent_observations record what complete
+		// REST snapshots saw, and expired_at is the revocable conclusion drawn
+		// from them; all four default to zero, which means "no evidence" and
+		// therefore "never expire".
+		for _, column := range []struct {
+			name  string
+			query string
+		}{
+			{"corroborated_at", `ALTER TABLE runner_demands ADD COLUMN corroborated_at INTEGER NOT NULL DEFAULT 0`},
+			{"absent_since", `ALTER TABLE runner_demands ADD COLUMN absent_since INTEGER NOT NULL DEFAULT 0`},
+			{"absent_observations", `ALTER TABLE runner_demands ADD COLUMN absent_observations INTEGER NOT NULL DEFAULT 0`},
+			{"expired_at", `ALTER TABLE runner_demands ADD COLUMN expired_at INTEGER NOT NULL DEFAULT 0`},
+		} {
+			var present int
+			if err := s.txRow(ctx, tx, "migrate.v12.column."+column.name,
+				`SELECT COUNT(*) FROM pragma_table_info('runner_demands') WHERE name=?`, column.name).Scan(&present); err != nil {
+				return fmt.Errorf("inspect migration 12 column %s: %w", column.name, err)
+			}
+			if present == 0 {
+				if _, err := s.txExec(ctx, tx, "migrate.v12."+column.name, column.query); err != nil {
+					return fmt.Errorf("migration 12 column %s: %w", column.name, err)
+				}
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v12.snapshots", `CREATE TABLE IF NOT EXISTS github_job_snapshots (
+			scale_set_id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, job_count INTEGER NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("migration 12 snapshots: %w", err)
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v12.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(12, ?)`, now); err != nil {
+			return fmt.Errorf("record migration 12: %w", err)
+		}
+	}
 	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
 	// creates and first seeds the table, so it always exists by this point; an
 	// operator deleting the row (incident 2026-07-22, which wedged every tick on

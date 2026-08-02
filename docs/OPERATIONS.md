@@ -541,6 +541,39 @@ and do not force the deregister to "succeed": a 401/403 must never be read as
 absence, or a permissions regression would release the teardown of instances the
 fleet cannot actually deregister.
 
+### Case study: a ghost queued job — demand GitHub advertises but no longer has
+
+On 2026-08-01 a `knee-repo`/`large` job was queued at 18:32:52Z, its PR branch
+was force-pushed, and GitHub cancelled the superseded run server-side. No
+terminal scale-set message ever arrived, so the session kept advertising one
+acquirable job and the fleet kept one `JobAvailable` demand row alive for
+**10h35m** while the repository's REST scope held zero non-completed workflow
+runs.
+
+Established facts, so nobody re-litigates them during the next incident:
+
+- **The broker never retracts.** `runner_demands` ratchets forward by design, so
+  a job that dies without a `JobCompleted` message cannot be removed by protocol
+  evidence. `Statistics.TotalAvailableJobs` stayed at 1 all night.
+- **A restart does not help.** Observations are rebuilt from the same durable
+  row. The 2026-08-01 remedy — `launchctl kickstart -k` after proving no busy
+  runner existed anywhere — worked only because the operator supplied the
+  absence proof by hand.
+- The fleet kept spawning `large` VMs that registered online and never went
+  busy, and the release gate refused every 300s tick with
+  `apply production release: prepare update: autoupdate: fleet is not quiescent`,
+  blocking v0.1.304.
+
+Since v0.1.305 the canonical REST job inventory retracts it (see
+[ADR 0026](adr/0026-queued-demand-expires-on-proven-absence.md)). A demand row is
+expired only when it was corroborated by REST at least once, has then been
+missing from at least three complete scope snapshots, and has been missing for at
+least fifteen minutes — and it is restored automatically, with its original queue
+age, by any later REST snapshot or broker event that contradicts the expiry. Do
+not delete demand rows by hand and do not disable the job inventory to "clear" a
+queue: without a complete scope observation the fleet has no absence evidence at
+all, and the ghost simply returns.
+
 ## Health
 
 - `GET /healthz`: event-loop liveness.

@@ -92,13 +92,17 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		}
 	}
 	labels, _ := json.Marshal(record.Labels)
+	// Fresh broker evidence retracts every REST-derived absence conclusion for
+	// this request: a re-advertised job is by definition not a ghost, and an
+	// expiry that the broker contradicts must never survive it.
 	_, err = s.txExec(ctx, tx, "inbox.project", `INSERT INTO runner_demands(scale_set_id,runner_request_id,status,status_rank,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(scale_set_id,runner_request_id) DO UPDATE SET status=excluded.status,status_rank=excluded.status_rank,owner=excluded.owner,
 		repository=excluded.repository,workflow_run_id=excluded.workflow_run_id,job_id=excluded.job_id,display_name=excluded.display_name,
 		workflow_ref=excluded.workflow_ref,logical_key=excluded.logical_key,event_name=excluded.event_name,labels=excluded.labels,
 		queue_time=excluded.queue_time,first_queue_time=excluded.first_queue_time,workflow_job_id=excluded.workflow_job_id,run_attempt=excluded.run_attempt,
-		runner_id=excluded.runner_id,runner_name=excluded.runner_name,result=excluded.result,updated_at=excluded.updated_at`,
+		runner_id=excluded.runner_id,runner_name=excluded.runner_name,result=excluded.result,updated_at=excluded.updated_at,
+		absent_since=0,absent_observations=0,expired_at=0`,
 		record.ScaleSetID, record.RunnerRequestID, record.Status, demandRank(record.Status), record.Owner, record.Repository,
 		record.WorkflowRunID, record.JobID, record.DisplayName, record.WorkflowRef, record.LogicalKey, record.EventName, labels,
 		toNanos(record.QueueTime), toNanos(record.FirstQueueTime), record.WorkflowJobID, record.RunAttempt, record.RunnerID,
@@ -174,12 +178,16 @@ func demandRank(kind operations.DemandEventKind) int {
 	}
 }
 
+// ActiveDemands lists demand the broker has not completed and REST has not
+// proven absent. An expired ghost is excluded rather than deleted, so the row
+// stays available as durable evidence and is revived unchanged the moment
+// either source contradicts the expiry.
 func (s *Store) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operations.DemandRecord, error) {
 	if scaleSetID <= 0 {
 		return nil, operations.ErrInvalid
 	}
 	rows, err := s.dbQuery(ctx, "inbox.active.query", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at
-		FROM runner_demands WHERE scale_set_id=? AND status_rank<? ORDER BY COALESCE(NULLIF(first_queue_time,0),queue_time),runner_request_id`, scaleSetID, demandRank(operations.DemandJobCompleted))
+		FROM runner_demands WHERE scale_set_id=? AND status_rank<? AND expired_at=0 ORDER BY COALESCE(NULLIF(first_queue_time,0),queue_time),runner_request_id`, scaleSetID, demandRank(operations.DemandJobCompleted))
 	if err != nil {
 		return nil, fmt.Errorf("list active demands: %w", err)
 	}
@@ -602,6 +610,11 @@ func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetI
 	if err := s.txRow(ctx, tx, "githubjobs.count", `SELECT COUNT(*) FROM github_job_observations WHERE scale_set_id=?`, scaleSetID).Scan(&previousCount); err != nil {
 		return false, fmt.Errorf("count prior GitHub jobs: %w", err)
 	}
+	var previousObserved int64
+	if err := s.txRow(ctx, tx, "githubjobs.mark.load", `SELECT observed_at FROM github_job_snapshots WHERE scale_set_id=?`,
+		scaleSetID).Scan(&previousObserved); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("load GitHub job snapshot mark: %w", err)
+	}
 	if _, err := s.txExec(ctx, tx, "githubjobs.replace", `DELETE FROM github_job_observations WHERE scale_set_id=?`, scaleSetID); err != nil {
 		return false, fmt.Errorf("replace GitHub job snapshot: %w", err)
 	}
@@ -657,16 +670,74 @@ func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetI
 			scaleSetID, key, toNanos(candidate.first), jobID, attempt, observedAt.UTC().UnixNano()); err != nil {
 			return false, fmt.Errorf("reconcile demand group: %w", err)
 		}
+		// Seeing the job queued is positive REST evidence: it records the join
+		// that makes a later absence meaningful and revokes any absence or
+		// expiry a previous snapshot concluded.
 		if _, err := s.txExec(ctx, tx, "githubjobs.project", `UPDATE runner_demands SET
 			first_queue_time=(SELECT first_queue_time FROM demand_groups WHERE scale_set_id=? AND logical_key=?),
 			workflow_job_id=(SELECT workflow_job_id FROM demand_groups WHERE scale_set_id=? AND logical_key=?),
-			run_attempt=(SELECT run_attempt FROM demand_groups WHERE scale_set_id=? AND logical_key=?),updated_at=?
+			run_attempt=(SELECT run_attempt FROM demand_groups WHERE scale_set_id=? AND logical_key=?),updated_at=?,
+			corroborated_at=?,absent_since=0,absent_observations=0,expired_at=0
 			WHERE scale_set_id=? AND logical_key=?`, scaleSetID, key, scaleSetID, key, scaleSetID, key,
-			observedAt.UTC().UnixNano(), scaleSetID, key); err != nil {
+			observedAt.UTC().UnixNano(), observedAt.UTC().UnixNano(), scaleSetID, key); err != nil {
 			return false, fmt.Errorf("project GitHub job correlation: %w", err)
 		}
 	}
+	if err := s.accrueAbsentDemand(ctx, tx, scaleSetID, observedAt, previousObserved, len(jobs)); err != nil {
+		return false, err
+	}
 	return previousCount > 0 || len(jobs) > 0, nil
+}
+
+// accrueAbsentDemand records what this complete snapshot did not contain. Only
+// demand REST has corroborated at least once can accrue absence, so a broker
+// job the REST scope never covers (a repository outside the observer, or a
+// label join that never matched) is left alone forever instead of being
+// expired on evidence that was never capable of seeing it. A snapshot that is
+// not strictly newer than the last recorded one adds no evidence at all, which
+// keeps a replayed or clock-skewed observation from counting twice.
+func (s *Store) accrueAbsentDemand(ctx context.Context, tx *sql.Tx, scaleSetID int64, observedAt time.Time,
+	previousObserved int64, count int,
+) error {
+	observed := observedAt.UTC().UnixNano()
+	if observed <= previousObserved {
+		return nil
+	}
+	if _, err := s.txExec(ctx, tx, "githubjobs.absent", `UPDATE runner_demands SET
+		absent_since=CASE WHEN absent_since=0 THEN ? ELSE absent_since END,
+		absent_observations=absent_observations+1
+		WHERE scale_set_id=? AND status_rank=? AND expired_at=0 AND corroborated_at>0 AND corroborated_at<?`,
+		observed, scaleSetID, demandRank(operations.DemandJobAvailable), observed); err != nil {
+		return fmt.Errorf("accrue absent demand: %w", err)
+	}
+	if _, err := s.txExec(ctx, tx, "githubjobs.mark", `INSERT INTO github_job_snapshots(scale_set_id,observed_at,job_count)
+		VALUES(?,?,?) ON CONFLICT(scale_set_id) DO UPDATE SET observed_at=excluded.observed_at,job_count=excluded.job_count`,
+		scaleSetID, observed, count); err != nil {
+		return fmt.Errorf("record GitHub job snapshot mark: %w", err)
+	}
+	return nil
+}
+
+// ExpireGhostDemands retires queued demand that complete REST snapshots have
+// proven absent. The predicate is the whole guard: the row must still be
+// exactly JobAvailable at commit time, must never have been expired before,
+// must carry positive REST corroboration, and must have been missing from
+// enough snapshots for long enough. A job that starts, completes, or is
+// re-advertised between planning and this statement fails the WHERE clause
+// instead of losing its demand.
+func (s *Store) ExpireGhostDemands(ctx context.Context, scaleSetID int64, criteria operations.GhostDemandCriteria) (int64, error) {
+	if scaleSetID <= 0 || !criteria.Valid() {
+		return 0, operations.ErrInvalid
+	}
+	observed := criteria.ObservedAt.UTC().UnixNano()
+	result, err := s.dbExec(ctx, "inbox.ghost.expire", `UPDATE runner_demands SET expired_at=?,updated_at=?
+		WHERE scale_set_id=? AND status_rank=? AND expired_at=0 AND corroborated_at>0 AND absent_since>0
+		AND absent_since<=? AND absent_observations>=?`, observed, observed, scaleSetID,
+		demandRank(operations.DemandJobAvailable), criteria.AbsentBefore.UTC().UnixNano(), criteria.MinObservations)
+	if err != nil {
+		return 0, fmt.Errorf("expire ghost demands: %w", err)
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) QueuedGitHubJobs(ctx context.Context, scaleSetID int64) ([]operations.GitHubJobObservation, error) {

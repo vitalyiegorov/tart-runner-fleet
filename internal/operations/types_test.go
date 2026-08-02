@@ -150,6 +150,23 @@ func TestCanonicalDemandObservationValidation(t *testing.T) {
 			t.Fatalf("invalid GitHub job accepted: %#v", candidate)
 		}
 	}
+	observed := time.Now().UTC()
+	ghost := GhostDemandCriteria{ObservedAt: observed, AbsentBefore: observed.Add(-time.Hour), MinObservations: 3}
+	if !ghost.Valid() {
+		t.Fatal("provable ghost criteria rejected")
+	}
+	for _, mutate := range []func(*GhostDemandCriteria){
+		func(value *GhostDemandCriteria) { value.ObservedAt = time.Time{} },
+		func(value *GhostDemandCriteria) { value.AbsentBefore = time.Time{} },
+		func(value *GhostDemandCriteria) { value.AbsentBefore = observed.Add(time.Second) },
+		func(value *GhostDemandCriteria) { value.MinObservations = 0 },
+	} {
+		candidate := ghost
+		mutate(&candidate)
+		if candidate.Valid() {
+			t.Fatalf("unprovable ghost criteria accepted: %#v", candidate)
+		}
+	}
 }
 
 func TestRetryPolicy(t *testing.T) {

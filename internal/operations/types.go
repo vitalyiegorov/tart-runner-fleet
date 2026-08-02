@@ -388,6 +388,25 @@ func (j GitHubJobObservation) Valid() bool {
 		j.RunAttempt > 0 && j.DisplayName != "" && !j.CreatedAt.IsZero()
 }
 
+// GhostDemandCriteria bounds the one demand fact GitHub never retracts: a
+// queued job the broker still advertises after the job itself was cancelled or
+// superseded. Absence is only ever proven by complete REST snapshots, so every
+// field is evidence rather than a timer. ObservedAt is the snapshot that proves
+// the demand is still missing, AbsentBefore is the instant absence must already
+// have started at, and MinObservations is how many distinct complete snapshots
+// had to miss it. All three must hold, which is why a single unlucky poll can
+// never expire live demand.
+type GhostDemandCriteria struct {
+	ObservedAt      time.Time
+	AbsentBefore    time.Time
+	MinObservations int
+}
+
+func (c GhostDemandCriteria) Valid() bool {
+	return !c.ObservedAt.IsZero() && !c.AbsentBefore.IsZero() && !c.AbsentBefore.After(c.ObservedAt) &&
+		c.MinObservations > 0
+}
+
 func (c DeletionConfirmation) Safe(now time.Time, maxAge time.Duration) bool {
 	return c.Fresh && c.RunnerInactive && c.JobsInactive && !c.ObservedAt.IsZero() &&
 		!c.ObservedAt.After(now) && now.Sub(c.ObservedAt) <= maxAge
