@@ -41,13 +41,45 @@ Nothing was protected by that refusal. The reserved `xl` could not have used
 those four cores; it was waiting for the busy `xl` to exit, not for the maestro
 to stay unadmitted.
 
+### What the bug class costs
+
+The cost of a wrongly vetoed remainder is not a scheduling nicety, and it is
+worth stating in units so the invariant's motivation survives this incident: an
+idle vector the size of the starved profile, for the entire duration of the
+blocking job.
+
+Here that is 4 cores and 7168 MB idle for 78 minutes (12:47Z→14:05Z) — 5.2
+core-hours, 40% of a ten-core machine, on a host whose own probe reported 58%
+CPU idle and `admissionAllowed: true` throughout. Three `maestro` jobs each paid
+1h18m of queue latency for capacity that was standing free the whole time. The
+loss scales with the blocking job's runtime, which the controller neither bounds
+nor can predict, so a single long CI job converts one wrong predicate into an
+arbitrarily large hole.
+
+The 2026-07-25 incident ADR 0017 repaired had the same shape and a comparable
+size (3 vCPU / 4096 MB idle for ~45 minutes). Two incidents of one shape in nine
+days is why this decision states the rule as an invariant over *every* pass
+rather than patching a second call site.
+
+A survey of every pass that can admit while a reservation is held found one more
+of the same shape, in the opposite direction: `planLinuxHandoff`'s one-shot macOS
+backfill wave consulted no reservation at all and could therefore admit a macOS
+VM straight into the vector reserved for the aged Linux head it exists to
+unblock. Bounded is not the same as safe — one wave is enough to make a head
+wait for a whole job.
+
 `fillLinuxRemainder` does not share the flaw: it delegates to `planLinux`, which
-owns the reservation and already applies ADR 0017.
+owns the reservation and already applies ADR 0017. `boundedDrainBackfill` is
+left as it is: it admits at most one VM of the smallest Linux profile, latched
+once per handoff by ADR 0005 precisely so it cannot starve what waits behind it,
+and the reserved head — always aged — is itself its first-ranked candidate when
+its profile is eligible.
 
 ## Decision
 
-A remainder pass admits work behind a held reservation only when doing so cannot
-delay the reserved head. Two conditions together are the invariant:
+Every pass that admits work while another pass holds a reservation — the macOS
+remainder pass and the bounded handoff wave alike — admits it only when doing so
+cannot delay the reserved head. Two conditions together are the invariant:
 
 1. **Vector.** The pass plans inside `free - reservation`: the reserved head's
    whole vector is charged against the pass's envelope as if it were already
@@ -99,12 +131,19 @@ busy runner to meet an internal scheduling deadline.
 
 ## Evidence
 
-- `internal/scheduler/scheduler_reserved_remainder_test.go`: the incident replay
+- `tests/replay/reserved_remainder_incident_test.go`: the incident itself over
+  16 ticks of the 78-minute window — a control arm with no complementary pass
+  reproducing the hole, then the free vector put to work exactly once, the
+  reservation surviving every tick with no drain planned, and the reserved head
+  taking the released vector FIRST at 14:05Z ahead of the maestros still queued.
+- `internal/scheduler/scheduler_reserved_remainder_test.go`: the unit replay
   (infeasible `xl` head, busy `xl`, feasible maestro admitted), both guard cases
   (a feasible head keeps its whole vector withheld; a feasible head still lends
-  what it does not need), the head winning the vector on the next tick after a
-  fill, the repository-slot exclusion, the `fillLinuxRemainder` symmetry check,
-  and the envelope arithmetic pinned directly.
+  what it does not need), the counterfactual proving the refusal is what lets the
+  head start, the head winning the vector on the next tick after a fill, the
+  repository-slot exclusion, the bounded handoff wave under both directions of
+  the invariant, the `fillLinuxRemainder` symmetry check, and the envelope
+  arithmetic pinned directly.
 - `internal/scheduler/scheduler_mixed_test.go`:
   `TestMixedFillMacSkippedWhileReservationHeld` still refuses macOS admission
   into a reserved remainder that cannot hold it.

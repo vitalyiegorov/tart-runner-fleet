@@ -142,6 +142,81 @@ func TestMacRemainderBehindAReservedLinuxHead(t *testing.T) {
 	}
 }
 
+// TestRefusedRemainderIsWhatLetsTheReservedHeadStart proves the guard direction
+// is load-bearing rather than merely conservative, by playing the counterfactual
+// out. The head fits the free envelope and is blocked only by its repository
+// cap. When the pass refuses the 6 CPU builder, the head starts on the very tick
+// its blocker exits. Had the pass admitted it — as a naive "drop the reservation
+// check" fix would — the host would have been left with 4 cores where the head
+// needs 6, so the head would have waited for the whole builder job.
+func TestRefusedRemainderIsWhatLetsTheReservedHeadStart(t *testing.T) {
+	cfg := reservedRemainderConfig()
+	cfg.RepoCaps["b/repo"] = 1
+	head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, "xl")
+	builder := profileDemand(cfg, "mac-a", 2, 60*time.Minute, "builder")
+	blocker := liveInstance(cfg, "linux-small-1", "b/repo", "small")
+
+	first := PlanTick(reservedRemainderInput(cfg, []domain.Demand{head, builder}, []domain.Instance{blocker}, State{}))
+	if containsSpawn(first.Operations) {
+		t.Fatalf("the reserved head's own vector must not be lent out: %#v", first.Operations)
+	}
+
+	// The cap blocker finishes. Nothing else took the vector, so the head starts.
+	second := PlanTick(reservedRemainderInput(cfg, []domain.Demand{head, builder}, nil, first.Next))
+	if !spawnsProfile(second, "xl") {
+		t.Fatalf("the reserved head must start as soon as its cap clears: %#v", second.Operations)
+	}
+
+	// The counterfactual: the same tick with the builder live instead.
+	admitted := reservedRemainderInput(cfg, []domain.Demand{head}, []domain.Instance{
+		liveInstance(cfg, "mac-builder-1", "mac-a", "builder")}, first.Next)
+	if free := linuxFree(admitted); free.CanFit(cfg.Profiles["xl"].Resources) {
+		t.Fatalf("counterfactual is not a delay: %#v still fits the head, so this test proves nothing", free)
+	}
+}
+
+// TestBoundedHandoffWaveHonoursTheReservation covers the other pass that admits
+// macOS work while a Linux reservation may be held: the one-shot backfill wave
+// inside planLinuxHandoff, which runs when a busy macOS instance blocks an aged
+// Linux head. Bounded is not the same as safe, so the same invariant binds it.
+func TestBoundedHandoffWaveHonoursTheReservation(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		headProfile domain.ProfileID
+		headRepoCap int
+		wantMac     bool
+	}{
+		{name: "an infeasible head lends the stranded residual", headProfile: "xl", headRepoCap: 4, wantMac: true},
+		{name: "a feasible head keeps its vector", headProfile: "large", headRepoCap: 1, wantMac: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := reservedRemainderConfig()
+			cfg.RepoCaps["b/repo"] = test.headRepoCap
+			head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, test.headProfile)
+			mac := profileDemand(cfg, "mac-a", 2, 60*time.Minute, "maestro")
+			// A busy maestro makes the host mixed, so the Linux head goes through
+			// planLinuxWithCoexistence; a live small in the head's repository is
+			// what blocks a head that would otherwise fit.
+			live := []domain.Instance{liveInstance(cfg, "mac-1", "mac-b", "maestro"),
+				liveInstance(cfg, "linux-small-1", "b/repo", "small")}
+
+			plan := PlanTick(reservedRemainderInput(cfg, []domain.Demand{head, mac}, live, State{}))
+
+			if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+				t.Fatalf("the aged head must hold its reservation, got %#v", plan.Next.Reservation)
+			}
+			if got := spawnsProfile(plan, "maestro"); got != test.wantMac {
+				t.Fatalf("bounded wave admitted maestro = %v, want %v: %#v", got, test.wantMac, plan.Operations)
+			}
+			// The latch is written only by planLinuxHandoff's wave, so it proves
+			// WHICH pass decided — the remainder pass cannot set it.
+			if plan.Next.LinuxHandoff == nil || plan.Next.LinuxHandoff.BackfillAdmitted != test.wantMac {
+				t.Fatalf("the handoff wave, not the remainder pass, must be the deciding pass: %#v", plan.Next.LinuxHandoff)
+			}
+		})
+	}
+}
+
 // TestReservedHeadWinsTheVectorAfterAMacRemainderFill pins the other half of the
 // contract, exactly as ADR 0017 does for the Linux queue: residual admission
 // behind an infeasible head must not weaken the reservation. The head keeps its

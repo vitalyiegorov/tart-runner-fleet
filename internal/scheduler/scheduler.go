@@ -1406,8 +1406,14 @@ func planLinuxHandoff(in Input, plan Plan, demands, macDemands []domain.Demand) 
 	if !allIdle {
 		if !handoff.BackfillAdmitted {
 			if profile, ok := activeMacProfile(in.Instances.Value); ok {
+				// planLinux ran first and may have reserved a vector for the aged
+				// Linux head this wave is meant to unblock. A bounded wave is still
+				// a second admission pass, so ADR 0029 binds it too: withhold the
+				// reserved head's vector and never bid for its repository.
+				lending := chargeReservedHead(in, plan.Next.Reservation)
+				candidates := reservedRemainderDemands(demandsForProfile(macDemands, profile), plan.Next.Reservation)
 				before := len(plan.Operations)
-				plan = appendMacSpawns(in, plan, demandsForProfile(macDemands, profile), nil)
+				plan = appendMacSpawns(lending, plan, candidates, nil)
 				if containsSpawn(plan.Operations[before:]) {
 					handoff.BackfillAdmitted = true
 					plan.Next.LinuxHandoff = &handoff
