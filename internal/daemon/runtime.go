@@ -420,7 +420,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		}
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
-		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute})
+		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute,
+		FailureComponents: failureComponents})
 	serverConfig := telemetry.ServerConfig{ControllerVersion: opts.Version, ControllerMode: string(opts.Mode)}
 	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
@@ -587,6 +588,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
 	reporter := newFailureReporter(os.Stderr, d.now)
+	reporter.counter = health
 	go func() {
 		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, Worker: worker,
 			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond,
@@ -1143,12 +1145,27 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 // most one line per component per window keeps a hot failure loop from
 // drowning the daemon's stderr while still breaking the historical silence
 // that once hid an 18h scheduler outage.
+// failureComponents is the closed inventory of control-plane loops app.Service
+// starts. It lives beside the wiring that starts them so the metric's label
+// space cannot drift from the loops that exist.
+var failureComponents = []string{"ingest", "operations", "scheduler"}
+
+// failureCounter is the metric half of a reported failure. It is separated from
+// the logger because the two have opposite duties: the log is rate limited so a
+// hot loop cannot drown stderr, and the counter must not be, or it reproduces
+// the undercount that made the 2026-08-02 wedge look like eight incidents
+// instead of one continuous one.
+type failureCounter interface {
+	RecordComponentFailure(component, reason string)
+}
+
 type failureReporter struct {
-	mu     sync.Mutex
-	last   map[string]time.Time
-	now    func() time.Time
-	window time.Duration
-	logger *slog.Logger
+	mu      sync.Mutex
+	last    map[string]time.Time
+	now     func() time.Time
+	window  time.Duration
+	logger  *slog.Logger
+	counter failureCounter
 }
 
 func newFailureReporter(w io.Writer, now func() time.Time) *failureReporter {
@@ -1160,6 +1177,11 @@ func newFailureReporter(w io.Writer, now func() time.Time) *failureReporter {
 }
 
 func (r *failureReporter) report(component, reason string) {
+	// Counted before the rate limit, and outside it: every occurrence is a data
+	// point even when only the first of the minute is logged.
+	if r.counter != nil {
+		r.counter.RecordComponentFailure(component, reason)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()

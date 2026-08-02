@@ -58,6 +58,11 @@ type HealthConfig struct {
 	QueueIncidentSLO       time.Duration
 	Profiles               []string
 	CriticalObservations   []string
+	// FailureComponents is the closed set of control-plane loops whose failures
+	// may be counted. Naming them here rather than inside telemetry keeps the
+	// loop inventory with the process that starts the loops, exactly as
+	// CriticalObservations keeps the observation inventory with its wiring.
+	FailureComponents []string
 }
 
 type QueueMetrics struct {
@@ -114,6 +119,7 @@ type Snapshot struct {
 	OperationRetries   int
 	DeadOperations     int
 	OperationFailures  []OperationFailure
+	ComponentFailures  []ComponentFailure
 	DeadLetters        []DeadLetter
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
@@ -138,6 +144,7 @@ type Health struct {
 	queueIncidentSLO       time.Duration
 	profiles               map[string]struct{}
 	critical               map[string]struct{}
+	failureComponents      map[string]struct{}
 
 	lastLoopTick       time.Time
 	lastSuccessfulTick time.Time
@@ -149,6 +156,7 @@ type Health struct {
 	operationRetries   int
 	deadOperations     int
 	operationFailures  []OperationFailure
+	componentFailures  map[componentFailureKey]int
 	deadLetters        []DeadLetter
 	hostPressure       HostPressureMetric
 	revision           uint64
@@ -191,6 +199,10 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 	if !ok {
 		return nil, errInvalidHealthConfig
 	}
+	failureComponents, ok := uniqueNames(config.FailureComponents)
+	if !ok {
+		return nil, errInvalidHealthConfig
+	}
 
 	now := clock.Now()
 	h := &Health{
@@ -198,10 +210,11 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 		readyTickTTL: config.ReadyTickTTL, liveTickTTL: config.LiveTickTTL,
 		criticalObservationTTL: config.CriticalObservationTTL,
 		queueSLO:               config.QueueSLO, queueIncidentSLO: config.QueueIncidentSLO,
-		profiles: profiles, critical: critical, mode: ModeIdle,
-		queues:       make(map[string]QueueMetrics, len(profiles)),
-		instances:    make(map[string]InstanceMetrics, len(profiles)),
-		observations: make(map[string]ObservationMetric, len(critical)),
+		profiles: profiles, critical: critical, failureComponents: failureComponents, mode: ModeIdle,
+		componentFailures: make(map[componentFailureKey]int, len(failureComponents)),
+		queues:            make(map[string]QueueMetrics, len(profiles)),
+		instances:         make(map[string]InstanceMetrics, len(profiles)),
+		observations:      make(map[string]ObservationMetric, len(critical)),
 	}
 	for name := range critical {
 		h.observations[name] = ObservationMetric{Freshness: ObservationUnavailable}
@@ -317,6 +330,28 @@ type OperationFailure struct {
 	Code     string
 	Count    int
 	Attempts int
+}
+
+// UnclassifiedFailureReason stands in for a failure whose cause the classifier
+// could not name. An empty label would still be a series, so it is better to
+// name the gap: a rising unclassified count is itself the signal that a failure
+// path is missing from the closed vocabulary.
+const UnclassifiedFailureReason = "unclassified"
+
+// ComponentFailure counts one control-plane loop's failures under one bounded
+// reason. It is monotonic for the life of the process.
+//
+// The reporter that logs these failures rate-limits to one line per component
+// and reason per minute, so the log records that a loop failed but never how
+// often. During the 2026-08-02 wedge that turned roughly one failure per tick
+// into eight log lines, and nothing in the metrics distinguished a loop that
+// failed once from one that had not committed anything for half an hour: the
+// only ingest-adjacent series, fleet_observation_fresh, is a gauge that
+// self-heals faster than a scrape interval.
+type ComponentFailure struct {
+	Component string
+	Reason    string
+	Count     int
 }
 
 // maxOperationFailures bounds both the status document and the metric label
@@ -454,9 +489,47 @@ func (h *Health) Snapshot() Snapshot {
 		Instances:    cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
-		DeadLetters:  append([]DeadLetter(nil), h.deadLetters...),
-		HostPressure: h.hostPressure, ObservationTTL: h.criticalObservationTTL,
+		ComponentFailures: h.sortedComponentFailures(),
+		DeadLetters:       append([]DeadLetter(nil), h.deadLetters...),
+		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
+}
+
+type componentFailureKey struct{ component, reason string }
+
+// RecordComponentFailure counts one loop failure. It admits only components the
+// process declared, so a mistyped or upstream-derived name can never open a new
+// time series, and it never rate-limits: undercounting is the deficiency this
+// exists to repair.
+func (h *Health) RecordComponentFailure(component, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.failureComponents[component]; !ok {
+		return
+	}
+	if reason == "" {
+		reason = UnclassifiedFailureReason
+	}
+	h.componentFailures[componentFailureKey{component: component, reason: reason}]++
+}
+
+// sortedComponentFailures renders the counters in a deterministic order so
+// operators, JSON consumers, and metric diffs never depend on map iteration.
+func (h *Health) sortedComponentFailures() []ComponentFailure {
+	if len(h.componentFailures) == 0 {
+		return nil
+	}
+	result := make([]ComponentFailure, 0, len(h.componentFailures))
+	for key, count := range h.componentFailures {
+		result = append(result, ComponentFailure{Component: key.component, Reason: key.reason, Count: count})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Component != result[j].Component {
+			return result[i].Component < result[j].Component
+		}
+		return result[i].Reason < result[j].Reason
+	})
+	return result
 }
 
 func cloneMap[K comparable, V any](source map[K]V) map[K]V {

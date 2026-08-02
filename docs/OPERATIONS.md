@@ -629,14 +629,29 @@ bug rather than the norm:
 | `scheduler_state_corrupt` | The stored optimization state did not decode. | Recoverable: the row is reseeded on the next tick. Investigate if it repeats. |
 | `demand_unreadable` | Durable demand for a binding could not be read. | Check the database; distinct from a stale-statistics binding, which trickles instead of failing. |
 | `queue_summary_unreadable` | The canonical queue summary could not be produced. | Check REST reachability and rate limits. |
-| `plan_commit_failed` | The plan was computed but the durable store was unavailable or refused the write. | Check the database, the authority lease, and operation leases. If it repeats on every tick while `scheduler_state.version` never advances and `plans` gains no row, the write is being refused deterministically rather than failing intermittently — see [ADR 0027](adr/0027-one-tick-admits-a-demand-once.md). |
+| `plan_commit_failed` | The plan was computed but the durable store was unavailable. | Check the database, the authority lease, and operation leases. A constraint violation is no longer reported here — it is a refused plan, not an unavailable store. |
 | `plan_commit_contended` | The plan lost an optimistic-concurrency race: the durable state moved between the observation it was built from and its compare-and-set. | None. It self-heals on the next tick, which re-observes. Expected under host saturation; investigate only if it never clears. |
-| `plan_commit_rejected` | The durable layer refused the plan as malformed, e.g. an unknown profile or a drain of an instance whose durable state cannot be drained. | Repeats every tick until the inputs change. Reconcile the inventory and configuration; this is not a database fault. |
+| `plan_commit_rejected` | The durable layer refused the plan as malformed, e.g. an unknown profile, a drain of an instance whose durable state cannot be drained, or a write that violates a schema constraint. | Repeats every tick until the inputs change. Reconcile the inventory and configuration; this is not a database fault. Confirm with `scheduler_state.version` never advancing and `plans` gaining no row — see [ADR 0027](adr/0027-one-tick-admits-a-demand-once.md) and [ADR 0028](adr/0028-a-repeated-decision-is-a-new-attempt.md) for the two plans that reached production this way. |
 | `plan_invalid` | The scheduler could not form a usable plan, e.g. a live instance with an unrecognized platform. The durable write was never attempted. | Reconcile the inventory; this is not a database fault. |
 
 A blocked plan is not a loop failure. Fail-closed admission on a stale or
 unavailable observation returns no error, so it is visible as a non-`ready` plan
 status and in `observations` rather than as a warning.
+
+The warning above is rate limited to one line per component and reason per
+minute, so it records *that* a loop is failing and never *how often*. Use the
+counter for that:
+
+```sh
+fleet metrics --endpoint unix://__STATE_DIR__/fleetd.sock | grep fleet_component_failures_total
+fleet_component_failures_total{component="scheduler",reason="plan_commit_rejected"} 412
+```
+
+`fleet_component_failures_total` is monotonic for the life of the process and
+both labels are closed vocabulary, so `rate()` over it separates a loop that
+failed once from one that has not committed anything for half an hour — a
+distinction the log cannot make. A rising `reason="unclassified"` means a failure
+path is missing from the vocabulary and is worth reporting.
 
 A daemon restart is no longer a recovery step for a wedged session: recovery is
 per binding and bounded. `githubSessionMaxIngestFailures` (default 5) and

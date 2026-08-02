@@ -2204,3 +2204,52 @@ func TestRuntimeExecutorsDriveProvisionToAssigned(t *testing.T) {
 	<-done
 	t.Fatal("provision operation did not reach assigned")
 }
+
+// TestFailureReporterCountsEveryOccurrenceItDoesNotLog is the pairing that made
+// the 2026-08-02 wedge look smaller than it was: the log emits at most one line
+// per component and reason per minute, so a loop failing every tick left eight
+// lines standing for roughly a hundred failures. The counter must see all of
+// them, including the ones the rate limit suppresses.
+func TestFailureReporterCountsEveryOccurrenceItDoesNotLog(t *testing.T) {
+	var logged bytes.Buffer
+	clock := time.Unix(80_000, 0).UTC()
+	counter := &recordingFailureCounter{}
+	reporter := newFailureReporter(&logged, func() time.Time { return clock })
+	reporter.counter = counter
+
+	for range 6 {
+		reporter.report("scheduler", "plan_commit_failed")
+	}
+	reporter.report("ingest", "")
+
+	if got := counter.calls; len(got) != 7 {
+		t.Fatalf("counted %d failures, want every one: %#v", len(got), got)
+	}
+	if got := strings.Count(logged.String(), "component=scheduler"); got != 1 {
+		t.Fatalf("logged scheduler lines = %d, want the rate limit to hold at 1", got)
+	}
+	if counter.calls[6] != (failureCall{component: "ingest"}) {
+		t.Fatalf("unclassified failure = %#v; the counter, not the reporter, names the gap", counter.calls[6])
+	}
+}
+
+// TestFailureReporterWithoutACounterStillLogs keeps the metric optional so the
+// reporter can never become a reason a failure goes unreported.
+func TestFailureReporterWithoutACounterStillLogs(t *testing.T) {
+	var logged bytes.Buffer
+	reporter := newFailureReporter(&logged, func() time.Time { return time.Unix(90_000, 0).UTC() })
+
+	reporter.report("scheduler", "plan_commit_rejected")
+
+	if !strings.Contains(logged.String(), "plan_commit_rejected") {
+		t.Fatalf("log = %q", logged.String())
+	}
+}
+
+type failureCall struct{ component, reason string }
+
+type recordingFailureCounter struct{ calls []failureCall }
+
+func (r *recordingFailureCounter) RecordComponentFailure(component, reason string) {
+	r.calls = append(r.calls, failureCall{component: component, reason: reason})
+}
