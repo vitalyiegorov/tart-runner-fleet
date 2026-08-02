@@ -28,6 +28,13 @@ type GitHubJobStore interface {
 	QueuedGitHubJobs(context.Context, int64) ([]operations.GitHubJobObservation, error)
 }
 
+// GhostDemandStore retires demand that complete REST snapshots have proven
+// absent. It is optional: a store without it keeps every durable demand, which
+// is the pre-issue-#113 behaviour and always the safe direction.
+type GhostDemandStore interface {
+	ExpireGhostDemands(context.Context, int64, operations.GhostDemandCriteria) (int64, error)
+}
+
 type GitHubQueueSnapshot interface {
 	ObservedAt() time.Time
 	QueuedJobs() []githubscaleset.WorkflowJob
@@ -116,10 +123,22 @@ type DemandCoordinator struct {
 	Projector        DemandProjector
 	Now              func() time.Time
 	StatisticsMaxAge time.Duration
+	GhostAbsence     time.Duration
 	StrictJobRouting bool
 }
 
 const defaultStatisticsMaxAge = 2 * time.Minute
+
+// defaultGhostAbsence and minGhostObservations bound how much REST evidence
+// retires demand GitHub still advertises. The REST scope is polled at most
+// every 30s, so the default window is dozens of complete snapshots in which a
+// genuinely queued job would have appeared; the minimum observation count is
+// the independent second bound that keeps one lonely snapshot after a long
+// outage from concluding anything on its own.
+const (
+	defaultGhostAbsence  = 15 * time.Minute
+	minGhostObservations = 3
+)
 
 func (c DemandCoordinator) now() time.Time {
 	if c.Now != nil {
@@ -133,6 +152,13 @@ func (c DemandCoordinator) statisticsMaxAge() time.Duration {
 		return c.StatisticsMaxAge
 	}
 	return defaultStatisticsMaxAge
+}
+
+func (c DemandCoordinator) ghostAbsence() time.Duration {
+	if c.GhostAbsence > 0 {
+		return c.GhostAbsence
+	}
+	return defaultGhostAbsence
 }
 
 // ErrDemandStatisticsUnavailable marks a binding whose scale-set statistics
@@ -226,7 +252,36 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 			RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
 			Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
 	}
-	return store.ReconcileGitHubJobSnapshot(ctx, snapshot.ObservedAt(), observations)
+	changed, err := store.ReconcileGitHubJobSnapshot(ctx, snapshot.ObservedAt(), observations)
+	if err != nil {
+		return changed, err
+	}
+	expired, err := c.expireGhostDemand(ctx, bindings, snapshot.ObservedAt())
+	return changed || expired, err
+}
+
+// expireGhostDemand retires demand this snapshot has now proven absent for
+// longer than the ghost window. It runs only behind a committed, complete REST
+// scope observation, so freshness is a property of the caller rather than a
+// clock comparison: the same snapshot that failed to find the job is the one
+// that dates the conclusion.
+func (c DemandCoordinator) expireGhostDemand(ctx context.Context, bindings []Binding, observedAt time.Time) (bool, error) {
+	store, ok := c.Store.(GhostDemandStore)
+	if !ok {
+		return false, nil
+	}
+	observed := observedAt.UTC()
+	criteria := operations.GhostDemandCriteria{ObservedAt: observed, AbsentBefore: observed.Add(-c.ghostAbsence()),
+		MinObservations: minGhostObservations}
+	expired := false
+	for _, binding := range bindings {
+		count, err := store.ExpireGhostDemands(ctx, binding.durableKey(), criteria)
+		if err != nil {
+			return expired, err
+		}
+		expired = expired || count > 0
+	}
+	return expired, nil
 }
 
 func containsFold(values []string, want string) bool {

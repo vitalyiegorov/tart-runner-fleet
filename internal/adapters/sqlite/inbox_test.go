@@ -205,7 +205,8 @@ func TestCanonicalQueuePersistenceFailsClosed(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	job := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 1,
 		RunAttempt: 1, DisplayName: "build", Labels: []string{"self-hosted", "linux-small"}, Status: "queued", CreatedAt: now, QueueTimeExact: true}
-	for _, point := range []string{"githubjobs.begin", "githubjobs.count", "githubjobs.replace", "githubjobs.upsert", "githubjobs.group", "githubjobs.project", "githubjobs.commit"} {
+	for _, point := range []string{"githubjobs.begin", "githubjobs.count", "githubjobs.mark.load", "githubjobs.replace",
+		"githubjobs.upsert", "githubjobs.group", "githubjobs.project", "githubjobs.absent", "githubjobs.mark", "githubjobs.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)
 			store.injectFault = func(candidate string) error {
