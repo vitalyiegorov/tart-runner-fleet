@@ -194,8 +194,8 @@ jobs:
 ```
 
 Pick the tier by job weight, not by habit: lint/typecheck and script-only jobs
-on `linux-small`, test and quality gates on `linux-medium`, bundlers and
-compiles on `linux-large`. This repository's own CI does exactly that —
+on `linux-small`, test and quality gates on a Linux medium runner
+(`linux-medium`), bundlers and compiles on `linux-large`. This repository's own CI does exactly that —
 preflight on `small`, lint/coverage/build on `medium`, the race suite on
 `large` — and `knee-doctor` splits its PR pipeline the same way. `budgie-at`
 additionally attaches `linux-ci` and `linux-burst` to its `linux-large` set so
