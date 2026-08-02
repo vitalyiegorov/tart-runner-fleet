@@ -28,6 +28,9 @@ env:
 jobs:
   build:
     name: Verify and build release
+    # Tag pushes and manual dispatch already require write access, so this is
+    # a fork containment guard rather than an authorization gate.
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
     runs-on: [self-hosted, linux-tiered, linux-medium]
     timeout-minutes: 20
     env:
@@ -98,7 +101,9 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      github.repository == 'vitalyiegorov/tart-runner-fleet'
     needs: build
     permissions:
       contents: write

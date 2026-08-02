@@ -6,9 +6,12 @@ on:
     types: [completed]
     branches: [main]
 
-permissions:
-  actions: read
-  contents: write
+# SECURITY: `workflow_run` grants a write token to a workflow definition taken
+# from the default branch, and it fires for CI runs started by pull requests
+# too. The guard below admits only a successful CI run for a `push` to `main`
+# in this repository, so no fork-controlled run can reach the release token or
+# supply the artifact this job downloads.
+permissions: {}
 
 concurrency:
   group: main-production-release
@@ -18,11 +21,15 @@ jobs:
   publish:
     name: Publish verified main release
     if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: [self-hosted, linux-tiered, linux-small]
+    permissions:
+      actions: read
+      contents: write
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}

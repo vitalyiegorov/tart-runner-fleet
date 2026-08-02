@@ -1,13 +1,24 @@
 name: PR Metadata
 
+# SECURITY: `pull_request_target` runs the workflow definition from the base
+# branch with a token that can write to this repository, and it is triggered by
+# pull requests opened from forks. Three invariants keep that safe and must not
+# be relaxed:
+#
+#   1. No step checks out, fetches, or executes pull request head content. Only
+#      trusted event metadata is read, and every value derived from the pull
+#      request is passed through the environment rather than interpolated into
+#      a shell command, so a crafted title cannot inject script.
+#   2. The job runs on a GitHub-hosted runner. Fork-triggered execution must
+#      never touch the maintainer's self-hosted Tart fleet, and this is the one
+#      workflow a fork can start without any repository write access.
+#   3. Permissions are empty at the workflow level and granted per job at the
+#      narrowest scope that still lets the job attach a release-note label.
 on:
   pull_request_target:
     types: [opened, edited, reopened, synchronize]
 
-permissions:
-  contents: read
-  issues: write
-  pull-requests: write
+permissions: {}
 
 concurrency:
   group: pr-metadata-${{ github.event.pull_request.number }}
@@ -16,11 +27,13 @@ concurrency:
 jobs:
   release-label:
     name: Classify release note
-    runs-on: [self-hosted, linux-tiered, linux-small]
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    runs-on: ubuntu-latest
+    permissions:
+      # Pull request labels are issue labels; nothing else is written.
+      issues: write
     timeout-minutes: 5
     steps:
-      # This privileged workflow deliberately does not check out or execute PR
-      # code. It reads only event metadata from the trusted base workflow.
       - name: Derive release category from Conventional Commit title
         env:
           GH_TOKEN: ${{ github.token }}
