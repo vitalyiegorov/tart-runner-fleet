@@ -923,6 +923,54 @@ func TestSpawnGenerationCountsTerminalIncarnationsByDemand(t *testing.T) {
 	}
 }
 
+// TestDrainGenerationCountsTerminalAttemptsByInstance pins the drain half of the
+// generation rule: only attempts that can no longer act supersede, only for this
+// instance, and only for the drain effect.
+func TestDrainGenerationCountsTerminalAttemptsByInstance(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	enqueue := func(id, kind, resource string, status operations.OperationStatus) {
+		t.Helper()
+		_, err := store.db.ExecContext(ctx, `INSERT INTO operations(id,idempotency_key,effect_key,kind,resource_id,payload,status,attempts,available_at,created_at,updated_at)
+			VALUES(?,?,?,?,?,'{}',?,0,?,?,?)`, id, id, kind+":"+resource, kind, resource, status, now.UnixNano(), now.UnixNano(), now.UnixNano())
+		if err != nil {
+			t.Fatalf("enqueue %s: %v", id, err)
+		}
+	}
+	for _, seed := range []struct {
+		id, kind, resource string
+		status             operations.OperationStatus
+	}{
+		{"drain-completed", lifecycle.OperationDrain, "vm-1", operations.OperationCompleted},
+		{"drain-dead", lifecycle.OperationDrain, "vm-1", operations.OperationDead},
+		{"drain-discharged", lifecycle.OperationDrain, "vm-1", operations.OperationDischarged},
+		{"drain-pending", lifecycle.OperationDrain, "vm-1", operations.OperationPending},
+		{"drain-claimed", lifecycle.OperationDrain, "vm-1", operations.OperationClaimed},
+		{"clone-completed", lifecycle.OperationProvision, "vm-1", operations.OperationCompleted},
+		{"drain-other-vm", lifecycle.OperationDrain, "vm-2", operations.OperationCompleted},
+	} {
+		enqueue(seed.id, seed.kind, seed.resource, seed.status)
+	}
+
+	for _, testCase := range []struct {
+		name     string
+		instance string
+		want     int
+	}{
+		{name: "only terminal drains of this instance count", instance: "vm-1", want: 3},
+		{name: "another instance keeps its own count", instance: "vm-2", want: 1},
+		{name: "an instance never drained is generation zero", instance: "vm-unseen"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got, err := store.DrainGeneration(ctx, testCase.instance)
+			if err != nil || got != testCase.want {
+				t.Fatalf("DrainGeneration(%q) = %d, %v; want %d", testCase.instance, got, err, testCase.want)
+			}
+		})
+	}
+}
+
 type scanError struct{ err error }
 
 func (s scanError) Scan(...any) error { return s.err }
@@ -962,6 +1010,7 @@ func TestScannerErrorsAndClosedDatabaseErrors(t *testing.T) {
 			_, err := store.SpawnGeneration(ctx, domain.DemandKey{Repo: "owner/repo", RunID: 1, Attempt: 1, JobID: 1})
 			return err
 		},
+		func() error { _, err := store.DrainGeneration(ctx, "vm"); return err },
 		func() error {
 			_, _, err := store.Transition(ctx, operations.Transition{InstanceID: "vm", ExpectedState: operations.StatePlanned, NextState: operations.StateCloning, Operation: operation})
 			return err

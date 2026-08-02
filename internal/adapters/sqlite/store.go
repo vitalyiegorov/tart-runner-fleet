@@ -709,6 +709,34 @@ func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (i
 	return generation, nil
 }
 
+// DrainGeneration counts the instance's prior drain attempts that can no longer
+// act. It is the drain half of SpawnGeneration and exists for the same reason:
+// a drain identity is content-addressed from the scheduler's recovery decision
+// alone, so a recovery whose premise recurs re-derives a byte-identical
+// operation. DrainExecutor.abort makes that recurrence ordinary — fresh evidence
+// of a running job returns the instance to Running and completes the drain as a
+// no-op, the deadline elapses again, and the identical operation is planned
+// against a row that already exists.
+//
+// Only terminal attempts are counted, so a claimed or pending drain still
+// collides and a genuine double-drain of one attempt hard-fails rather than
+// enqueuing the effect twice. A discharged attempt counts: the operator declared
+// it terminal, and its row is exactly the tombstone a later attempt must
+// supersede. The count is stable within a tick because the fleet is a single
+// writer and a live drain keeps the instance out of the recovery states the
+// scheduler derives these operations from.
+func (s *Store) DrainGeneration(ctx context.Context, instanceID string) (int, error) {
+	var generation int
+	err := s.dbRow(ctx, "operations.drain_generation", `SELECT COUNT(*) FROM operations
+		WHERE kind=? AND resource_id=? AND status IN (?,?,?)`,
+		lifecycle.OperationDrain, instanceID,
+		operations.OperationCompleted, operations.OperationDead, operations.OperationDischarged).Scan(&generation)
+	if err != nil {
+		return 0, fmt.Errorf("count drain generation: %w", err)
+	}
+	return generation, nil
+}
+
 // Advance atomically persists one externally observed lifecycle edge without
 // enqueuing another effect. The owning outbox operation remains claimed until
 // its executor reaches a terminal lifecycle state and completes it.

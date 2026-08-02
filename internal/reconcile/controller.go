@@ -22,6 +22,7 @@ type PlanStore interface {
 	SchedulerState(context.Context) (operations.SchedulerState, error)
 	Instance(context.Context, string) (operations.Instance, error)
 	SpawnGeneration(context.Context, domain.DemandKey) (int, error)
+	DrainGeneration(context.Context, string) (int, error)
 	ApplyPlan(context.Context, operations.Plan) (bool, error)
 }
 
@@ -157,10 +158,21 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 			if !validState {
 				return operations.Plan{}, fmt.Errorf("drain %s in state %s: %w", instance.ID, instance.State, operations.ErrConflict)
 			}
+			// A recovery whose premise recurs re-derives a byte-identical operation:
+			// the scheduler content-addresses a drain from its decision alone, and an
+			// aborted attempt (fresh evidence of a running job) returns the instance
+			// to the very state the recovery is derived from. Scope the identity to
+			// the terminal prior attempts exactly as a respawn is scoped, so the
+			// repeat supersedes those tombstones instead of wedging every later tick
+			// on a UNIQUE collision.
+			generation, err := c.Store.DrainGeneration(ctx, operation.Instance)
+			if err != nil {
+				return operations.Plan{}, err
+			}
 			next := instance
 			next.State, next.Version, next.DrainPhase, next.UpdatedAt = operations.StateDraining, instance.Version+1, drainPhase, now.UTC()
 			durable.Instances = append(durable.Instances, operations.InstanceIntent{ExpectedVersion: instance.Version, ExpectedState: instance.State, Instance: next})
-			durable.Operations = append(durable.Operations, outbox(operation, operation.ID, "deregister", instance.ID, instance.Ownership, now))
+			durable.Operations = append(durable.Operations, outbox(operation, attemptIdentity(operation.ID, generation), "deregister", instance.ID, instance.Ownership, now))
 		case scheduler.OperationSpawn:
 			profile, ok := c.Profiles[operation.Profile]
 			if !ok || profile.Route != operation.Route || profile.Resources.CPU <= 0 || profile.Resources.MemoryMB <= 0 || profile.Resources.Slots <= 0 {
@@ -177,7 +189,7 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 				return operations.Plan{}, err
 			}
 			name := instanceName(operation, generation)
-			operationID := spawnIdentity(operation, generation)
+			operationID := attemptIdentity(operation.ID, generation)
 			ownership := operations.Ownership{ControllerID: c.ControllerID, ResourceID: operation.Demand.String(), OperationID: operationID}
 			instance := operations.Instance{ID: name, Repo: operation.Demand.Repo, Platform: profile.Platform, Profile: profile.ID, Route: profile.Route,
 				Resources: profile.Resources, Demand: operation.Demand, State: operations.StatePlanned, Version: 0, Ownership: ownership, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
@@ -209,17 +221,22 @@ func instanceName(operation scheduler.Operation, generation int) string {
 	return "trf-" + strings.ToLower(string(operation.Profile)) + "-" + hex.EncodeToString(sum[:8])
 }
 
-// spawnIdentity derives the durable spawn operation identity. Generation zero
-// preserves the scheduler's content address so first spawns — and replays of
-// the same attempt, which the plans-table idempotency gate already collapses —
-// keep their existing identity byte-for-byte. A later generation salts a
-// distinct identity that supersedes the terminal prior incarnation's tombstones
-// without disturbing them (the audit history and effect records stay intact).
-func spawnIdentity(operation scheduler.Operation, generation int) string {
+// attemptIdentity derives the durable operation identity for one attempt at a
+// scheduler decision, spawn or drain. Generation zero preserves the scheduler's
+// content address so first attempts — and replays of the same attempt, which the
+// plans-table idempotency gate already collapses — keep their existing identity
+// byte-for-byte. A later generation salts a distinct identity that supersedes the
+// terminal prior attempt's tombstones without disturbing them (the audit history
+// and effect records stay intact).
+//
+// The effect key is deliberately NOT salted. Identity names the attempt; the
+// effect key names the physical effect, and operation_effects is what keeps
+// deregistering one runner, or cloning one VM, idempotent across attempts.
+func attemptIdentity(contentAddress string, generation int) string {
 	if generation == 0 {
-		return operation.ID
+		return contentAddress
 	}
-	sum := sha256.Sum256(generationSeed(operation.ID, generation))
+	sum := sha256.Sum256(generationSeed(contentAddress, generation))
 	return "op-" + hex.EncodeToString(sum[:12])
 }
 

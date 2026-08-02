@@ -20,11 +20,17 @@ type fakeStore struct {
 	applied                         []operations.Plan
 	generation                      int
 	generationErr                   error
+	drainGeneration                 int
+	drainGenerationErr              error
 	stateErr, instanceErr, applyErr error
 }
 
 func (f *fakeStore) SpawnGeneration(context.Context, domain.DemandKey) (int, error) {
 	return f.generation, f.generationErr
+}
+
+func (f *fakeStore) DrainGeneration(context.Context, string) (int, error) {
+	return f.drainGeneration, f.drainGenerationErr
 }
 
 func (f *fakeStore) SchedulerState(context.Context) (operations.SchedulerState, error) {
