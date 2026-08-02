@@ -4,7 +4,10 @@
 
 Accepted. Amends [ADR 0005](0005-bounded-drain-backfill.md) and the residual
 admission rules in [ADR 0012](0012-shared-cross-platform-capacity.md); both
-remain accepted everywhere else.
+remain accepted everywhere else. Extended by
+[ADR 0029](0029-remainder-admission-behind-a-reservation.md), which carries this
+rule from `safeBackfill` to the complementary remainder passes and states the
+non-resource half of the invariant.
 
 ## Context
 

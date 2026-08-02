@@ -9,7 +9,9 @@ by [ADR 0017](0017-infeasible-reservation-residual-backfill.md), which stops an
 infeasible reservation from stranding the residual envelope; and by
 [ADR 0018](0018-second-pilot-elastic-host-envelope.md), which makes the single
 configured envelope an opt-in elastic one derived from the observed physical
-host, turning `maxLinuxCpu` into a Linux-only cap when enabled.
+host, turning `maxLinuxCpu` into a Linux-only cap when enabled; and by
+[ADR 0029](0029-remainder-admission-behind-a-reservation.md), which states when
+the complementary remainder pass may admit work behind a held reservation.
 
 ## Context
 

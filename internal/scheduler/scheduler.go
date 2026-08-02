@@ -1097,6 +1097,62 @@ func demandsAwaitingAdmission(demands []domain.Demand, operations []Operation) [
 	return result
 }
 
+// reservedRemainderDemands drops the demands a complementary pass must not
+// admit while a reservation is held, whatever the envelope says.
+//
+// Resources are not the only way to delay a reserved head. Repository caps gate
+// admission too, and activeRepoCounts counts EVERY live instance regardless of
+// platform, so a macOS spawn in the reserved head's repository can consume the
+// exact cap slot the head is waiting for and block it again the moment its
+// vector frees. Remainder arithmetic cannot see that blocker, so the head's
+// repository is excluded outright: it is the head's, and this pass never bids
+// for it.
+func reservedRemainderDemands(demands []domain.Demand, reservation *domain.Reservation) []domain.Demand {
+	if reservation == nil {
+		return demands
+	}
+	result := make([]domain.Demand, 0, len(demands))
+	for _, demand := range demands {
+		if demand.Key.Repo != reservation.Demand.Repo {
+			result = append(result, demand)
+		}
+	}
+	return result
+}
+
+// chargeReservedHead models a held reservation as occupancy for a complementary
+// admission pass, exactly as appendPlannedSpawns models this tick's spawns. The
+// pass then plans inside free - reservation and can never take a vector the
+// reserved head is waiting for.
+//
+// When the reserved vector does not fit the free envelope AT ALL, nothing is
+// charged and the pass plans inside the full residual. That is ADR 0017's rule,
+// extended from safeBackfill to the second admission pass: such a head is
+// blocked by live instances holding what it needs, so it cannot start until they
+// release no matter what this pass admits — it is NOT waiting on the pass to
+// stop. The reservation contract is then preserved by ordering, not by idleness:
+// the head is re-checked first on every later tick, so it wins the first vector
+// large enough for it.
+//
+// Feasibility is judged against the starvation-guard envelope, the same one
+// planLinux judges the head in, because only an aged head ever holds a
+// reservation. Judging a head as fitting is the fail-safe answer here: it
+// withholds the head's vector.
+func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
+	if reservation == nil || !linuxFreeAged(in).CanFit(reservation.Resources) {
+		return in
+	}
+	profile := in.Config.Profiles[reservation.Profile]
+	charged := append([]domain.Instance(nil), in.Instances.Value...)
+	charged = append(charged, domain.Instance{
+		ID: "reserved-" + reservation.Demand.String(), Repo: reservation.Demand.Repo, Demand: reservation.Demand,
+		Platform: profile.Platform, Profile: reservation.Profile, Route: profile.Route, Resources: reservation.Resources,
+		State: domain.InstancePlanned, Power: domain.InstancePowerRunning,
+	})
+	in.Instances = domain.Fresh(charged, in.Instances.ObservedAt)
+	return in
+}
+
 // fillLinuxRemainder admits Linux work in the envelope left after the macOS head
 // has planned. It never drains and never latches, so it is safe to run beside a
 // live macOS cohort or a freshly planned macOS spawn. The Linux allocator owns
@@ -1121,19 +1177,28 @@ func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
 // the Linux head has planned, turning "N Linux" into "N Linux AND a macOS
 // cohort" within MaxActive and the single-cohort invariant. It only grows the
 // already-active macOS profile (or, on a host with no live macOS, establishes
-// the head demand's profile), and never while a Linux reservation is holding a
-// vector for an aged Linux head. appendMacSpawns performs no drains, so no
-// macOS profile switch can be started as a side effect of a Linux tick; the
-// Linux head keeps ownership of the DRR fairness cursor.
+// the head demand's profile). appendMacSpawns performs no drains, so no macOS
+// profile switch can be started as a side effect of a Linux tick; the Linux head
+// keeps ownership of the DRR fairness cursor.
+//
+// A held Linux reservation constrains this pass instead of cancelling it. The
+// reserved head's whole vector is withheld (chargeReservedHead) and its
+// repository is off limits (reservedRemainderDemands), so nothing admitted here
+// can delay it; when that vector does not fit the free envelope at all the head
+// is not waiting on this pass, and ADR 0029 admits inside the full residual
+// rather than stranding it. Returning early on any reservation at all is what
+// starved a maestro that fit the four free cores exactly for over an hour on
+// 2026-08-02, behind an xl head that could not have used them.
 func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
-	macos = demandsAwaitingAdmission(macos, plan.Operations)
-	if len(macos) == 0 || plan.Next.Reservation != nil {
+	macos = reservedRemainderDemands(demandsAwaitingAdmission(macos, plan.Operations), plan.Next.Reservation)
+	if len(macos) == 0 {
 		return plan
 	}
 	augmented, ok := mixedRemainderInput(in, plan)
 	if !ok {
 		return plan
 	}
+	augmented = chargeReservedHead(augmented, plan.Next.Reservation)
 	target, active := activeMacProfile(augmented.Instances.Value)
 	if active {
 		if !macProfileCanGrow(augmented, target) {
