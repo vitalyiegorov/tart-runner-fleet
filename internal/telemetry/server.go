@@ -375,6 +375,19 @@ func renderMetrics(snapshot Snapshot) string {
 		}
 	}
 
+	if len(snapshot.ComponentFailures) > 0 {
+		// Both labels are closed vocabulary authored in-process — the component is a
+		// static loop name and the reason is the bounded failure token — so label
+		// cardinality is bounded and an alert can rate() the exact incident: a
+		// scheduler refused by the durable layer reads differently from one losing a
+		// harmless race, and the log's one-line-per-minute rate limit tells neither.
+		writeHelpType("fleet_component_failures_total", "Control-plane loop failures by component and bounded reason.", "counter")
+		for _, failure := range snapshot.ComponentFailures {
+			fmt.Fprintf(&output, "fleet_component_failures_total{component=%s,reason=%s} %d\n",
+				prometheusLabel(failure.Component), prometheusLabel(failure.Reason), failure.Count)
+		}
+	}
+
 	writeHelpType("fleet_host_available_memory_mib", "Host reclaimable memory available for admission in MiB.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_available_memory_mib %d\n", snapshot.HostPressure.AvailableMemoryMiB)
 	writeHelpType("fleet_host_free_disk_gib", "Host filesystem free space in GiB.", "gauge")
