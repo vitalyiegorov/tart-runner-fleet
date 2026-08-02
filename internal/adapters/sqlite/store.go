@@ -15,8 +15,40 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
-	_ "modernc.org/sqlite"
+	driver "modernc.org/sqlite"
 )
+
+// sqliteConstraintCode is SQLite's primary result code for every constraint
+// violation. The extended code names the specific constraint in its high bits
+// (UNIQUE 2067, PRIMARY KEY 1555, FOREIGN KEY 787, NOT NULL 1299, CHECK 275), so
+// the low byte is the stable classification and new extended codes cannot break
+// it.
+const sqliteConstraintCode = 19
+
+// refusedByConstraint reports whether the durable layer refused a write because
+// the plan violated the schema rather than because the store was unavailable.
+//
+// The distinction is the operator's whole triage. A refused constraint repeats
+// identically for as long as the inputs do — the planner is pure, so the same
+// tick inputs rebuild the same rejected plan forever — while an unavailable
+// store clears on its own. Before this predicate both reported plan_commit_failed
+// ("check the database"), and during the 2026-08-02 wedge that sent triage to a
+// database whose integrity_check was clean.
+func refusedByConstraint(err error) bool {
+	var refusal *driver.Error
+	return errors.As(err, &refusal) && refusal.Code()&0xFF == sqliteConstraintCode
+}
+
+// refuseMalformed marks a constraint violation as a plan the durable layer will
+// not accept, leaving every other failure exactly as the driver reported it. The
+// original error is preserved alongside the sentinel so the constraint that was
+// violated stays readable in the wrapped chain.
+func refuseMalformed(err error) error {
+	if !refusedByConstraint(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", operations.ErrInvalid, err)
+}
 
 type Store struct {
 	db          *sql.DB
@@ -156,7 +188,7 @@ func (s *Store) ApplyPlan(ctx context.Context, plan operations.Plan) (bool, erro
 			}
 		}
 		if err != nil {
-			return false, fmt.Errorf("apply instance intent: %w", err)
+			return false, fmt.Errorf("apply instance intent: %w", refuseMalformed(err))
 		}
 	}
 	for _, operation := range plan.Operations {
@@ -174,7 +206,7 @@ func (s *Store) ApplyPlan(ctx context.Context, plan operations.Plan) (bool, erro
 				return false, operations.ErrInvalid
 			}
 			if _, err := s.txExec(ctx, tx, "apply.dependency.record", `INSERT INTO operation_dependencies(operation_id,depends_on) VALUES(?,?)`, operation.ID, dependency); err != nil {
-				return false, fmt.Errorf("record operation dependency: %w", err)
+				return false, fmt.Errorf("record operation dependency: %w", refuseMalformed(err))
 			}
 		}
 	}
@@ -190,7 +222,7 @@ func (s *Store) ApplyPlan(ctx context.Context, plan operations.Plan) (bool, erro
 	}
 	if _, err := s.txExec(ctx, tx, "apply.record", `INSERT INTO plans(id,digest,scheduler_version,created_at) VALUES(?,?,?,?)`,
 		plan.ID, digest[:], plan.Scheduler.Version, plan.CreatedAt.UTC().UnixNano()); err != nil {
-		return false, fmt.Errorf("record plan: %w", err)
+		return false, fmt.Errorf("record plan: %w", refuseMalformed(err))
 	}
 	if err := s.commit(tx, "apply.commit"); err != nil {
 		return false, fmt.Errorf("commit plan: %w", err)
@@ -253,7 +285,7 @@ func insertOperation(ctx context.Context, tx *sql.Tx, operation operations.Opera
 		operation.ID, operation.IdempotencyKey, operation.EffectKey, operation.Kind, operation.ResourceID, payload, operations.OperationPending,
 		operation.Attempts, operation.AvailableAt.UTC().UnixNano(), "", int64(0), operation.LastError, now.UTC().UnixNano(), now.UTC().UnixNano())
 	if err != nil {
-		return fmt.Errorf("enqueue plan operation: %w", err)
+		return fmt.Errorf("enqueue plan operation: %w", refuseMalformed(err))
 	}
 	return nil
 }
