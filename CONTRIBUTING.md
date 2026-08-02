@@ -87,3 +87,15 @@ GitHub generates release notes from merged pull requests. The PR metadata
 workflow derives exactly one release category from the Conventional Commit
 title, and `.github/release.yml` renders Breaking changes, Features, Fixes,
 Performance, Documentation, Dependencies, and Maintenance sections.
+
+## Contributor License Agreement
+
+First-time contributors must sign the [CLA](CLA.md) by including this line in
+their first pull request description:
+
+```
+I have read the CLA document at CLA.md and I hereby sign the CLA.
+```
+
+The CLA grants the project owner the right to dual-license contributions
+(AGPL-3.0 and commercial terms). Signing once covers all future contributions.
