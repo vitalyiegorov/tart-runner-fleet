@@ -665,6 +665,40 @@ run that was already `queued` needs an operator-driven cancel and re-run. Those
 jobs stay visible in `queues` and still breach the queue SLO, so they are not
 silent — but the controller must never cancel a user workflow itself.
 
+### A breached queue SLO while the host still has free capacity
+
+`queue_slo_breached` with `admissionAllowed: true` and idle cores is normally
+head-of-line blocking, not a fault. The aged global-FIFO head reserves its exact
+vector, and admission behind that reservation is bounded on purpose. The
+reservation is scheduler state and is not exposed by `fleet.v1`, so reconstruct
+it: the reserved head is the oldest queued job past the fairness age, and what
+is free is the host less every live instance.
+
+```sh
+fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
+  jq '{queues: .data.queues, live: .data.instances, pressure: .data.hostPressure}'
+```
+
+Compare the head profile's configured vector against the host capacity less the
+`live` vectors, then read the two cases:
+
+- The reserved head **does not fit** what is free: it is waiting for a live
+  instance to exit, not for the queue behind it to stay idle, so work that fits
+  the residual — Linux *or* macOS — is admitted every tick behind it
+  ([ADR 0017](adr/0017-infeasible-reservation-residual-backfill.md),
+  [ADR 0029](adr/0029-remainder-admission-behind-a-reservation.md)). A queue
+  still frozen in this state with a demand that fits is a bug worth reporting;
+  that is exactly the 2026-08-02 incident, where a `maestro` fitting the four
+  free cores waited over an hour behind an `xl` head that could not use them.
+- The reserved head **does fit** what is free: it is blocked by a non-resource
+  gate, usually its repository cap. Its whole vector is then held for it and
+  only the leftover is lent out, so a queued job larger than
+  `free - reservation` correctly waits. This is policy, not a wedge.
+
+Neither case is repaired by restarting the daemon. Both clear when the blocking
+instance finishes; the reserved head is re-checked first on every tick and takes
+the first vector large enough for it.
+
 ## Recovery
 
 1. Stop admission; do not delete uncertain VMs.
