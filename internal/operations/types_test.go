@@ -109,6 +109,34 @@ func TestDemandEventValidation(t *testing.T) {
 	}
 }
 
+// TestDemandRecordNamesOneSchedulingIdentity pins the derivation the scheduler's
+// queue and any instance bound to a demand must share. They are produced in
+// different packages -- app.convertDemandRecords and the durable rebind of
+// ADR 0033 -- and if they ever disagreed, a demand a live instance already
+// incarnates would be invisible to app.plannableDemands and admitted twice.
+func TestDemandRecordNamesOneSchedulingIdentity(t *testing.T) {
+	record := DemandRecord{Owner: "rnw-community", Repository: "rnw-community",
+		WorkflowRunID: 30_740_997_047, RunAttempt: 2, RunnerRequestID: 8_670_852_748_984_054_370}
+	if record.Repo() != "rnw-community/rnw-community" {
+		t.Fatalf("repository slug = %q", record.Repo())
+	}
+	want := domain.DemandKey{Repo: "rnw-community/rnw-community", RunID: 30_740_997_047, Attempt: 2,
+		JobID: 8_670_852_748_984_054_370}
+	if got := record.DemandKey(); got != want || got.Validate() != nil {
+		t.Fatalf("demand key = %#v", got)
+	}
+	// GitHub omits the run attempt for a first attempt, and the queue normalizes
+	// it to one; the binding must normalize it identically.
+	record.RunAttempt = 0
+	if got := record.DemandKey(); got.Attempt != 1 {
+		t.Fatalf("a missing run attempt must normalize to the first: %#v", got)
+	}
+	// An incomplete row cannot name an incarnation, and says so.
+	if (DemandRecord{}).DemandKey().Validate() == nil {
+		t.Fatal("an empty demand record produced a usable key")
+	}
+}
+
 func TestCanonicalDemandObservationValidation(t *testing.T) {
 	statistics := DemandStatistics{MessageID: 1}
 	if !statistics.Valid() {

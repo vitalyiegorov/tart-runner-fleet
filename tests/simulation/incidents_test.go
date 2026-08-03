@@ -283,6 +283,103 @@ func TestDoubleAdmissionIncidentIsPinnedByPropertyE(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Incident 2026-08-02 -- ADR 0033, the sibling handoff (issue #123)
+// ---------------------------------------------------------------------------
+
+// TestCrossedSiblingHandoffIncidentReplaysThroughTheSimulator drives the whole
+// 2026-08-02 churn end to end.
+//
+// The trace is three events. Two builder jobs of one repository arrive, and
+// MaxActive is one, so exactly one VM is spawned and the second job stays
+// queued -- the sibling. The broker then hands that queued sibling to the VM's
+// runner and returns the VM's own request to the queue, which is exactly what
+// `runner_demands` recorded for `trf-xl-25a374b60f46dafe`: one request
+// JobStarted on the runner, its sibling still JobAvailable. The sibling is a
+// long job, because the whole incident turns on work that outlives a recovery
+// deadline.
+//
+// Before ADR 0033 this produced, deterministically:
+//
+//   - a binding that named a job GitHub had given away, so `JobActive` (bound
+//     demand) reported idle while `RunnerActiveJob` (runner name) reported busy;
+//   - a stalled-assignment drain at the assignment deadline, aborted by GitHub's
+//     refusal to deregister a busy runner, then a lingering-runner drain one
+//     idle-runner deadline later, aborted the same way -- the 09:44:48Z and
+//     09:59:51Z operations of the incident;
+//   - a released request nobody could ever spawn for, whose queue age grew for
+//     as long as the fleet stayed up.
+//
+// After it, the binding follows GitHub, both jobs run, and the fleet settles.
+func TestCrossedSiblingHandoffIncidentReplaysThroughTheSimulator(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	trace := simTrace{Seed: 20_260_802, Ticks: 200, Config: cfg.Name, Events: []simEvent{
+		{Tick: 1, Kind: eventLongJob, Count: 14},
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "pull_request"},
+		{Tick: 3, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "pull_request"},
+		{Tick: 4, Kind: eventSiblingSubstitute},
+		{Tick: 5, Kind: eventStopArrivals},
+	}}
+	w := newWorld(t, cfg, trace)
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("the sibling-handoff incident must no longer violate a property: %s", findings[0])
+	}
+	// The harness really did reach the incident state; a green run over a trace
+	// that never handed a sibling over would prove nothing.
+	if w.substitutions != 1 {
+		t.Fatalf("the harness never reproduced the handoff: %d substitutions", w.substitutions)
+	}
+	// The runner that was given the sibling is never drained while it works: no
+	// recovery drain is planned for it at all, so none has to be aborted.
+	if len(w.drainAborts) != 0 {
+		t.Fatalf("the churn is back: %v", w.drainAborts)
+	}
+	// Both sibling jobs ran. The released one is the whole point -- before the
+	// repair it could neither be respawned nor executed.
+	for _, job := range w.jobs {
+		if job.status != jobDone {
+			t.Fatalf("job %d never completed: status %s runner %q", job.requestID, job.status, job.runner)
+		}
+	}
+	// jobs are recorded in arrival order, and the substitution released the first
+	// one -- the request whose VM was spawned -- in favour of the queued second.
+	released, sibling := w.jobs[0], w.jobs[1]
+	// The released demand waited for CAPACITY and nothing else: the only builder
+	// slot was held by the long sibling, and the fleet served it within a boot of
+	// that slot coming free. Before the repair it waited for the whole run.
+	if wait := released.startedAt.Sub(sibling.finishedAt); wait <= 0 || wait > 8*simTick {
+		t.Fatalf("the released demand started %s after capacity freed, not promptly", wait)
+	}
+	// Its queue age is GitHub's, untouched by the rebind (ADR 0033). The
+	// scheduler therefore ranks it by how long the job has really been waiting,
+	// which is what keeps aging an honest starvation guard.
+	if !w.queueCarried(released.requestID, released.queuedAt) {
+		t.Fatal("the released demand never re-entered the plannable queue with its original queue time")
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+	final := w.observations[len(w.observations)-1]
+	if final.Queued != 0 {
+		t.Fatalf("the released demand never drained: %d still queued", final.Queued)
+	}
+}
+
+// queueCarried reports whether any observed tick offered the scheduler this
+// request with exactly the queue time GitHub gave it.
+func (w *world) queueCarried(requestID int64, queuedAt time.Time) bool {
+	for _, observation := range w.observations {
+		for _, demand := range observation.Demands {
+			if demand.Key.JobID == requestID && demand.CreatedAt.Equal(queuedAt) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Incident 2026-07-25 -- ADR 0017, the stranded residual behind a wedged drain
 // ---------------------------------------------------------------------------
 

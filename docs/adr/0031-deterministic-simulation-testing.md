@@ -91,7 +91,9 @@ The code under test is production code, not a model of it:
   run may be cancelled loudly (a terminal message follows) or silently (none ever
   does, which is the ADR 0026 ghost). Two acquired requests may be matched to the
   opposite registered runners, which is the crossed assignment ADR 0028 exists
-  for.
+  for; and a registered runner may be given a still-QUEUED sibling instead of the
+  request its own VM acquired, which no instance incarnates and no swap can
+  repair -- the handoff of ADR 0033.
 - **The REST scope.** Complete queued-job snapshots taken at one instant and
   delivered at another, so "lagging inventory" is a real skew rather than a flag.
 - **The host.** An Apple M4 -- ten cores, 24 GiB, parameterized -- shared with
@@ -101,7 +103,13 @@ The code under test is production code, not a model of it:
 - **The executor.** It mirrors `lifecycle.ProvisionExecutor` and
   `lifecycle.DrainExecutor` edge for edge, including the two details every
   timing question turns on: the job is acquired at the `reachable ->
-  registering` edge, and provisioning ends in `assigned`, not `online_idle`.
+  registering` edge, and provisioning ends in `assigned`, not `online_idle`. A
+  drain re-verifies its premise against the real durable adapters and aborts on
+  contrary evidence, and GitHub refuses to deregister a runner that is EXECUTING
+  a job -- the edge that makes a recovery drain a loop rather than a kill.
+- **Job duration.** Work runs for a configured number of ticks, and a trace may
+  make a job outlive a recovery deadline. Until it could, no job ever did, and
+  the whole abort class of ADR 0028 was unreachable.
 - **The clock.** One tick is thirty virtual seconds. `FairnessAge` is ten ticks,
   the statistics freshness budget four, the ghost-absence window thirty.
 
@@ -133,12 +141,14 @@ refusal.
 | | Property | Oracle | Status |
 |---|---|---|---|
 | a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. | Enforced |
-| b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Per-demand pass-over count against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03, see [ADR 0004](0004-bounded-control-plane-priority.md) |
+| b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Pass-over count per (demand, CAUSE) against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03, see [ADR 0004](0004-bounded-control-plane-priority.md) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
 | e | **No double admission.** One demand is admitted once. | A demand spawned twice in a plan, or spawned while a live instance already incarnates it. | Enforced (finding 1 fixed 2026-08-03; see [ADR 0027](0027-one-tick-admits-a-demand-once.md)) |
 | f | **Eventual quiescence.** The fleet empties when the demand stream stops. | Q ticks after GitHub has no work: scheduler-visible demand and in-flight operations must both be zero. | Enforced |
-| g | **Conservation.** Instances never exceed the envelope or the caps. | Aggregate CPU, memory, and slots against the physical machine; per-repository count against its cap; per-profile count against MaxActive. | Enforced (finding 2 fixed 2026-08-03; see [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)) |
+| g | **Conservation.** Instances never exceed the envelope or the caps. | Aggregate CPU, memory, and slots against the physical machine; per-repository count against its cap (excluding a rebound instance, whose repository the broker chose); per-profile count against MaxActive. | Enforced (finding 2 fixed 2026-08-03; see [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)) |
+| h | **No stranded demand.** A queued job is never held by an instance that is executing a different one. | An instance still incarnating a demand GitHub has queued and dispatched to nobody, while GitHub has dispatched another job of the same scale set to its runner, for more than G ticks. | Enforced (added with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md)) |
+| i | **No drain churn.** A recovery drain the executor aborts does not repeat. | Per-instance count of drains disproven at execution time, against N. | Enforced (added with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the
@@ -157,6 +167,24 @@ found it. Every signature is pinned by its own characterization test in
 change shape, and its fix PR arrives with a test that already describes it.
 
 An unsignatured violation of any property fails the build.
+
+Two oracle refinements were needed to keep that promise honest, both made with
+[ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md):
+
+- Property (b) counts pass-overs per (demand, CAUSE) rather than per demand.
+  This is finding 6 of issue #130. A demand passed over once by each of several
+  mechanisms has not been starved N times by any of them, and crediting the
+  accumulated total to whichever cause happened to tip the counter reports the
+  last mechanism for all the previous ones' work -- so a run of documented
+  pass-overs surfaced as an unsignatured hard failure on its final tick, naming a
+  mechanism that had acted once. Each cause now earns its own budget, so a
+  genuinely new defect must repeat before it fails the build.
+- Property (g) does not charge a REBOUND instance to a repository cap. A cap
+  bounds admission -- how many VMs the fleet will create for a repository -- and
+  cannot bound which repository's job GitHub then dispatches to a runner that
+  already exists. The physical envelope still charges every instance in full, and
+  the same VM ran the same foreign job before the binding followed GitHub; only
+  what the fleet is willing to say about it changed.
 
 ### Where the harness lives
 

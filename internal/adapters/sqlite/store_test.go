@@ -898,7 +898,13 @@ func TestApplyPlanUpdateAndFailureBranches(t *testing.T) {
 	}
 }
 
-func TestSpawnGenerationCountsTerminalIncarnationsByDemand(t *testing.T) {
+// TestSpawnGenerationCountsSpentIncarnationsByDemand pins both ways an
+// incarnation is spent: it reached a terminal state, or GitHub gave its runner
+// another job and the durable binding followed it (ADR 0033). Both leave a live
+// or tombstoned row whose immutable ownership still names this demand, so both
+// must salt the next spawn's identity — and a row that still holds the demand,
+// or declares no binding at all, must not.
+func TestSpawnGenerationCountsSpentIncarnationsByDemand(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 	demand := domain.DemandKey{Repo: "owner/repo", RunID: 7, Attempt: 1, JobID: 9}
@@ -910,13 +916,38 @@ func TestSpawnGenerationCountsTerminalIncarnationsByDemand(t *testing.T) {
 			t.Fatalf("create %s: %v", id, err)
 		}
 	}
+	bound := func(id string, state operations.State, resource string, binding domain.DemandKey) {
+		t.Helper()
+		ownership := operations.Ownership{ControllerID: "c", ResourceID: resource, OperationID: id}
+		if err := store.CreateInstance(ctx, operations.Instance{ID: id, State: state, Repo: binding.Repo,
+			Platform: domain.PlatformLinux, Profile: "small", Route: "linux-small",
+			Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}, Demand: binding,
+			Ownership: ownership}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
 	mk("gen-deleted", operations.StateDeleted, demand.String())
 	mk("gen-failed", operations.StateFailed, demand.String())
+	// A live row with no declared binding is not evidence of anything: it must
+	// keep colliding rather than earn a fresh identity.
 	mk("gen-live", operations.StateOnlineIdle, demand.String())
 	mk("gen-other", operations.StateDeleted, other.String())
+	// Still holding its own demand: a genuine double-spawn must hard-fail.
+	bound("gen-bound", operations.StateRunning, demand.String(), demand)
 
 	if got, err := store.SpawnGeneration(ctx, demand); err != nil || got != 2 {
-		t.Fatalf("SpawnGeneration = %d, %v (want 2 terminal, live excluded)", got, err)
+		t.Fatalf("SpawnGeneration = %d, %v (want 2 terminal, live and bound excluded)", got, err)
+	}
+
+	// The sibling handoff: spawned for `demand`, executing `other`.
+	bound("gen-rebound", operations.StateRunning, demand.String(), other)
+	if got, err := store.SpawnGeneration(ctx, demand); err != nil || got != 3 {
+		t.Fatalf("a rebound incarnation must supersede: SpawnGeneration = %d, %v", got, err)
+	}
+	// And it does not leak into the demand it was rebound ONTO, whose own
+	// ownership signature it does not carry.
+	if got, err := store.SpawnGeneration(ctx, other); err != nil || got != 1 {
+		t.Fatalf("SpawnGeneration for the rebound-onto demand = %d, %v", got, err)
 	}
 	if got, err := store.SpawnGeneration(ctx, domain.DemandKey{Repo: "fresh", RunID: 1, Attempt: 1, JobID: 1}); err != nil || got != 0 {
 		t.Fatalf("SpawnGeneration for unseen demand = %d, %v", got, err)

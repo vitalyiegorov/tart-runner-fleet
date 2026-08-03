@@ -33,6 +33,16 @@ const (
 	findingNoQuiescence findingKind = "no_quiescence"
 	// findingConservation is property (g): instances never exceed the envelope.
 	findingConservation findingKind = "conservation"
+	// findingStrandedDemand is property (h): no queued demand is held hostage by
+	// an instance that is executing a DIFFERENT job. Such a demand can never be
+	// respawned (its own instance still incarnates it) and never executed (its
+	// runner is busy with something else), so its queue age grows without bound.
+	findingStrandedDemand findingKind = "stranded_demand"
+	// findingDrainChurn is property (i): a recovery drain the executor aborts must
+	// not repeat. Aborting returns the instance to Running, which restarts the very
+	// deadline that planned the drain, so a second abort is a loop rather than an
+	// unlucky race.
+	findingDrainChurn findingKind = "drain_churn"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -175,10 +185,177 @@ func defaultCheckers(cfg worldConfig) []checker {
 		identityUniquenessChecker(),
 		planAlwaysAppliesChecker(),
 		conservationChecker(cfg),
+		// (h) and (i) precede the liveness and starvation oracles deliberately: a
+		// demand nobody can serve and a drain that will not stay dead are the CAUSE
+		// of the queue that never drains, and reporting the symptom would send an
+		// operator to the scheduler for a binding defect (issue #123).
+		strandedDemandChecker(cfg),
+		drainChurnChecker(cfg),
 		livenessChecker(cfg),
 		boundedStarvationChecker(cfg),
 		quiescenceChecker(cfg),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// (h) No demand is stranded on a runner that is executing something else.
+// ---------------------------------------------------------------------------
+
+// strandedDemandChecker is the issue #123 oracle.
+//
+// The fleet binds an instance to ONE demand, and every question it later asks
+// about that instance -- is a job active, is it safe to deregister, may this
+// demand be planned again -- is answered from that binding. GitHub, meanwhile,
+// decides what the runner actually executes. When the broker gives a runner a
+// sibling from the same scale set, the two answers come apart and STAY apart:
+//
+//   - the demand is not plannable, because a live instance incarnates it, so no
+//     other VM is ever spawned for it (app.plannableDemands);
+//   - it is not executable either, because the instance that holds it is busy
+//     with the sibling.
+//
+// Its queue age then grows without bound, and because aging is the absolute
+// scheduling priority (ADR 0004) that unbounded age outranks every genuinely
+// newer job on the host. On 2026-08-02 one such demand reported 1h28m and pinned
+// an xl VM for the rest of the day.
+//
+// The oracle is deliberately conditioned on the runner being BUSY. Without that
+// clause it would also flag the ADR 0026 ghost -- a runner GitHub never gave any
+// work to -- which is a different defect with a different repair.
+//
+// StrandedG ticks of grace is the broker's delivery budget: the message that
+// names the real assignment can be delayed, and evidence that has not arrived
+// cannot be acted on.
+func strandedDemandChecker(cfg worldConfig) checker {
+	stranded := map[string]int{}
+	return func(w *world, observation tickObservation) []finding {
+		var findings []finding
+		seen := map[string]bool{}
+		for _, instance := range observation.Instances {
+			job := w.strandedDemandOf(instance)
+			if job == nil {
+				continue
+			}
+			seen[instance.ID] = true
+			stranded[instance.ID]++
+			if stranded[instance.ID] != cfg.StrandedG+1 {
+				continue
+			}
+			findings = append(findings, finding{Kind: findingStrandedDemand, Tick: observation.Tick,
+				Detail: fmt.Sprintf("%s holds demand %s (queued %s ago, still JobAvailable to GitHub) while GitHub gave its runner %s: the demand can neither be respawned nor served\n%s",
+					instance.ID, instance.Demand, observation.Now.Sub(job.queuedAt), w.runnerJobName(instance.ID),
+					w.dumpPlan(observation))})
+		}
+		for id := range stranded {
+			if !seen[id] {
+				delete(stranded, id)
+			}
+		}
+		return findings
+	}
+}
+
+// strandedDemandOf reports the broker's job for an instance's bound demand when
+// that binding is PROVEN wrong, and nil otherwise. Three facts must hold
+// together, and each one excludes a different, legitimate shape:
+//
+//   - The instance still incarnates the demand, so nothing else may be spawned
+//     for it (app.plannableDemands).
+//   - GitHub still has that job queued and dispatched to nobody. This excludes
+//     ordinary execution and completion, and it excludes the crossed assignment
+//     of ADR 0016, where BOTH requests were acquired and neither is queued.
+//   - GitHub has dispatched a different job of the same scale set to this
+//     instance's runner. This is what makes the binding provably wrong rather
+//     than merely unlucky, and it excludes the ADR 0026 ghost -- a runner GitHub
+//     never gave any work to -- which is a different defect with a different
+//     repair.
+//
+// The dispatch is remembered after the sibling finishes, deliberately. The
+// binding does not heal when the sibling ends: the instance still holds a demand
+// it will never execute, and the demand still cannot be respawned. On 2026-08-02
+// that state outlived several sibling jobs.
+func (w *world) strandedDemandOf(instance domain.Instance) *simJob {
+	if !instance.IncarnatesDemand() || !w.runnerRanAnotherJob(instance.ID, instance.Demand.JobID) {
+		return nil
+	}
+	job := w.jobByRequest(instance.Demand.JobID)
+	if job == nil || job.status != jobQueued || job.runner != "" || job.silentCancel {
+		return nil
+	}
+	return job
+}
+
+// runnerRanAnotherJob reports whether GitHub has dispatched any job other than
+// the given request to this runner. A finished job keeps its runner, so this
+// stays true once it has happened -- which is the point: the evidence that a
+// binding is wrong does not expire when the job that proved it ends.
+func (w *world) runnerRanAnotherJob(runner string, bound int64) bool {
+	for _, job := range w.jobs {
+		if job.runner != runner || job.requestID == bound {
+			continue
+		}
+		switch job.status {
+		case jobAcquired, jobRunning, jobDone:
+			return true
+		case jobQueued, jobCancelled:
+		}
+	}
+	return false
+}
+
+// runnerJobName names what a runner is really executing, so a stranding finding
+// says which sibling took the runner rather than merely that one did.
+func (w *world) runnerJobName(runner string) string {
+	for _, job := range w.jobs {
+		if job.runner == runner {
+			return fmt.Sprintf("request %d (%s)", job.requestID, job.status)
+		}
+	}
+	return "nothing"
+}
+
+// ---------------------------------------------------------------------------
+// (i) An aborted recovery drain does not repeat.
+// ---------------------------------------------------------------------------
+
+// drainChurnChecker fails when one instance has more than DrainChurnN recovery
+// drains disproven at execution time.
+//
+// The abort itself is correct and must stay: it is what upholds the busy-drain
+// invariant when planning-time evidence was wrong. What it cannot do is make the
+// evidence right. `abort` returns the instance to Running, RunningSince is the
+// row's updated_at, so the idle-runner deadline restarts and the identical
+// recovery is re-derived one deadline later -- forever, at the cost of a durable
+// transition, a GitHub round trip, and a deregistration attempt against a runner
+// doing real work (ADR 0028's "not addressed here").
+//
+// One abort is therefore a race the design anticipates; two is a loop.
+func drainChurnChecker(cfg worldConfig) checker {
+	reported := map[string]bool{}
+	return func(w *world, observation tickObservation) []finding {
+		var findings []finding
+		for _, id := range sortedKeys(w.drainAborts) {
+			if w.drainAborts[id] <= cfg.DrainChurnN || reported[id] {
+				continue
+			}
+			reported[id] = true
+			findings = append(findings, finding{Kind: findingDrainChurn, Tick: observation.Tick,
+				Detail: fmt.Sprintf("%s had %d recovery drains aborted; its runner is executing %s while its bound demand %s says otherwise\n%s",
+					id, w.drainAborts[id], w.runnerJobName(id), boundDemandOf(observation, id), w.dumpPlan(observation))})
+		}
+		return findings
+	}
+}
+
+// boundDemandOf names the demand an observed instance is bound to, which is the
+// key every recovery decision about it was derived from.
+func boundDemandOf(observation tickObservation, id string) domain.DemandKey {
+	for _, instance := range observation.Instances {
+		if instance.ID == id {
+			return instance.Demand
+		}
+	}
+	return domain.DemandKey{}
 }
 
 // ---------------------------------------------------------------------------
@@ -317,12 +494,13 @@ func identityUniquenessChecker() checker {
 // exceed MaxActive.
 func conservationChecker(cfg worldConfig) checker {
 	memoryCeiling := int(cfg.PhysicalMemoryMB - cfg.Guards.MinAvailableMemoryMB)
-	return func(_ *world, observation tickObservation) []finding {
+	return func(w *world, observation tickObservation) []finding {
 		var findings []finding
 		total := domain.Resources{}
 		linuxRepos := map[string]int{}
 		macRepos := map[string]int{}
 		macProfiles := map[domain.ProfileID]int{}
+		rebound := w.reboundInstances()
 		for _, instance := range observation.Instances {
 			if !instance.ConsumesHostResources() {
 				continue
@@ -334,6 +512,19 @@ func conservationChecker(cfg worldConfig) checker {
 			// activeRepoCounts is the occupancy the scheduler's own cap test reads:
 			// an idle or tearing-down instance holds no repository slot.
 			if instance.State == domain.InstanceOnlineIdle || instance.State.TearingDown() {
+				continue
+			}
+			// A repository cap bounds ADMISSION -- how many VMs the fleet will
+			// CREATE for a repository -- and it cannot bound which repository's job
+			// GitHub then dispatches to a runner that already exists. A rebound
+			// instance is one the broker moved (ADR 0033); it consumes no new
+			// capacity, and the physical envelope above still charges it in full.
+			// Charging it to a cap it was never admitted under would report GitHub's
+			// decision as a scheduler defect. Before the binding followed GitHub the
+			// same VM ran the same foreign job while the fleet mis-attributed it to
+			// the repository it was spawned for, so nothing about the machine
+			// changed here -- only what the fleet is willing to say about it.
+			if rebound[instance.ID] {
 				continue
 			}
 			if instance.Platform == domain.PlatformMacOS {
@@ -394,6 +585,24 @@ func repositoryCapFindings(cfg worldConfig, observation tickObservation, linuxRe
 		findings = append(findings, item)
 	}
 	return findings
+}
+
+// reboundInstances names every live instance the broker moved off the demand it
+// was spawned for. Ownership is immutable, so the durable row carries both facts:
+// `ownership.resource_id` is the demand it was born for, and its scheduling
+// metadata is the demand GitHub gave it.
+func (w *world) reboundInstances() map[string]bool {
+	instances, err := w.store.LiveInstances(w.ctx)
+	if err != nil {
+		return nil
+	}
+	rebound := make(map[string]bool, len(instances))
+	for _, instance := range instances {
+		if instance.Demand != (domain.DemandKey{}) && instance.Ownership.ResourceID != instance.Demand.String() {
+			rebound[instance.ID] = true
+		}
+	}
+	return rebound
 }
 
 func sortedProfiles(counts map[domain.ProfileID]int) []domain.ProfileID {
@@ -575,7 +784,16 @@ func (w *world) tearingDown(observation tickObservation) bool {
 // so an aged feasible demand that younger work overtakes more than N times is a
 // violation of a written invariant, not a preference.
 func boundedStarvationChecker(cfg worldConfig) checker {
-	passedOver := map[domain.DemandKey]int{}
+	// Keyed on (demand, CAUSE), not on the demand alone. A demand passed over once
+	// by each of several mechanisms has not been starved N times by any of them,
+	// and crediting the accumulated total to whichever cause happened to tip the
+	// counter reports the last mechanism for all the previous ones' work -- so a
+	// run of documented pass-overs surfaces as an unsignatured hard failure on its
+	// final tick, naming a mechanism that acted once. That is the oracle
+	// imprecision issue #130 records as finding 6. Each cause now earns its own
+	// N+1, so a genuinely new defect must repeat before it fails the build and a
+	// documented one can no longer masquerade as one.
+	passedOver := map[string]int{}
 	return func(w *world, observation tickObservation) []finding {
 		admitted := admittedDemands(observation)
 		if len(admitted) == 0 || w.tearingDown(observation) {
@@ -596,14 +814,15 @@ func boundedStarvationChecker(cfg worldConfig) checker {
 				// is the decision, not a violation of it.
 				continue
 			}
-			passedOver[demand.Key]++
-			if passedOver[demand.Key] != cfg.StarvationN+1 {
+			signature := starvationSignature(cfg, observation.Now, demand, overtaker)
+			cause := demand.Key.String() + "\x00" + signature
+			passedOver[cause]++
+			if passedOver[cause] != cfg.StarvationN+1 {
 				continue
 			}
-			findings = append(findings, finding{Kind: findingStarvation,
-				Signature: starvationSignature(cfg, observation.Now, demand, overtaker), Tick: observation.Tick,
-				Detail: fmt.Sprintf("aged feasible %s (%s old) passed over %d times, this tick by %s (%s old)\n%s",
-					demand.Key, observation.Now.Sub(demand.CreatedAt), passedOver[demand.Key],
+			findings = append(findings, finding{Kind: findingStarvation, Signature: signature, Tick: observation.Tick,
+				Detail: fmt.Sprintf("aged feasible %s (%s old) passed over %d times by one cause, this tick by %s (%s old)\n%s",
+					demand.Key, observation.Now.Sub(demand.CreatedAt), passedOver[cause],
 					overtaker.Key, observation.Now.Sub(overtaker.CreatedAt), w.dumpPlan(observation))})
 		}
 		return findings
