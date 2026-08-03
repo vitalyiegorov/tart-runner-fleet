@@ -11,6 +11,12 @@ everywhere else. The aged-FIFO and scheduling-class rules of
 rule of [ADR 0027](0027-one-tick-admits-a-demand-once.md) are unchanged and still
 bind every demand admitted here.
 
+Amended by
+[ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md), which replaces the
+wholesale repository exclusion of condition 2 below with a precise slot count. A
+reserved head holds one repository slot, not its whole repository; the vector
+condition and everything else here remain accepted unchanged.
+
 ## Context
 
 Aged work joins absolute global FIFO, where the head may reserve its exact
@@ -92,6 +98,13 @@ cannot delay the reserved head. Two conditions together are the invariant:
    head's repository can consume the exact cap slot the head is waiting for and
    block it again the moment its vector frees. Remainder arithmetic cannot see
    that blocker, so the repository is excluded outright.
+
+   *Amended by [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md).*
+   The exclusion is wholesale where its justification is not: what the head
+   waits for is one slot, not the repository. ADR 0030 replaces this condition
+   with the slot count `RepoCaps[headRepo] - occupied(headRepo) - 1`, which is
+   equal to this rule whenever the head needs the last free slot and strictly
+   more permissive — provably without cost to the head — whenever it does not.
 
 Feasibility of the reserved head is judged against the starvation-guard
 envelope, the same one `planLinux` judges it in, because only an aged head ever

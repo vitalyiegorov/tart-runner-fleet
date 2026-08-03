@@ -1097,23 +1097,75 @@ func demandsAwaitingAdmission(demands []domain.Demand, operations []Operation) [
 	return result
 }
 
-// reservedRemainderDemands drops the demands a complementary pass must not
-// admit while a reservation is held, whatever the envelope says.
+// reservedRepoSlack reports how many demands in the reserved head's own
+// repository a complementary pass may still admit without ever costing the head
+// the cap slot it is waiting for.
 //
 // Resources are not the only way to delay a reserved head. Repository caps gate
 // admission too, and activeRepoCounts counts EVERY live instance regardless of
 // platform, so a macOS spawn in the reserved head's repository can consume the
 // exact cap slot the head is waiting for and block it again the moment its
-// vector frees. Remainder arithmetic cannot see that blocker, so the head's
-// repository is excluded outright: it is the head's, and this pass never bids
-// for it.
-func reservedRemainderDemands(demands []domain.Demand, reservation *domain.Reservation) []domain.Demand {
+// vector frees. Remainder arithmetic cannot see that blocker.
+//
+// The answer is a count, not a veto. The occupancy is exactly the one
+// planLinux's feasible() will read on the tick the head's vector frees — live
+// instances plus everything this plan already admits (appendPlannedSpawns is how
+// both passes charge planned spawns) — and the head's own future slot is
+// subtracted before anything else may bid. What remains is genuinely spare:
+// admitting it leaves the cap answer for the head unchanged.
+func reservedRepoSlack(in Input, plan Plan, repo string) int {
+	limit := in.Config.RepoCaps[repo]
+	if limit <= 0 {
+		limit = 1
+	}
+	occupied := activeRepoCounts(appendPlannedSpawns(in.Instances.Value, in.Config, plan.Operations))
+	return limit - occupied[repo] - 1
+}
+
+// reservedRemainderDemands drops the demands a complementary pass must not
+// admit while a reservation is held, whatever the envelope says.
+//
+// Everything outside the reserved head's repository passes through untouched.
+// Inside it, reservedRepoSlack decides how many demands may bid, and the
+// highest-priority ones take those slots — aged before young, the same global
+// FIFO order every other admission obeys.
+//
+// A wholesale exclusion of the repository was ADR 0029's first answer and it
+// over-protected: on 2026-08-03 a head whose repository cap was 4 with one live
+// instance had three spare slots, and macOS work from that repository aged 4h39m
+// was refused the residual its own head could not use, while YOUNGER work from
+// another repository was admitted. That inverts the aged FIFO this pass exists
+// to protect. A head cannot lose a slot that is still free once its own is set
+// aside, so refusing there bought nothing and cost the queue its oldest work.
+//
+// The reservation is Linux-authored and singular, so the head's own demand is
+// never in a macOS candidate list; slack is what the head does not need, never
+// what it holds.
+func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []domain.Demand {
+	reservation := plan.Next.Reservation
 	if reservation == nil {
 		return demands
 	}
+	var sameRepo []domain.Demand
+	for _, demand := range demands {
+		if demand.Key.Repo == reservation.Demand.Repo {
+			sameRepo = append(sameRepo, demand)
+		}
+	}
+	if len(sameRepo) == 0 {
+		return demands
+	}
+	slack := reservedRepoSlack(in, plan, reservation.Demand.Repo)
+	admissible := make(map[domain.DemandKey]bool, len(sameRepo))
+	for _, demand := range priorityOrder(in, sameRepo) {
+		if len(admissible) >= slack {
+			break
+		}
+		admissible[demand.Key] = true
+	}
 	result := make([]domain.Demand, 0, len(demands))
 	for _, demand := range demands {
-		if demand.Key.Repo != reservation.Demand.Repo {
+		if demand.Key.Repo != reservation.Demand.Repo || admissible[demand.Key] {
 			result = append(result, demand)
 		}
 	}
@@ -1183,14 +1235,15 @@ func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
 //
 // A held Linux reservation constrains this pass instead of cancelling it. The
 // reserved head's whole vector is withheld (chargeReservedHead) and its
-// repository is off limits (reservedRemainderDemands), so nothing admitted here
-// can delay it; when that vector does not fit the free envelope at all the head
-// is not waiting on this pass, and ADR 0029 admits inside the full residual
-// rather than stranding it. Returning early on any reservation at all is what
-// starved a maestro that fit the four free cores exactly for over an hour on
-// 2026-08-02, behind an xl head that could not have used them.
+// repository may be bid for only up to the cap slack the head does not need
+// (reservedRemainderDemands), so nothing admitted here can delay it; when that
+// vector does not fit the free envelope at all the head is not waiting on this
+// pass, and ADR 0029 admits inside the full residual rather than stranding it.
+// Returning early on any reservation at all is what starved a maestro that fit
+// the four free cores exactly for over an hour on 2026-08-02, behind an xl head
+// that could not have used them.
 func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
-	macos = reservedRemainderDemands(demandsAwaitingAdmission(macos, plan.Operations), plan.Next.Reservation)
+	macos = reservedRemainderDemands(in, plan, demandsAwaitingAdmission(macos, plan.Operations))
 	if len(macos) == 0 {
 		return plan
 	}
@@ -1409,9 +1462,10 @@ func planLinuxHandoff(in Input, plan Plan, demands, macDemands []domain.Demand) 
 				// planLinux ran first and may have reserved a vector for the aged
 				// Linux head this wave is meant to unblock. A bounded wave is still
 				// a second admission pass, so ADR 0029 binds it too: withhold the
-				// reserved head's vector and never bid for its repository.
+				// reserved head's vector, and bid for its repository only up to the
+				// cap slack that leaves the head's own slot free.
 				lending := chargeReservedHead(in, plan.Next.Reservation)
-				candidates := reservedRemainderDemands(demandsForProfile(macDemands, profile), plan.Next.Reservation)
+				candidates := reservedRemainderDemands(in, plan, demandsForProfile(macDemands, profile))
 				before := len(plan.Operations)
 				plan = appendMacSpawns(lending, plan, candidates, nil)
 				if containsSpawn(plan.Operations[before:]) {
