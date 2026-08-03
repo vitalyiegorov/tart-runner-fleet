@@ -20,8 +20,13 @@ type Resources struct {
 }
 
 type Profile struct {
-	ID        string    `json:"id"`
-	Label     string    `json:"label"`
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	// Aliases are additional runner labels that resolve to this same profile and
+	// therefore to the same scale set. They exist so a resource-explicit
+	// canonical label can be adopted without rewriting every consumer workflow:
+	// the retired role or tier name is listed here and keeps routing (ADR 0032).
+	Aliases   []string  `json:"aliases,omitempty"`
 	Resources Resources `json:"-"`
 	CPU       int       `json:"cpu"`
 	MemoryMiB int       `json:"memoryMb"`
@@ -174,7 +179,10 @@ type GitHubInstallation struct {
 }
 
 // GitHubScope is one GitHub Actions registration boundary. A scale set cannot
-// cross this boundary or the GitHub App installation that owns it.
+// cross this boundary or the GitHub App installation that owns it. Its
+// ScaleSets list is also the scope's opt-in: a scope exposes exactly the
+// profile variants it lists, so adding a variant to the fleet costs one scale
+// set in the scopes that want it rather than one in every scope (ADR 0032).
 type GitHubScope struct {
 	Name         string     `json:"name"`
 	Kind         string     `json:"kind"`
@@ -503,6 +511,11 @@ func Default() Config {
 func (c Config) Clone() Config {
 	out := c
 	out.Linux.Profiles = append([]Profile(nil), c.Linux.Profiles...)
+	for i := range out.Linux.Profiles {
+		out.Linux.Profiles[i].Aliases = append([]string(nil), c.Linux.Profiles[i].Aliases...)
+	}
+	out.MacOS.Builder.Aliases = append([]string(nil), c.MacOS.Builder.Aliases...)
+	out.MacOS.Maestro.Aliases = append([]string(nil), c.MacOS.Maestro.Aliases...)
 	out.GitHub.ScaleSets = append([]ScaleSet(nil), c.GitHub.ScaleSets...)
 	for i := range out.GitHub.ScaleSets {
 		out.GitHub.ScaleSets[i].Labels = append([]string(nil), c.GitHub.ScaleSets[i].Labels...)
@@ -609,7 +622,10 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	return nil
+	// Label derivation runs last so a broken vector is reported as the vector
+	// error it is, not as the naming failure it also causes.
+	_, err := c.profileLabelSets()
+	return err
 }
 
 // ValidateAuthority adds requirements for making GitHub or Tart mutations.
@@ -712,7 +728,7 @@ func (c Config) validateMultiScopeAuthority() error {
 		installationIDs[installation.InstallationID] = struct{}{}
 	}
 
-	profiles := c.authorityProfiles()
+	labelSets := c.ProfileLabelSets()
 	capacities := c.authorityProfileCapacities()
 	targets := make(map[string]string, len(c.Targets))
 	targetCapacities := make(map[string]int, len(c.Targets))
@@ -747,7 +763,7 @@ func (c Config) validateMultiScopeAuthority() error {
 		if err := validateScopeTargets(scope, parsed, targets, assignedTargets); err != nil {
 			return err
 		}
-		if err := validateScopeScaleSets(scope, profiles, capacities, targetCapacities, github.CanonicalJobInventory); err != nil {
+		if err := validateScopeScaleSets(scope, labelSets, capacities, targetCapacities, github.CanonicalJobInventory); err != nil {
 			return err
 		}
 	}
@@ -764,18 +780,6 @@ func (a GitHubApp) hasCredentialSource() bool {
 		return true
 	}
 	return strings.TrimSpace(a.KeychainService) != "" && strings.TrimSpace(a.KeychainAccount) != ""
-}
-
-func (c Config) authorityProfiles() map[string]string {
-	profiles := make(map[string]string, len(c.Linux.Profiles)+2)
-	for _, profile := range c.Linux.Profiles {
-		profiles[profile.ID] = profile.Label
-	}
-	if c.MacOS.Enabled {
-		profiles[c.MacOS.Builder.ID] = c.MacOS.Builder.Label
-		profiles[c.MacOS.Maestro.ID] = c.MacOS.Maestro.Label
-	}
-	return profiles
 }
 
 func (c Config) authorityProfileCapacities() map[string]int {
@@ -851,7 +855,14 @@ func validateScopeTargets(scope GitHubScope, parsed *url.URL, targets, assigned 
 	return nil
 }
 
-func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capacities, targetCapacities map[string]int,
+// validateScopeScaleSets checks one scope's opt-in list. A scope exposes the
+// variants it lists and no others: requiring every enabled profile in every
+// scope multiplied scale sets, sessions, and GitHub traffic by the size of the
+// variant matrix for no operator benefit (ADR 0032). What still binds is that
+// each listed variant exists, appears once, and carries labels that resolve to
+// it, and that a scope exposes at least one variant — a scope with no scale set
+// can never receive work.
+func validateScopeScaleSets(scope GitHubScope, labelSets map[string]LabelSet, capacities, targetCapacities map[string]int,
 	canonicalJobInventory bool) error {
 	seenProfiles := make(map[string]struct{}, len(scope.ScaleSets))
 	seenNames := make(map[string]struct{}, len(scope.ScaleSets))
@@ -860,7 +871,7 @@ func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capac
 		scopeCapacity += targetCapacities[folded(target)]
 	}
 	for _, scaleSet := range scope.ScaleSets {
-		route, known := profiles[scaleSet.Profile]
+		_, known := labelSets[scaleSet.Profile]
 		if !known || strings.TrimSpace(scaleSet.Name) == "" || scaleSet.ID < 0 || scaleSet.MaxCapacity <= 0 {
 			return fmt.Errorf("invalid scale set for profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)
 		}
@@ -880,19 +891,25 @@ func validateScopeScaleSets(scope GitHubScope, profiles map[string]string, capac
 		if _, duplicate := seenNames[name]; duplicate {
 			return fmt.Errorf("duplicate scale set name %q in GitHub scope %q", scaleSet.Name, scope.Name)
 		}
-		if err := validateScaleSetLabels(scope.Name, scaleSet, route); err != nil {
+		if err := validateScaleSetLabels(scope.Name, scaleSet, labelSets); err != nil {
 			return err
 		}
 		seenProfiles[scaleSet.Profile] = struct{}{}
 		seenNames[name] = struct{}{}
 	}
-	if len(seenProfiles) != len(profiles) {
-		return fmt.Errorf("every enabled profile requires one scale set in GitHub scope %q", scope.Name)
+	if len(seenProfiles) == 0 {
+		return fmt.Errorf("GitHub scope %q must expose at least one profile scale set", scope.Name)
 	}
 	return nil
 }
 
-func validateScaleSetLabels(scopeName string, scaleSet ScaleSet, route string) error {
+// validateScaleSetLabels proves a scale set is reachable and unambiguous. It
+// must advertise self-hosted and at least one name of its own profile — the
+// canonical resource label or any alias, so a file written before ADR 0032
+// still passes — and it must never advertise another profile's canonical label,
+// which would route that shape's work to the wrong vector.
+func validateScaleSetLabels(scopeName string, scaleSet ScaleSet, labelSets map[string]LabelSet) error {
+	set := labelSets[scaleSet.Profile]
 	seen := make(map[string]struct{}, len(scaleSet.Labels))
 	hasSelfHosted, hasRoute := false, false
 	for _, label := range scaleSet.Labels {
@@ -903,12 +920,26 @@ func validateScaleSetLabels(scopeName string, scaleSet ScaleSet, route string) e
 		if _, duplicate := seen[key]; duplicate {
 			return fmt.Errorf("scale set %q in GitHub scope %q has duplicate label %q", scaleSet.Name, scopeName, label)
 		}
+		if err := checkForeignCanonicalLabel(scopeName, scaleSet, labelSets, label); err != nil {
+			return err
+		}
 		seen[key] = struct{}{}
 		hasSelfHosted = hasSelfHosted || key == "self-hosted"
-		hasRoute = hasRoute || strings.EqualFold(label, route)
+		hasRoute = hasRoute || set.Contains(label)
 	}
 	if !hasSelfHosted || !hasRoute {
-		return fmt.Errorf("scale set %q in GitHub scope %q requires self-hosted and profile route labels", scaleSet.Name, scopeName)
+		return fmt.Errorf("scale set %q in GitHub scope %q requires self-hosted and a label of profile %q (canonical %q)",
+			scaleSet.Name, scopeName, scaleSet.Profile, set.Canonical)
+	}
+	return nil
+}
+
+func checkForeignCanonicalLabel(scopeName string, scaleSet ScaleSet, labelSets map[string]LabelSet, label string) error {
+	for id, other := range labelSets {
+		if id != scaleSet.Profile && strings.EqualFold(label, other.Canonical) {
+			return fmt.Errorf("scale set %q in GitHub scope %q advertises %q, the canonical label of profile %s",
+				scaleSet.Name, scopeName, label, id)
+		}
 	}
 	return nil
 }

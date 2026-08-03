@@ -55,6 +55,10 @@ func ValidateBindings(cfg config.Config) error {
 }
 
 func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Binding, error) {
+	// A binding matches queued jobs against what GitHub advertises, so it reads
+	// the same expanded label set the provisioner publishes: canonical resource
+	// label plus every alias (ADR 0032).
+	labelSets := cfg.ProfileLabelSets()
 	if len(cfg.GitHub.Scopes) > 0 {
 		bindings := make([]Binding, 0)
 		seenKeys := map[int64]string{}
@@ -71,7 +75,8 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 				}
 				seenKeys[key] = identity
 				bindings = append(bindings, Binding{StoreKey: key, ScaleSetID: int64(scaleSet.ID), Scope: scope.Name,
-					Targets: append([]string(nil), scope.Targets...), ScaleSetLabels: effectiveScaleSetLabels(scaleSet), Profile: profile})
+					Targets: append([]string(nil), scope.Targets...), Profile: profile,
+					ScaleSetLabels: effectiveScaleSetLabels(scaleSet, labelSets[scaleSet.Profile])})
 			}
 		}
 		return bindings, nil
@@ -83,7 +88,7 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 			return nil, err
 		}
 		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID),
-			ScaleSetLabels: effectiveScaleSetLabels(scaleSet), Profile: profile})
+			ScaleSetLabels: effectiveScaleSetLabels(scaleSet, labelSets[scaleSet.Profile]), Profile: profile})
 	}
 	return bindings, nil
 }
@@ -108,8 +113,8 @@ func resolveScaleSetProfile(schedulerConfig scheduler.Config, scaleSet config.Sc
 	return profile, nil
 }
 
-func effectiveScaleSetLabels(scaleSet config.ScaleSet) []string {
-	labels := append([]string(nil), scaleSet.Labels...)
+func effectiveScaleSetLabels(scaleSet config.ScaleSet, labelSet config.LabelSet) []string {
+	labels := labelSet.Advertise(scaleSet.Labels)
 	name := strings.TrimSpace(scaleSet.Name)
 	if name == "" {
 		return labels

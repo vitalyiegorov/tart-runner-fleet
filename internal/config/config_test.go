@@ -623,13 +623,13 @@ func TestValidateAuthorityRejectsAmbiguousOrUnsafeMultiScopeConfiguration(t *tes
 		"duplicate target ownership": func(c *Config) {
 			c.GitHub.Scopes[1].Targets = append(c.GitHub.Scopes[1].Targets, c.GitHub.Scopes[0].Targets[0])
 		},
-		"scope without targets":  func(c *Config) { c.GitHub.Scopes[0].Targets = nil },
-		"uncovered target":       func(c *Config) { c.GitHub.Scopes = c.GitHub.Scopes[1:] },
-		"unknown target":         func(c *Config) { c.GitHub.Scopes[0].Targets[0] = "vitalyiegorov/unknown" },
-		"unknown profile":        func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Profile = "unknown" },
-		"missing profile":        func(c *Config) { c.GitHub.Scopes[0].ScaleSets = c.GitHub.Scopes[0].ScaleSets[:4] },
-		"duplicate profile":      func(c *Config) { c.GitHub.Scopes[0].ScaleSets[1].Profile = "small" },
-		"missing scale set name": func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Name = "" },
+		"scope without targets":     func(c *Config) { c.GitHub.Scopes[0].Targets = nil },
+		"uncovered target":          func(c *Config) { c.GitHub.Scopes = c.GitHub.Scopes[1:] },
+		"unknown target":            func(c *Config) { c.GitHub.Scopes[0].Targets[0] = "vitalyiegorov/unknown" },
+		"unknown profile":           func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Profile = "unknown" },
+		"scope exposing no variant": func(c *Config) { c.GitHub.Scopes[0].ScaleSets = nil },
+		"duplicate profile":         func(c *Config) { c.GitHub.Scopes[0].ScaleSets[1].Profile = "small" },
+		"missing scale set name":    func(c *Config) { c.GitHub.Scopes[0].ScaleSets[0].Name = "" },
 		"duplicate scale set name": func(c *Config) {
 			c.GitHub.Scopes[0].ScaleSets[1].Name = c.GitHub.Scopes[0].ScaleSets[0].Name
 		},

@@ -75,6 +75,41 @@ func TestRunPlansBeforeApplyingAndPersistsReturnedIDs(t *testing.T) {
 	}
 }
 
+// TestProvisionedScaleSetAdvertisesCanonicalAndAliasLabels proves the migration
+// path of ADR 0032: a configuration that still names its profiles by role gets
+// the derived resource label attached at provisioning time, so both names route
+// to the one scale set and no consumer workflow has to change first.
+func TestProvisionedScaleSetAdvertisesCanonicalAndAliasLabels(t *testing.T) {
+	specs := map[string][]string{}
+	client := &fakeClient{inspect: func(spec githubscaleset.ScaleSetSpec) (githubscaleset.ScaleSetPlan, error) {
+		specs[spec.Name] = spec.Labels
+		return githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetCreate}, nil
+	}}
+	cfg := provisionConfig()
+	cfg.Linux.Profiles[0].Aliases = []string{"linux-burst"}
+	request := Request{Config: cfg, LoadKey: func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {
+		return githubscaleset.NewPrivateKeySecret("pem"), nil
+	}, Open: func(githubscaleset.GitHubAppAdminConfig) (Client, error) { return client, nil }}
+	if _, err := Run(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"repo-small":   {"self-hosted", "linux-small", "trf-linux-arm64-1x2", "linux-burst"},
+		"repo-builder": {"self-hosted", "macos-builder", "trf-macos-arm64-8x12"},
+	}
+	for name, labels := range want {
+		got := specs[name]
+		if len(got) != len(labels) {
+			t.Fatalf("%s labels = %#v, want %#v", name, got, labels)
+		}
+		for index, label := range labels {
+			if got[index] != label {
+				t.Fatalf("%s labels = %#v, want %#v", name, got, labels)
+			}
+		}
+	}
+}
+
 func TestRunPlanOnlyAndDriftFailBeforeCreate(t *testing.T) {
 	client := &fakeClient{plans: map[string]githubscaleset.ScaleSetPlan{}}
 	base := Request{Config: provisionConfig(), LoadKey: func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error) {

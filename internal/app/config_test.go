@@ -67,7 +67,8 @@ func TestBuildSchedulerConfigAndBindings(t *testing.T) {
 	}
 	bindings, err := BuildBindings(cfg, schedulerConfig)
 	if err != nil || len(bindings) != 2 || bindings[0].ScaleSetID != 1 || bindings[1].Profile.ID != "builder" ||
-		len(bindings[0].ScaleSetLabels) != 3 || bindings[0].ScaleSetLabels[2] != "linux-small" {
+		len(bindings[0].ScaleSetLabels) != 4 || bindings[0].ScaleSetLabels[2] != "linux-small" ||
+		bindings[0].ScaleSetLabels[3] != "trf-linux-arm64-1x2" || bindings[1].ScaleSetLabels[4] != "trf-macos-arm64-8x12" {
 		t.Fatalf("bindings = %#v, %v", bindings, err)
 	}
 	cfg.GitHub.ScaleSets[0].Labels[2] = "mutated"
@@ -112,8 +113,11 @@ func TestBuildBindingsUseScopedDurableIdentityAndTargets(t *testing.T) {
 	if err != nil || len(bindings) != 2 {
 		t.Fatalf("bindings = %#v, %v", bindings, err)
 	}
+	// The canonical resource label is attached beside the configured legacy
+	// label, so a binding matches jobs that ask for either name (ADR 0032).
 	if bindings[0].ScaleSetID != 11 || bindings[0].StoreKey <= 0 || bindings[0].StoreKey == bindings[1].StoreKey || bindings[0].Scope != "one" ||
-		len(bindings[0].ScaleSetLabels) != 3 || bindings[0].ScaleSetLabels[1] != "linux-small" || bindings[0].ScaleSetLabels[2] != "one-small" {
+		len(bindings[0].ScaleSetLabels) != 4 || bindings[0].ScaleSetLabels[1] != "linux-small" ||
+		bindings[0].ScaleSetLabels[2] != "trf-linux-arm64-1x2" || bindings[0].ScaleSetLabels[3] != "one-small" {
 		t.Fatalf("scoped identities = %#v", bindings)
 	}
 	if !bindings[0].accepts("o/r1") || !bindings[0].accepts("O/R1") || bindings[0].accepts("o/r2") {
@@ -121,8 +125,30 @@ func TestBuildBindingsUseScopedDurableIdentityAndTargets(t *testing.T) {
 	}
 }
 
+// TestBindingRoutesCanonicalAndLegacyLabelsToTheSameScaleSet proves the
+// consumer-visible half of ADR 0032: a workflow may ask for a shape by its
+// resource label or by the role name it used before, and both reach the one
+// scale set, while a shape that scale set does not serve still does not match.
+func TestBindingRoutesCanonicalAndLegacyLabelsToTheSameScaleSet(t *testing.T) {
+	cfg := config.Default()
+	cfg.GitHub.ScaleSets = []config.ScaleSet{{Profile: "small", Name: "repo-small", ID: 1, MaxCapacity: 4,
+		Labels: []string{"self-hosted", "linux-small"}}}
+	bindings, err := BuildBindings(cfg, BuildSchedulerConfig(cfg))
+	if err != nil || len(bindings) != 1 {
+		t.Fatalf("bindings = %#v, %v", bindings, err)
+	}
+	for _, requested := range [][]string{{"self-hosted", "linux-small"}, {"self-hosted", "trf-linux-arm64-1x2"}} {
+		if !bindings[0].matchesRESTLabels(requested) {
+			t.Fatalf("binding refused %v", requested)
+		}
+	}
+	if bindings[0].matchesRESTLabels([]string{"self-hosted", "trf-linux-arm64-4x8"}) {
+		t.Fatal("binding accepted a job asking for a shape it does not serve")
+	}
+}
+
 func TestEffectiveScaleSetLabelsDoesNotDuplicateConfiguredName(t *testing.T) {
-	got := effectiveScaleSetLabels(config.ScaleSet{Name: "Fleet-Small", Labels: []string{"self-hosted", "fleet-small"}})
+	got := effectiveScaleSetLabels(config.ScaleSet{Name: "Fleet-Small", Labels: []string{"self-hosted", "fleet-small"}}, config.LabelSet{})
 	if len(got) != 2 || got[1] != "fleet-small" {
 		t.Fatalf("effective labels = %#v", got)
 	}
