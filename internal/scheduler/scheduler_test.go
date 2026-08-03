@@ -865,15 +865,17 @@ func TestExactSelectionHonorsCapsResourcesAndLexicographicPreference(t *testing.
 		demand("b/repo", 3, time.Minute, "large"),
 		demand("c/repo", 4, time.Minute, "small"),
 	}
-	selected := exactSelect(candidates, domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 2}, map[string]int{}, config)
+	selected := exactSelect(testNow, candidates, domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 2}, map[string]int{}, config)
 	if got := []int64{selected[0].Key.JobID, selected[1].Key.JobID}; !reflect.DeepEqual(got, []int64{1, 4}) {
 		t.Fatalf("exact selected = %#v", got)
 	}
-	if betterSelection([]int{1}, []int{0}) || !betterSelection([]int{0}, []int{1}) || betterSelection([]int{0}, []int{0}) {
+	oneBand := []int{0, 0, 0, 0}
+	if betterAdmission([]int{1}, []int{0}, oneBand, 1) || !betterAdmission([]int{0}, []int{1}, oneBand, 1) ||
+		betterAdmission([]int{0}, []int{0}, oneBand, 1) {
 		t.Fatal("lexicographic selection preference changed")
 	}
 	delete(config.RepoCaps, "c/repo")
-	if got := exactSelect([]domain.Demand{candidates[3]}, domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}, nil, config); len(got) != 1 {
+	if got := exactSelect(testNow, []domain.Demand{candidates[3]}, domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}, nil, config); len(got) != 1 {
 		t.Fatalf("default exact-selection cap rejected work: %#v", got)
 	}
 }
