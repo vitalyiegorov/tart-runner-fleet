@@ -69,22 +69,35 @@ job.
 
 ## Resource model
 
-The example configuration exposes these bounded profiles:
+A runner label states the shape it delivers — `trf-<os>-<arch>-<cpu>x<ramGiB>`,
+derived from the profile's configured vector so it cannot drift from the VM you
+get ([ADR 0032](docs/adr/0032-resource-explicit-runner-labels.md)). The example
+configuration exposes this variant matrix:
 
-| Profile | vCPU | Memory | Maximum concurrency |
-| --- | ---: | ---: | ---: |
-| Linux small | 1 | 2 GiB | constrained by the 8-vCPU/16-GiB Linux envelope |
-| Linux medium | 2 | 4 GiB | constrained by the 8-vCPU/16-GiB Linux envelope |
-| Linux large | 4 | 8 GiB | constrained by the 8-vCPU/16-GiB Linux envelope |
-| macOS builder | 8 | 12 GiB | 1 |
-| macOS Maestro | 4 | 7 GiB | 2 |
+| Canonical label | vCPU | Memory | Maximum concurrency | Alias |
+| --- | ---: | ---: | ---: | --- |
+| `trf-linux-arm64-1x2` | 1 | 2 GiB | constrained by the 8-vCPU/16-GiB Linux envelope | `linux-small` |
+| `trf-linux-arm64-2x4` | 2 | 4 GiB | constrained by the 8-vCPU/16-GiB Linux envelope | `linux-medium` |
+| `trf-linux-arm64-2x8` | 2 | 8 GiB | constrained by the 8-vCPU/16-GiB Linux envelope | — |
+| `trf-linux-arm64-4x8` | 4 | 8 GiB | constrained by the 8-vCPU/16-GiB Linux envelope | `linux-large` |
+| `trf-linux-arm64-6x12` | 6 | 12 GiB | constrained by the 8-vCPU/16-GiB Linux envelope | `linux-xl` |
+| `trf-linux-arm64-8x16` | 8 | 16 GiB | 1 — it is the whole Linux envelope | — |
+| `trf-macos-arm64-6x12` | 6 | 12 GiB | 1 | `macos-builder` |
+| `trf-macos-arm64-4x7` | 4 | 7 GiB | 2 | `macos-maestro` |
+
+Aliases are the retired role and tier names. They resolve to the same profile
+and are advertised on the same scale set, so a workflow that still asks for
+`linux-large` keeps routing while it migrates to `trf-linux-arm64-4x8`.
 
 Linux and macOS share one CPU, memory, slot, repository, and host-pressure
-envelope. A Maestro VM may therefore run beside Linux jobs when their combined
-resource vectors fit. Two Maestro VMs may run together; the 8-vCPU builder
-exhausts the configured CPU envelope and consequently runs alone. Values come
-from `fleet.json`, so treat the table as the example contract rather than a
-hidden default.
+envelope. A 4×7 macOS VM may therefore run beside Linux jobs when their combined
+resource vectors fit, and two of them may run together. Values come from
+`fleet.json`, so treat the table as the example contract rather than a hidden
+default; a profile whose label disagreed with its vector would fail validation.
+
+Each GitHub scope exposes only the variants its `scaleSets` list names, so a
+wide matrix costs one scale set per variant *per scope that wants it* rather
+than one in every scope.
 
 ### Second-pilot mode
 

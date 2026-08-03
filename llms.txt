@@ -53,6 +53,7 @@ Invariants an agent must respect:
 - [docs/adr/0025-saturation-is-not-durable-failure.md](docs/adr/0025-saturation-is-not-durable-failure.md): a saturated host is not evidence of failure.
 - [docs/adr/0026-queued-demand-expires-on-proven-absence.md](docs/adr/0026-queued-demand-expires-on-proven-absence.md): queued demand expires only on proven absence.
 - [docs/adr/0031-deterministic-simulation-testing.md](docs/adr/0031-deterministic-simulation-testing.md): cross-pass defects are found by deterministic simulation, not by coverage.
+- [docs/adr/0032-resource-explicit-runner-labels.md](docs/adr/0032-resource-explicit-runner-labels.md): a runner label is `trf-<os>-<arch>-<cpu>x<ramGiB>`, derived from the profile vector; role names survive as aliases.
 
 ## Reference
 
@@ -60,11 +61,11 @@ Invariants an agent must respect:
 - [docs/API.md](docs/API.md): `fleet.v1` DTOs, compatibility promise, and socket security contract.
 - [config/fleet.example.json](config/fleet.example.json): observe-mode starting configuration with bounded profiles and targets.
 - [Makefile](Makefile): `make preflight`, `quality`, `verify`/`ci` (the gates CI runs).
-- [README.md#real-world-examples](README.md#real-world-examples): how consumer repos map `runs-on` labels onto fleet profiles.
+- [README.md#real-world-examples](README.md#real-world-examples): the canonical label table (variant, shape, alias) and how consumer repos map `runs-on` labels onto fleet profiles.
 
 ## Optional
 
 - [docs/SECURITY.md](docs/SECURITY.md): threat model and secret handling.
 - [docs/TESTING.md](docs/TESTING.md): unit, contract, integration, replay, and chaos layers.
 - [docs/RELEASING.md](docs/RELEASING.md): release channels, version selection, retry semantics.
-- [docs/adr/](docs/adr): all 31 architecture decision records.
+- [docs/adr/](docs/adr): all 32 architecture decision records.

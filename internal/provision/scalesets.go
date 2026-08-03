@@ -73,6 +73,11 @@ func Run(ctx context.Context, request Request) (Result, error) {
 	for _, installation := range result.Config.GitHub.Installations {
 		installations[installation.Name] = installation.InstallationID
 	}
+	// Every scale set advertises its profile's canonical resource label and each
+	// alias beside whatever the configuration lists, so adopting the canonical
+	// vocabulary is a provisioning run rather than a rewrite of every consumer
+	// workflow (ADR 0032).
+	labelSets := result.Config.ProfileLabelSets()
 	scopeIndexes := make([]int, len(result.Config.GitHub.Scopes))
 	for index := range scopeIndexes {
 		scopeIndexes[index] = index
@@ -96,7 +101,8 @@ func Run(ctx context.Context, request Request) (Result, error) {
 		slices.SortFunc(setIndexes, func(a, b int) int { return compare(scope.ScaleSets[a].Name, scope.ScaleSets[b].Name) })
 		for _, setIndex := range setIndexes {
 			set := scope.ScaleSets[setIndex]
-			spec := githubscaleset.ScaleSetSpec{Name: set.Name, RunnerGroup: scope.RunnerGroup, Labels: append([]string(nil), set.Labels...)}
+			spec := githubscaleset.ScaleSetSpec{Name: set.Name, RunnerGroup: scope.RunnerGroup,
+				Labels: labelSets[set.Profile].Advertise(set.Labels)}
 			plan, err := client.Inspect(ctx, spec)
 			if err != nil {
 				return Result{}, fmt.Errorf("inspect %s/%s: %w", scope.Name, set.Profile, err)

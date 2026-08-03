@@ -179,12 +179,16 @@ func TestArchitectureDecisionNumbersAreUnique(t *testing.T) {
 func TestOperationalDocsTrackCurrentRuntimeContracts(t *testing.T) {
 	root := documentationRoot(t)
 	requireText := map[string][]string{
-		"README.md": {"Linux medium runner", "docs/AGENT_RUNBOOK.md"},
+		// The canonical label grammar and one derived label are pinned so the
+		// operator-facing table cannot drift back to opaque size adjectives while
+		// the configuration derives resource-explicit names (ADR 0032).
+		"README.md": {"Linux medium runner", "docs/AGENT_RUNBOOK.md",
+			"trf-<os>-<arch>-<cpu>x<ramGiB>", "trf-linux-arm64-4x8", "linux-large"},
 		// Match the complete assignment, not the bare path: `fleet` is a strict
 		// prefix of the retired `fleetctl`, so `$ROOT/current/fleet` alone is
 		// satisfied by a document that still says `$ROOT/current/fleetctl`.
 		// TestOperatorDocsNameNoRetiredExecutable is the other half of this guard.
-		"USAGE.md":              {`FLEET="$ROOT/current/fleet"`},
+		"USAGE.md":              {`FLEET="$ROOT/current/fleet"`, "trf-<os>-<arch>-<cpu>x<ramGiB>", "trf-macos-arm64-4x7"},
 		"docs/AGENT_RUNBOOK.md": {`FLEET="$ROOT/current/fleet"`, "installed-generation.json", "exit status 0"},
 		"docs/OPERATIONS.md":    {"five-minute readiness budget", "launchd bootstrap", "not running", "exit status 0"},
 	}

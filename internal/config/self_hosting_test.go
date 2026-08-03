@@ -39,14 +39,17 @@ func TestExampleConfigCanBuildItsSuccessor(t *testing.T) {
 		}
 	}
 
+	// Profiles are looked up by canonical resource label, never by an id or a
+	// size adjective: the label is derived from the vector (ADR 0032), so this
+	// assertion cannot be satisfied by renaming anything.
 	profiles := make(map[string]Profile, len(cfg.Linux.Profiles))
 	for _, profile := range cfg.Linux.Profiles {
-		profiles[profile.ID] = profile.normalized()
+		profiles[profile.Label] = profile.normalized()
 	}
-	medium, mediumOK := profiles["medium"]
-	large, largeOK := profiles["large"]
+	medium, mediumOK := profiles["trf-linux-arm64-2x4"]
+	large, largeOK := profiles["trf-linux-arm64-4x8"]
 	if !mediumOK || !largeOK {
-		t.Fatal("self-hosted CI requires medium and large Linux profiles")
+		t.Fatal("self-hosted CI requires the 2x4 and 4x8 Linux variants")
 	}
 	cpu := 2*medium.Resources.CPU + large.Resources.CPU
 	memory := 2*medium.Resources.MemoryMiB + large.Resources.MemoryMiB

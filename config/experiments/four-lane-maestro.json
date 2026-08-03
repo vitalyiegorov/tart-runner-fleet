@@ -15,9 +15,9 @@
   "tartControlTimeoutSeconds": 45,
   "bootTimeoutSeconds": 180,
   "linuxProfiles": [
-    { "id": "small", "label": "linux-small", "cpu": 1, "memoryMb": 2048, "diskGb": 50 },
-    { "id": "medium", "label": "linux-medium", "cpu": 2, "memoryMb": 4096, "diskGb": 50 },
-    { "id": "large", "label": "linux-large", "cpu": 4, "memoryMb": 8192, "diskGb": 50 }
+    { "id": "linux-1x2", "label": "trf-linux-arm64-1x2", "aliases": ["linux-small"], "cpu": 1, "memoryMb": 2048, "diskGb": 50 },
+    { "id": "linux-2x4", "label": "trf-linux-arm64-2x4", "aliases": ["linux-medium"], "cpu": 2, "memoryMb": 4096, "diskGb": 50 },
+    { "id": "linux-4x8", "label": "trf-linux-arm64-4x8", "aliases": ["linux-large"], "cpu": 4, "memoryMb": 8192, "diskGb": 50 }
   ],
   "macosBurst": {
     "enabled": true,
@@ -26,13 +26,13 @@
     "vmPrefix": "gha-macos",
     "rootDiskOptions": "sync=none",
     "sharedDirectoryPath": "/Users/runner/ci-shared",
-    "builder": { "id": "builder", "label": "macos-builder", "cpu": 8, "memoryMb": 12288, "maxActive": 1 },
-    "maestro": { "id": "maestro", "label": "macos-maestro", "cpu": 4, "memoryMb": 9216, "maxActive": 2 }
+    "builder": { "id": "macos-8x12", "label": "trf-macos-arm64-8x12", "aliases": ["macos-builder"], "cpu": 8, "memoryMb": 12288, "maxActive": 1 },
+    "maestro": { "id": "macos-4x9", "label": "trf-macos-arm64-4x9", "aliases": ["macos-maestro"], "cpu": 4, "memoryMb": 9216, "maxActive": 2 }
   },
   "targets": [
     { "type": "repo", "slug": "vitalyiegorov/tart-runner-fleet", "maxActive": 3, "schedulingClass": "control-plane" },
     { "type": "repo", "slug": "vitalyiegorov/knee-doctor", "maxActive": 4 },
-    { "type": "repo", "slug": "budgie-at/budgie", "maxActive": 4, "defaultLinuxProfile": "large", "runnerLabels": ["self-hosted", "linux-ci", "linux-burst"] },
+    { "type": "repo", "slug": "budgie-at/budgie", "maxActive": 4, "defaultLinuxProfile": "linux-4x8", "runnerLabels": ["self-hosted", "linux-ci", "linux-burst"] },
     { "type": "repo", "slug": "vitalyiegorov/hotel-provence", "maxActive": 4 },
     { "type": "repo", "slug": "vitalyiegorov/suuudokuuu", "maxActive": 4 }
   ]

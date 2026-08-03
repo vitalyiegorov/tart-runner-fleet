@@ -10,7 +10,7 @@ It never installs from a mutable source checkout.
   `/opt/homebrew/bin/tart`;
 - an authenticated GitHub CLI (`gh auth status`) for release downloads;
 - a GitHub App installed on every repository or organization the fleet serves;
-- one GitHub Actions runner scale set per enabled scope/profile;
+- one GitHub Actions runner scale set per profile variant each scope exposes;
 - immutable Linux and macOS Tart bases containing `$HOME/actions-runner/run.sh`
   and the matching released `tart-runner-fleet-bootstrap` helper;
 - enough host capacity for the configured resource envelope and disk guard.

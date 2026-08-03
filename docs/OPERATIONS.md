@@ -132,7 +132,10 @@ The multi-scope `github` configuration contains one non-secret App client ID,
 one private-key credential reference, named installation IDs, and registration
 scopes. Use a repository scope for each personal repository and an organization
 scope for organization repositories. Every target belongs to exactly one scope;
-every scope has exactly one scale set for each enabled profile. Numeric scale-set
+every scope lists one scale set for each profile variant *it chooses to expose*,
+and at least one. A variant a scope omits simply has no runner there, so list
+the shapes that scope's workflows actually request
+([ADR 0032](adr/0032-resource-explicit-runner-labels.md)). Numeric scale-set
 IDs may collide across installations because durable state uses a scoped key.
 
 Grant every configured installation read-only **Actions** repository
@@ -149,9 +152,15 @@ requires truthful capacity.
 
 Set every scale set's `maxCapacity` to its truthful executable maximum for the
 scope: the smaller of the profile/host capacity and the sum of the scope's
-repository `maxActive` limits. Under the default 8-CPU/16-GiB vectors and one
-repository capped at four, that is `4` for small, `4` for medium, `2` for
-large, `1` for builder, and `2` for Maestro. Do not add a delivery-only slot.
+repository `maxActive` limits. Under the default 8-CPU/16-GiB envelope and one
+repository capped at four, that is `4` for `trf-linux-arm64-1x2`, `4` for
+`trf-linux-arm64-2x4`, `2` for `trf-linux-arm64-4x8`, `1` for
+`trf-linux-arm64-8x16`, `1` for `trf-macos-arm64-6x12`, and `2` for
+`trf-macos-arm64-4x7`. Do not add a delivery-only slot.
+
+A scope carries a scale set only for the variants it lists, so this arithmetic
+is done per variant per scope that exposes it, not for the whole matrix in every
+scope ([ADR 0032](adr/0032-resource-explicit-runner-labels.md)).
 
 For an existing authority that still uses inflated lookahead, first grant the
 read-only App permission and validate a versioned candidate with
@@ -328,7 +337,7 @@ mkdir -p "$PLIST_DIR"
 cd "$RELEASE_DIR"
 ./render-launchd.sh observe "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/observe.plist"
 ./render-launchd.sh shadow "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/shadow.plist"
-./render-launchd.sh canary "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/canary.plist" fleet-repo small
+./render-launchd.sh canary "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/canary.plist" fleet-repo linux-1x2
 ./render-launchd.sh authority "$RELEASE_DIR" "$STATE_DIR" "$PLIST_DIR/authority.plist"
 plutil -lint "$PLIST_DIR"/*.plist
 ```
@@ -347,7 +356,7 @@ launchctl print gui/"$(id -u)"/com.vitalyiegorov.tart-runner-fleet.canary
 
 Dispatch `.github/workflows/fleet-canary.yml`. Canary ingestion requires the
 dedicated `tart-fleet-canary` job label in addition to the exact scope/profile,
-so an ordinary `linux-small` job in the same repository cannot be mutated.
+so an ordinary `trf-linux-arm64-1x2` job in the same repository cannot be mutated.
 Require the complete sequence:
 queued demand, owned Tart clone, readiness, JIT registration, job success,
 fresh completed-job guard, deregistration, stop, deletion, and zero owned VMs.

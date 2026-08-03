@@ -166,44 +166,58 @@ These repositories run their entire CI on one Mac mini through this fleet:
 `budgie-at` organization. Consumers only ever write `runs-on` labels; the fleet
 maps each label set to a bounded profile.
 
-| Labels | Profile | Shape (production `fleet.json`) |
-| --- | --- | --- |
-| `[self-hosted, linux-tiered, linux-small\|medium\|large]` | Linux tiers | 1 vCPU/2 GiB · 2 vCPU/4 GiB · 4 vCPU/8 GiB |
-| `[self-hosted, linux-tiered, linux-xl]` | Linux xl | 6 vCPU / 12 GiB |
-| `[self-hosted, macOS, ARM64, macos-builder]` | macOS builder | 6 vCPU / 12 GiB, `maxActive: 1` |
-| `[self-hosted, macOS, ARM64, macos-maestro]` | macOS maestro | 4 vCPU / 7 GiB, `maxActive: 2` |
+A runner label states the shape it delivers: `trf-<os>-<arch>-<cpu>x<ramGiB>`.
+The label is derived from the profile's configured vector, so it cannot drift
+from the VM you actually get, and adding a shape needs no new adjective
+([ADR 0032](docs/adr/0032-resource-explicit-runner-labels.md)). Labels carry no
+priority — the scheduler reads the vector, never the name.
 
-Profiles are configuration, not built-ins: [`config/fleet.example.json`](config/fleet.example.json)
-ships a similar set, and labels are declared per scale set.
+| Canonical label | Shape | Alias (still routes) |
+| --- | --- | --- |
+| `trf-linux-arm64-1x2` | 1 vCPU / 2 GiB | `linux-small` |
+| `trf-linux-arm64-2x4` | 2 vCPU / 4 GiB | `linux-medium` |
+| `trf-linux-arm64-2x8` | 2 vCPU / 8 GiB — memory-bound work | — |
+| `trf-linux-arm64-4x8` | 4 vCPU / 8 GiB | `linux-large` |
+| `trf-linux-arm64-6x12` | 6 vCPU / 12 GiB | `linux-xl` |
+| `trf-linux-arm64-8x16` | 8 vCPU / 16 GiB — takes the Linux envelope alone | — |
+| `trf-macos-arm64-6x12` | 6 vCPU / 12 GiB, `maxActive: 1` | `macos-builder` |
+| `trf-macos-arm64-4x7` | 4 vCPU / 7 GiB, `maxActive: 2` | `macos-maestro` |
+
+Profiles are configuration, not built-ins:
+[`config/fleet.example.json`](config/fleet.example.json) ships this matrix, and
+each scope exposes only the variants it wants. Every scale set also advertises
+`self-hosted` plus whatever grouping labels the operator adds
+(`linux-tiered`, `macOS`, `ARM64`, `linux-ci`, …).
 
 ```yaml
 # Xcode / Gradle release builds: heaviest single job, so it takes the whole
 # macOS builder and runs alone (maxActive 1).
 jobs:
   build-ios-e2e-app:
-    runs-on: [self-hosted, macOS, ARM64, macos-builder]
+    runs-on: [self-hosted, macOS, ARM64, trf-macos-arm64-6x12]
 
 # Maestro UI tests need a real macOS GUI VM with a booted simulator, and two
-# fit side by side — so shards map 1:1 onto the maestro profile's two slots.
+# fit side by side — so shards map 1:1 onto that profile's two slots.
   e2e-ios:
-    runs-on: [self-hosted, macOS, ARM64, macos-maestro]
+    runs-on: [self-hosted, macOS, ARM64, trf-macos-arm64-4x7]
     strategy: { fail-fast: false, max-parallel: 2, matrix: { shard: [1, 2] } }
 
-# Android E2E: a privileged Redroid container claims 4 CPU / 6 GiB, so one xl
-# VM beats two mediums — Android cannot usefully shard on this host.
+# Android E2E: a privileged Redroid container claims 4 CPU / 6 GiB, so one 6x12
+# VM beats two 2x4s — Android cannot usefully shard on this host.
   e2e-android:
-    runs-on: [self-hosted, linux-tiered, linux-xl]
+    runs-on: [self-hosted, linux-tiered, trf-linux-arm64-6x12]
 ```
 
-Pick the tier by job weight, not by habit: lint/typecheck and script-only jobs
-on `linux-small`, test and quality gates on a Linux medium runner
-(`linux-medium`), bundlers and compiles on `linux-large`. This repository's own CI does exactly that —
-preflight on `small`, lint/coverage/build on `medium`, the race suite on
-`large` — and `knee-doctor` splits its PR pipeline the same way. `budgie-at`
-additionally attaches `linux-ci` and `linux-burst` to its `linux-large` set so
-existing workflow labels keep routing unchanged. Smaller vectors are admitted
-first and packed for maximum cardinality, so right-sizing jobs directly raises
-host throughput.
+Pick the shape by job weight, not by habit: lint/typecheck and script-only jobs
+on `trf-linux-arm64-1x2`, test and quality gates on a Linux medium runner
+(`trf-linux-arm64-2x4`), bundlers and compiles on `trf-linux-arm64-4x8`, and
+memory-bound single-threaded tooling on `trf-linux-arm64-2x8` rather than paying
+for cores it will not use. This repository's own CI does exactly that — preflight
+on 1×2, lint/coverage/build on 2×4, the race suite on 4×8 — and `knee-doctor`
+splits its PR pipeline the same way. `budgie-at` additionally attaches
+`linux-ci` and `linux-burst` to its 4×8 set so existing workflow labels keep
+routing unchanged. Smaller vectors are admitted first and packed for maximum
+cardinality, so right-sizing jobs directly raises host throughput.
 
 ## Operating it
 
@@ -292,4 +306,4 @@ authority long enough to build and verify its successor.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model and secret handling
 - [`docs/TESTING.md`](docs/TESTING.md) · [`docs/RELEASING.md`](docs/RELEASING.md) — verification layers, release process
 - [`docs/FLEET_ARCHITECTURE_PLAN.md`](docs/FLEET_ARCHITECTURE_PLAN.md) — target architecture, SLOs, sequencing
-- [`docs/adr/`](docs/adr) — 31 architecture decision records
+- [`docs/adr/`](docs/adr) — 32 architecture decision records
