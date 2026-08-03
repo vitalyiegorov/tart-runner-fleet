@@ -52,6 +52,7 @@ Invariants an agent must respect:
 - [docs/adr/0021-dischargeable-dead-letters.md](docs/adr/0021-dischargeable-dead-letters.md): a dead letter is parked and operator-dischargeable.
 - [docs/adr/0025-saturation-is-not-durable-failure.md](docs/adr/0025-saturation-is-not-durable-failure.md): a saturated host is not evidence of failure.
 - [docs/adr/0026-queued-demand-expires-on-proven-absence.md](docs/adr/0026-queued-demand-expires-on-proven-absence.md): queued demand expires only on proven absence.
+- [docs/adr/0031-deterministic-simulation-testing.md](docs/adr/0031-deterministic-simulation-testing.md): cross-pass defects are found by deterministic simulation, not by coverage.
 
 ## Reference
 
@@ -66,4 +67,4 @@ Invariants an agent must respect:
 - [docs/SECURITY.md](docs/SECURITY.md): threat model and secret handling.
 - [docs/TESTING.md](docs/TESTING.md): unit, contract, integration, replay, and chaos layers.
 - [docs/RELEASING.md](docs/RELEASING.md): release channels, version selection, retry semantics.
-- [docs/adr/](docs/adr): all 26 architecture decision records.
+- [docs/adr/](docs/adr): all 31 architecture decision records.

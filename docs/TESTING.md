@@ -43,7 +43,18 @@ The 99% line is a floor, not the safety argument. The suite is layered:
 5. SQLite crash/restart and concurrent lease tests;
 6. Tart command adapter tests with deadlines and hostile input;
 7. integration tests using fakes for every external boundary;
-8. canary lifecycle tests on disposable real VMs before promotion.
+8. deterministic simulation of the whole single-host fleet (ADR 0031);
+9. canary lifecycle tests on disposable real VMs before promotion.
+
+Layer 8 is the answer to the defect class the other layers structurally cannot
+see: a composition that is correct function by function and wrong across passes
+and ticks. `tests/simulation` runs the real planner, the real reconcile
+controller, and a real SQLite store against a simulated scale-set broker, REST
+scope, and host, with every source of nondeterminism drawn from one seed. Seven
+properties are checked after every tick, and a violation shrinks to a minimal
+event trace. `make unit` runs a small default seed range; the pull-request gate
+widens it to about a minute; `.github/workflows/nightly-simulation.yml` explores
+the rest.
 
 Every production incident must first become a failing replay. CI runs formatting,
 vet, shuffled tests, the race detector, and atomic coverage. Code generated from
