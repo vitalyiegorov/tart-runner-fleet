@@ -138,7 +138,7 @@ refusal.
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
 | e | **No double admission.** One demand is admitted once. | A demand spawned twice in a plan, or spawned while a live instance already incarnates it. | Enforced (finding 1 fixed 2026-08-03; see [ADR 0027](0027-one-tick-admits-a-demand-once.md)) |
 | f | **Eventual quiescence.** The fleet empties when the demand stream stops. | Q ticks after GitHub has no work: scheduler-visible demand and in-flight operations must both be zero. | Enforced |
-| g | **Conservation.** Instances never exceed the envelope or the caps. | Aggregate CPU, memory, and slots against the physical machine; per-repository count against its cap; per-profile count against MaxActive. | Enforced with one documented exemption (finding 2) |
+| g | **Conservation.** Instances never exceed the envelope or the caps. | Aggregate CPU, memory, and slots against the physical machine; per-repository count against its cap; per-profile count against MaxActive. | Enforced (finding 2 fixed 2026-08-03; see [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the

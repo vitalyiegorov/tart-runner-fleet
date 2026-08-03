@@ -65,12 +65,17 @@ func (f finding) String() string {
 // because a regression deserves to be reported as itself.
 const sigRespawnLiveIncarnation = "respawn_of_a_live_incarnation"
 
-// sigMacOSIgnoresRepositoryCap is FINDING 2 of ADR 0031: scheduler
-// .appendMacSpawns bounds macOS admission by the envelope and by the profile's
-// MaxActive, and by nothing else. It never reads Config.RepoCaps, although
+// sigMacOSIgnoresRepositoryCap was FINDING 2 of ADR 0031: scheduler
+// .appendMacSpawns bounded macOS admission by the envelope and by the profile's
+// MaxActive, and by nothing else. It never read Config.RepoCaps, although
 // activeRepoCounts charges a macOS instance to its repository exactly like a
-// Linux one -- so a repository's cap bounds its Linux work and not its macOS
+// Linux one -- so a repository's cap bounded its Linux work and not its macOS
 // work.
+//
+// It is FIXED -- appendMacSpawns is the single seam every macOS spawn passes
+// through, and it now applies the same cap the Linux allocator does -- so the
+// sweep no longer tolerates it. The name survives because a regression deserves
+// to be reported as itself.
 const sigMacOSIgnoresRepositoryCap = "macos_admission_ignores_repository_cap"
 
 // sigControlPlaneOvertakesAgedWork is FINDING 3 of ADR 0031. ADR 0004 states the

@@ -867,11 +867,8 @@ func exactSelect(candidates []domain.Demand, free domain.Resources, baseCounts m
 		for i := index; i < len(candidates); i++ {
 			candidate := candidates[i]
 			profile := config.Profiles[candidate.Profile]
-			cap := config.RepoCaps[candidate.Key.Repo]
-			if cap <= 0 {
-				cap = 1
-			}
-			if counts[candidate.Key.Repo] >= cap || !remaining.CanFit(profile.Resources) {
+			if counts[candidate.Key.Repo] >= repoCapLimit(config.RepoCaps, candidate.Key.Repo) ||
+				!remaining.CanFit(profile.Resources) {
 				continue
 			}
 			nextRemaining, _ := remaining.Sub(profile.Resources)
@@ -959,11 +956,19 @@ func feasible(resources, free domain.Resources, repo string, base map[string]int
 			count++
 		}
 	}
-	cap := caps[repo]
-	if cap <= 0 {
-		cap = 1
+	return count < repoCapLimit(caps, repo)
+}
+
+// repoCapLimit is one repository's configured concurrency cap. An omitted or
+// non-positive cap normalizes to one, so an unconfigured repository is bounded
+// rather than unbounded. Every admission path reads the cap through here, which
+// is what keeps the bound identical for Linux exact admission, macOS admission,
+// and ADR 0030's reserved-slack arithmetic.
+func repoCapLimit(caps map[string]int, repo string) int {
+	if limit := caps[repo]; limit > 0 {
+		return limit
 	}
-	return count < cap
+	return 1
 }
 
 func spawnedDemands(operations []Operation) []domain.Demand {
@@ -1114,10 +1119,7 @@ func demandsAwaitingAdmission(demands []domain.Demand, operations []Operation) [
 // subtracted before anything else may bid. What remains is genuinely spare:
 // admitting it leaves the cap answer for the head unchanged.
 func reservedRepoSlack(in Input, plan Plan, repo string) int {
-	limit := in.Config.RepoCaps[repo]
-	if limit <= 0 {
-		limit = 1
-	}
+	limit := repoCapLimit(in.Config.RepoCaps, repo)
 	occupied := activeRepoCounts(appendPlannedSpawns(in.Instances.Value, in.Config, plan.Operations))
 	return limit - occupied[repo] - 1
 }
@@ -1609,6 +1611,13 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		return plan
 	}
 	agedFree := linuxFreeAged(in)
+	// The repository cap is a platform-wide bound (ADR 0012), and ADR 0030's
+	// reserved-slack arithmetic depends on it being one: activeRepoCounts charges
+	// a macOS instance to its repository exactly like a Linux one, so a cap this
+	// pass ignored would be a cap the Linux head could not rely on. Occupancy is
+	// the same one every other pass reads -- live instances plus whatever this
+	// plan already admits.
+	counts := activeRepoCounts(appendPlannedSpawns(in.Instances.Value, in.Config, plan.Operations))
 	ordered := priorityOrder(in, demands)
 	selected := make([]domain.Demand, 0, available)
 	for _, demand := range ordered {
@@ -1626,6 +1635,14 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		if !envelope.CanFit(profile.Resources) {
 			break
 		}
+		// A capped repository is skipped, never a stop: every candidate here shares
+		// one profile vector, so an exhausted envelope ends the pass but an
+		// exhausted cap only ends that repository's turn. The next repository's
+		// work takes the vector, which is what exactSelect already does for Linux.
+		if counts[demand.Key.Repo] >= repoCapLimit(in.Config.RepoCaps, demand.Key.Repo) {
+			continue
+		}
+		counts[demand.Key.Repo]++
 		agedFree, _ = agedFree.Sub(profile.Resources)
 		if remaining, ok := free.Sub(profile.Resources); ok {
 			free = remaining
