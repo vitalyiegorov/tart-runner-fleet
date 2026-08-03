@@ -114,14 +114,16 @@ func TestMacOSAdmissionHonorsRepositoryCap(t *testing.T) {
 	}
 }
 
-// TestFindingControlPlaneOvertakesAgedStandardWork pins FINDING 3.
+// TestAgedStandardWorkOutranksYoungControlPlane was FINDING 3's
+// characterization and is now its regression.
 //
-// ADR 0004 states the lane rule as "control-plane work can bypass only YOUNG
-// standard work; aged global FIFO ... remains absolute", and priorityOrder
-// honours it. exactSelect then re-ranks the same candidates by scheduling class
-// alone (betterAdmission's band coverage) and aging is not a band there, so
-// inside a backfill a young control-plane demand outranks an aged standard one.
-func TestFindingControlPlaneOvertakesAgedStandardWork(t *testing.T) {
+// ADR 0004 orders scheduling as aged global FIFO, then young control-plane, then
+// young standard, and priorityOrder honoured it. exactSelect then re-ranked the
+// same candidates by scheduling class alone (betterAdmission's band coverage)
+// and aging was not a band there, so inside a backfill a young control-plane
+// demand outranked an aged standard one. Since 2026-08-03 aging is the first
+// band, so the band vector and priorityOrder state the same rule.
+func TestAgedStandardWorkOutranksYoungControlPlane(t *testing.T) {
 	t.Parallel()
 	config := findingConfig(func(config *scheduler.Config) {
 		config.RepoSchedulingClasses = map[string]domain.SchedulingClass{simControlPlaneRepo: domain.SchedulingControlPlane}
@@ -138,11 +140,8 @@ func TestFindingControlPlaneOvertakesAgedStandardWork(t *testing.T) {
 		Instances: domain.Fresh([]domain.Instance(nil), findingNow),
 		Host:      domain.Fresh(domain.Host{Available: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 4}}, findingNow)})
 	admitted := spawnedKeys(plan)
-	if containsKey(admitted, agedStandard.Key) {
-		t.Fatalf("FINDING 3 no longer reproduces: aged standard work now keeps its place: %v", admitted)
-	}
-	if !containsKey(admitted, youngControlPlane.Key) {
-		t.Fatalf("finding changed shape; admitted %v", admitted)
+	if !containsKey(admitted, agedStandard.Key) || containsKey(admitted, youngControlPlane.Key) {
+		t.Fatalf("aged standard work must take the residual ahead of young control-plane work: %v", admitted)
 	}
 	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
 		t.Fatalf("the aged head must still hold the reservation: %#v", plan.Next.Reservation)
@@ -154,8 +153,14 @@ func TestFindingControlPlaneOvertakesAgedStandardWork(t *testing.T) {
 // exactSelect searches for the admission with the largest COUNT inside a
 // scheduling band. throughputOrder's own comment promises that
 // shortest-resource-first applies only to young work "because aging is applied
-// before this function", but exactSelect receives the aged and young candidates
-// in one slice, so two younger small demands still outrank one aged large.
+// before this function", but exactSelect receives every aged candidate in one
+// slice, so two smaller aged demands still outrank one older aged large.
+//
+// FINDING 3's repair narrowed this finding's SHAPE and this test moved with it:
+// aging is now exactSelect's first band, so young work can no longer maximize
+// count ahead of aged work at all. What remains is count maximization INSIDE the
+// aged band, where global FIFO is still the written rule and the largest count
+// still wins.
 func TestFindingCountMaximizationOvertakesAgedWork(t *testing.T) {
 	t.Parallel()
 	config := findingConfig(func(config *scheduler.Config) {
@@ -163,18 +168,18 @@ func TestFindingCountMaximizationOvertakesAgedWork(t *testing.T) {
 	})
 	head := findingDemand("a/repo", 31, 60*time.Minute, "xl")
 	agedLarge := findingDemand("b/repo", 32, 40*time.Minute, "large")
-	youngSmallA := findingDemand("a/repo", 33, time.Minute, "small")
-	youngSmallB := findingDemand("b/repo", 34, time.Minute, "small")
+	agedSmallA := findingDemand("a/repo", 33, 20*time.Minute, "small")
+	agedSmallB := findingDemand("b/repo", 34, 19*time.Minute, "small")
 
 	plan := scheduler.PlanTick(scheduler.Input{Now: findingNow, Config: config,
-		Demands:   domain.Fresh([]domain.Demand{head, agedLarge, youngSmallA, youngSmallB}, findingNow),
+		Demands:   domain.Fresh([]domain.Demand{head, agedLarge, agedSmallA, agedSmallB}, findingNow),
 		Instances: domain.Fresh([]domain.Instance(nil), findingNow),
 		Host:      domain.Fresh(domain.Host{Available: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 4}}, findingNow)})
 	admitted := spawnedKeys(plan)
 	if containsKey(admitted, agedLarge.Key) {
-		t.Fatalf("FINDING 5 no longer reproduces: the aged large kept its place: %v", admitted)
+		t.Fatalf("FINDING 5 no longer reproduces: the older aged large kept its place: %v", admitted)
 	}
-	if !containsKey(admitted, youngSmallA.Key) || !containsKey(admitted, youngSmallB.Key) {
+	if !containsKey(admitted, agedSmallA.Key) || !containsKey(admitted, agedSmallB.Key) {
 		t.Fatalf("finding changed shape; admitted %v", admitted)
 	}
 }

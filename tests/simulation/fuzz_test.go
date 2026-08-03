@@ -48,14 +48,14 @@ func TestSimFuzz(t *testing.T) {
 // Each is pinned by its own characterization test in findings_test.go, so the
 // sweep tolerating it cannot let it silently change shape.
 //
-// FINDINGS 1 and 2 are deliberately absent: they are fixed, so
-// sigRespawnLiveIncarnation and sigMacOSIgnoresRepositoryCap now fail the sweep
-// like any other violation of properties (e) and (g). Each signature itself is
-// kept so a regression is reported by name rather than as an anonymous refusal.
+// FINDINGS 1, 2 and 3 are deliberately absent: they are fixed, so
+// sigRespawnLiveIncarnation, sigMacOSIgnoresRepositoryCap and
+// sigControlPlaneOvertakesAgedWork now fail the sweep like any other violation
+// of properties (e), (g) and (b). Each signature itself is kept so a regression
+// is reported by name rather than as an anonymous refusal.
 func knownFinding(item finding) bool {
 	switch item.Signature {
-	case sigControlPlaneOvertakesAgedWork, sigCrossPlatformResidualArbitration,
-		sigCountMaximizationOvertakesAgedWork:
+	case sigCrossPlatformResidualArbitration, sigCountMaximizationOvertakesAgedWork:
 		return true
 	}
 	return false

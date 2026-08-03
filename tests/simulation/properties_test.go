@@ -78,12 +78,16 @@ const sigRespawnLiveIncarnation = "respawn_of_a_live_incarnation"
 // to be reported as itself.
 const sigMacOSIgnoresRepositoryCap = "macos_admission_ignores_repository_cap"
 
-// sigControlPlaneOvertakesAgedWork is FINDING 3 of ADR 0031. ADR 0004 states the
-// lane rule as "control-plane work can bypass only YOUNG standard work; aged
-// global FIFO ... remains absolute", and priorityOrder honours it. exactSelect
-// then re-ranks the very same candidates by scheduling class alone
-// (betterAdmission's band coverage), and aging is not a band there, so a young
-// control-plane demand outranks an aged standard one after all.
+// sigControlPlaneOvertakesAgedWork was FINDING 3 of ADR 0031. ADR 0004 orders
+// scheduling as aged global FIFO, then young control-plane, then young standard,
+// and priorityOrder honoured it. exactSelect then re-ranked the very same
+// candidates by scheduling class alone (betterAdmission's band coverage), and
+// aging was not a band there, so a young control-plane demand outranked an aged
+// standard one after all.
+//
+// It is FIXED -- schedulingBand's first band is aging, so the band vector is
+// ADR 0004's list -- so the sweep no longer tolerates it. The name survives
+// because a regression deserves to be reported as itself.
 const sigControlPlaneOvertakesAgedWork = "control_plane_overtakes_aged_standard_work"
 
 // sigCrossPlatformResidualArbitration is FINDING 4 of ADR 0031 and is the hole
@@ -597,7 +601,7 @@ func boundedStarvationChecker(cfg worldConfig) checker {
 				continue
 			}
 			findings = append(findings, finding{Kind: findingStarvation,
-				Signature: starvationSignature(cfg, demand, overtaker), Tick: observation.Tick,
+				Signature: starvationSignature(cfg, observation.Now, demand, overtaker), Tick: observation.Tick,
 				Detail: fmt.Sprintf("aged feasible %s (%s old) passed over %d times, this tick by %s (%s old)\n%s",
 					demand.Key, observation.Now.Sub(demand.CreatedAt), passedOver[demand.Key],
 					overtaker.Key, observation.Now.Sub(overtaker.CreatedAt), w.dumpPlan(observation))})
@@ -642,18 +646,43 @@ func youngestOvertaker(admitted []domain.Demand, demand domain.Demand) (domain.D
 	return youngest, found
 }
 
-// starvationSignature attributes a pass-over to one of the two documented lane
+// starvationSignature attributes a pass-over to one of the documented lane
 // defects, or to nothing -- in which case the sweep treats it as a new bug.
-func starvationSignature(cfg worldConfig, waiting, overtaker domain.Demand) string {
-	classes := cfg.Scheduler.RepoSchedulingClasses
-	if classes[overtaker.Key.Repo] == domain.SchedulingControlPlane && classes[waiting.Key.Repo] != domain.SchedulingControlPlane {
-		return sigControlPlaneOvertakesAgedWork
-	}
+//
+// Attribution names the MECHANISM that decided the tick, not a coincidence of
+// the two demands' attributes. The order of the tests below is that reasoning,
+// and it is not cosmetic: a signature that outlives its own defect keeps
+// reporting a FIXED finding, which is how a repair looks incomplete and an open
+// finding hides. Both tightenings below were made on 2026-08-03, when finding 3
+// was fixed and its signature stopped being tolerated.
+//
+//   - Different platforms: the two demands were never in one candidate list, so
+//     no lane inside a pass ever ordered them. The residual is arbitrated one
+//     platform at a time -- planLinux and safeBackfill, then fillMacRemainder --
+//     and that pass ordering is what decided the tick whatever class or size the
+//     overtaker happens to carry. Aging cannot be the explanation either, since
+//     priorityOrder ranks aged work above every young lane on both platforms.
+//   - A strictly smaller overtaker: its SIZE is a sufficient explanation. It fits
+//     vectors and residuals the waiting demand cannot -- more of them per
+//     envelope, and whatever another pass leaves behind -- which is finding 5,
+//     the count-and-packing question. Since 2026-08-03 no young lane can take a
+//     vector an aged demand could have used (exactSelect settles the aged band's
+//     members before it reads any younger band), so a smaller overtaker won on
+//     size or on a residual, never on its lane.
+//   - Scheduling class: a lane only between YOUNG demands of the same size or
+//     larger. ADR 0004's aged band is class-blind, so an overtaker that is itself
+//     aged did not win because of its class either.
+func starvationSignature(cfg worldConfig, now time.Time, waiting, overtaker domain.Demand) string {
 	if overtaker.Platform != waiting.Platform {
 		return sigCrossPlatformResidualArbitration
 	}
 	if strictlySmaller(cfg.Scheduler.Profiles[overtaker.Profile].Resources, cfg.Scheduler.Profiles[waiting.Profile].Resources) {
 		return sigCountMaximizationOvertakesAgedWork
+	}
+	classes := cfg.Scheduler.RepoSchedulingClasses
+	if !aged(cfg, now, overtaker) && classes[overtaker.Key.Repo] == domain.SchedulingControlPlane &&
+		classes[waiting.Key.Repo] != domain.SchedulingControlPlane {
+		return sigControlPlaneOvertakesAgedWork
 	}
 	return ""
 }

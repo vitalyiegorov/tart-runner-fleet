@@ -467,7 +467,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 	}
 
 	ordered := youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)
-	selected := exactSelect(ordered, free, baseCounts, in.Config)
+	selected := exactSelect(in.Now, ordered, free, baseCounts, in.Config)
 	for _, candidate := range selected {
 		plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
 	}
@@ -679,7 +679,7 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 	for _, demand := range alreadySelected {
 		counts[demand.Key.Repo]++
 	}
-	selected := exactSelect(ordered, backfillCapacity, counts, in.Config)
+	selected := exactSelect(in.Now, ordered, backfillCapacity, counts, in.Config)
 	operations := make([]Operation, 0, len(selected))
 	for _, demand := range selected {
 		operations = append(operations, spawnOperation(demand, nil))
@@ -842,15 +842,15 @@ func eventRank(event domain.Event) int {
 // exactSelect enumerates all feasible combinations while selecting at most the
 // configured slot vector (four in production). That makes feasibility exact
 // without an unbounded 2^N search.
-func exactSelect(candidates []domain.Demand, free domain.Resources, baseCounts map[string]int, config Config) []domain.Demand {
-	// Priority band per candidate mirrors youngPriorityOrder's lanes: lower band
-	// is higher priority. Count maximization is a throughput optimization that
+func exactSelect(now time.Time, candidates []domain.Demand, free domain.Resources, baseCounts map[string]int, config Config) []domain.Demand {
+	// Priority band per candidate is ADR 0004's scheduling order: lower band is
+	// higher priority. Count maximization is a throughput optimization that
 	// must apply only WITHIN a band; it must never admit a larger count of
 	// lower-priority work while a feasible higher-priority demand is deferred.
 	bands := make([]int, len(candidates))
 	numBands := 0
 	for i := range candidates {
-		bands[i] = schedulingBand(candidates[i], config)
+		bands[i] = schedulingBand(now, candidates[i], config)
 		if bands[i]+1 > numBands {
 			numBands = bands[i] + 1
 		}
@@ -885,57 +885,76 @@ func exactSelect(candidates []domain.Demand, free domain.Resources, baseCounts m
 	return selected
 }
 
-// schedulingBand assigns a demand its priority band for exact admission. It
-// mirrors youngPriorityOrder: control-plane work occupies the highest-priority
-// band, standard work the next. Aging remains the absolute starvation guard and
-// is handled by the reservation head outside exactSelect, so it is not a band
-// here.
-func schedulingBand(demand domain.Demand, config Config) int {
-	if config.RepoSchedulingClasses[demand.Key.Repo] == domain.SchedulingControlPlane {
+// schedulingBand assigns a demand its priority band for exact admission. The
+// bands ARE ADR 0004's scheduling order, in its order: aged work first, in one
+// class-blind global FIFO band, then young control-plane, then young standard.
+//
+// Aging led that list before this function existed, and it must lead it here
+// too. Bands used to carry the scheduling class alone, on the reasoning that
+// aging is guarded by the reservation head outside exactSelect. It is not: the
+// reservation protects ONE head, while safeBackfill and the bounded drain
+// backfill hand exactSelect aged and young candidates in the same slice, and
+// band coverage is compared before anything else. A young control-plane demand
+// therefore outranked an aged standard one — ADR 0004's rule 2 ahead of its
+// rule 1 — and the aged demand's global FIFO position bought it nothing
+// (FINDING 3 of ADR 0031).
+//
+// priorityOrder builds exactly these three groups in exactly this order, so a
+// candidate list and its band vector now say the same thing.
+func schedulingBand(now time.Time, demand domain.Demand, config Config) int {
+	if demandAged(now, config.FairnessAge, demand) {
 		return 0
 	}
-	return 1
+	if config.RepoSchedulingClasses[demand.Key.Repo] == domain.SchedulingControlPlane {
+		return 1
+	}
+	return 2
 }
 
-// betterAdmission ranks two feasible index selections while respecting priority
-// bands. It first compares their per-band coverage vectors lexicographically
-// (band 0 highest priority): more admitted demands in a higher-priority band
-// beats any count of lower-priority bands, so exact admission never inverts
-// priority to maximize raw count. When the coverage vectors are identical —
-// always the case when every candidate shares one band — total count is equal,
-// so it defers to betterSelection's count/index-lexicographic tie-break,
-// preserving the original throughput behavior and determinism.
+// betterAdmission ranks two feasible index selections by ADR 0004's scheduling
+// order. Bands are compared in priority order (band 0 highest), and each band is
+// compared exactly as a single lane always was: more admitted demands first,
+// then the earlier candidates. The candidate list is already in priority order,
+// so a lower index is older work, and one band's answer is settled before the
+// next band is consulted at all.
+//
+// Comparing a band's MEMBERS and not merely its count is what keeps rule 1 above
+// rule 2. Counts alone tie whenever two selections admit the same NUMBER of aged
+// demands, and that tie used to be broken by the young control-plane band: an
+// aged `large` heading the residual lost it to an aged `small` plus a
+// one-minute-old control-plane `medium`, because the pair covered one aged
+// demand too and added a band-1 admission. Rule 1 is a FIFO over aged work, so
+// WHICH aged demand is admitted is decided before any young lane may weigh in.
+//
+// With every candidate in one band this is byte-for-byte the original
+// count/index-lexicographic preference, which is what keeps throughput and
+// determinism unchanged for the common case.
 func betterAdmission(candidate, incumbent, bands []int, numBands int) bool {
-	candidateCover := bandCoverage(candidate, bands, numBands)
-	incumbentCover := bandCoverage(incumbent, bands, numBands)
-	for b := 0; b < numBands; b++ {
-		if candidateCover[b] != incumbentCover[b] {
-			return candidateCover[b] > incumbentCover[b]
+	for band := range numBands {
+		candidateBand := bandMembers(candidate, bands, band)
+		incumbentBand := bandMembers(incumbent, bands, band)
+		if len(candidateBand) != len(incumbentBand) {
+			return len(candidateBand) > len(incumbentBand)
 		}
-	}
-	return betterSelection(candidate, incumbent)
-}
-
-// bandCoverage counts, per priority band, how many chosen candidates fall in
-// that band. bands maps a candidate index to its band.
-func bandCoverage(chosen, bands []int, numBands int) []int {
-	coverage := make([]int, numBands)
-	for _, index := range chosen {
-		coverage[bands[index]]++
-	}
-	return coverage
-}
-
-func betterSelection(candidate, incumbent []int) bool {
-	if len(candidate) != len(incumbent) {
-		return len(candidate) > len(incumbent)
-	}
-	for i := range candidate {
-		if candidate[i] != incumbent[i] {
-			return candidate[i] < incumbent[i]
+		for i := range candidateBand {
+			if candidateBand[i] != incumbentBand[i] {
+				return candidateBand[i] < incumbentBand[i]
+			}
 		}
 	}
 	return false
+}
+
+// bandMembers is the chosen candidates that fall in one band, in candidate
+// order. bands maps a candidate index to its band.
+func bandMembers(chosen, bands []int, band int) []int {
+	members := make([]int, 0, len(chosen))
+	for _, index := range chosen {
+		if bands[index] == band {
+			members = append(members, index)
+		}
+	}
+	return members
 }
 
 func cloneCounts(source map[string]int) map[string]int {
@@ -1407,7 +1426,7 @@ func boundedDrainBackfill(in Input, demands []domain.Demand) []Operation {
 	}
 	free := linuxFree(in)
 	free.Slots = min(free.Slots, 1)
-	selected := exactSelect(priorityOrder(in, eligible), free, activeRepoCounts(in.Instances.Value), in.Config)
+	selected := exactSelect(in.Now, priorityOrder(in, eligible), free, activeRepoCounts(in.Instances.Value), in.Config)
 	if len(selected) == 0 {
 		return nil
 	}

@@ -133,7 +133,7 @@ refusal.
 | | Property | Oracle | Status |
 |---|---|---|---|
 | a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. | Enforced |
-| b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Per-demand pass-over count against the youngest demand admitted ahead of it. | Enforced with four documented exemptions (findings 3, 4, 5, and the ADR 0017 reserved head) |
+| b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Per-demand pass-over count against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03, see [ADR 0004](0004-bounded-control-plane-priority.md) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
 | e | **No double admission.** One demand is admitted once. | A demand spawned twice in a plan, or spawned while a live instance already incarnates it. | Enforced (finding 1 fixed 2026-08-03; see [ADR 0027](0027-one-tick-admits-a-demand-once.md)) |
@@ -190,6 +190,33 @@ that admitted nothing could not starve anyone either. Over 150 seeds at 200
 ticks, finding 1 fell from ~146 seeds to 0, seeds with no finding of any kind
 rose from ~2 to ~89, and the three aged-FIFO signatures fell by roughly a
 quarter to a half.
+
+Findings 2 and 3 were fixed on 2026-08-03, by the cap amendment of ADR 0030 and
+the band amendment of ADR 0004. Neither signature is tolerated by the sweep any
+more. Over the same 150 seeds at 200 ticks, finding 2 fell from 11 seeds to 0 and
+finding 3 from 23 to 0, and seeds with no finding of any kind rose from 107 to
+123.
+
+Fixing them also had to sharpen the oracle that NAMES them.
+`starvationSignature` attributed a pass-over by the first attribute that matched,
+which is harmless while several lane defects are open and misleading the moment
+one is fixed: a cross-platform pass-over whose overtaker happened to belong to
+the control-plane repository, and a count-maximization pass-over between two AGED
+demands, were both filed under finding 3's name, so a fixed defect went on being
+reported by that name on four of 150 seeds. Attribution now tests platform, then
+size, then class, and records why that is the causal order.
+
+The sharper oracle exposes MORE, not less. Run against the unfixed scheduler it
+turns 14 of finding 3's 23 seeds into UNSIGNATURED violations -- aged
+control-plane work overtaking OLDER aged standard work, which is the same
+class-over-aging breach but out of the reach of a rule stated in terms of young
+lanes -- so the old code fails the sweep on 15 seeds where the old name absorbed
+everything. On the fixed scheduler both counts are zero. Nothing is tolerated
+that was not tolerated before; every violation is still counted, under the open
+finding whose mechanism produced it. Findings 4 and 5 absorb the renaming: over
+the same corpus, 4 moves from 9 seeds to 14 and 5 from 11 to 18, of which 12 and
+17 respectively are already present on the unfixed scheduler once it is measured
+with the same oracle.
 
 A cost worth naming: the simulator is a second implementation of the fleet's
 environment, and a wrong model produces confident nonsense. Two safeguards
