@@ -73,19 +73,49 @@ func commitFailureReason(status scheduler.PlanStatus, err error) string {
 	}
 }
 
-// trickle degrades a fail-closed binding by admitting a single demand while
-// statistics are unavailable. queued is age-sorted oldest-first, so it returns
-// the oldest demand that has no live incarnation, letting the freshly spawned
-// runner draw new broker statistics. Demands already served by a live instance
-// are skipped rather than respawned; if every queued demand is already live it
-// admits nothing, since there is no idle work to un-livelock.
-func trickle(queued []domain.Demand, liveIncarnations map[domain.DemandKey]bool) []domain.Demand {
+// plannableDemands drops every queued demand a live, non-terminal instance
+// already incarnates. It is the single seam where the scheduler's queue is
+// assembled, so every admission path downstream inherits the rule instead of
+// restating it (ADR 0027).
+//
+// GitHub keeps a job Available until a runner acquires it, and production
+// acquires at the reachable -> registering edge, minutes after the spawn. For
+// that whole boot window the demand is still durably JobAvailable and the
+// statistics bound still admits it, so an unfiltered queue re-derives the
+// byte-identical content-addressed spawn every tick. ApplyPlan refuses it on the
+// instances primary key, and a refused plan is discarded WHOLE — so nothing else
+// was admitted either, for as long as one VM took to boot.
+//
+// The lifecycle decides membership, not the state name: domain.Instance
+// .IncarnatesDemand is false for a terminal incarnation, so a failed or reaped
+// instance releases its demand back into this queue and an instance failure is
+// still retried. Only what is still alive holds its demand's identity.
+//
+// Filtering the input rather than deduplicating the finished plan is the same
+// choice ADR 0027 made for one tick's two passes: a demand already being served
+// must not be counted against slots, repository caps, or the residual envelope
+// either.
+func plannableDemands(queued []domain.Demand, liveIncarnations map[domain.DemandKey]bool) []domain.Demand {
+	plannable := make([]domain.Demand, 0, len(queued))
 	for _, demand := range queued {
-		if !liveIncarnations[demand.Key] {
-			return []domain.Demand{demand}
+		if liveIncarnations[demand.Key] {
+			continue
 		}
+		plannable = append(plannable, demand)
 	}
-	return nil
+	return plannable
+}
+
+// trickle degrades a fail-closed binding by admitting a single demand while
+// statistics are unavailable. plannable is age-sorted oldest-first and already
+// carries no demand a live instance incarnates, so it returns the oldest one and
+// lets the freshly spawned runner draw new broker statistics. An empty plannable
+// queue admits nothing: there is no idle work to un-livelock.
+func trickle(plannable []domain.Demand) []domain.Demand {
+	if len(plannable) == 0 {
+		return nil
+	}
+	return []domain.Demand{plannable[0]}
 }
 
 func (e Engine) Tick(ctx context.Context) (TickResult, error) {
@@ -133,10 +163,9 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	}
 	instances, host := e.Inventory.Observe(ctx)
 	// Demand keys already owned by a live, non-terminal instance incarnation.
-	// The statistics-fresh path never plans these — the Available/Assigned
-	// bounds account for their assigned/running instances — but the degraded
-	// trickle below bypasses those bounds entirely, so it needs this guard to
-	// avoid double-spawning a demand whose runner is already live.
+	// Every admission path is bounded by this one fact: a demand a live instance
+	// already serves is not plannable work, whatever the broker still advertises
+	// and whatever the statistics still bound.
 	liveIncarnations := make(map[domain.DemandKey]bool, len(instances.Value))
 	for _, instance := range instances.Value {
 		if instance.IncarnatesDemand() {
@@ -145,7 +174,10 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	}
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
-		schedulable := queued
+		// One filter for every path: a demand whose VM is already cloning,
+		// booting, registering, assigned, running, or tearing down is not
+		// re-planned, and a terminal incarnation releases it again.
+		schedulable := plannableDemands(queued, liveIncarnations)
 		if errors.Is(err, ErrDemandStatisticsUnavailable) {
 			// Statistics refresh only with new broker messages, and a stalled
 			// queue never sends any, so a fully fail-closed binding livelocks
@@ -156,12 +188,10 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			// delivers fresh statistics, and the binding leaves degradation.
 			// The queue stays fully visible to the SLO monitor either way.
 			//
-			// Trickle the oldest demand that has no live incarnation: a demand
-			// whose runner is already assigned (waiting on GitHub) must not be
-			// respawned, or the plan collides with the live instance and every
-			// recycled tick wedges the fleet. Skipping only advances to the
-			// next candidate, so the binding still un-livelocks.
-			schedulable = trickle(queued, liveIncarnations)
+			// The plannable queue has already dropped every demand a live
+			// instance incarnates, so this is the oldest genuinely unserved
+			// demand and can never collide with a booting runner.
+			schedulable = trickle(schedulable)
 		} else if err != nil {
 			return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
 		}

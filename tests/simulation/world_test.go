@@ -496,9 +496,13 @@ func (w *world) reconcile() tickObservation {
 	// built from rather than against the state it just created.
 	instances, host := w.engine.Inventory.Observe(w.ctx)
 	result, err := w.engine.Tick(w.ctx)
+	queued := 0
+	for _, summary := range result.Queues {
+		queued += summary.Count
+	}
 	return tickObservation{
 		Tick: w.tick, Now: w.now, Plan: result.Plan, Applied: result.Applied, Err: err,
-		Demands: result.Demands, Instances: instances.Value, InstancesUsable: instances.Usable(),
+		Demands: result.Demands, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
 		Host: host.Value, HostUsable: host.Usable(),
 	}
 }

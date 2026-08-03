@@ -55,10 +55,14 @@ func (f finding) String() string {
 	return fmt.Sprintf("tick %d: %s: %s", f.Tick, f.Kind, f.Detail)
 }
 
-// sigRespawnLiveIncarnation is FINDING 1 of ADR 0031: between a spawn and its
+// sigRespawnLiveIncarnation was FINDING 1 of ADR 0031: between a spawn and its
 // runner's JIT acquisition the demand is still JobAvailable to GitHub, nothing
-// in the pipeline filters a demand a live instance already incarnates, and every
-// tick in that window re-derives the identical content-addressed spawn.
+// in the pipeline filtered a demand a live instance already incarnates, and
+// every tick in that window re-derived the identical content-addressed spawn.
+//
+// It is FIXED -- app.plannableDemands is now the single seam that assembles the
+// scheduler's queue -- so the sweep no longer tolerates it. The name survives
+// because a regression deserves to be reported as itself.
 const sigRespawnLiveIncarnation = "respawn_of_a_live_incarnation"
 
 // sigMacOSIgnoresRepositoryCap is FINDING 2 of ADR 0031: scheduler
@@ -97,12 +101,20 @@ const sigCountMaximizationOvertakesAgedWork = "count_maximization_overtakes_aged
 // is the only thing property oracles read, so a property is a pure function of
 // observations rather than of harness internals.
 type tickObservation struct {
-	Tick            int
-	Now             time.Time
-	Plan            scheduler.Plan
-	Applied         bool
-	Err             error
-	Demands         []domain.Demand
+	Tick    int
+	Now     time.Time
+	Plan    scheduler.Plan
+	Applied bool
+	Err     error
+	// Demands is the PLANNABLE queue: what the scheduler was allowed to admit
+	// this tick. app.plannableDemands has already dropped every demand a live
+	// instance incarnates, so it answers "what work is still unserved".
+	Demands []domain.Demand
+	// Queued is the DURABLE queue depth across every binding -- the number the
+	// SLO monitor reads. It answers a different question ("what does the fleet
+	// still believe it has to do"), and a demand whose runner is already booting
+	// counts here while it is absent from Demands.
+	Queued          int
 	Instances       []domain.Instance
 	InstancesUsable bool
 	Host            domain.Host
@@ -680,12 +692,17 @@ func quiescenceChecker(cfg worldConfig) checker {
 			return nil
 		}
 		settled = 0
-		if len(observation.Demands) == 0 && len(w.claimed) == 0 {
+		// The DURABLE queue depth, not the plannable one: a demand whose runner is
+		// already live is absent from the plannable queue by design, and the ghost
+		// of ADR 0026 is exactly such a demand. Measuring the plannable queue here
+		// would call that fleet quiescent while it still holds a runner for work
+		// GitHub no longer has.
+		if observation.Queued == 0 && len(w.claimed) == 0 {
 			return nil
 		}
 		return []finding{{Kind: findingNoQuiescence, Tick: observation.Tick,
 			Detail: fmt.Sprintf("%d demands and %d operations still in flight %d ticks after GitHub went quiet\n%s",
-				len(observation.Demands), len(w.claimed), cfg.QuiesceQ, w.dumpPlan(observation))}}
+				observation.Queued, len(w.claimed), cfg.QuiesceQ, w.dumpPlan(observation))}}
 	}
 }
 

@@ -295,24 +295,25 @@ func TestEngineTickTrickleSkipsDemandWithLiveIncarnation(t *testing.T) {
 	}
 }
 
-// TestTrickleSelectsOldestWithoutLiveIncarnation pins the trickle selection
-// helper directly across its branches: empty input, first candidate live,
-// no candidate live, and every candidate live.
-func TestTrickleSelectsOldestWithoutLiveIncarnation(t *testing.T) {
+// TestTrickleAdmitsTheOldestPlannableDemand pins the trickle selection helper
+// directly. It now receives the plannable queue — plannableDemands has already
+// dropped every demand a live instance incarnates — so its whole contract is
+// "the oldest one, or nothing at all".
+func TestTrickleAdmitsTheOldestPlannableDemand(t *testing.T) {
 	keyA := domain.DemandKey{Repo: "owner/repo", RunID: 8, Attempt: 1, JobID: 11}
 	keyB := domain.DemandKey{Repo: "owner/repo", RunID: 8, Attempt: 1, JobID: 12}
 	a := domain.Demand{Key: keyA}
 	b := domain.Demand{Key: keyB}
-	if got := trickle(nil, map[domain.DemandKey]bool{}); got != nil {
+	if got := trickle(nil); got != nil {
 		t.Fatalf("empty queue must trickle nothing: %#v", got)
 	}
-	if got := trickle([]domain.Demand{a, b}, map[domain.DemandKey]bool{}); len(got) != 1 || got[0].Key != keyA {
-		t.Fatalf("no live incarnation must trickle the oldest: %#v", got)
+	if got := trickle([]domain.Demand{}); got != nil {
+		t.Fatalf("a fully incarnated queue must trickle nothing: %#v", got)
 	}
-	if got := trickle([]domain.Demand{a, b}, map[domain.DemandKey]bool{keyA: true}); len(got) != 1 || got[0].Key != keyB {
-		t.Fatalf("first live must skip forward to the next: %#v", got)
+	if got := trickle([]domain.Demand{a, b}); len(got) != 1 || got[0].Key != keyA {
+		t.Fatalf("trickle must admit the oldest plannable demand: %#v", got)
 	}
-	if got := trickle([]domain.Demand{a, b}, map[domain.DemandKey]bool{keyA: true, keyB: true}); got != nil {
-		t.Fatalf("all live must trickle nothing: %#v", got)
+	if got := trickle([]domain.Demand{b}); len(got) != 1 || got[0].Key != keyB {
+		t.Fatalf("a skipped-forward queue must trickle its own head: %#v", got)
 	}
 }

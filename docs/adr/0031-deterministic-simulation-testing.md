@@ -136,7 +136,7 @@ refusal.
 | b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Per-demand pass-over count against the youngest demand admitted ahead of it. | Enforced with four documented exemptions (findings 3, 4, 5, and the ADR 0017 reserved head) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
-| e | **No double admission.** One demand is admitted once. | A demand spawned twice in a plan, or spawned while a live instance already incarnates it. | Enforced with one documented exemption (finding 1) |
+| e | **No double admission.** One demand is admitted once. | A demand spawned twice in a plan, or spawned while a live instance already incarnates it. | Enforced (finding 1 fixed 2026-08-03; see [ADR 0027](0027-one-tick-admits-a-demand-once.md)) |
 | f | **Eventual quiescence.** The fleet empties when the demand stream stops. | Q ticks after GitHub has no work: scheduler-visible demand and in-flight operations must both be zero. | Enforced |
 | g | **Conservation.** Instances never exceed the envelope or the caps. | Aggregate CPU, memory, and slots against the physical machine; per-repository count against its cap; per-profile count against MaxActive. | Enforced with one documented exemption (finding 2) |
 
@@ -182,6 +182,15 @@ including one that needs no simulator at all to reproduce once you know to look
 in the pull request that introduced this record and pinned in
 `tests/simulation/findings_test.go`.
 
+Finding 1 was fixed on 2026-08-03 by the queue seam described in ADR 0027's
+cross-tick amendment. Its signature is no longer tolerated by the sweep, and the
+name survives only so a regression is reported as itself. Removing the wedge also
+moved the remaining findings' frequencies, which is the expected shape: a tick
+that admitted nothing could not starve anyone either. Over 150 seeds at 200
+ticks, finding 1 fell from ~146 seeds to 0, seeds with no finding of any kind
+rose from ~2 to ~89, and the three aged-FIFO signatures fell by roughly a
+quarter to a half.
+
 A cost worth naming: the simulator is a second implementation of the fleet's
 environment, and a wrong model produces confident nonsense. Two safeguards
 apply. The executor mirrors `lifecycle`'s state machine edge for edge and every
@@ -209,7 +218,8 @@ into a smoke test, so the required event vocabulary is asserted directly.
   the generator-coverage guard.
 - `tests/simulation/incidents_test.go` -- 2026-08-01 (ADR 0026), 2026-08-02 (ADR
   0027), and 2026-07-25 (ADR 0017) replayed as pinned traces, plus finding 1's
-  minimal two-tick reproduction.
+  minimal three-tick regression: the boot window plans nothing, and a terminal
+  incarnation is still retried.
 - `tests/simulation/findings_test.go` -- characterizations of findings 2 to 5.
 - `.github/workflows/nightly.yml` -- the long sweep.
 
