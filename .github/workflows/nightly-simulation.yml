@@ -1,0 +1,45 @@
+name: Nightly fleet simulation
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-fleet-simulation
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+# The pull-request gate explores a bounded seed range so it fits inside the
+# review budget. The state space this harness exists for -- late, duplicated,
+# reordered, and lost broker messages composed with stale inventory, host
+# pressure, and wedged drains across hundreds of ticks -- needs volume, and volume
+# belongs in a scheduled run. See ADR 0031.
+
+jobs:
+  simulation:
+    # Only this repository owns the self-hosted fleet these labels resolve to.
+    # A fork must not schedule nightly work it cannot serve.
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    runs-on: [self-hosted, linux-tiered, linux-large]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Roughly two orders of magnitude more simulated fleet-hours than the
+      # pull-request gate. The budgets are sized from measured throughput with
+      # margin; widen them here rather than in `make unit`, which every job runs.
+      - name: Long deterministic simulation sweep
+        run: go test -count=1 -timeout 35m ./tests/simulation -run TestSimFuzz -seeds=500 -sim-ticks=320
+      - name: Disjoint seed range under the race detector
+        run: go test -race -count=1 -timeout 15m ./tests/simulation -run TestSimFuzz -seed-base=900001 -seeds=15 -sim-ticks=200
+      - name: Pinned incidents and findings repeated
+        run: go test -race -shuffle=on -count=5 -timeout 10m ./tests/simulation -run 'TestFinding|TestGhost|TestDoubleAdmission|TestStranded|TestSimIsDeterministic'

@@ -1,0 +1,657 @@
+// Package simulation_test is the deterministic simulation testing (DST) harness
+// described by ADR 0031.
+//
+// It runs the REAL control plane -- scheduler.PlanTick, reconcile.Controller
+// .Commit, and a real SQLite store's ApplyPlan/inbox/lifecycle writes -- inside a
+// simulated single-host fleet whose every source of nondeterminism (GitHub
+// scale-set broker delivery, REST inventory freshness, host tenant load, VM boot
+// latency, job duration) is driven by a seeded event trace and a virtual clock.
+//
+// Every run is reproducible from (seed, config); the same trace replayed twice
+// produces the same observations, so a failure shrinks to a minimal event trace
+// instead of a screenshot of a bad night.
+//
+// The harness is deliberately a test-only package under tests/, exactly like
+// tests/replay and tests/chaos: scripts/check-coverage.sh instruments each
+// package's own statements, and a package with no non-test files contributes
+// none, so the simulator carries the 99% gate for the production code it drives
+// rather than for its own scaffolding. scripts/check-cpd.sh likewise scans only
+// cmd and internal.
+package simulation_test
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
+)
+
+// simEpoch is the virtual wall clock the simulation starts from. It is a fixed
+// constant so a (seed, config) pair names one exact history.
+var simEpoch = time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+
+// simTick is one control-plane reconciliation. Thirty virtual seconds keeps the
+// production ratios legible: FairnessAge 5m is ten ticks, the statistics
+// freshness budget is four, and the ghost-absence window is thirty.
+const simTick = 30 * time.Second
+
+// simControlPlaneRepo is the fleet's own repository. ADR 0004 gives it the
+// control-plane scheduling class, so the simulator carries one.
+const simControlPlaneRepo = "ops/fleet"
+
+// simOwner runs the executor and the controller. One writer, one goroutine: the
+// harness is sequential by construction so that any lost compare-and-set is a
+// genuine composition defect rather than a modelled race.
+const simOwner = "sim-controller"
+
+// worldConfig is the parameterized host envelope and policy under simulation.
+// The defaults are the production Mac mini (Apple M4, 10 cores, 24 GiB).
+type worldConfig struct {
+	Name             string
+	PhysicalCPU      int64
+	PhysicalMemoryMB int64
+	Guards           macos.Guardrails
+	Scheduler        scheduler.Config
+	Bindings         []app.Binding
+	Repos            []string
+	Profiles         []domain.ProfileID
+	// LivenessK bounds property (a): a feasible demand must reach admission
+	// within this many ticks.
+	LivenessK int
+	// StarvationN bounds property (b): an aged feasible demand may be passed over
+	// by younger work at most this many times.
+	StarvationN int
+	// QuiesceQ bounds property (f): after the demand stream stops the fleet must
+	// be empty within this many ticks.
+	QuiesceQ int
+}
+
+func simProfiles() map[domain.ProfileID]domain.Profile {
+	return map[domain.ProfileID]domain.Profile{
+		"small":   {ID: "small", Platform: domain.PlatformLinux, Route: "linux-small", Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}},
+		"medium":  {ID: "medium", Platform: domain.PlatformLinux, Route: "linux-medium", Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}},
+		"large":   {ID: "large", Platform: domain.PlatformLinux, Route: "linux-large", Resources: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}},
+		"xl":      {ID: "xl", Platform: domain.PlatformLinux, Route: "linux-xl", Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}},
+		"builder": {ID: "builder", Platform: domain.PlatformMacOS, Route: "macos-builder", Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}, MaxActive: 1},
+		"maestro": {ID: "maestro", Platform: domain.PlatformMacOS, Route: "macos-maestro", Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, MaxActive: 2},
+	}
+}
+
+// simBindings maps one scale set to each profile, exactly as the production
+// configuration does. Scale-set identifiers are stable so a pinned trace names
+// the same queues on every replay.
+func simBindings(profiles map[domain.ProfileID]domain.Profile) []app.Binding {
+	ids := sortedProfileIDs(profiles)
+	bindings := make([]app.Binding, 0, len(ids))
+	for index, id := range ids {
+		profile := profiles[id]
+		bindings = append(bindings, app.Binding{
+			StoreKey: int64(index + 1), ScaleSetID: int64(index + 1), Scope: "sim/" + string(id),
+			ScaleSetLabels: []string{"self-hosted", string(profile.Route)}, Profile: profile,
+		})
+	}
+	return bindings
+}
+
+func sortedProfileIDs(profiles map[domain.ProfileID]domain.Profile) []domain.ProfileID {
+	ids := make([]domain.ProfileID, 0, len(profiles))
+	for id := range profiles {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// defaultWorld is the production-shaped envelope: an elastic 10-core / 24 GiB
+// Apple M4 shared with its own tenant, mixed platform and profile admission on,
+// four repositories with distinct caps, and the fleet repository in the
+// control-plane scheduling class.
+func defaultWorld() worldConfig {
+	profiles := simProfiles()
+	return worldConfig{
+		Name:             "m4-mac-mini",
+		PhysicalCPU:      10,
+		PhysicalMemoryMB: 24_576,
+		Guards: macos.Guardrails{MinFreeDiskGB: 20, MinAvailableMemoryMB: 2_048,
+			MaxSwapUsedMB: 8_192, MaxLoadAverage: 24, MinCPUidlePercent: 5},
+		Scheduler: scheduler.Config{
+			LinuxCapacity:   domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+			FairnessAge:     5 * time.Minute,
+			AssignedTimeout: 15 * time.Minute,
+			RepoCaps: map[string]int{
+				"a/repo": 4, "b/repo": 4, "c/repo": 2, simControlPlaneRepo: 2,
+			},
+			RepoSchedulingClasses:  map[string]domain.SchedulingClass{simControlPlaneRepo: domain.SchedulingControlPlane},
+			Profiles:               profiles,
+			MixedPlatformAdmission: true,
+			MixedProfileCohorts:    true,
+			ElasticHostEnvelope:    true,
+		},
+		Bindings:    simBindings(profiles),
+		Repos:       []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
+		Profiles:    sortedProfileIDs(profiles),
+		LivenessK:   12,
+		StarvationN: 3,
+		QuiesceQ:    40,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Simulated host
+// ---------------------------------------------------------------------------
+
+// simHost is the host probe. It reports the physical machine, what the fleet's
+// own VMs hold, and what the host's other tenant holds, so the elastic envelope
+// of ADR 0018 is exercised against a machine that really does get busy.
+type simHost struct{ world *world }
+
+func (h simHost) Snapshot(context.Context) macos.Snapshot {
+	w := h.world
+	usedCPU, usedMemory := w.fleetOccupancy()
+	idle := float64(w.cfg.PhysicalCPU-int64(usedCPU)-int64(w.tenantCPU)) / float64(w.cfg.PhysicalCPU) * 100
+	if idle < 0 {
+		idle = 0
+	}
+	available := w.cfg.PhysicalMemoryMB - int64(usedMemory) - int64(w.tenantMemoryMB)
+	if available < 0 {
+		available = 0
+	}
+	if w.hostProbeStale > 0 {
+		return macos.Snapshot{Freshness: macos.Stale, ObservedAt: w.now}
+	}
+	return macos.Snapshot{
+		Freshness: macos.Fresh, ObservedAt: w.now, AvailableMemoryMB: available, FreeDiskGB: 400,
+		SwapUsedMB: 0, SwapOuts: 0, CPUidlePercent: idle, LoadAverage: float64(usedCPU + w.tenantCPU),
+		SwapOutRatePerSecond: 0, SwapOutRateObserved: true,
+		PhysicalCPU: w.cfg.PhysicalCPU, PhysicalMemoryMB: w.cfg.PhysicalMemoryMB,
+	}
+}
+
+// simTart is the VM enumeration. It answers from the simulated hypervisor, so
+// an absent or powered-off VM is a fact the real inventory adapter classifies.
+type simTart struct{ world *world }
+
+func (a simTart) List(context.Context) ([]tart.VM, error) {
+	w := a.world
+	if w.tartUnavailable > 0 {
+		return nil, fmt.Errorf("simulated tart failure")
+	}
+	names := make([]string, 0, len(w.vms))
+	for name := range w.vms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	vms := make([]tart.VM, 0, len(names))
+	for _, name := range names {
+		vms = append(vms, tart.VM{Name: name, Running: w.vms[name]})
+	}
+	return vms, nil
+}
+
+// simRecovery answers the two destructive-recovery evidence questions from the
+// broker's own truth, which is what makes a stalled assignment or a lingering
+// runner reachable in simulation.
+type simRecovery struct{ world *world }
+
+func (r simRecovery) ConfirmDeletion(_ context.Context, name string) (operations.DeletionConfirmation, error) {
+	inactive := !r.world.runnerBusy(name)
+	return operations.DeletionConfirmation{Fresh: true, RunnerInactive: inactive, JobsInactive: inactive,
+		ObservedAt: r.world.now}, nil
+}
+
+func (r simRecovery) JobActive(_ context.Context, instance operations.Instance) (bool, error) {
+	job := r.world.jobByRequest(instance.Demand.JobID)
+	return job != nil && job.status == jobRunning, nil
+}
+
+// simInstances is the durable instance reader with one substitution: UpdatedAt
+// is rewritten to the VIRTUAL instant the row entered its current state.
+//
+// The store stamps updated_at from the process wall clock, and
+// app.ProductionInventory derives AssignedSince and RunningSince from it. Under
+// a virtual clock every row would therefore look newborn and no assignment or
+// idle-runner deadline could ever be reached, hiding exactly the recovery paths
+// ADR 0028 was written about. Nothing else about the row is touched.
+type simInstances struct{ world *world }
+
+func (s simInstances) LiveInstances(ctx context.Context) ([]operations.Instance, error) {
+	instances, err := s.world.store.LiveInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range instances {
+		if since, ok := s.world.enteredAt[stateKey(instances[index])]; ok {
+			instances[index].UpdatedAt = since
+		}
+	}
+	return instances, nil
+}
+
+func stateKey(instance operations.Instance) string {
+	return instance.ID + "\x00" + string(instance.State)
+}
+
+// ---------------------------------------------------------------------------
+// The world
+// ---------------------------------------------------------------------------
+
+type world struct {
+	ctx   context.Context
+	cfg   worldConfig
+	trace simTrace
+
+	store  *sqlite.Store
+	engine app.Engine
+	demand app.DemandCoordinator
+
+	now  time.Time
+	tick int
+
+	// jobs is the broker's own truth about every workflow job it has ever
+	// advertised, independent of what the fleet has durably learned.
+	jobs      []*simJob
+	nextRunID int64
+	nextReq   int64
+	nextMsgID int64
+
+	// outbound holds broker messages that have been produced but not yet
+	// delivered, which is where delay, duplication, reorder, and loss live.
+	outbound []*simMessage
+	// delivered remembers the last message committed per scale set so a
+	// duplication event can redeliver a batch the fleet has already applied.
+	delivered map[int]*simMessage
+	// restQueue holds REST scope snapshots taken at one instant and delivered at
+	// another, which is what "lagging inventory" means here.
+	restQueue []*simSnapshot
+
+	// vms is the simulated hypervisor: name -> powered on.
+	vms map[string]bool
+	// enteredAt records the virtual instant each instance entered each state.
+	enteredAt map[string]time.Time
+	// claimed maps an in-flight durable operation to the executor's progress.
+	claimed map[string]*simOperation
+
+	// Fault state, all set by trace events and decayed each tick.
+	tenantCPU        int
+	tenantMemoryMB   int
+	statisticsGap    int
+	restLag          int
+	hostProbeStale   int
+	tartUnavailable  int
+	messageDelay     int
+	delayWindow      int
+	slowBootNext     int
+	wedgeNextDrain   int
+	reassignSiblings bool
+	stalledRunner    map[string]bool
+	wedgedDrain      map[string]int
+	// arrivalsStopped marks the tick after which no new job may be created, which
+	// is what makes property (f) meaningful.
+	arrivalsStopped bool
+
+	observations []tickObservation
+	findings     []finding
+	// known collects the first occurrence of each documented defect the run met.
+	known map[string]finding
+	// checkers are the property oracles evaluated after every tick.
+	checkers []checker
+}
+
+type jobStatus string
+
+const (
+	jobQueued    jobStatus = "queued"
+	jobAcquired  jobStatus = "acquired"
+	jobRunning   jobStatus = "running"
+	jobDone      jobStatus = "done"
+	jobCancelled jobStatus = "cancelled"
+)
+
+// simJob is one workflow job in GitHub's world. requestID doubles as the
+// scale-set runner request identifier and as DemandKey.JobID, exactly as
+// app.convertDemandRecords maps them.
+type simJob struct {
+	requestID int64
+	runID     int64
+	repo      string
+	owner     string
+	name      string
+	binding   int
+	event     string
+	queuedAt  time.Time
+	status    jobStatus
+	runner    string
+	remaining int
+	// announced records which broker events have already been produced, so a
+	// redelivery is a duplicate rather than a new fact.
+	announced map[operations.DemandEventKind]bool
+	// silentCancel models the ADR 0026 ghost: GitHub cancelled the run server
+	// side and never sent a terminal message, so the broker keeps advertising it.
+	silentCancel bool
+}
+
+// simMessage is one scale-set message in flight.
+type simMessage struct {
+	binding   int
+	messageID int64
+	events    []operations.DemandEvent
+	available int
+	assigned  int
+	running   int
+	deliverAt int
+	withStats bool
+}
+
+// simSnapshot is one complete REST scope observation of the queued jobs.
+type simSnapshot struct {
+	at        time.Time
+	deliverAt int
+	jobs      []githubscaleset.WorkflowJob
+}
+
+// simOperation is the executor's progress through one durable outbox operation.
+type simOperation struct {
+	operation operations.Operation
+	instance  string
+	remaining int
+}
+
+// runTrace executes one candidate history end to end and reports every property
+// violation it produced. Shrinking calls it hundreds of times, so the store is
+// closed on return rather than deferred to the end of the test.
+func runTrace(t testingT, cfg worldConfig, trace simTrace) []finding {
+	t.Helper()
+	w := newWorld(t, cfg, trace)
+	defer w.close()
+	return w.run()
+}
+
+func (w *world) close() { _ = w.store.Close() }
+
+func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
+	t.Helper()
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("open simulated store: %v", err)
+	}
+	w := &world{
+		ctx: ctx, cfg: cfg, trace: trace, store: store, now: simEpoch,
+		nextRunID: 1_000, nextReq: 500_000, nextMsgID: 1,
+		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, claimed: map[string]*simOperation{},
+		delivered: map[int]*simMessage{}, stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
+		known: map[string]finding{},
+	}
+	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
+		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute}
+	w.engine = app.Engine{
+		Store: store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,
+		ControllerID: simOwner, Mode: reconcile.Authority, Now: func() time.Time { return w.now },
+		Inventory: app.ProductionInventory{
+			Store: simInstances{world: w}, Tart: simTart{world: w}, Host: simHost{world: w},
+			Recovery: simRecovery{world: w}, Capacity: cfg.Scheduler.LinuxCapacity, Guards: cfg.Guards,
+			ElasticHostEnvelope: cfg.Scheduler.ElasticHostEnvelope,
+		},
+	}
+	w.checkers = defaultCheckers(cfg)
+	return w
+}
+
+// fleetOccupancy is what the fleet's own VMs hold on the host right now. A VM
+// counts from the moment it is cloned until it is deleted, which is what a
+// hypervisor would report.
+func (w *world) fleetOccupancy() (cpu, memoryMB int) {
+	instances, err := w.store.LiveInstances(w.ctx)
+	if err != nil {
+		return 0, 0
+	}
+	for _, instance := range instances {
+		if instance.State == operations.StatePlanned || instance.State == operations.StateDeleted {
+			continue
+		}
+		cpu += instance.Resources.CPU
+		memoryMB += instance.Resources.MemoryMB
+	}
+	return cpu, memoryMB
+}
+
+func (w *world) jobByRequest(requestID int64) *simJob {
+	for _, job := range w.jobs {
+		if job.requestID == requestID {
+			return job
+		}
+	}
+	return nil
+}
+
+func (w *world) runnerBusy(name string) bool {
+	for _, job := range w.jobs {
+		if job.runner == name && (job.status == jobAcquired || job.status == jobRunning) {
+			return true
+		}
+	}
+	return false
+}
+
+// run executes the whole trace and returns every property violation observed.
+func (w *world) run() []finding {
+	for w.tick = 1; w.tick <= w.trace.Ticks; w.tick++ {
+		w.now = simEpoch.Add(time.Duration(w.tick) * simTick)
+		w.applyTraceEvents()
+		w.advancePhysics()
+		w.produceMessages()
+		w.deliverMessages()
+		w.deliverSnapshots()
+		observation := w.reconcile()
+		w.executeOperations()
+		w.observations = append(w.observations, observation)
+		if w.check(observation) {
+			return w.findings
+		}
+	}
+	return w.findings
+}
+
+// check evaluates the property set in order and reports whether the run must
+// stop. A DOCUMENTED defect (ADR 0031's findings table) is recorded and ends the
+// tick's evaluation without ending the run, so a known hole neither fails the
+// sweep nor masks the properties it would otherwise cascade into. Anything else
+// stops the run immediately with its counterexample.
+func (w *world) check(observation tickObservation) bool {
+	for _, evaluate := range w.checkers {
+		results := evaluate(w, observation)
+		if len(results) == 0 {
+			continue
+		}
+		item := results[0]
+		if !knownFinding(item) {
+			w.findings = append(w.findings, item)
+			return true
+		}
+		if _, seen := w.known[item.Signature+string(item.Kind)]; !seen {
+			w.known[item.Signature+string(item.Kind)] = item
+		}
+		break
+	}
+	return len(w.findings) > 0
+}
+
+// reconcile is the control plane under test: the real engine tick, which
+// observes inventory, plans, and commits through the real durable store.
+func (w *world) reconcile() tickObservation {
+	// The inventory is read BEFORE the engine reads it, not after: nothing in
+	// this sequential world mutates in between, so both reads are the same
+	// snapshot, and a property oracle must judge a plan against the state it was
+	// built from rather than against the state it just created.
+	instances, host := w.engine.Inventory.Observe(w.ctx)
+	result, err := w.engine.Tick(w.ctx)
+	return tickObservation{
+		Tick: w.tick, Now: w.now, Plan: result.Plan, Applied: result.Applied, Err: err,
+		Demands: result.Demands, Instances: instances.Value, InstancesUsable: instances.Usable(),
+		Host: host.Value, HostUsable: host.Usable(),
+	}
+}
+
+// executeOperations claims durable outbox work and walks the real instance
+// lifecycle one legal edge per tick, validated by the durable store's own
+// transition guard.
+func (w *world) executeOperations() {
+	claimed, err := w.store.Claim(w.ctx, simOwner, 8, w.now, time.Hour)
+	if err != nil {
+		w.record(findingStoreError, fmt.Sprintf("claim operations: %v", err))
+		return
+	}
+	for _, operation := range claimed {
+		delay := 0
+		switch operation.Kind {
+		case lifecycle.OperationProvision:
+			delay, w.slowBootNext = w.slowBootNext, 0
+		case lifecycle.OperationDrain:
+			if w.wedgeNextDrain > 0 {
+				w.wedgedDrain[operation.ResourceID], w.wedgeNextDrain = w.wedgeNextDrain, 0
+			}
+		}
+		w.claimed[operation.ID] = &simOperation{operation: operation, instance: operation.ResourceID, remaining: delay}
+	}
+	for _, id := range sortedOperationIDs(w.claimed) {
+		w.stepOperation(w.claimed[id])
+	}
+}
+
+func sortedOperationIDs(claimed map[string]*simOperation) []string {
+	ids := make([]string, 0, len(claimed))
+	for id := range claimed {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// stepOperation advances one claimed operation by a single lifecycle edge.
+func (w *world) stepOperation(pending *simOperation) {
+	if pending.remaining > 0 {
+		pending.remaining--
+		return
+	}
+	instance, err := w.store.Instance(w.ctx, pending.instance)
+	if err != nil {
+		w.record(findingStoreError, fmt.Sprintf("read instance %s: %v", pending.instance, err))
+		return
+	}
+	next, done := w.nextLifecycleState(instance)
+	if next != "" {
+		if !w.advance(instance, next) {
+			return
+		}
+	}
+	if !done {
+		return
+	}
+	if _, err := w.store.Complete(w.ctx, pending.operation.ID, simOwner, pending.operation.EffectKey, w.now); err != nil {
+		w.record(findingStoreError, fmt.Sprintf("complete %s: %v", pending.operation.ID, err))
+		return
+	}
+	delete(w.claimed, pending.operation.ID)
+}
+
+// nextLifecycleState mirrors lifecycle.ProvisionExecutor and
+// lifecycle.DrainExecutor edge for edge.
+//
+// Two details matter and are deliberately not simplified. First, the job is
+// acquired at the reachable -> registering edge, exactly where production calls
+// AcquireAndGenerateJIT: until then GitHub still counts the job Available, which
+// is the whole re-planning window. Second, provisioning ends in ASSIGNED, not
+// online_idle -- a JIT runner is created bound to its request -- so online_idle
+// is only ever reached by the durable demand projection when a broker event
+// overtakes registration.
+//
+// A wedged drain stays in draining: the 2026-07-25 shape, where GitHub refused to
+// deregister a runner it had brokered another job to.
+func (w *world) nextLifecycleState(instance operations.Instance) (operations.State, bool) {
+	switch instance.State {
+	case operations.StatePlanned:
+		w.vms[instance.ID] = true
+		return operations.StateCloning, false
+	case operations.StateCloning:
+		return operations.StateBooting, false
+	case operations.StateBooting:
+		return operations.StateReachable, false
+	case operations.StateReachable:
+		// An acquisition that returns nothing still generates a JIT runner: the VM
+		// registers and then waits for work GitHub will never send, which is
+		// precisely the ghost-demand runner that "registered online but never went
+		// busy" in the 2026-08-01 incident.
+		w.acquireJob(instance)
+		return operations.StateRegistering, false
+	case operations.StateRegistering:
+		return operations.StateAssigned, true
+	case operations.StateOnlineIdle:
+		// Reached only when a projection overtook registration. The provisioning
+		// operation is finished either way.
+		return "", true
+	case operations.StateDraining:
+		if w.wedgedDrain[instance.ID] > 0 {
+			return "", false
+		}
+		return operations.StateDeregistering, false
+	case operations.StateDeregistering:
+		return operations.StateStopping, false
+	case operations.StateStopping:
+		delete(w.vms, instance.ID)
+		w.releaseRunner(instance.ID)
+		return operations.StateDeleted, true
+	case operations.StateDeleted, operations.StateFailed:
+		// A terminal instance can carry a second operation for the same effect --
+		// a scheduler recovery drain beside the demand-event drain, for instance.
+		// operation_effects already made the physical effect idempotent, so the
+		// straggler completes as the acknowledged no-op production performs.
+		return "", true
+	default:
+		// Assigned or running: the drain operation waits for the job to end.
+		return "", false
+	}
+}
+
+// releaseRunner ends whatever the broker had brokered to a VM that no longer
+// exists. A job that never started returns to the queue, which is precisely how
+// GitHub re-advertises work whose runner disappeared.
+func (w *world) releaseRunner(name string) {
+	for _, job := range w.jobs {
+		if job.runner != name {
+			continue
+		}
+		job.runner = ""
+		switch job.status {
+		case jobAcquired, jobRunning:
+			job.status = jobQueued
+			job.announced = map[operations.DemandEventKind]bool{operations.DemandJobAvailable: true}
+		case jobQueued, jobDone, jobCancelled:
+		}
+	}
+}
+
+func (w *world) advance(instance operations.Instance, next operations.State) bool {
+	updated, err := w.store.Advance(w.ctx, lifecycle.StateChange{InstanceID: instance.ID,
+		ExpectedState: instance.State, ExpectedVersion: instance.Version, NextState: next})
+	if err != nil {
+		w.record(findingStoreError, fmt.Sprintf("advance %s %s->%s: %v", instance.ID, instance.State, next, err))
+		return false
+	}
+	w.enteredAt[stateKey(updated)] = w.now
+	return true
+}
+
+func (w *world) record(kind findingKind, detail string) {
+	w.findings = append(w.findings, finding{Kind: kind, Tick: w.tick, Detail: detail})
+}

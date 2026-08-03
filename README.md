@@ -292,4 +292,4 @@ authority long enough to build and verify its successor.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — threat model and secret handling
 - [`docs/TESTING.md`](docs/TESTING.md) · [`docs/RELEASING.md`](docs/RELEASING.md) — verification layers, release process
 - [`docs/FLEET_ARCHITECTURE_PLAN.md`](docs/FLEET_ARCHITECTURE_PLAN.md) — target architecture, SLOs, sequencing
-- [`docs/adr/`](docs/adr) — 26 architecture decision records
+- [`docs/adr/`](docs/adr) — 31 architecture decision records

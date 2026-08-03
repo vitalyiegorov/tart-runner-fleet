@@ -41,6 +41,7 @@ all changes as safety critical.
 - `internal/discharge`: the one guarded operator mutation and its ordering rules.
 - `internal/telemetry`: coherent status, health, readiness, and metrics.
 - `tests/{contract,integration,replay,chaos}`: cross-package safety evidence.
+- `tests/simulation`: deterministic simulation of the whole fleet (ADR 0031).
 - `docs/adr`: decisions that must be updated when architecture changes.
 
 ## Agent inspection recipe

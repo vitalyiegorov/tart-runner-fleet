@@ -112,6 +112,12 @@ jobs:
           cache: false
       - name: Shuffled unit, contract, integration, replay, and chaos tests
         run: make unit
+      # A bounded seed range of the deterministic fleet simulation (ADR 0031).
+      # `make unit` already runs its default budget; this widens it to roughly a
+      # minute of wall clock, which is what a review can afford. The nightly
+      # sweep in nightly-simulation.yml explores the rest.
+      - name: Bounded deterministic fleet simulation
+        run: go test -count=1 -timeout 10m ./tests/simulation -run TestSimFuzz -seeds=80 -sim-ticks=200
       - name: Upload exact coverage evidence
         if: always() && hashFiles('coverage.out') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
