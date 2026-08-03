@@ -98,6 +98,31 @@ The reservation contract is preserved, as in ADR 0017 and ADR 0029, by
 **ordering, not by idleness**: the reserved head is re-checked first on every
 later tick, so it wins the first vector large enough for it.
 
+### Amendment 2026-08-03: macOS admission enforces the cap it is charged for
+
+The slack arithmetic above rests on an assumption this record stated but did not
+enforce: that `RepoCaps` bounds every platform, because `activeRepoCounts`
+charges every platform. It did not. `appendMacSpawns` — the single function every
+macOS spawn in the planner is emitted by, across the head branch, the mixed
+remainder, both handoff waves, and the exclusive path — bounded admission by the
+resource envelope and by the profile's `MaxActive`, and read `Config.RepoCaps`
+nowhere. A repository's cap bounded its Linux work and not its macOS work, so
+`slack = cap - occupied - 1` set aside a slot that a later macOS spawn could take
+anyway. Deterministic simulation found the resulting over-cap occupancy on 11 of
+150 seeds (ADR 0031, finding 2).
+
+`appendMacSpawns` now applies the same cap the Linux allocator applies, against
+the same occupancy every other pass reads: `activeRepoCounts` over live
+instances plus this plan's own spawns (`appendPlannedSpawns`). A capped
+repository is SKIPPED rather than ending the pass — every candidate there shares
+one profile vector, so an exhausted envelope ends admission but an exhausted cap
+only ends that repository's turn, and the next repository's work takes the
+vector. That is what `exactSelect` already does for Linux.
+
+The reserved-slack arithmetic is unchanged and is now sound: a slot the head sets
+aside cannot be taken by a platform that ignores the cap, because no such
+platform remains.
+
 ## Consequences
 
 The pass is strictly more permissive than ADR 0029 in exactly one direction —
