@@ -230,7 +230,7 @@ func (s *Store) DemandRecord(ctx context.Context, scaleSetID, requestID int64) (
 	if scaleSetID <= 0 || requestID <= 0 {
 		return operations.DemandRecord{}, operations.ErrInvalid
 	}
-	return scanDemand(s.db.QueryRowContext(ctx, `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at
+	return scanDemand(s.dbRow(ctx, "inbox.demand.lookup", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at
 		FROM runner_demands WHERE scale_set_id=? AND runner_request_id=?`, scaleSetID, requestID))
 }
 
@@ -281,7 +281,7 @@ func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event 
 			}
 		}
 		if instance.ID != "" {
-			instance, err = s.alignRunnerDemand(ctx, instance, instances, repo, record.RunnerRequestID)
+			instance, err = s.alignRunnerDemand(ctx, instance, instances, record)
 			if err != nil {
 				return err
 			}
@@ -306,13 +306,28 @@ func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event 
 }
 
 // alignRunnerDemand reconciles the reservation used to provision a JIT runner
-// with GitHub's authoritative RunnerName assignment. Scale sets may match two
-// acquired requests to the opposite registered runners, so updating only the
-// named runner would duplicate one request and leave the displaced runner with
-// an unsafe stale identity. Swapping both scheduling identities atomically
-// preserves the one-to-one mapping while ownership signatures remain immutable.
-func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instance, instances []operations.Instance, repo string, requestID int64) (operations.Instance, error) {
-	if target.ID == "" || repo == "" || requestID <= 0 {
+// with GitHub's authoritative RunnerName assignment. GitHub decides which of a
+// scale set's queued requests a registered runner executes; the fleet only
+// decides which request justified spawning the VM. When those two disagree,
+// GitHub wins — it is the party that actually dispatched the work — and the
+// durable binding is moved to what it dispatched.
+//
+// Two disagreements are reachable, and they need different repairs:
+//
+//   - Both requests were acquired, by one VM each, and the broker matched them
+//     to the opposite runners. Updating only the named runner would duplicate one
+//     request and leave the displaced runner with an unsafe stale identity, so
+//     both scheduling identities are swapped atomically (ADR 0016).
+//   - Only the target's own request was acquired, and the runner was handed a
+//     SIBLING that no VM incarnates. There is nothing to swap with, so the target
+//     is rebound to the sibling and its former demand returns to the queue
+//     (ADR 0033, issue #123).
+//
+// Ownership signatures stay immutable in both, so nothing about the VM's
+// provenance, its name, or its spawn identity is rewritten.
+func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instance, instances []operations.Instance, record operations.DemandRecord) (operations.Instance, error) {
+	repo, requestID := record.Repo(), record.RunnerRequestID
+	if target.ID == "" || record.Owner == "" || record.Repository == "" || requestID <= 0 {
 		return operations.Instance{}, operations.ErrInvalid
 	}
 	var source operations.Instance
@@ -324,11 +339,11 @@ func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instanc
 			source = candidate
 		}
 	}
-	if source.ID == "" {
-		return operations.Instance{}, operations.ErrUncertain
-	}
-	if source.ID == target.ID {
+	if source.ID == target.ID && source.ID != "" {
 		return target, nil
+	}
+	if source.ID == "" {
+		return s.rebindRunnerDemand(ctx, target, record)
 	}
 	if source.Platform != target.Platform || source.Profile != target.Profile || source.Route != target.Route || source.Resources != target.Resources {
 		return operations.Instance{}, operations.ErrConflict
@@ -374,6 +389,119 @@ func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instanc
 	}
 	targetNext.UpdatedAt = now
 	return targetNext, nil
+}
+
+// rebindRunnerDemand moves a registered runner's durable binding onto the
+// SIBLING request GitHub actually dispatched to it, and releases the request the
+// fleet spawned it for back to the queue.
+//
+// This is the 2026-08-02 shape of issue #123. The broker handed
+// `trf-xl-25a374b60f46dafe` "Maestro (bare)" while the fleet had bound it to
+// "Maestro (expo)" — two jobs of one workflow run, dispatched 41 ms apart — and
+// no VM had acquired the sibling, so there was no second instance to swap with.
+// The binding then said one thing and GitHub said another, permanently:
+// `JobInactive` reads the BOUND demand and reported an idle runner, `RunnerBusy`
+// reads the RUNNER and reported a live job, and the fleet planned a recovery
+// drain every idle-runner deadline and aborted it every time (ADR 0028). The
+// released demand meanwhile could never be respawned, because its own instance
+// still incarnated it.
+//
+// Rebinding makes the binding say what GitHub says, so both predicates read one
+// fact again. Three guards keep it fail-closed, and each one leaves the previous
+// ErrUncertain behaviour in place rather than guessing:
+//
+//   - The runner must exist in GitHub's world. Only a registered, working
+//     instance can have been dispatched to; a VM still cloning has no runner, and
+//     one already tearing down must not have work re-attached to it.
+//   - The dispatched row must be able to name a demand at all, so no rebind can
+//     write scheduling metadata the durable layer would refuse.
+//   - The released demand must show no work of its own ON THIS RUNNER. A bound
+//     demand already JobStarted or JobCompleted with this runner's name means the
+//     runner really did serve it, and releasing it would lose real work. The same
+//     statuses under a DIFFERENT runner's name are the opposite evidence — GitHub
+//     is running that job elsewhere — and releasing it is exactly right.
+//
+// The repository may change with the binding, and must: a scale set can serve
+// several repositories, and GitHub brokers across all of them. That is safe for
+// control routing — which is keyed on (repo, profile), lifecycle.SourceKey —
+// because the dispatched row arrived through this instance's own scale set, and
+// every repository whose demand a scale set delivers is one the fleet would have
+// spawned an instance into directly (reconcile.Controller takes the instance's
+// repository straight from the demand). A rebind can therefore only move an
+// instance to a repository it could already have been born in. The crossed
+// assignment above has swapped repositories since ADR 0016 for the same reason.
+//
+// The released demand's queue time is deliberately untouched: it is GitHub's
+// fact about a job that has genuinely never run, and ADR 0033 explains why
+// resetting it would both lie to the queue SLO and invert the aging guard of
+// ADR 0004.
+func (s *Store) rebindRunnerDemand(ctx context.Context, target operations.Instance, record operations.DemandRecord) (operations.Instance, error) {
+	if !rebindableRunnerState(target.State) {
+		return operations.Instance{}, operations.ErrUncertain
+	}
+	next := target
+	next.Repo, next.Demand = record.Repo(), record.DemandKey()
+	if next.Demand == target.Demand || !next.SchedulingMetadataValid() {
+		return operations.Instance{}, operations.ErrUncertain
+	}
+	released, err := s.DemandRecord(ctx, record.ScaleSetID, target.Demand.JobID)
+	if err != nil && !errors.Is(err, operations.ErrNotFound) {
+		return operations.Instance{}, err
+	}
+	if err == nil && released.RunnerName == target.ID &&
+		(released.Status == operations.DemandJobStarted || released.Status == operations.DemandJobCompleted) {
+		return operations.Instance{}, operations.ErrUncertain
+	}
+	// Both encodings are already known valid: the target came from the durable
+	// row and the rebound metadata was validated above, exactly as the swap
+	// relies on.
+	before, _ := encodeSchedulingMetadata(target)
+	after, _ := encodeSchedulingMetadata(next)
+	now := time.Now().UTC()
+	// The same compare-and-set the swap uses: state, version, and the exact prior
+	// metadata. A row that moved between the read and this write keeps its old
+	// binding and the next redelivery retries, which is what at-least-once
+	// delivery is for.
+	result, err := s.dbExec(ctx, "runner-demand.rebind", `UPDATE instances SET scheduling_metadata=?,updated_at=?
+		WHERE id=? AND state=? AND version=? AND scheduling_metadata=?`, after, now.UnixNano(), target.ID, target.State, target.Version, before)
+	if err != nil {
+		return operations.Instance{}, fmt.Errorf("rebind runner demand: %w", err)
+	}
+	changed, _ := result.RowsAffected()
+	if changed != 1 {
+		return operations.Instance{}, operations.ErrConflict
+	}
+	next.UpdatedAt = now
+	return next, nil
+}
+
+// rebindableRunnerState is the set of states in which an instance has a runner
+// GitHub can dispatch to, and no cleanup in flight.
+//
+// It starts at REACHABLE, not at registering, and that boundary is load-bearing.
+// ProvisionExecutor calls AcquireAndGenerateJIT on the reachable -> registering
+// edge, so the runner exists from the moment the acquisition returns, while the
+// durable row only advances afterwards. A broker message naming that runner can
+// and does arrive inside that window: the deterministic simulation reached it on
+// the very tick the runner came up, and a rebind refused there was never retried,
+// stranding the demand for the rest of the run.
+//
+// Everything earlier stays fail-closed because there is no runner to name yet —
+// a VM that has not booted cannot have been dispatched to. So does the teardown
+// chain, and so do the terminal states: work is never re-attached to an instance
+// that is being reclaimed.
+//
+// A rebind does not bump the row's version, exactly as the crossed-assignment
+// swap does not, so it cannot interfere with the provisioning executor's own
+// compare-and-set mid-flight.
+func rebindableRunnerState(state operations.State) bool {
+	switch state {
+	case operations.StateReachable, operations.StateRegistering, operations.StateOnlineIdle,
+		operations.StateAssigned, operations.StateRunning:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) projectDemandRank(ctx context.Context, instance operations.Instance, status operations.DemandEventKind) error {

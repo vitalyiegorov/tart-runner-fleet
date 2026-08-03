@@ -22,6 +22,14 @@ func demandEvent(kind operations.DemandEventKind, requestID int64) operations.De
 	}
 }
 
+// runnerDemandRecord is the durable demand row GitHub's authoritative
+// RunnerName assignment arrives on, shaped so DemandKey() reproduces exactly the
+// key runnerDemandInstance carries.
+func runnerDemandRecord(requestID int64) operations.DemandRecord {
+	return operations.DemandRecord{ScaleSetID: 1, RunnerRequestID: requestID, Status: operations.DemandJobStarted,
+		Owner: "owner", Repository: "repo", WorkflowRunID: 77, RunAttempt: 1}
+}
+
 func runnerDemandInstance(id string, requestID int64) operations.Instance {
 	return operations.Instance{
 		ID: id, Repo: "owner/repo", Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
@@ -627,28 +635,32 @@ func TestAlignRunnerDemandFailsClosedAndRollsBack(t *testing.T) {
 	target := runnerDemandInstance("runner-beta", 102)
 
 	store := testStore(t)
-	if _, err := store.alignRunnerDemand(ctx, operations.Instance{}, nil, "", 0); !errors.Is(err, operations.ErrInvalid) {
+	if _, err := store.alignRunnerDemand(ctx, operations.Instance{}, nil, operations.DemandRecord{}); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("invalid alignment error = %v", err)
 	}
-	if _, err := store.alignRunnerDemand(ctx, target, []operations.Instance{target}, "owner/repo", 101); !errors.Is(err, operations.ErrUncertain) {
-		t.Fatalf("missing reservation error = %v", err)
+	// Nothing incarnates request 101, so alignment takes the ADR 0033 rebind
+	// path. This store holds no durable row for the target, so the
+	// compare-and-set matches nothing and the rebind fails closed instead of
+	// inventing a binding.
+	if _, err := store.alignRunnerDemand(ctx, target, []operations.Instance{target}, runnerDemandRecord(101)); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("unrepresented rebind error = %v", err)
 	}
-	if got, err := store.alignRunnerDemand(ctx, source, []operations.Instance{source}, "owner/repo", 101); err != nil || got.ID != source.ID {
+	if got, err := store.alignRunnerDemand(ctx, source, []operations.Instance{source}, runnerDemandRecord(101)); err != nil || got.ID != source.ID {
 		t.Fatalf("already aligned runner = %#v, %v", got, err)
 	}
 	duplicate := source
 	duplicate.ID = "runner-duplicate"
-	if _, err := store.alignRunnerDemand(ctx, target, []operations.Instance{source, duplicate, target}, "owner/repo", 101); !errors.Is(err, operations.ErrConflict) {
+	if _, err := store.alignRunnerDemand(ctx, target, []operations.Instance{source, duplicate, target}, runnerDemandRecord(101)); !errors.Is(err, operations.ErrConflict) {
 		t.Fatalf("duplicate reservation error = %v", err)
 	}
 	incompatible := target
 	incompatible.Profile = "builder"
-	if _, err := store.alignRunnerDemand(ctx, incompatible, []operations.Instance{source, incompatible}, "owner/repo", 101); !errors.Is(err, operations.ErrConflict) {
+	if _, err := store.alignRunnerDemand(ctx, incompatible, []operations.Instance{source, incompatible}, runnerDemandRecord(101)); !errors.Is(err, operations.ErrConflict) {
 		t.Fatalf("incompatible runner error = %v", err)
 	}
 	invalidSource, invalidTarget := source, target
 	invalidSource.Resources.CPU, invalidTarget.Resources.CPU = 0, 0
-	if _, err := store.alignRunnerDemand(ctx, invalidTarget, []operations.Instance{invalidSource, invalidTarget}, "owner/repo", 101); !errors.Is(err, operations.ErrConflict) {
+	if _, err := store.alignRunnerDemand(ctx, invalidTarget, []operations.Instance{invalidSource, invalidTarget}, runnerDemandRecord(101)); !errors.Is(err, operations.ErrConflict) {
 		t.Fatalf("invalid scheduling metadata error = %v", err)
 	}
 
@@ -685,7 +697,7 @@ func TestAlignRunnerDemandFailsClosedAndRollsBack(t *testing.T) {
 				}
 				return nil
 			}
-			if _, err := pairStore.alignRunnerDemand(ctx, beta, instances, "owner/repo", alpha.Demand.JobID); err == nil {
+			if _, err := pairStore.alignRunnerDemand(ctx, beta, instances, runnerDemandRecord(alpha.Demand.JobID)); err == nil {
 				t.Fatalf("fault %s was ignored", point)
 			}
 			pairStore.injectFault = nil
@@ -699,7 +711,7 @@ func TestAlignRunnerDemandFailsClosedAndRollsBack(t *testing.T) {
 			if _, err := pairStore.db.ExecContext(ctx, `UPDATE instances SET version=version+1 WHERE id=?`, staleID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := pairStore.alignRunnerDemand(ctx, beta, instances, "owner/repo", alpha.Demand.JobID); !errors.Is(err, operations.ErrConflict) {
+			if _, err := pairStore.alignRunnerDemand(ctx, beta, instances, runnerDemandRecord(alpha.Demand.JobID)); !errors.Is(err, operations.ErrConflict) {
 				t.Fatalf("stale runner error = %v", err)
 			}
 			alphaAfter, _ := pairStore.Instance(ctx, source.ID)
@@ -898,6 +910,9 @@ func TestProjectDemandEventUsesDurableRecordAndUniqueOwnedInstance(t *testing.T)
 			t.Fatalf("named completion after VM deletion = %v", err)
 		}
 	}
+	// A named runner whose request no instance incarnates is the sibling handoff
+	// of issue #123: the binding follows GitHub (ADR 0033) instead of failing
+	// closed forever, and the demand it held is released to the queue.
 	misalignedStore := testStore(t)
 	misaligned := demandEvent(operations.DemandJobStarted, 93)
 	misaligned.RunnerName = "named-target"
@@ -907,8 +922,25 @@ func TestProjectDemandEventUsesDurableRecordAndUniqueOwnedInstance(t *testing.T)
 	if err := misalignedStore.CreateInstance(ctx, runnerDemandInstance(misaligned.RunnerName, 94)); err != nil {
 		t.Fatal(err)
 	}
-	if err := misalignedStore.ProjectDemandEvent(ctx, 7, misaligned); !errors.Is(err, operations.ErrUncertain) {
-		t.Fatalf("named runner without reservation error = %v", err)
+	if err := misalignedStore.ProjectDemandEvent(ctx, 7, misaligned); err != nil {
+		t.Fatalf("sibling handoff must rebind the runner: %v", err)
+	}
+	if rebound, err := misalignedStore.Instance(ctx, misaligned.RunnerName); err != nil || rebound.Demand.JobID != 93 {
+		t.Fatalf("named runner kept a demand GitHub did not give it: %#v, %v", rebound, err)
+	}
+	// The same evidence against an instance already tearing down stays fail-closed:
+	// a dying runner never has work re-attached to it.
+	drainingStore := testStore(t)
+	if _, err := drainingStore.ApplyDemandBatch(ctx, 7, 1, []operations.DemandEvent{misaligned}); err != nil {
+		t.Fatal(err)
+	}
+	draining := runnerDemandInstance(misaligned.RunnerName, 94)
+	draining.State = operations.StateDraining
+	if err := drainingStore.CreateInstance(ctx, draining); err != nil {
+		t.Fatal(err)
+	}
+	if err := drainingStore.ProjectDemandEvent(ctx, 7, misaligned); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("a draining runner must not be rebound: %v", err)
 	}
 
 	duplicateStore, duplicate := newStoreWithDemand(t, operations.DemandJobAssigned)

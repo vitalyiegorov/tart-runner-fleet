@@ -75,6 +75,17 @@ type worldConfig struct {
 	// QuiesceQ bounds property (f): after the demand stream stops the fleet must
 	// be empty within this many ticks.
 	QuiesceQ int
+	// StrandedG bounds property (h): a demand whose own instance is executing a
+	// DIFFERENT job may stay in that state at most this many ticks. It is a
+	// delivery budget, not a tolerance — the broker message that names the real
+	// assignment may be delayed by up to six ticks, and the fleet cannot act on
+	// evidence it has not received.
+	StrandedG int
+	// DrainChurnN bounds property (i): an instance may have at most this many
+	// recovery drains aborted by execution-time evidence. One is a genuine race
+	// between planning and execution; a second is a loop, because aborting
+	// restarts the very deadline that planned it.
+	DrainChurnN int
 }
 
 func simProfiles() map[domain.ProfileID]domain.Profile {
@@ -144,6 +155,8 @@ func defaultWorld() worldConfig {
 		LivenessK:   12,
 		StarvationN: 3,
 		QuiesceQ:    40,
+		StrandedG:   10,
+		DrainChurnN: 1,
 	}
 }
 
@@ -292,10 +305,22 @@ type world struct {
 	messageDelay     int
 	delayWindow      int
 	slowBootNext     int
+	longJobNext      int
 	wedgeNextDrain   int
 	reassignSiblings bool
-	stalledRunner    map[string]bool
-	wedgedDrain      map[string]int
+	// substituteSiblings arms the issue #123 handoff: the broker gives a
+	// registered runner a QUEUED sibling instead of the request its own VM
+	// acquired. Latched like reassignSiblings, so it fires at the first
+	// opportunity rather than needing the trace to name the exact tick.
+	substituteSiblings bool
+	// substitutions counts how many times it actually happened, so a pinned
+	// incident can prove the harness reached the state it claims to model.
+	substitutions int
+	// drainAborts counts, per instance, the recovery drains whose premise
+	// execution-time evidence disproved. It is property (i)'s whole measurement.
+	drainAborts   map[string]int
+	stalledRunner map[string]bool
+	wedgedDrain   map[string]int
 	// arrivalsStopped marks the tick after which no new job may be created, which
 	// is what makes property (f) meaningful.
 	arrivalsStopped bool
@@ -330,9 +355,16 @@ type simJob struct {
 	binding   int
 	event     string
 	queuedAt  time.Time
-	status    jobStatus
-	runner    string
-	remaining int
+	// startedAt is when work actually began on a runner. queuedAt to startedAt is
+	// the wait a GitHub user sees, and the only honest measure of whether a demand
+	// the fleet released back to the queue was ever served.
+	startedAt time.Time
+	// finishedAt is when the runner handed the result back, which is what frees
+	// the capacity the next job waits for.
+	finishedAt time.Time
+	status     jobStatus
+	runner     string
+	remaining  int
 	// announced records which broker events have already been produced, so a
 	// redelivery is a duplicate rather than a new fact.
 	announced map[operations.DemandEventKind]bool
@@ -391,7 +423,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		nextRunID: 1_000, nextReq: 500_000, nextMsgID: 1,
 		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, claimed: map[string]*simOperation{},
 		delivered: map[int]*simMessage{}, stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
-		known: map[string]finding{},
+		drainAborts: map[string]int{}, known: map[string]finding{},
 	}
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
 		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute}
@@ -433,6 +465,17 @@ func (w *world) jobByRequest(requestID int64) *simJob {
 		}
 	}
 	return nil
+}
+
+// runnerExecuting is GitHub's own answer to "may this runner be removed": only a
+// job that has actually started blocks removal.
+func (w *world) runnerExecuting(name string) bool {
+	for _, job := range w.jobs {
+		if job.runner == name && job.status == jobRunning {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *world) runnerBusy(name string) bool {
@@ -608,6 +651,25 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		if w.wedgedDrain[instance.ID] > 0 {
 			return "", false
 		}
+		if w.drainAbortsNow(instance) {
+			// DrainExecutor.abort: the drain's planning-time premise is disproven,
+			// so the instance returns to Running -- the conservative busy state --
+			// and the operation completes as an acknowledged no-op (ADR 0028).
+			w.drainAborts[instance.ID]++
+			return operations.StateRunning, true
+		}
+		if w.runnerExecuting(instance.ID) {
+			// GitHub refuses to deregister a runner that is EXECUTING a job, and the
+			// fleet's own durable evidence did not corroborate that refusal, so the
+			// stage fails and is retried rather than escalated. This is the
+			// 2026-07-25 kill loop, and it is why the busy-drain invariant survives
+			// even when planning-time evidence was wrong.
+			//
+			// An assigned-but-not-started runner is deliberately NOT refused: GitHub
+			// re-queues its job when the runner goes away, which is exactly what
+			// makes the stalled-assignment reclaim safe.
+			return "", false
+		}
 		return operations.StateDeregistering, false
 	case operations.StateDeregistering:
 		return operations.StateStopping, false
@@ -625,6 +687,71 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		// Assigned or running: the drain operation waits for the job to end.
 		return "", false
 	}
+}
+
+// drainAbortsNow mirrors lifecycle.DrainExecutor's execution-time re-checks
+// against the REAL durable evidence the production adapters read. It is
+// deliberately not answered from the simulator's own ground truth: the
+// disagreement issue #123 is about lives precisely between these queries, and an
+// oracle that resolved it by cheating could not reproduce it.
+//
+// There are two gates, in the executor's own order.
+//
+// First the drain phase re-verifies its own planning premise, on the key that
+// premise was derived from:
+//
+//   - A stalled assignment aborts when the BOUND demand shows a job that started
+//     (ControlRouter.JobStarted).
+//   - A lingering runner aborts when the BOUND demand shows a job executing right
+//     now (ControlRouter.JobActive).
+//   - Every other drain -- the event drain the demand projection issues -- aborts
+//     on RUNNER-keyed evidence (ControlRouter.RunnerBusy), because GitHub may have
+//     handed this runner a job the fleet is not waiting on.
+//
+// Then, and only then, the drain reaches GitHub, and githubRefusesDeregister is
+// the second gate. This is the edge that made the 2026-08-02 churn a LOOP rather
+// than a kill: the bound demand showed nothing started, so the stalled-assignment
+// guard passed and the executor really did try to deregister a runner that was
+// executing a sibling. GitHub refused (`runner_busy`), the runner-keyed re-check
+// confirmed it, and the drain aborted (executor.go's deregister-refusal branch).
+//
+// The stopped and inactive recoveries key on power and registration rather than
+// on demand and are unreachable here: no fault powers a VM off.
+func (w *world) drainAbortsNow(instance operations.Instance) bool {
+	scaleSet := w.storeKeyFor(instance.Profile)
+	if scaleSet <= 0 {
+		return false
+	}
+	switch instance.DrainPhase {
+	case operations.DrainPhaseStalledAssignment, operations.DrainPhaseLingeringRunner:
+		record, err := w.store.DemandRecord(w.ctx, scaleSet, instance.Demand.JobID)
+		if err == nil && record.Status == operations.DemandJobStarted {
+			return true
+		}
+		if err == nil && instance.DrainPhase == operations.DrainPhaseStalledAssignment &&
+			record.Status == operations.DemandJobCompleted {
+			return true
+		}
+	case operations.DrainPhaseStoppedRecovery, operations.DrainPhaseInactiveRecovery:
+		return false
+	}
+	// verifyRunnerIdle for an event drain, and the deregister refusal for a
+	// recovery drain, ask the same runner-keyed question of the same durable
+	// evidence. Runner-active evidence implies GitHub would refuse anyway, so one
+	// query answers both.
+	busy, err := w.store.RunnerActiveJob(w.ctx, scaleSet, instance.ID)
+	return err == nil && busy
+}
+
+// storeKeyFor resolves the durable scale-set key an instance's demand lives
+// under, which is the same routing lifecycle.ControlRouter performs.
+func (w *world) storeKeyFor(profile domain.ProfileID) int64 {
+	for _, binding := range w.cfg.Bindings {
+		if binding.Profile.ID == profile {
+			return binding.StoreKey
+		}
+	}
+	return 0
 }
 
 // releaseRunner ends whatever the broker had brokered to a VM that no longer

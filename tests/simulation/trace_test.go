@@ -64,10 +64,17 @@ const (
 	eventHostProbeStale  eventKind = "host_probe_stale"
 	eventTartUnavailable eventKind = "tart_unavailable"
 	eventSlowBoot        eventKind = "slow_boot"
+	// eventLongJob makes the next workflow job to start run for longer than a
+	// recovery deadline, which is what a real test suite does.
+	eventLongJob         eventKind = "long_job"
 	eventStalledRunner   eventKind = "stalled_runner"
 	eventWedgedDrain     eventKind = "wedged_drain"
 	eventSiblingReassign eventKind = "sibling_reassign"
-	eventStopArrivals    eventKind = "stop_arrivals"
+	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
+	// sibling instead of the request its own VM acquired, and that request goes
+	// back to the queue with nobody to run it.
+	eventSiblingSubstitute eventKind = "sibling_substitute"
+	eventStopArrivals      eventKind = "stop_arrivals"
 )
 
 func (t simTrace) String() string {
@@ -130,8 +137,8 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	}
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
-		eventSlowBoot, eventStalledRunner, eventWedgedDrain, eventSiblingReassign, eventSilentCancel,
-		eventLoudCancel}
+		eventSlowBoot, eventLongJob, eventStalledRunner, eventWedgedDrain, eventSiblingReassign,
+		eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
@@ -196,12 +203,18 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.tartUnavailable = event.Count
 	case eventSlowBoot:
 		w.slowBootNext = event.Count
+	case eventLongJob:
+		// Scaled to deadlines: Count of 6 is roughly one assignment deadline, so
+		// the generator reaches jobs that outlive one and jobs that do not.
+		w.longJobNext = event.Count * 6
 	case eventStalledRunner:
 		w.stallRunner(event.Count)
 	case eventWedgedDrain:
 		w.wedgeDrain(event.Count)
 	case eventSiblingReassign:
 		w.reassignSiblings = true
+	case eventSiblingSubstitute:
+		w.substituteSiblings = true
 	}
 }
 

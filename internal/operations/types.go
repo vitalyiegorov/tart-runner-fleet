@@ -348,6 +348,27 @@ type DemandRecord struct {
 	UpdatedAt       time.Time
 }
 
+// Repo is the durable row's repository slug in the one form the scheduler and
+// the instance row both use.
+func (r DemandRecord) Repo() string { return r.Owner + "/" + r.Repository }
+
+// DemandKey is the scheduling identity of this durable row. It is THE
+// derivation: the queue the scheduler plans from and any instance bound to a
+// demand must name the same key byte for byte, or a demand a live instance
+// already incarnates is invisible to app.plannableDemands and gets admitted a
+// second time. A missing run attempt normalizes to the first attempt, because
+// GitHub omits the field for it.
+//
+// The key is only meaningful when Validate passes; callers that build a binding
+// from it must check, since an incomplete row cannot name an incarnation.
+func (r DemandRecord) DemandKey() domain.DemandKey {
+	attempt := r.RunAttempt
+	if attempt <= 0 {
+		attempt = 1
+	}
+	return domain.DemandKey{Repo: r.Repo(), RunID: r.WorkflowRunID, Attempt: attempt, JobID: r.RunnerRequestID}
+}
+
 // DemandStatistics is GitHub's authoritative point-in-time view of one
 // runner scale set. It bounds admission but never erases durable demand.
 type DemandStatistics struct {

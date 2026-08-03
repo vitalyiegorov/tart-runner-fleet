@@ -720,21 +720,42 @@ func (s *Store) Instance(ctx context.Context, id string) (operations.Instance, e
 	return scanInstance(s.db.QueryRowContext(ctx, `SELECT id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at FROM instances WHERE id=?`, id))
 }
 
-// SpawnGeneration counts the demand's prior terminal incarnations from durable
-// state. A completed or failed attempt leaves a deleted/failed instance row (and
-// its durable operations) behind as a tombstone; the count lets the controller
-// derive a fresh, deterministic identity for the next spawn that supersedes
-// those tombstones. Only terminal rows are counted, so a still-live incarnation
-// keeps colliding and a genuine double-spawn hard-fails. The count is stable
-// within a tick: the fleet is a single writer and there is at most one live
-// incarnation per demand, so no concurrent worker transition can advance it
-// while a respawn is being planned. The demand is addressed through
+// SpawnGeneration counts the demand's prior SPENT incarnations from durable
+// state. A spent incarnation is one that can never execute this demand again, so
+// its rows are a tombstone the next spawn's content-addressed identity must
+// supersede instead of colliding with. Two things spend an incarnation, and both
+// are exactly the conditions under which domain.Instance.IncarnatesDemand stops
+// holding the demand — the same seam app.plannableDemands lets the demand back
+// into the queue on, so identity and admission can never disagree:
+//
+//   - It reached a terminal state. A completed or failed attempt leaves a
+//     deleted/failed instance row and its durable clone operation behind.
+//   - It was REBOUND. GitHub handed its runner a different job from the same
+//     scale set, the durable binding followed (ADR 0033), and the demand it was
+//     spawned for went back to the queue with no incarnation at all. The row stays
+//     live and busy, and its immutable ownership signature still names the demand
+//     it was spawned for — which is precisely why the next spawn for that demand
+//     re-derived a byte-identical instance name and wedged on the instances
+//     primary key until this counted it.
+//
+// A still-live incarnation that still holds its demand is deliberately NOT
+// counted, so a genuine double-spawn hard-fails. Neither is a live row that
+// declares no binding at all — a legacy schema-0 row, or metadata json_extract
+// cannot read: an undeclared binding is not evidence of a rebind, and an
+// identity that is not provably free must keep colliding.
+//
+// The count is stable within a tick: the fleet is a single writer and there is at
+// most one live incarnation per demand. The demand is addressed through
 // ownership.resource_id, matching how recovery migrations already key ownership.
 func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (int, error) {
 	var generation int
 	err := s.dbRow(ctx, "instances.generation", `SELECT COUNT(*) FROM instances
-		WHERE state IN (?,?) AND json_extract(ownership,'$.resource_id')=?`,
-		operations.StateDeleted, operations.StateFailed, demand.String()).Scan(&generation)
+		WHERE json_extract(ownership,'$.resource_id')=?
+		  AND (state IN (?,?)
+		       OR (json_extract(scheduling_metadata,'$.demand.JobID')>0
+		           AND (json_extract(scheduling_metadata,'$.demand.JobID')<>?
+		                OR json_extract(scheduling_metadata,'$.demand.RunID')<>?)))`,
+		demand.String(), operations.StateDeleted, operations.StateFailed, demand.JobID, demand.RunID).Scan(&generation)
 	if err != nil {
 		return 0, fmt.Errorf("count spawn generation: %w", err)
 	}

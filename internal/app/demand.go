@@ -460,12 +460,12 @@ func convertDemandRecords(binding Binding, records []operations.DemandRecord) []
 		if createdAt.IsZero() {
 			createdAt = record.QueueTime
 		}
-		attempt := record.RunAttempt
-		if attempt <= 0 {
-			attempt = 1
-		}
 		result = append(result, domain.Demand{
-			Key:       domain.DemandKey{Repo: record.Owner + "/" + record.Repository, RunID: record.WorkflowRunID, Attempt: attempt, JobID: record.RunnerRequestID},
+			// operations.DemandRecord.DemandKey is the single derivation shared with
+			// the durable rebind in the inbox: an instance bound to a demand and the
+			// queue entry for that demand must name one key, or plannableDemands
+			// cannot see that the demand is already incarnated.
+			Key:       record.DemandKey(),
 			CreatedAt: createdAt.UTC(), Profile: binding.Profile.ID, Route: binding.Profile.Route, Platform: binding.Profile.Platform,
 			Event: event(record.EventName), RunStatus: domain.RunQueued,
 		})

@@ -87,3 +87,8 @@ different keys and disagree by construction whenever GitHub hands a runner a
 sibling job from the same scale set, so a busy runner still attracts a recovery
 drain every idle-runner deadline and still aborts it. That is a design question
 about what evidence binds an instance to work, tracked separately.
+
+It was answered by [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md):
+the binding follows GitHub, so the two keys read one fact and no drain is planned
+for a working runner at all. The generation rule here is unchanged and still
+carries the aborts that remain legitimate.

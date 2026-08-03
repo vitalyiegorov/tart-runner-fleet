@@ -58,6 +58,7 @@ func (w *world) advancePhysics() {
 		w.wedgedDrain[id] = decay(remaining)
 	}
 	w.crossSiblingAssignments()
+	w.substituteQueuedSibling()
 	w.progressJobs()
 }
 
@@ -114,6 +115,62 @@ func (w *world) crossSiblingAssignments() {
 	}
 }
 
+// substituteQueuedSibling is GitHub giving a registered runner a job OTHER than
+// the one its own VM acquired, where that other job is still QUEUED — nobody
+// spawned a VM for it.
+//
+// This is the shape of the 2026-08-02 incident (issue #123) and it is materially
+// different from crossSiblingAssignments above. A cross swaps two acquired
+// requests, so every request still has exactly one instance and
+// sqlite.alignRunnerDemand can swap the two bindings back into agreement. A
+// substitution has no counterpart: the acquired request returns to the queue
+// unassigned, the runner executes a sibling no instance incarnates, and the
+// fleet's binding is left naming work that will never run on it.
+//
+// Only a job whose JobAssigned has not been announced can be substituted, for
+// the same reason a cross can only happen there: once the broker has told the
+// fleet who runs what, it does not take it back.
+func (w *world) substituteQueuedSibling() {
+	if !w.substituteSiblings {
+		return
+	}
+	for _, bound := range w.jobs {
+		if bound.status != jobAcquired || bound.runner == "" || bound.announced[operations.DemandJobAssigned] {
+			continue
+		}
+		sibling := w.queuedSiblingOf(bound)
+		if sibling == nil {
+			continue
+		}
+		sibling.runner, sibling.status = bound.runner, jobAcquired
+		// The acquired request goes back to being an ordinary queued job that
+		// GitHub still advertises, exactly as "Maestro (expo)" stayed JobAvailable
+		// for the whole incident.
+		bound.runner, bound.status = "", jobQueued
+		bound.announced = map[operations.DemandEventKind]bool{operations.DemandJobAvailable: true}
+		w.substituteSiblings = false
+		w.substitutions++
+		return
+	}
+}
+
+// queuedSiblingOf is the oldest queued job of the same scale set. The scale set
+// is GitHub's own brokering boundary and the only one that applies: a scale set
+// serves every repository configured against it, so a sibling handoff is not
+// confined to the workflow run, or even to the repository, that the runner's own
+// request came from.
+func (w *world) queuedSiblingOf(bound *simJob) *simJob {
+	for _, candidate := range w.jobs {
+		if candidate == bound || candidate.binding != bound.binding {
+			continue
+		}
+		if candidate.status == jobQueued && !candidate.silentCancel && candidate.runner == "" {
+			return candidate
+		}
+	}
+	return nil
+}
+
 // progressJobs starts acquired work and retires finished work. A stalled runner
 // never starts: its assignment ages in place, which is the 84-minute stalled
 // assignment the recovery deadline exists for.
@@ -125,11 +182,19 @@ func (w *world) progressJobs() {
 				continue
 			}
 			job.status = jobRunning
-			job.remaining = simJobTicks
+			job.startedAt = w.now
+			// Job duration is a property of the workflow, not of the fleet, and the
+			// harness modelled exactly one of them -- three virtual minutes, five
+			// times shorter than the assignment deadline. No job could therefore
+			// outlive a recovery deadline, which made the whole abort class of
+			// ADR 0028 unreachable and hid the churn of issue #123. A long job is
+			// the ordinary case for the maestro suites this fleet runs.
+			job.remaining = simJobTicks + w.longJobNext
+			w.longJobNext = 0
 		case jobRunning:
 			job.remaining--
 			if job.remaining <= 0 {
-				job.status = jobDone
+				job.status, job.finishedAt = jobDone, w.now
 			}
 		case jobQueued, jobDone, jobCancelled:
 		}
