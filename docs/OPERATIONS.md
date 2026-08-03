@@ -690,6 +690,11 @@ Compare the head profile's configured vector against the host capacity less the
   still frozen in this state with a demand that fits is a bug worth reporting;
   that is exactly the 2026-08-02 incident, where a `maestro` fitting the four
   free cores waited over an hour behind an `xl` head that could not use them.
+  Work in the head's **own** repository is admitted here too, but only up to the
+  slack its cap leaves once the head's own slot is set aside — so a repository
+  at its last free slot still lends nothing
+  ([ADR 0030](adr/0030-a-reserved-head-holds-one-repository-slot.md)). Read the
+  cap and the live instance count for that repository before calling it a wedge.
 - The reserved head **does fit** what is free: it is blocked by a non-resource
   gate, usually its repository cap. Its whole vector is then held for it and
   only the leftover is lent out, so a queued job larger than

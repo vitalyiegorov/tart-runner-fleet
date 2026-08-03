@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -333,22 +334,168 @@ func TestChargeReservedHeadIsExact(t *testing.T) {
 	}
 }
 
-// TestReservedRemainderDemandsExcludesOnlyTheReservedRepository pins the filter
-// itself: without a reservation nothing is dropped, with one exactly the
-// reserved head's repository is dropped and order is preserved.
-func TestReservedRemainderDemandsExcludesOnlyTheReservedRepository(t *testing.T) {
+// TestReservedRemainderDemandsKeepsOnlyWhatTheHeadCanSpare pins the filter
+// itself. Without a reservation nothing is dropped. With one, the reserved
+// head's repository is admissible only up to the slots that remain after the
+// head's own future slot is set aside, and the surviving same-repository
+// demands are the highest-priority ones — aged before young.
+func TestReservedRemainderDemandsKeepsOnlyWhatTheHeadCanSpare(t *testing.T) {
 	cfg := reservedRemainderConfig()
-	head := profileDemand(cfg, "b/repo", 1, time.Minute, "xl")
-	sameRepo := profileDemand(cfg, "b/repo", 2, time.Minute, "maestro")
-	otherRepo := profileDemand(cfg, "mac-a", 3, time.Minute, "maestro")
-	demands := []domain.Demand{sameRepo, otherRepo}
+	head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, "xl")
+	youngSameRepo := profileDemand(cfg, "b/repo", 2, time.Minute, "maestro")
+	agedSameRepo := profileDemand(cfg, "b/repo", 3, 60*time.Minute, "maestro")
+	otherRepo := profileDemand(cfg, "mac-a", 4, time.Minute, "maestro")
+	demands := []domain.Demand{youngSameRepo, agedSameRepo, otherRepo}
 	reservation := &domain.Reservation{Demand: head.Key, Profile: "xl", Resources: cfg.Profiles["xl"].Resources}
+	base := reservedRemainderInput(cfg, demands, []domain.Instance{liveInstance(cfg, "linux-xl-1", "b/repo", "xl")}, State{})
 
-	if got := reservedRemainderDemands(demands, nil); len(got) != 2 {
+	if got := reservedRemainderDemands(base, Plan{Status: PlanReady}, demands); len(got) != 3 {
 		t.Fatalf("no reservation must drop nothing, got %#v", got)
 	}
-	got := reservedRemainderDemands(demands, reservation)
-	if len(got) != 1 || got[0].Key != otherRepo.Key {
-		t.Fatalf("reservedRemainderDemands = %#v, want only %#v", got, otherRepo.Key)
+
+	// One live instance already occupies a slot of the head's repository, so a
+	// cap of 2 leaves the head exactly one — the slot it is waiting for.
+	for _, test := range []struct {
+		name string
+		caps map[string]int
+		want []domain.DemandKey
+	}{
+		{name: "an unconfigured cap is one slot and it is the head's",
+			caps: map[string]int{"a/repo": 4, "mac-a": 2}, want: []domain.DemandKey{otherRepo.Key}},
+		{name: "the head's last slot is never lent",
+			caps: map[string]int{"a/repo": 4, "b/repo": 2, "mac-a": 2}, want: []domain.DemandKey{otherRepo.Key}},
+		{name: "one spare slot goes to the aged demand",
+			caps: map[string]int{"a/repo": 4, "b/repo": 3, "mac-a": 2},
+			want: []domain.DemandKey{agedSameRepo.Key, otherRepo.Key}},
+		{name: "spare slots for everyone drop nothing",
+			caps: map[string]int{"a/repo": 4, "b/repo": 4, "mac-a": 2},
+			want: []domain.DemandKey{youngSameRepo.Key, agedSameRepo.Key, otherRepo.Key}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in := base
+			in.Config.RepoCaps = test.caps
+			got := reservedRemainderDemands(in, Plan{Status: PlanReady, Next: State{Reservation: reservation}}, demands)
+			keys := make([]domain.DemandKey, 0, len(got))
+			for _, demand := range got {
+				keys = append(keys, demand.Key)
+			}
+			if !reflect.DeepEqual(keys, test.want) {
+				t.Fatalf("reservedRemainderDemands = %#v, want %#v", keys, test.want)
+			}
+		})
+	}
+}
+
+// TestMacRemainderAdmitsSameRepositoryWorkTheHeadCanSpare is the 2026-08-03
+// counterexample to ADR 0029 as first written.
+//
+// Live at ~06:50Z: the reserved aged head was an `xl` in a repository whose cap
+// is 4 with a single live instance, and the queue behind it held `maestro` work
+// aged 4h39m in THAT SAME repository. The head could not use the four free
+// cores — a live `xl` held what it needs — so ADR 0029's vector condition
+// released the residual. Its repository condition then withdrew it again, and
+// the aged same-repository work starved for another hour.
+//
+// It could not have cost the head anything. Three cap slots stood free; the
+// head needs one. The two cases below are the same topology and differ only in
+// whether a spare slot exists.
+func TestMacRemainderAdmitsSameRepositoryWorkTheHeadCanSpare(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		repoCap int
+		wantMac bool
+	}{
+		{name: "a spare repository slot is lent to aged same-repo work", repoCap: 4, wantMac: true},
+		{name: "the head's last repository slot is withheld", repoCap: 2, wantMac: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := reservedRemainderConfig()
+			cfg.RepoCaps["b/repo"] = test.repoCap
+			head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, "xl")
+			sameRepo := profileDemand(cfg, "b/repo", 2, 60*time.Minute, "maestro")
+			// The live xl is in the head's own repository, exactly as it was live:
+			// it occupies one cap slot AND the six cores the head is waiting for.
+			busy := []domain.Instance{liveInstance(cfg, "linux-xl-1", "b/repo", "xl")}
+
+			plan := PlanTick(reservedRemainderInput(cfg, []domain.Demand{head, sameRepo}, busy, State{}))
+
+			if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+				t.Fatalf("the aged head must hold its reservation, got %#v", plan.Next.Reservation)
+			}
+			if containsDrain(plan.Operations) {
+				t.Fatalf("a remainder pass must never drain to make room: %#v", plan.Operations)
+			}
+			if spawnsProfile(plan, "xl") {
+				t.Fatalf("the reserved head cannot fit and must not spawn: %#v", plan.Operations)
+			}
+			if got := spawnsProfile(plan, "maestro"); got != test.wantMac {
+				t.Fatalf("same-repository maestro admitted = %v, want %v: %#v", got, test.wantMac, plan.Operations)
+			}
+		})
+	}
+}
+
+// TestAgedSameRepositoryWorkOutranksYoungOtherRepositoryWork is the aged-FIFO
+// half of the same counterexample. Excluding the head's repository wholesale
+// did not merely refuse work — it INVERTED the queue: a young demand from
+// another repository was admitted into the residual while aged work that had
+// waited four hours was not even a candidate. One maestro fits the four free
+// cores, and it must be the aged one.
+func TestAgedSameRepositoryWorkOutranksYoungOtherRepositoryWork(t *testing.T) {
+	cfg := reservedRemainderConfig()
+	head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, "xl")
+	agedSameRepo := profileDemand(cfg, "b/repo", 2, 60*time.Minute, "maestro")
+	youngOtherRepo := profileDemand(cfg, "mac-a", 3, time.Minute, "maestro")
+	busy := []domain.Instance{liveInstance(cfg, "linux-xl-1", "b/repo", "xl")}
+
+	plan := PlanTick(reservedRemainderInput(cfg,
+		[]domain.Demand{head, agedSameRepo, youngOtherRepo}, busy, State{}))
+
+	got := spawnedDemands(plan.Operations)
+	if len(got) != 1 || got[0].Key != agedSameRepo.Key {
+		t.Fatalf("residual spawns = %#v, want only the aged same-repository maestro %#v", got, agedSameRepo.Key)
+	}
+	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+		t.Fatalf("the aged head must hold its reservation, got %#v", plan.Next.Reservation)
+	}
+}
+
+// TestBoundedHandoffWaveAdmitsSameRepositoryWorkTheHeadCanSpare verifies the
+// precise slot check on the SECOND pass bound by ADR 0029 — planLinuxHandoff's
+// one-shot backfill wave. It is the same invariant, so it must reach the same
+// two answers, and the latch proves which pass decided.
+func TestBoundedHandoffWaveAdmitsSameRepositoryWorkTheHeadCanSpare(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		repoCap int
+		wantMac bool
+	}{
+		{name: "a spare repository slot is lent by the wave", repoCap: 4, wantMac: true},
+		{name: "the head's last repository slot is withheld by the wave", repoCap: 2, wantMac: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := reservedRemainderConfig()
+			cfg.RepoCaps["b/repo"] = test.repoCap
+			head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, "xl")
+			sameRepo := profileDemand(cfg, "b/repo", 2, 60*time.Minute, "maestro")
+			// A busy maestro makes the host mixed, so the Linux head goes through
+			// planLinuxWithCoexistence and reaches the wave; the live small in the
+			// head's repository holds one of its cap slots. Five cores are free and
+			// the head needs six, so its vector is not what refuses anything here.
+			live := []domain.Instance{liveInstance(cfg, "mac-1", "mac-b", "maestro"),
+				liveInstance(cfg, "linux-small-1", "b/repo", "small")}
+
+			plan := PlanTick(reservedRemainderInput(cfg, []domain.Demand{head, sameRepo}, live, State{}))
+
+			if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+				t.Fatalf("the aged head must hold its reservation, got %#v", plan.Next.Reservation)
+			}
+			if got := spawnsProfile(plan, "maestro"); got != test.wantMac {
+				t.Fatalf("bounded wave admitted maestro = %v, want %v: %#v", got, test.wantMac, plan.Operations)
+			}
+			if plan.Next.LinuxHandoff == nil || plan.Next.LinuxHandoff.BackfillAdmitted != test.wantMac {
+				t.Fatalf("the handoff wave, not the remainder pass, must be the deciding pass: %#v", plan.Next.LinuxHandoff)
+			}
+		})
 	}
 }
