@@ -8,6 +8,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
@@ -16,27 +17,31 @@ import (
 // This file pins history. Three production incidents that already have ADRs are
 // re-expressed as deterministic simulator traces, proving the harness reaches
 // the state each incident reached; and FINDING 1 -- the defect this harness found
-// first -- is pinned as a minimal two-tick reproduction over the real store.
+// first -- is pinned as a minimal three-tick regression over the real store.
 
 // ---------------------------------------------------------------------------
-// FINDING 1
+// FINDING 1 -- fixed 2026-08-03, ADR 0027's cross-tick amendment
 // ---------------------------------------------------------------------------
 
 // TestFindingRespawnOfALiveIncarnation is the smallest complete statement of
 // FINDING 1, and it needs no simulator at all: a real store, a real
-// DemandCoordinator, a real Engine, one demand, two consecutive ticks.
+// DemandCoordinator, a real Engine, one demand, three consecutive ticks.
 //
 // GitHub keeps a job Available until a runner acquires it, and production
 // acquires at the reachable -> registering edge, minutes after the spawn. In
-// between, ActiveDemands still returns the demand as JobAvailable, the statistics
-// bound still admits it, and nothing between the queue and the plan filters a
-// demand a live instance already incarnates -- only the DEGRADED trickle path in
-// app.Tick does, via domain.Instance.IncarnatesDemand.
+// between, ActiveDemands still returns the demand as JobAvailable and the
+// statistics bound still admits it. Before the fix nothing between the queue and
+// the plan filtered a demand a live instance already incarnates -- only the
+// degraded trickle path did -- so the second tick re-derived the byte-identical
+// content-addressed spawn, ApplyPlan refused it on the instances primary key,
+// and because a refused plan is discarded whole the tick admitted nothing else.
+// The plan is a pure function of its inputs, so every tick of the boot window
+// rebuilt the same refusal.
 //
-// So the second tick re-derives the byte-identical content-addressed spawn, and
-// ApplyPlan refuses it on the instances primary key. The plan is a pure function
-// of its inputs, so every tick in the boot window rebuilds the same refusal and
-// admits nothing else while it does.
+// app.plannableDemands is now the one seam that assembles the scheduler's queue,
+// so the second tick plans nothing. The third tick proves the other half of the
+// rule: a TERMINAL incarnation releases its demand, which is how an instance
+// failure is retried.
 func TestFindingRespawnOfALiveIncarnation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -73,40 +78,77 @@ func TestFindingRespawnOfALiveIncarnation(t *testing.T) {
 	if err != nil || !first.Applied || len(first.Plan.Operations) != 1 {
 		t.Fatalf("first tick must spawn exactly once: applied=%t ops=%d err=%v", first.Applied, len(first.Plan.Operations), err)
 	}
+	spawned := firstInstance(t, store)
+
 	now = now.Add(20 * time.Second)
 	second, secondErr := engine.Tick(ctx)
-	if secondErr == nil {
-		t.Fatalf("FINDING 1 no longer reproduces: the second tick was accepted (applied=%t ops=%d)",
-			second.Applied, len(second.Plan.Operations))
+	if secondErr != nil {
+		t.Fatalf("FINDING 1 is back: the boot window refused a tick: %v", secondErr)
 	}
-	if second.Applied {
-		t.Fatalf("a refused commit must not report applied: %#v", second.Plan)
+	if len(second.Plan.Operations) != 0 {
+		t.Fatalf("a demand its own VM is already booting must not be planned again: %#v", second.Plan.Operations)
 	}
-	// The characterization: an identical spawn for a demand whose instance is
-	// still cloning, refused by the durable layer, reported as a rejected plan.
-	if len(second.Plan.Operations) != 1 || second.Plan.Operations[0].Kind != scheduler.OperationSpawn {
-		t.Fatalf("finding changed shape: %#v", second.Plan.Operations)
+	if len(second.Demands) != 0 {
+		t.Fatalf("the plannable queue must not carry an incarnated demand: %#v", second.Demands)
 	}
-	if reason := app.ReasonPlanCommitRejected; !containsText(secondErr.Error(), reason) {
-		t.Fatalf("expected %s, got %v", reason, secondErr)
+	// The queue itself stays fully visible: filtering the plannable queue is not
+	// hiding durable demand from the SLO monitor.
+	if second.Queues["small"].Count != 1 {
+		t.Fatalf("queue visibility lost during the boot window: %#v", second.Queues)
 	}
-	// And the property oracle names it, which is what lets the sweep tolerate it
-	// deliberately instead of by accident.
+	// And the property (e) oracle -- the one that named this defect -- is clean.
 	observation := tickObservation{Tick: 2, Now: now, Plan: second.Plan, Applied: second.Applied,
 		Err: secondErr, Demands: second.Demands, Instances: second.Instances}
-	findings := noDoubleAdmissionChecker()(&world{}, observation)
-	if len(findings) != 1 || findings[0].Signature != sigRespawnLiveIncarnation {
-		t.Fatalf("property (e) must name this defect, got %v", findings)
+	if findings := noDoubleAdmissionChecker()(&world{}, observation); len(findings) != 0 {
+		t.Fatalf("property (e) must be clean, got %v", findings)
+	}
+
+	// The lifecycle edge the fix must not break: the VM fails, releasing the
+	// demand, and the next tick retries it as a fresh attempt (ADR 0028).
+	failInstance(t, store, spawned)
+	now = now.Add(20 * time.Second)
+	third, thirdErr := engine.Tick(ctx)
+	if thirdErr != nil || !third.Applied {
+		t.Fatalf("a failed incarnation must be retried: applied=%t err=%v", third.Applied, thirdErr)
+	}
+	if len(third.Plan.Operations) != 1 || third.Plan.Operations[0].Kind != scheduler.OperationSpawn {
+		t.Fatalf("the retry must be exactly one spawn: %#v", third.Plan.Operations)
+	}
+	if retried := firstInstance(t, store); retried == spawned {
+		t.Fatalf("the retry reused the failed identity %q", spawned)
 	}
 }
 
-func containsText(haystack, needle string) bool {
-	for index := 0; index+len(needle) <= len(haystack); index++ {
-		if haystack[index:index+len(needle)] == needle {
-			return true
+// firstInstance is the identity of the sole non-terminal instance the store
+// holds, so the regression can name the incarnation it drives.
+func firstInstance(t *testing.T, store *sqlite.Store) string {
+	t.Helper()
+	live, err := store.LiveInstances(context.Background())
+	if err != nil {
+		t.Fatalf("read live instances: %v", err)
+	}
+	for _, instance := range live {
+		if instance.State != operations.StateFailed {
+			return instance.ID
 		}
 	}
-	return false
+	t.Fatalf("no live instance: %#v", live)
+	return ""
+}
+
+// failInstance drives one instance to the terminal failed state through the real
+// durable transition, which is what releases its demand for a retry.
+func failInstance(t *testing.T, store *sqlite.Store, id string) {
+	t.Helper()
+	ctx := context.Background()
+	instance, err := store.Instance(ctx, id)
+	if err != nil {
+		t.Fatalf("read instance %s: %v", id, err)
+	}
+	if _, err := store.Advance(ctx, lifecycle.StateChange{InstanceID: id, ExpectedState: instance.State,
+		ExpectedVersion: instance.Version, NextState: operations.StateFailed, FailureCode: "clone_failed"}); err != nil {
+		t.Fatalf("fail instance %s: %v", id, err)
+	}
 }
 
 // durableInventory is the smallest honest inventory: the durable rows, powered
@@ -166,8 +208,8 @@ func TestGhostQueuedDemandIncidentReplaysThroughTheSimulator(t *testing.T) {
 	}
 	// And the REST evidence eventually retires it, which is the ADR 0026 repair.
 	final := w.observations[len(w.observations)-1]
-	if len(final.Demands) != 0 {
-		t.Fatalf("proven-absent demand was never retired: %d still queued", len(final.Demands))
+	if final.Queued != 0 {
+		t.Fatalf("proven-absent demand was never retired: %d still queued", final.Queued)
 	}
 	if live := w.liveInstanceCount(); live != 0 {
 		t.Fatalf("the fleet never settled: %d live instances", live)
@@ -179,9 +221,14 @@ func TestGhostQueuedDemandIncidentReplaysThroughTheSimulator(t *testing.T) {
 
 // observationsShowGhost reports whether any tick saw the cancelled run still
 // queued, which is the incident state the harness must be able to reach.
+//
+// It reads the durable queue depth rather than the plannable one: the ghost's
+// own runner is live for most of the window, so the plannable queue correctly
+// excludes it, while the queue the incident was reported from -- and the one the
+// SLO monitor watches -- still carries it.
 func (w *world) observationsShowGhost() bool {
 	for _, observation := range w.observations {
-		if observation.Tick > 6 && len(observation.Demands) > 0 {
+		if observation.Tick > 6 && observation.Queued > 0 {
 			return true
 		}
 	}

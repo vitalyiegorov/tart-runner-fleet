@@ -45,12 +45,16 @@ func TestSimFuzz(t *testing.T) {
 // the scheduler rather than in the harness. ADR 0031 records why each one is
 // here and what would close it; nothing else is tolerated.
 //
-// Each is pinned by its own characterization test -- findings_test.go, and
-// incidents_test.go for finding 1 -- so the sweep tolerating it cannot let it
-// silently change shape.
+// Each is pinned by its own characterization test in findings_test.go, so the
+// sweep tolerating it cannot let it silently change shape.
+//
+// FINDING 1 is deliberately absent: it is fixed, so
+// sigRespawnLiveIncarnation now fails the sweep like any other violation of
+// property (e). The signature itself is kept so a regression is reported by
+// name rather than as an anonymous double admission.
 func knownFinding(item finding) bool {
 	switch item.Signature {
-	case sigRespawnLiveIncarnation, sigMacOSIgnoresRepositoryCap,
+	case sigMacOSIgnoresRepositoryCap,
 		sigControlPlaneOvertakesAgedWork, sigCrossPlatformResidualArbitration,
 		sigCountMaximizationOvertakesAgedWork:
 		return true

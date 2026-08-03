@@ -59,6 +59,33 @@ The filter removes only what this plan claimed. Everything else the first pass
 declined still reaches the residual envelope on the same tick, so no work-
 conserving behaviour is lost.
 
+### Amendment 2026-08-03: the same rule across ticks
+
+The 2026-08-02 repair filtered one tick's second pass. Deterministic simulation
+(ADR 0031, finding 1) then showed the identical collision spread over TIME rather
+than over passes, on 148 of 150 seeds.
+
+GitHub keeps a job `Available` until a runner acquires it, and production
+acquires at the `reachable -> registering` edge — minutes after the spawn. For
+that whole boot window the demand is still durably `JobAvailable`, the statistics
+bound still admits it, and the queue handed to `PlanTick` still carried it, so
+every tick re-derived the byte-identical content-addressed spawn. `ApplyPlan`
+refused it on the `instances` primary key, and because a refused plan is
+discarded whole, the fleet admitted **nothing else** for as long as one VM took
+to boot. Only the degraded trickle path filtered such a demand, because that path
+alone had met the collision in production first.
+
+**No admission path ever sees a demand a live incarnation already serves.**
+`app.plannableDemands` filters the queue where `app.Engine.Tick` assembles it —
+one seam, before `PlanTick`, so every pass inherits the rule instead of restating
+it. Membership is decided by `domain.Instance.IncarnatesDemand`, so a terminal
+incarnation (deleted or failed) releases its demand back into the queue and an
+instance failure is still retried as a fresh attempt (ADR 0028).
+
+The durable queue is unchanged and stays fully visible: `QueueSummary` still
+counts every queued demand, so the SLO monitor and `fleet queues` see exactly
+what they saw before. What narrowed is only what the scheduler may admit.
+
 ## Consequences
 
 The scheduler can no longer author a plan the durable layer must refuse. The
