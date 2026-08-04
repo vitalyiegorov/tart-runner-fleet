@@ -83,6 +83,17 @@ confirmation phrase, and a non-empty reason are supplied. `update adopt` and
 `update apply-latest` likewise require distinct exact confirmation phrases and
 preserve controller mode, readiness, checksums, and rollback.
 
+Every `update` subcommand takes `--root`, `--state-dir`, `--launch-agents-dir`,
+`--config`, and `--endpoint`, and their defaults are this node's install layout:
+`~/Library/Application Support/tart-runner-fleet` and `~/Library/LaunchAgents`
+on macOS, `$XDG_DATA_HOME/tart-runner-fleet` and
+`$XDG_CONFIG_HOME/systemd/user` elsewhere. `--domain` names the per-user service
+manager, and the release transaction accepts only a launchd target
+(`system`, `gui/<uid>`, `user/<uid>`, `pid/<pid>`): it swaps generations with
+`launchctl` and lints with `plutil`, so on a node whose service manager is
+`systemd --user` it refuses rather than half-applying a generation. That node
+uses the manual bridge in [`OPERATIONS.md`](OPERATIONS.md).
+
 `operations discharge` requires `--confirm discharge-dead-letter` and a non-empty
 `--reason`, and is refused unless the daemon runs in authority mode. It reaches
 exactly one durable row and, only with `--reap-instance`, exactly one owned VM
