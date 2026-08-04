@@ -219,6 +219,44 @@ func containerNodeWorld() worldConfig {
 	return cfg
 }
 
+// simFederatedScope is the one GitHub scope two nodes serve together. It is a
+// single scope name on purpose: the shared label lives inside one registration
+// boundary, and that is what makes one queued job visible to both scale sets.
+const simFederatedScope = "sudoku-repo"
+
+// federatedWorld is the topology ADR 0034 gained when the #144 spike proved
+// GitHub distributes work across two identically-labelled scale sets in one
+// scope: node A's `maestro` set and node C's `maestro` set, same scope, same
+// profile, byte-identical labels, different durable identities.
+//
+// ADR 0031 says the simulated world is ONE node, and that is still true here.
+// What this world models is not two hosts but one SCOPE, observed the way both
+// nodes observe it: the REST inventory poll returns the scope's whole queue, and
+// every job in it matches both sets by label. The second binding stands in for
+// the peer's scale set as it appears in that shared view. Its work executes on
+// the same simulated host, which overstates the load and understates nothing --
+// and it is exactly the arrangement in which an unbounded REST lane counts one
+// queued job twice and lets two sets derive demand for it (issue #153).
+//
+// Placement is GitHub's, not the fleet's: simGitHubPlacement fills the set with
+// the most room, which is the rule the spike measured.
+func federatedWorld() worldConfig {
+	cfg := defaultWorld()
+	cfg.Name = "federated-maestro-scope"
+	profile := simProfiles()["maestro"]
+	profiles := map[domain.ProfileID]domain.Profile{"maestro": profile}
+	cfg.Scheduler.Profiles = profiles
+	cfg.Profiles = sortedProfileIDs(profiles)
+	labels := []string{"self-hosted", string(profile.Route)}
+	cfg.Bindings = []app.Binding{
+		{StoreKey: 1, ScaleSetID: 1, Scope: simFederatedScope, ScaleSetLabels: labels,
+			Profile: profile, SharedLabels: true},
+		{StoreKey: 2, ScaleSetID: 2, Scope: simFederatedScope, ScaleSetLabels: labels,
+			Profile: profile, SharedLabels: true},
+	}
+	return cfg
+}
+
 // hostCeiling is the largest total the fleet may ever hold on this host, derived
 // from configured facts alone so the property oracles never borrow the
 // scheduler's own envelope arithmetic. It is the physical machine net of the
@@ -374,6 +412,13 @@ type world struct {
 	// restQueue holds REST scope snapshots taken at one instant and delivered at
 	// another, which is what "lagging inventory" means here.
 	restQueue []*simSnapshot
+	// restCommitted is the most recently committed scope observation, kept so a
+	// federated scope can be judged against the work that observation could
+	// possibly have been about.
+	restCommitted *simSnapshot
+	// owedHistory is how much work the scope owed at each tick so far, which is
+	// what a conservation bound over lagging evidence has to be measured against.
+	owedHistory []int
 
 	// vms is the simulated hypervisor: name -> powered on.
 	vms map[string]bool
@@ -477,6 +522,10 @@ type simSnapshot struct {
 	at        time.Time
 	deliverAt int
 	jobs      []githubscaleset.WorkflowJob
+	// outstanding is every job the scope still owed at the instant of capture --
+	// queued, acquired, or executing. It is the scope's whole work, and no set of
+	// attributions taken from this observation may add up to more than it.
+	outstanding int
 }
 
 // simOperation is the executor's progress through one durable outbox operation.
@@ -805,7 +854,7 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 // The stopped and inactive recoveries key on power and registration rather than
 // on demand and are unreachable here: no fault powers a VM off.
 func (w *world) drainAbortsNow(instance operations.Instance) bool {
-	scaleSet := w.storeKeyFor(instance.Profile)
+	scaleSet := w.storeKeyFor(instance)
 	if scaleSet <= 0 {
 		return false
 	}
@@ -832,9 +881,18 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 
 // storeKeyFor resolves the durable scale-set key an instance's demand lives
 // under, which is the same routing lifecycle.ControlRouter performs.
-func (w *world) storeKeyFor(profile domain.ProfileID) int64 {
+//
+// The demand's own scale set is asked first, because in a federated scope the
+// profile no longer names one set: two identically-labelled sets serve one
+// profile, and an instance's evidence lives under the set that brokered its job.
+// The profile fallback is the answer for every other world, and is identical to
+// the demand lookup wherever a profile has exactly one set.
+func (w *world) storeKeyFor(instance operations.Instance) int64 {
+	if job := w.jobByRequest(instance.Demand.JobID); job != nil {
+		return w.cfg.Bindings[job.binding].StoreKey
+	}
 	for _, binding := range w.cfg.Bindings {
-		if binding.Profile.ID == profile {
+		if binding.Profile.ID == instance.Profile {
 			return binding.StoreKey
 		}
 	}

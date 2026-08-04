@@ -741,3 +741,26 @@ func profileScaleSets(scope string) []ScaleSet {
 		{Profile: "maestro", Name: "fleet-" + scope + "-macos-maestro", MaxCapacity: 2, Labels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"}},
 	}
 }
+
+// TestSharedLabelsRequireTruthfulCapacity pins ADR 0034's shared-label
+// precondition as a validation rule rather than a paragraph. GitHub splits a
+// queue between two identically-labelled scale sets by the capacity each last
+// advertised, so a node declaring a shared label while still inflating its
+// capacity for queue lookahead would have GitHub split by fiction.
+func TestSharedLabelsRequireTruthfulCapacity(t *testing.T) {
+	cfg := multiScopeAuthorityConfig()
+	cfg.GitHub.Scopes[0].ScaleSets[4].SharedLabels = true
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("a shared label beside truthful capacity was rejected: %v", err)
+	}
+	cfg.GitHub.CanonicalJobInventory = false
+	for _, scope := range cfg.GitHub.Scopes {
+		for index := range scope.ScaleSets {
+			scope.ScaleSets[index].MaxCapacity += 8
+		}
+	}
+	err := cfg.ValidateAuthority()
+	if err == nil || !strings.Contains(err.Error(), "sharedLabels") {
+		t.Fatalf("ValidateAuthority() = %v, want a refusal naming sharedLabels", err)
+	}
+}
