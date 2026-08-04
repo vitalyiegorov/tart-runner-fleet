@@ -508,9 +508,12 @@ type simJob struct {
 	// advertisedAt is the tick at which the broker actually delivered this job's
 	// JobAvailable to the fleet. Property (j) is measured from it.
 	advertisedAt int
-	status       jobStatus
-	runner       string
-	remaining    int
+	// heard latches property (j)'s answer. A demand row the fleet has committed
+	// is not un-committed, so the oracle asks once and never again.
+	heard     bool
+	status    jobStatus
+	runner    string
+	remaining int
 	// announced records which broker events have already been produced, so a
 	// redelivery is a duplicate rather than a new fact.
 	announced map[operations.DemandEventKind]bool

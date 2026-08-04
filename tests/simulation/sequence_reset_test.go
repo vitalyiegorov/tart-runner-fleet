@@ -52,8 +52,10 @@ func TestIncidentBrokerSequenceResetKeepsTheBindingHearing(t *testing.T) {
 	t.Parallel()
 	cfg := sequenceResetWorld()
 	// A pinned seed, not a sweep: the incident is a physics event, so the trace
-	// only has to keep jobs arriving across the restart.
-	trace := generateTrace(7, 60, cfg)
+	// only has to keep jobs arriving across the restart. Forty ticks is twenty
+	// virtual minutes -- double the restart tick, and long enough for the jobs
+	// advertised after it to be heard, planned, and served.
+	trace := generateTrace(7, 40, cfg)
 	findings := runTrace(t, cfg, trace)
 	for _, item := range findings {
 		if item.Kind == findingUnheardDemand {
@@ -66,12 +68,15 @@ func TestIncidentBrokerSequenceResetKeepsTheBindingHearing(t *testing.T) {
 }
 
 // TestSequenceResetSweepHoldsEveryProperty widens the same physics over a seed
-// sweep, so the fix is not pinned to one arrival pattern.
+// sweep, so the fix is not pinned to one arrival pattern. Four seeds is the
+// bounded PR-time budget: every one of them is an independent counterexample
+// before the fix, and the corpus arm sweeps this world at sixty-four whenever an
+// operator asks it to.
 func TestSequenceResetSweepHoldsEveryProperty(t *testing.T) {
 	t.Parallel()
 	cfg := sequenceResetWorld()
-	for seed := int64(1); seed <= 8; seed++ {
-		trace := generateTrace(seed, 60, cfg)
+	for seed := int64(1); seed <= 4; seed++ {
+		trace := generateTrace(seed, 40, cfg)
 		if findings := runTrace(t, cfg, trace); len(findings) != 0 {
 			t.Fatalf("seed %d: %v", seed, findings)
 		}

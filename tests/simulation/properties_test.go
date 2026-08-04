@@ -757,12 +757,33 @@ func unheardDemandChecker(cfg worldConfig) checker {
 		if budget <= 0 {
 			return nil
 		}
+		// The ledger is read at most once per binding per tick, and only for a
+		// binding that actually owes an answer. A job proven heard is latched, so
+		// the steady state of a healthy fleet costs one query per job for its whole
+		// life -- the oracle must be able to run inside every arm of every sweep,
+		// under the race detector, without becoming the reason the suite is slow.
+		var heard map[int]map[int64]struct{}
 		for _, job := range w.jobs {
-			if job.status != jobQueued || job.silentCancel || job.advertisedAt == 0 ||
+			if job.heard || job.status != jobQueued || job.silentCancel || job.advertisedAt == 0 ||
 				observation.Tick-job.advertisedAt <= budget {
 				continue
 			}
-			if w.durablyKnows(job) {
+			if heard == nil {
+				heard = map[int]map[int64]struct{}{}
+			}
+			known, read := heard[job.binding]
+			if !read {
+				known = w.durableRequests(job.binding)
+				heard[job.binding] = known
+			}
+			if known == nil {
+				// Rule 4: an unreadable ledger is not an empty one. The store's own
+				// fail-closed channel reports it; this oracle must not double-report it
+				// as a lost message.
+				continue
+			}
+			if _, ok := known[job.requestID]; ok {
+				job.heard = true
 				continue
 			}
 			return []finding{{Kind: findingUnheardDemand, Tick: observation.Tick,
@@ -773,23 +794,20 @@ func unheardDemandChecker(cfg worldConfig) checker {
 	}
 }
 
-// durablyKnows asks the real store whether this binding holds any demand record
-// for the job the broker advertised. Any status counts: the question is whether
-// the evidence was heard at all, not what the scheduler concluded from it.
-func (w *world) durablyKnows(job *simJob) bool {
-	records, err := w.store.ActiveDemands(w.ctx, w.cfg.Bindings[job.binding].StoreKey)
+// durableRequests is every runner request this binding holds a demand row for.
+// Any status counts: the question is whether the broker's evidence was heard at
+// all, not what the scheduler concluded from it. A nil result means the ledger
+// could not be read, which is not the same as an empty one.
+func (w *world) durableRequests(binding int) map[int64]struct{} {
+	records, err := w.store.ActiveDemands(w.ctx, w.cfg.Bindings[binding].StoreKey)
 	if err != nil {
-		// Rule 4: an unreadable ledger is not an empty one. The store's own
-		// fail-closed channel reports it; this oracle must not double-report it as
-		// a lost message.
-		return true
+		return nil
 	}
+	requests := make(map[int64]struct{}, len(records))
 	for _, record := range records {
-		if record.RunnerRequestID == job.requestID {
-			return true
-		}
+		requests[record.RunnerRequestID] = struct{}{}
 	}
-	return false
+	return requests
 }
 
 // ---------------------------------------------------------------------------
