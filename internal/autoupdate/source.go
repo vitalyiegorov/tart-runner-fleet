@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -24,11 +25,44 @@ type Release struct {
 	Dir     string
 }
 
+// Target is the platform a generation is for. A release publishes one archive
+// per node type — ADR 0034 gives the fleet a darwin/arm64 node and a
+// linux/amd64 one — so the asset an updater downloads, and the service
+// definition its generation must carry, are both properties of the machine
+// asking rather than constants.
+//
+// It is a parameter rather than a read of runtime.GOOS inside the download,
+// because the test suite runs on whichever node CI happens to own and a
+// platform-dependent fixture would pass on one machine and fail on the other.
+type Target struct {
+	OS, Arch string
+}
+
+// CurrentTarget is the platform this binary was built for.
+func CurrentTarget() Target { return Target{OS: runtime.GOOS, Arch: runtime.GOARCH} }
+
+// ArchiveName is the release asset that carries this target's generation.
+func (t Target) ArchiveName(version string) string {
+	return "tart-runner-fleet-" + version + "-" + t.OS + "-" + t.Arch + ".tar.gz"
+}
+
+// ServiceDefinition is the boot definition a generation must carry a verified
+// copy of: the authority LaunchAgent on macOS, the authority `systemd --user`
+// unit everywhere else. Verifying it with the executable is what makes a
+// generation a complete, self-contained thing to boot from.
+func (t Target) ServiceDefinition() string {
+	if t.OS == "darwin" {
+		return authorityServiceDefinition
+	}
+	return "tart-runner-fleet-authority.service"
+}
+
 // LatestProductionRelease downloads and verifies GitHub's latest normal
 // release into an immutable version directory. Drafts and prereleases are
 // rejected even if an API proxy incorrectly returns one as latest.
-func LatestProductionRelease(ctx context.Context, root, repository string, command Command) (Release, error) {
-	if command == nil || !filepath.IsAbs(root) || !safeRepository.MatchString(repository) {
+func LatestProductionRelease(ctx context.Context, root, repository string, command Command, target Target) (Release, error) {
+	if command == nil || !filepath.IsAbs(root) || !safeRepository.MatchString(repository) ||
+		target.OS == "" || target.Arch == "" {
 		return Release{}, ErrInvalidGeneration
 	}
 	body, err := command.Run(ctx, "gh", "api", "repos/"+repository+"/releases/latest")
@@ -64,7 +98,7 @@ func LatestProductionRelease(ctx context.Context, root, repository string, comma
 		return Release{}, err
 	}
 	defer func() { _ = os.RemoveAll(download) }()
-	archiveName := "tart-runner-fleet-" + metadata.TagName + "-darwin-arm64.tar.gz"
+	archiveName := target.ArchiveName(metadata.TagName)
 	if _, err := command.Run(ctx, "gh", "release", "download", metadata.TagName, "--repo", repository,
 		"--pattern", archiveName, "--pattern", "SHA256SUMS", "--dir", download); err != nil {
 		return Release{}, fmt.Errorf("download release: %w", err)
@@ -91,7 +125,7 @@ func LatestProductionRelease(ctx context.Context, root, repository string, comma
 	if err := verifyReleaseIdentity(staging, metadata.TagName); err != nil {
 		return Release{}, err
 	}
-	if err := verifyChecksums(staging); err != nil {
+	if err := verifyChecksums(staging, target.ServiceDefinition()); err != nil {
 		return Release{}, err
 	}
 	if err := os.Rename(staging, destination); err != nil {

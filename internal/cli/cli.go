@@ -329,7 +329,7 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		fmt.Fprintln(stderr, "--release-dir is valid only with adopt")
 		return exitUsage
 	}
-	release, err := autoupdate.LatestProductionRelease(ctx, *root, *repository, deps.command)
+	release, err := autoupdate.LatestProductionRelease(ctx, *root, *repository, deps.command, autoupdate.CurrentTarget())
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve production release: %v\n", err)
 		return exitFailure

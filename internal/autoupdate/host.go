@@ -17,10 +17,14 @@ import (
 )
 
 const (
-	InstalledGenerationFile         = "installed-generation.json"
-	CurrentGenerationLink           = "current"
-	UpdateJournalFile               = "update-transaction.json"
-	CanonicalPlist                  = "com.vitalyiegorov.tart-runner-fleet.plist"
+	InstalledGenerationFile = "installed-generation.json"
+	CurrentGenerationLink   = "current"
+	UpdateJournalFile       = "update-transaction.json"
+	CanonicalPlist          = "com.vitalyiegorov.tart-runner-fleet.plist"
+	// authorityServiceDefinition is the boot definition a macOS generation must
+	// carry a verified copy of, so that a generation is a complete thing to boot
+	// from rather than an executable plus whatever the machine happened to have.
+	authorityServiceDefinition      = "com.vitalyiegorov.tart-runner-fleet.authority.plist"
 	UpdaterPlist                    = "com.vitalyiegorov.tart-runner-fleet.updater.plist"
 	UpdaterHandoffPlist             = "com.vitalyiegorov.tart-runner-fleet.updater-handoff.plist"
 	updateBackupFile                = "update-previous.plist"
@@ -145,7 +149,9 @@ func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
 	if err != nil || strings.TrimSpace(string(manifest)) != candidate.Version {
 		return fmt.Errorf("release identity: %w", ErrInvalidGeneration)
 	}
-	if err := verifyChecksums(candidate.ReleaseDir); err != nil {
+	// A LocalHost is launchd-supervised by construction (see launchdDomain), so
+	// the definition its generation must carry is the LaunchAgent.
+	if err := verifyChecksums(candidate.ReleaseDir, authorityServiceDefinition); err != nil {
 		return err
 	}
 	if _, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
@@ -154,14 +160,17 @@ func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
 	return nil
 }
 
-func verifyChecksums(releaseDir string) error {
+// verifyChecksums proves a generation's executable, its identity manifest, and
+// the service definition that boots it all match the checksum manifest
+// published beside the archive. serviceDefinition is a parameter because it is
+// the one entry that differs per node type (Target.ServiceDefinition).
+func verifyChecksums(releaseDir, serviceDefinition string) error {
 	file, err := os.Open(filepath.Join(releaseDir, "SHA256SUMS")) // #nosec G304 -- validated immutable release path.
 	if err != nil {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	required := map[string]bool{"RELEASE_VERSION": false, "fleet": false,
-		"com.vitalyiegorov.tart-runner-fleet.authority.plist": false}
+	required := map[string]bool{"RELEASE_VERSION": false, "fleet": false, serviceDefinition: false}
 	scanner := bufio.NewScanner(io.LimitReader(file, 1<<20))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())

@@ -165,7 +165,17 @@ jobs:
           set -euo pipefail
           make build
           go run ./cmd/fleet version
-      - name: Reproduce complete macOS ARM64 release candidate
+
+      # The acceptance criterion of issue #138: a Linux node reaches the observe
+      # steady state. The runner is Linux, so this is the real daemon on a real
+      # machine reading its own /proc, with no Tart, no scale sets, and no
+      # executor — exactly Part A of docs/MULTI_NODE_PLAN.md. The archived
+      # observation is the evidence: fresh host pressure, an admitted host, and
+      # a ready controller in observe mode.
+      - name: Linux observe-mode daemon smoke test
+        run: ./scripts/observe-smoke.sh
+
+      - name: Reproduce complete release candidate for every node type
         run: |
           set -euo pipefail
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ]; then
@@ -178,7 +188,7 @@ jobs:
       - name: Upload verified CI binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ci-release-darwin-arm64-${{ github.sha }}
+          name: ci-release-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 7

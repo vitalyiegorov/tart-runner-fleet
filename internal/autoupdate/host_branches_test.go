@@ -278,7 +278,7 @@ func TestJournalAndServiceHelpers(t *testing.T) {
 
 func TestChecksumVerifierRejectsMissingMalformedAndUnreadableEntries(t *testing.T) {
 	dir := t.TempDir()
-	if err := verifyChecksums(dir); err == nil {
+	if err := verifyChecksums(dir, authorityServiceDefinition); err == nil {
 		t.Fatal("missing checksum file accepted")
 	}
 	for _, sums := range []string{
@@ -290,7 +290,7 @@ func TestChecksumVerifierRejectsMissingMalformedAndUnreadableEntries(t *testing.
 		if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := verifyChecksums(dir); err == nil {
+		if err := verifyChecksums(dir, authorityServiceDefinition); err == nil {
 			t.Fatalf("unsafe sums accepted: %.20q", sums)
 		}
 	}
@@ -302,13 +302,13 @@ func TestChecksumVerifierRejectsMissingMalformedAndUnreadableEntries(t *testing.
 	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(hex.EncodeToString(digest[:])+"  fleet\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyChecksums(dir); !errors.Is(err, ErrChecksum) {
+	if err := verifyChecksums(dir, authorityServiceDefinition); !errors.Is(err, ErrChecksum) {
 		t.Fatalf("incomplete sums error=%v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(strings.Repeat("0", 64)+"  ignored\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyChecksums(dir); !errors.Is(err, ErrChecksum) {
+	if err := verifyChecksums(dir, authorityServiceDefinition); !errors.Is(err, ErrChecksum) {
 		t.Fatalf("untracked sums error=%v", err)
 	}
 }

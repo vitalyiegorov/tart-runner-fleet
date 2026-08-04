@@ -125,6 +125,28 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 			t.Errorf("release artifacts must include the secret-safe guest bootstrap helper %q", required)
 		}
 	}
+	// ADR 0034 gives the fleet two node types, so a release that cannot be
+	// installed on the second one is not a release. The Linux archive is built
+	// from the same double-build compare and listed in the same SHA256SUMS as
+	// the darwin one, and it carries the systemd units and the renderer that
+	// boot it.
+	for _, required := range []string{
+		"GOOS=linux GOARCH=amd64",
+		"fleet-linux-amd64",
+		"fleet-linux-amd64.cdx.json",
+		"BUILDINFO-linux-amd64.txt",
+		"archive linux-amd64",
+		"tart-runner-fleet-$version-$goos_arch.tar.gz",
+		"tart-runner-fleet-authority.service",
+		"tart-runner-fleet-updater.service",
+		"tart-runner-fleet-updater.timer",
+		"tart-runner-fleet-updater-handoff.service",
+		"render-systemd.sh",
+	} {
+		if !strings.Contains(string(buildScript), required) {
+			t.Errorf("release must publish the linux/amd64 node's generation: missing %q", required)
+		}
+	}
 
 	mainRelease, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
@@ -143,6 +165,28 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 		if !strings.Contains(string(mainRelease), required) {
 			t.Errorf("main release verification must require bootstrap asset %q", required)
 		}
+	}
+	// The publish step must verify the second node's archive with the same
+	// checksum manifest, member listing, and file-presence checks as the first,
+	// and upload it: a release missing one node type is not publishable.
+	for _, required := range []string{
+		`LINUX_ARCHIVE="tart-runner-fleet-${VERSION}-linux-amd64.tar.gz"`,
+		"fleet-linux-amd64",
+		"BUILDINFO-linux-amd64.txt",
+		"EXPECTED_LINUX_CONTENTS",
+		`ACTUAL_LINUX_CONTENTS="$(tar -tzf "dist/$LINUX_ARCHIVE" | LC_ALL=C sort)"`,
+		`test "$ACTUAL_LINUX_CONTENTS" = "$EXPECTED_LINUX_CONTENTS"`,
+		`"dist/$LINUX_ARCHIVE"`,
+		"dist/render-systemd.sh",
+		"dist/tart-runner-fleet-authority.service",
+		"dist/tart-runner-fleet-updater.timer",
+	} {
+		if !strings.Contains(string(mainRelease), required) {
+			t.Errorf("main release must verify and publish the linux/amd64 generation: missing %q", required)
+		}
+	}
+	if !strings.Contains(string(ci), "./scripts/observe-smoke.sh") {
+		t.Error("CI must prove the daemon reaches the observe steady state on the node it builds on")
 	}
 }
 
