@@ -23,6 +23,7 @@ the build failed without them.
 
 - [Provenance: the legacy script and what it gets wrong](#provenance-the-legacy-script-and-what-it-gets-wrong)
 - [What the daemon requires of a Linux guest](#what-the-daemon-requires-of-a-linux-guest)
+- [What the *label* requires of a Linux guest](#what-the-label-requires-of-a-linux-guest)
 - [Build the image](#build-the-image)
 - [Seal and verify](#seal-and-verify)
 - [Deviations from the legacy script](#deviations-from-the-legacy-script)
@@ -138,6 +139,80 @@ writing its ready file, so the helper kills it and returns `ErrStart`. The
 operator sees a `bootstrap` stage failure with no cause. **Every Linux job on
 an image without the polkit rule below fails this way**, and the image looks
 perfect from the outside.
+
+## What the *label* requires of a Linux guest
+
+Everything above is what the daemon needs to start a runner at all. It is not
+the whole contract, and the part it leaves out caused a production failure on
+2026-08-04 that is worth recording in full, because the recipe as first written
+is what caused it.
+
+[ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md), as amended, lets
+two nodes advertise **the same runner label** and leaves the placement to
+GitHub. A consumer names `[self-hosted, linux-tiered, linux-xl]` and GitHub
+sends the job to whichever node has room. The consumer cannot see which node it
+landed on, cannot ask, and has no way to express a preference.
+
+That makes a label a promise about the *guest*, not only about the host that
+serves it. Two images behind one label must be capability-equivalent, or the
+label lies for exactly the fraction of jobs that land on the leaner image.
+
+### The failure
+
+Node C's Linux base was built from this document. Node A's incumbent base — the
+one with unrecovered provenance recorded under
+[Known unknowns](#known-unknowns) — additionally carries a **prewarmed Redroid
+container**, which `vitalyiegorov/suuudokuuu` needs to run Maestro against
+Android. This document did not know that, because it reconstructed the recipe
+from the legacy script and the daemon's code, and neither mentions Redroid. It
+even states the absence as a confirmed finding: "the legacy script installs
+neither Docker nor Podman".
+
+Both nodes then advertised `linux-xl`. `.github/workflows/android-maestro.yml`
+opens with its own guard:
+
+```sh
+manifest="$HOME/.sudoku-ci/android-emulator.json"
+test -f "$manifest" || {
+  echo '::error::The guest image lacks the Redroid prewarm; rebuild the base with prewarm-redroid-linux.sh.'
+  exit 1
+}
+```
+
+The result was a job that failed **deterministically on node C and passed
+deterministically on node A**, which presents as flakiness: same commit, same
+label, same workflow, different outcome, no visible cause. The consumer's guard
+is the only reason the cause was legible at all; without it the failure would
+have surfaced as a missing `docker` binary somewhere further down.
+
+The mitigation was to remove node C's `linux-xl` scale sets from its
+configuration, so the label was again advertised by one node. **That is a
+capacity loss taken to restore correctness**, and it is the right emergency
+action, but the durable fix is the image.
+
+### The rule
+
+> A node must not advertise a label unless its base image provides every
+> capability the consumers of that label depend on. A leaner image behind a
+> shared label is not an optimization; it is a correctness bug that presents as
+> flakiness.
+
+The invariant is stated in ADR 0034's amendment *"a shared label is a promise
+about the guest"*, together with a proposal for enforcing it rather than
+remembering it. Until that ships, the enforcement is this document: **any node
+that advertises `linux-xl` runs [step 6](#6-prewarm-redroid-on-any-node-that-advertises-linux-xl)**.
+
+### Which labels carry which extra capability, today
+
+| Label | Extra capability | Consumer |
+| --- | --- | --- |
+| `linux-xl` (`trf-linux-arm64-6x12`) | Docker, the Redroid image, a prewarmed `/data`, and `adb` | `suuudokuuu` Android Maestro |
+| every other Linux label | none beyond the daemon contract | — |
+
+This table is a snapshot of a fact that lives in consumer repositories, not
+here. Re-derive it before adding a node: search the scopes in the node's
+`fleet.json` for workflows that assert something about the guest, which by
+convention is a guard in the first step of the job.
 
 ## Build the image
 
@@ -338,6 +413,79 @@ sha256sum /usr/local/libexec/tart-runner-fleet-bootstrap
 Compare that digest with `shasum -a 256` of the host-side asset. The macOS
 recipe uses `-g wheel`; on Linux the root group is `root`.
 
+### 6. Prewarm Redroid, on any node that advertises `linux-xl`
+
+Skip this only if no scale set in the node's `fleet.json` advertises
+`linux-xl`. If one does, this step is **mandatory** — see
+[What the *label* requires of a Linux guest](#what-the-label-requires-of-a-linux-guest).
+
+The provisioning is not written here, and must not be copied here. It is
+`tests/app-tests/scripts/prewarm-redroid-linux.sh` in
+`vitalyiegorov/suuudokuuu`, and the consumer owns it: it pins the Android
+version, and the job that consumes it is the only thing that can say which
+version works. Fetch it, record the digest you fetched, and run it unmodified.
+
+```sh
+gh api repos/vitalyiegorov/suuudokuuu/contents/tests/app-tests/scripts/prewarm-redroid-linux.sh \
+  --jq '.content' | base64 -d > "$HOME/linux-base-build/prewarm-redroid-linux.sh"
+shasum -a 256 "$HOME/linux-base-build/prewarm-redroid-linux.sh"
+
+# Stage it inside the guest and run it from a file. See the warning below.
+"$TART" exec -i "$BUILD" bash -c 'cat > /tmp/prewarm-redroid-linux.sh' \
+  < "$HOME/linux-base-build/prewarm-redroid-linux.sh"
+"$TART" exec "$BUILD" bash -lc 'sha256sum /tmp/prewarm-redroid-linux.sh'
+"$TART" exec "$BUILD" bash -lc 'bash /tmp/prewarm-redroid-linux.sh </dev/null' </dev/null
+```
+
+What it bakes, and therefore what the image gains: `docker.io` and `adb` from
+apt; `/etc/modules-load.d/redroid.conf` so `binder_linux` loads on every boot;
+the pulled Redroid image; a `$HOME/redroid-data` volume that has completed one
+Android boot with animations disabled; and the manifest at
+`$HOME/.sudoku-ci/android-emulator.json` that the consumer's guard tests for.
+
+Android runs as a **privileged container, not a nested VM**. Nothing here needs
+`/dev/kvm` or nested virtualization inside the guest; `binder_linux` is a kernel
+module and the container mounts binderfs itself. Ubuntu 24.04's
+`7.0.0-28-generic` ships the module — confirm before running, because a kernel
+without it fails the script's own `test -d /sys/module/binder_linux`:
+
+```sh
+"$TART" exec "$BUILD" modinfo binder_linux
+```
+
+**Do not pipe the script into `bash -s` over `tart exec -i`.** This cost the
+build an hour. `bash` reading a script from a pipe reads it incrementally, and
+the script's first background-daemon child — `adb`, here — inherits that pipe
+and swallows the rest of the source. The observed result is the worst kind: the
+run stops silently at `docker run`, leaves the container up, writes no manifest,
+and **exits 0**. Stage the file inside the guest and run it by path, with
+`</dev/null`, as above.
+
+Then record what was baked, so the image can answer for itself later. Nothing
+reads this file; it is the provenance the next operator will want, and the seed
+of the image-capability manifest ADR 0034's amendment proposes:
+
+```sh
+"$TART" exec "$BUILD" bash -lc '
+set -euo pipefail
+manifest="$HOME/.sudoku-ci/android-emulator.json"
+{
+  printf "redroid_image=%s\n" "$(python3 -c "import json;print(json.load(open(\"$manifest\"))[\"image\"])")"
+  printf "redroid_image_digest=%s\n" "$(sudo docker image inspect \
+    "$(python3 -c "import json;print(json.load(open(\"$manifest\"))[\"image\"])")" \
+    --format "{{index .RepoDigests 0}}")"
+  printf "redroid_prewarm_script_sha256=%s\n" "<the digest you fetched>"
+  printf "redroid_prewarmed_at=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf "docker_version=%s\n" "$(sudo docker info --format "{{.ServerVersion}}")"
+} >> "$HOME/.ci-base-manifest"
+'
+```
+
+Measured on node C, 2026-08-04: the whole step ran in under five minutes, of
+which the 694 MB image pull was most; `docker.io` resolves to server 29.1.3 on
+the `overlayfs` driver; the prewarmed volume is 32 MB; and the image grew from
+4.7 GB to 7.1 GB in-guest, 5 GB to 8 GB as Tart reports it.
+
 ## Seal and verify
 
 `tart exec` runs with a `PATH` that has no `/sbin`, so `shutdown` must be
@@ -410,6 +558,7 @@ env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
 for tool in node npm npx yarn corepack git jq gh java python3 curl tar unzip zip make gcc sudo shutdown; do
   command -v "$tool" >/dev/null || { echo "MISSING $tool"; exit 1; }
 done
+# On a node that advertises linux-xl, add: docker adb
 node --version; npm --version'"'"'
 
 # The runner ships native binaries; prove they are linked.
@@ -437,6 +586,80 @@ gh        /usr/bin/gh
 Runner.Listener  0 unresolved shared libraries
 Runner.Worker    0 unresolved shared libraries
 ```
+
+Two traps in writing these checks. `systemd-run --scope` is the honest polkit
+probe, **not** `test -f /etc/polkit-1/rules.d/49-tart-runner-fleet.rules`:
+`/etc/polkit-1/rules.d` is `0700 root:root`, so the runner user's `test -f`
+returns false on a rule that is present and working. Worse, written as
+`test -f … && echo present`, `set -e` will not stop on it — POSIX exempts every
+command in an `AND-OR` list but the last — so the check *prints nothing and the
+script continues*. Use `sudo test -f`, or trust the probe.
+
+### Verify the Redroid prewarm, on a node that advertises `linux-xl`
+
+Verify what the consumer's guard tests, then verify the thing the guard is a
+proxy for. Both, after the reboot — a container runtime that only worked in the
+session that installed it is exactly the failure a reboot check exists to catch:
+
+```sh
+"$TART" exec "$BUILD" bash -lc '
+set -euo pipefail
+# 1. Exactly what .github/workflows/android-maestro.yml asserts.
+manifest="$HOME/.sudoku-ci/android-emulator.json"
+test -f "$manifest"
+image=$(python3 -c "import json; print(json.load(open(\"$manifest\"))[\"image\"])")
+data=$(python3 -c "import json; print(json.load(open(\"$manifest\"))[\"dataDir\"])")
+echo "REDROID_PREWARM_OK image=$image dataDir=$data"
+
+# 2. The image is present offline, and the volume really completed a boot.
+sudo docker image inspect "$image" --format "{{index .RepoDigests 0}}"
+test -d "$data/data"
+
+# 3. Both survived the reboot, which is the whole point of checking here.
+systemctl is-active docker.service
+test -d /sys/module/binder_linux
+
+# 4. The production step itself: boot Android from the prewarmed volume.
+sudo docker run -d --name redroid-verify --privileged \
+  --memory 6g --memory-swap 6g --cpus 4 -v "$data":/data -p 5555:5555 \
+  "$image" androidboot.redroid_gpu_mode=guest >/dev/null
+adb connect localhost:5555 >/dev/null
+deadline=$(( $(date +%s) + 300 ))
+until [ "$(adb -s localhost:5555 shell getprop sys.boot_completed 2>/dev/null | tr -d "\r")" = "1" ]; do
+  test "$(date +%s)" -lt "$deadline"; sleep 5
+  adb connect localhost:5555 >/dev/null 2>&1 || true
+done
+adb -s localhost:5555 shell getprop ro.build.version.release
+adb -s localhost:5555 shell getprop ro.product.cpu.abi
+adb -s localhost:5555 shell settings get global window_animation_scale
+adb kill-server; sudo docker rm -f redroid-verify
+'
+```
+
+Measured on node C, 2026-08-04, on the rebooted image:
+
+```
+REDROID_PREWARM_OK image=redroid/redroid:15.0.0_64only-latest dataDir=/home/admin/redroid-data
+redroid/redroid@sha256:b51bde9cef80f7bd7581148192f2b2f4d41f23c6344cfe88eceeb8ddd67490ee
+docker.service    active            29.1.3, storage driver overlayfs
+binder_linux      loaded at boot    via /etc/modules-load.d/redroid.conf
+ANDROID BOOT COMPLETED in 10s from the prewarmed volume
+release           15
+abi               arm64-v8a
+animation scale   0
+```
+
+**Ten seconds is the measurement that justifies the step.** The prewarm is not
+only about the packages being present; a first Android boot on a cold `/data`
+is minutes of the job's 45-minute budget, and it is paid once here instead of on
+every job. `arm64-v8a` is also the check that matters for the consumer, whose
+APK must ship that ABI — and it is the first thing that changes on x86_64, see
+[Adapting this for node B](#adapting-this-for-node-b-amd64-containers).
+
+Booting Android here writes to the base's `$HOME/redroid-data`. That is
+acceptable and intended — it is the same second boot every ephemeral clone
+performs — but it means this check belongs before the final cleanup pass, and
+the container must be removed before sealing.
 
 ### Then prove the whole path, end to end
 
@@ -473,6 +696,11 @@ rm -rf "$HOME/actions-runner/.tart-runner-fleet" "$HOME/actions-runner/_diag" \
        "$HOME/actions-runner/_work" "$HOME/actions-runner/run-helper.sh"
 rm -f "$HOME"/actions-runner/.tart-runner-fleet-supervisor-ready-*
 rm -f "$HOME/.bash_history"
+# On an image with the Redroid layer: no container may be baked in, only the
+# image and the volume. Leaving one makes the consumer'"'"'s `docker run` fail on a
+# name clash it did not create.
+sudo docker rm -f redroid-verify redroid-prewarm >/dev/null 2>&1 || true
+test "$(sudo docker ps -aq | wc -l)" = "0"
 sudo journalctl --rotate >/dev/null 2>&1 || true
 sudo journalctl --vacuum-time=1s >/dev/null 2>&1 || true
 test ! -e "$HOME/actions-runner/.runner"
@@ -488,13 +716,37 @@ as extracted.
 
 ```sh
 rm -f "$HOME/.tart/vms/$BUILD/control.sock"
+"$TART" rename linux-runner-base-go linux-runner-base-go-pre-<change>-<yyyymmdd>
 "$TART" rename "$BUILD" linux-runner-base-go
 ```
 
-From here the base stays **stopped forever**. Maintenance repeats this whole
-document against a new dated candidate and promotes by rename, keeping the
-outgoing image as `linux-runner-base-go-pre-<change>-<yyyymmdd>`. Never
-provision a live base in place.
+Run the two renames as one command, with no operator decision between them:
+between the first and the second, the name the daemon's `baseVm` points at does
+not exist, and a clone issued in that window fails. Check `tart list` for a
+running guest first and do it when the node is idle.
+
+From here the base stays **stopped forever**. Never provision a live base in
+place.
+
+### Maintenance: rebuild, or extend the incumbent
+
+Adding the Redroid layer to node C used the second form, and it is worth naming
+because the recipe above reads as if there were only the first:
+
+- **Rebuild from the pinned ancestor.** Everything above, in order. Use it when
+  the change is to a step this document owns, or when the incumbent's provenance
+  is unknown, or on a schedule.
+- **Extend the incumbent.** `tart clone linux-runner-base-go <dated candidate>`,
+  apply only the new step, verify **everything** — not just the new step — and
+  promote by rename. About 20 minutes against 55, and the clone is copy-on-write
+  so it costs almost no disk until it is written to.
+
+The second form inherits every property of the incumbent, including anything it
+got wrong and anything about it that was never recorded. That is the trade: it
+is fast because it does not rebuild, and it is unreproducible for the same
+reason. It is the right choice for an urgent capability gap on an image whose
+provenance is already documented, and the wrong one as a habit. Either way
+`$HOME/.ci-base-manifest` is what the next operator reads, so append to it.
 
 ## Deviations from the legacy script
 
@@ -519,9 +771,18 @@ Everything this recipe changes, and why. This is the list to re-check whenever
 | — | delete `control.sock` before every reboot | Otherwise `tart exec` fails against a perfectly healthy guest. |
 
 One more, not a change but a confirmation: **the legacy script installs neither
-Docker nor Podman, and neither is in the source image.** Nothing was added
-here. A workflow that needs a container runtime inside the guest needs an
-explicit layer that does not exist yet.
+Docker nor Podman, and neither is in the source image.**
+
+That sentence used to end "a workflow that needs a container runtime inside the
+guest needs an explicit layer that does not exist yet", and it was wrong within
+the day — not about the script, but about the fleet. `suuudokuuu` already needed
+one, node A already had one, and this document did not know. Step 6 is that
+layer, and the reason it is written as a mandatory step rather than an optional
+extra is
+[What the *label* requires of a Linux guest](#what-the-label-requires-of-a-linux-guest).
+The general lesson survives the correction: **the legacy script is not a
+statement about what the fleet's consumers need**, only about what one control
+plane once installed. Derive consumer requirements from the consumers.
 
 ## Wire it to the node configuration
 
@@ -544,6 +805,13 @@ Read the node's actual `fleet.json` before building and name the candidate to
 match. `BASE_IMAGE.md` records the same lesson from the macOS side, where the
 committed `baseVm` disagreed with the document's suggested name.
 
+Read it for a second reason as well, which the first version of this document
+did not: **the labels the node's scale sets advertise decide which optional
+steps are mandatory.** The deployed node C configuration has the full profile
+matrix — `linux-1x2`, `linux-2x4`, `linux-4x8`, `linux-6x12` — and its `6x12`
+scale sets advertise `[self-hosted, linux-tiered, linux-xl]`, the same labels
+node A's do. That is what made step 6 compulsory there.
+
 Note that [`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) assigns the Mac Studio
 macOS `maestro` work only, with "no Linux scale sets". The deployed
 configuration there has a full Linux profile matrix and this `baseVm`, so the
@@ -562,6 +830,9 @@ Measured on the Mac Studio, 2026-08-04.
 | Virtual disk capacity after `--disk-size 50` | 50 GB (45 GB usable in-guest) |
 | In-guest root filesystem used | 4.7 GB of 45 GB |
 | Wall-clock, pull to promote | about 55 minutes, including two false starts |
+| **With the Redroid layer of step 6**, `tart list` `Size` | 8 GB |
+| **With the Redroid layer of step 6**, in-guest root used | 7.1 GB of 45 GB |
+| Redroid layer, added to a cloned incumbent: wall-clock | about 20 minutes, three boots and all verification included |
 
 The image is **small** — under a tenth of the macOS base. That makes the
 transfer-versus-build comparison a very different argument from the macOS one:
@@ -622,6 +893,70 @@ Node B additionally needs the Android SDK/NDK, the emulator, `platform-tools`,
 and Maestro, per `MULTI_NODE_PLAN.md`. None of that is in this recipe, because
 no arm64 Linux consumer uses it.
 
+### The Redroid layer does *not* transfer to node B unchanged
+
+Step 6 is the part of this document most likely to be copied verbatim onto the
+GEEKOM and the part least entitled to be. Everything below is stated as
+something to **re-verify on the node**, not as a finding: none of it has been
+measured on x86_64, and the arm64 result is not evidence about it.
+
+- **The pinned image is an arm64 manifest.** The digest recorded in this
+  document, `sha256:b51bde…90ee`, is what `redroid/redroid:15.0.0_64only-latest`
+  resolved to on arm64. The same tag on amd64 resolves to a different manifest,
+  and the tag itself is `-latest`: pin whatever amd64 actually resolves to,
+  record it, and do not assume the Android version behaves the same. The arm64
+  finding that Android 14 hard-locks the 6.17 guest kernel and 13 never boots is
+  a *guest-kernel* interaction, so it must be re-tested against the GEEKOM's
+  kernel rather than inherited.
+- **The ABI question inverts, and it is the one that breaks the consumer.**
+  The verification above measures `ro.product.cpu.abi = arm64-v8a`, and
+  `suuudokuuu`'s prewarm script says in its own header that "apps must ship
+  arm64-v8a". On x86_64 the container reports an x86 ABI, so an APK carrying
+  only `arm64-v8a` native libraries either refuses to install or crashes on the
+  first native call — and the app is React Native, so there are always native
+  libraries. Node B therefore needs one of: an APK built with an x86_64 ABI
+  split, a Redroid image variant that ships a native bridge (ARM translation),
+  or the Google emulator path instead. **Which of those works is unmeasured.**
+  It is also the one item here that changes a *consumer's build*, not just an
+  image, so it is a conversation with the consumer before it is a provisioning
+  step.
+- **Two Android paths exist on node B and must not be conflated.** Redroid is a
+  privileged container over `binder_linux` and wants no `/dev/kvm` at all. The
+  Google AVD path — which is why node B exists, since
+  `reactivecircus/android-emulator-runner` with `arch: x86_64` is failing on the
+  Mac mini today — needs `/dev/kvm`, and the podman adapter grants it per
+  profile through `executor.kvmProfiles`. A profile can need both, one, or
+  neither, and the grant is not interchangeable with the module.
+- **`binder_linux` is a property of the GEEKOM's kernel, not of x86.** Ubuntu
+  ships it as a module under `kernel/drivers/android/`; a distribution that
+  builds `CONFIG_ANDROID_BINDER_IPC` differently, or not at all, fails the
+  prewarm script's own `test -d /sys/module/binder_linux`. Check `modinfo
+  binder_linux` before anything else, because it is the cheapest possible
+  disproof.
+- **Privileged containers inside a rootless runner container are the real
+  design problem.** On node A the runner is a VM, so `docker run --privileged`
+  inside it is ordinary. On node B the runner *is* a rootless container, and
+  `--privileged` nested inside it — with binderfs mounted and a port
+  published — is not the same operation and may not be permitted at all. The
+  plausible shapes are: run Redroid as a sibling on the node's own runtime and
+  give the job an `adb` endpoint; or grant the runner container the specific
+  capabilities and device access Redroid needs; or accept the Google AVD path
+  instead. This is design work with a security argument attached — the
+  `MULTI_NODE_PLAN.md` rationale for rootless is that approved third-party code
+  runs on this node — and it should not be settled by a provisioning script.
+- **The consumer's workflow hard-codes `sudo docker`.** Node B's runtime is
+  podman, and rootless podman needs no `sudo`. Either the image provides a
+  `docker` shim, or the workflow learns the runtime from the manifest that
+  already exists at `$HOME/.sudoku-ci/android-emulator.json` — the manifest has
+  a `type` field, and it is the natural place for the runtime to be named.
+
+Until every one of those is answered on the hardware, **node B must not
+advertise `linux-xl`**, or it reproduces exactly the failure recorded in
+[What the *label* requires of a Linux guest](#what-the-label-requires-of-a-linux-guest)
+— on a third node, with a third set of symptoms. Advertise the canonical
+`trf-linux-amd64-*` labels, which no Android consumer names, until the Android
+path there is proved.
+
 ## Known unknowns
 
 Stated so a future operator does not mistake inference for measurement.
@@ -637,8 +972,12 @@ Stated so a future operator does not mistake inference for measurement.
   breaks, add the `cli.github.com` repository rather than pinning backwards.
 - **The Playwright system dependencies are for `chromium` and `webkit` only.**
   `firefox` was not requested by the legacy script and is not installed.
-- **No container runtime is present**, as noted above. Whether any arm64 Linux
-  consumer needs one was not audited.
+- ~~**No container runtime is present.** Whether any arm64 Linux consumer needs
+  one was not audited.~~ **Corrected the same day, in production.** One did, the
+  audit was the outage, and step 6 is the answer. The unaudited-consumer class
+  of unknown is what the ADR 0034 amendment asks to be made mechanical; the
+  entry is struck rather than deleted because the shape of the miss is the
+  lesson.
 - **Why `tart run` does not re-bind a leftover `control.sock` was not traced
   into Tart's source.** The behaviour is reproducible and the workaround is
   reliable, but the mechanism is inferred from the symptom.
@@ -647,3 +986,26 @@ Stated so a future operator does not mistake inference for measurement.
   first real job on this base is still the first real job.
 - **Build-time CPU and memory were not tuned.** 4 vCPU / 8192 MiB was chosen to
   stay well inside a shared host's headroom, not because it is optimal.
+- **Node A's Redroid layer was read, not rebuilt, and the two images are
+  equivalent only where they were compared.** The comparison was made against a
+  *running clone* of node A's base while it served a job — read-only, and the
+  live base was never touched. What matched: the Redroid tag, the image digest
+  `sha256:b51bde…90ee`, `/usr/bin/docker` and `/usr/bin/adb`,
+  `/etc/modules-load.d/redroid.conf`, the runner user's `docker` group
+  membership, and every field of `$HOME/.sudoku-ci/android-emulator.json`. What
+  differs: node A's base carries no `$HOME/.ci-base-manifest` at all, so its
+  package set, Node version, and runner version are still unverified against
+  node C's. **The two images are proved equivalent for the `linux-xl` Android
+  capability and for nothing else.** That is exactly the gap the enforcement
+  proposal exists to close.
+- **The prewarmed `/data` was 32 MB on node C and 155 MB on the node A clone
+  that was read.** The node A figure was taken from a guest that had already run
+  a job, and job execution writes to `/data`, so the difference is expected and
+  was not investigated further. It is recorded because a *base* whose `/data`
+  is much larger than 32 MB would mean something was baked in that should not
+  have been.
+- **The `linux-xl` capability was proved in the base image, not in an ephemeral
+  clone.** The daemon resizes and boots a clone with the profile's own vector,
+  and the verification here ran in the base at 4 vCPU / 8192 MiB while the
+  profile is 6 vCPU / 12 GiB. More resources, same layer — but the first real
+  Android job on node C is still the first real Android job.

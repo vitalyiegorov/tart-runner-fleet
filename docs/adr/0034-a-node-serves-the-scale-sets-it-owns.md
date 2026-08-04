@@ -19,6 +19,11 @@ the elastic envelope are now per node, and gain a static ceiling below physical
 capacity. Changes nothing in [ADR 0031](0031-deterministic-simulation-testing.md):
 the simulated world stays one node, because a node is still one fleet.
 
+Amended 2026-08-04 (**c**): nodes that advertise the same label must provide
+equivalent guest capabilities. Recorded after a production failure caused by two
+images behind one label; adds an invariant and a proposal, and changes no
+mechanism.
+
 ## Context
 
 The fleet runs on one Apple-silicon Mac mini (10 cores, 24 GiB). Two more
@@ -436,6 +441,132 @@ say whether the image is really there. Nothing else about the port changed: the
 seven verbs, the field sets, and the caller-side ports are byte-for-byte as
 issue #137 left them, which is what let the container adapter be written against
 a target that could not move.
+
+## Amendment 2026-08-04c: a shared label is a promise about the guest
+
+This amendment adds an invariant to the shared-label federation recorded in
+*Amendment 2026-08-04b* ([issue #144](https://github.com/vitalyiegorov/tart-runner-fleet/issues/144),
+pull request #152), which withdrew §3's refusal to let two nodes advertise one
+label. It changes no mechanism, no schema, and no code. It exists because the
+fleet violated the invariant in production on the day that federation was
+deployed, and because nothing in this record — or in any gate — would have
+stopped it.
+
+### What happened
+
+Node A and node C both advertise `[self-hosted, linux-tiered, linux-xl]`, which
+is precisely what amendment 2026-08-04b permits: GitHub places, each node fills
+to its advertised capacity, no steward. Node C's Linux base image was built the
+same day from `docs/LINUX_BASE_IMAGE.md`, a document written by executing it,
+verified against every contract this codebase imposes on a guest, and correct in
+all of them.
+
+Node A's image additionally carries a prewarmed Redroid container. Node C's did
+not, because no artifact this fleet owns says it should: not the legacy build
+script, not the daemon's code, not the profile, not the label, not the scale-set
+definition, not the configuration schema. The capability exists only in a
+consumer's workflow in another repository.
+
+`vitalyiegorov/suuudokuuu`'s Android Maestro job therefore failed on node C and
+passed on node A — same commit, same label, same workflow — which is
+indistinguishable from flakiness until someone reads the two runs side by side
+and notices the runner names differ. The job carried its own guard
+(`::error::The guest image lacks the Redroid prewarm`), and that guard is the
+only reason the diagnosis took minutes rather than days. Nothing else in the
+loop could have produced it: the daemon started the guest correctly, the runner
+registered correctly, and the job ran on exactly the resources its label asked
+for.
+
+### The invariant
+
+> **Nodes that advertise the same label MUST provide equivalent guest
+> capabilities.** A leaner image behind a shared label is not an optimization
+> and not a degraded mode. It is a correctness bug whose observable is
+> non-determinism in someone else's repository.
+
+This follows from amendment 2026-08-04b rather than qualifying it. Once
+placement is GitHub's and a consumer cannot address a node, the label is the
+*entire* interface between a job and a machine. §4 of this record already says
+the canonical label "cannot lie" about CPU, memory, OS, and architecture — it is
+derived, and the derivation is checked. The label lies about everything else for
+free, and "everything else" turned out to include whether Android can run at
+all.
+
+Two consequences worth stating plainly:
+
+- **`hostBudget` scales capacity; it does not scale capability.** A smaller node
+  may advertise a smaller number. It may not advertise a smaller *image*.
+- **The emergency mitigation is to stop advertising, never to keep advertising
+  and hope.** Removing node C's `linux-xl` scale sets restored correctness at
+  the cost of capacity, and that is the correct trade every time.
+
+### Proposed enforcement, not implemented here
+
+Recorded so the next node does not rediscover this by outage. Ordered by what
+each catches and what it costs. **None of it is built**; the work is filed as an
+issue labelled `three-node`.
+
+**1. Declare the capability, in the two places that already exist.** A
+capability is a lowercase identifier — `redroid-android`, `container-runtime` —
+and it appears twice. A node declares what its base image provides:
+
+```json
+"baseVm": "linux-runner-base-go",
+"baseImageCapabilities": ["container-runtime", "redroid-android"]
+```
+
+A scale set declares what its label requires, beside the labels it already
+carries:
+
+```json
+{ "profile": "linux-6x12", "name": "trf-sudoku-xl-studio",
+  "labels": ["self-hosted", "linux-tiered", "linux-xl"],
+  "requiresCapabilities": ["redroid-android"] }
+```
+
+`Config.Validate` then refuses a scale set requiring a capability the node does
+not declare. This is a few lines in `internal/config/config.go` beside the
+existing profile/scale-set cross-checks, it costs nothing at runtime, it is
+covered by `fleet config validate` before the daemon starts, and — being a
+configuration error — it is caught by the same gate that already catches a scale
+set naming an unknown profile.
+
+**2. Compare the declarations across nodes, where the fleet exists as a whole.**
+§5 of this record renders each node's configuration from shared definitions and
+tests that the rendering is current. That contract test is the only place where
+all nodes are visible at once — no node may look at another, and this does not
+change that, because the check runs in CI on the configuration repository, not
+in the daemon. The rule: **for any label advertised by more than one node, the
+union of required capabilities must be declared by every node that advertises
+it.** That is the actual parity invariant, and it is enforceable exactly where
+the fleet is a single artifact. This is the recommended core of the work; §1 is
+what makes it expressible.
+
+**3. Make the declaration answerable by the image.** A declaration an operator
+types is a claim. The image should be able to confirm it: bake
+`/usr/local/share/tart-runner-fleet/image-capabilities.json` at seal time (node
+C's base already carries the informal ancestor of this, appended to
+`$HOME/.ci-base-manifest`), and have the bootstrap helper read it and compare it
+against the capabilities the daemon expected. A mismatch fails the instance at
+the `bootstrap` stage with a named reason, which
+[ADR 0020](0020-diagnosable-drain-failures.md) already knows how to surface, and
+which is a categorically better failure than a job dying inside a consumer's
+workflow. It is detection, not prevention — the job has already been assigned by
+then — so it ranks below §2 and is worth having anyway, because it is the only
+check that can catch a *stale* declaration after an image is rebuilt.
+
+**4. What is deliberately not proposed.** No probing of another node, no
+capability gossip, no registry, no runtime capability negotiation with GitHub,
+and no dynamic label computation. Every one of those reintroduces the
+cross-node coupling §9 forbids, and none is needed: the failure is a
+configuration mistake, and configuration is where it should be caught.
+
+The honest limit of all four: a capability list is only as good as the audit
+that produced it, and consumer requirements live in consumer repositories that
+this fleet does not read. §1 and §2 make an operator's knowledge *mechanically
+enforced*; they do not make it *complete*. The recurring operator task — read
+the consumers of every label a node advertises, before advertising it — remains,
+and `docs/LINUX_BASE_IMAGE.md` now carries it.
 
 ## Not addressed here
 
