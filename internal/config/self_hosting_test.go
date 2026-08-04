@@ -59,6 +59,56 @@ func TestExampleConfigCanBuildItsSuccessor(t *testing.T) {
 	}
 }
 
+// TestExampleConfigIsPortableOnlyOnceItsHostBudgetIsRemoved pins the reason the
+// observe smoke test cannot use `config/fleet.example.json` verbatim.
+//
+// `hostBudget` is a claim about ONE machine — the example states the live Mac
+// mini's ten cores and 23552 MiB — and `app.budgetExceedsHost` fails the host
+// observation closed when the machine cannot honour it (issue #136). An
+// unavailable host observation blocks every tick's plan, so the daemon never
+// records a successful tick and never becomes ready. That is exactly right for a
+// node whose operator claims capacity it does not have, and exactly wrong for a
+// two-core CI guest booting the shipped example: it cost issue #138 a red gate.
+//
+// The two halves are asserted together so they cannot drift. If the example
+// stops declaring a budget the smoke script's removal becomes a silent no-op and
+// its comment becomes a lie; if the script stops removing it, CI breaks again on
+// any machine smaller than node A.
+func TestExampleConfigIsPortableOnlyOnceItsHostBudgetIsRemoved(t *testing.T) {
+	file, err := os.Open("../../config/fleet.example.json") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	cfg, err := Decode(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HostBudget.CPU <= 0 || cfg.HostBudget.MemoryMiB <= 0 {
+		t.Fatalf("the example declares node A's envelope explicitly; hostBudget = %+v", cfg.HostBudget)
+	}
+
+	smoke, err := os.ReadFile("../../scripts/observe-smoke.sh") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"config/fleet.example.json",
+		`config.pop("hostBudget", None)`,
+	} {
+		if !strings.Contains(string(smoke), required) {
+			t.Errorf("the observe smoke test must derive its configuration from the example: missing %q", required)
+		}
+	}
+	// A timeout that prints nothing is a gate nobody can act on. The smoke test
+	// must surface the daemon's own account of why it never became ready.
+	for _, required := range []string{"status --output json", "doctor --output json", "readyz"} {
+		if !strings.Contains(string(smoke), required) {
+			t.Errorf("the observe smoke test must be self-diagnosing on timeout: missing %q", required)
+		}
+	}
+}
+
 func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
@@ -125,6 +175,28 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 			t.Errorf("release artifacts must include the secret-safe guest bootstrap helper %q", required)
 		}
 	}
+	// ADR 0034 gives the fleet two node types, so a release that cannot be
+	// installed on the second one is not a release. The Linux archive is built
+	// from the same double-build compare and listed in the same SHA256SUMS as
+	// the darwin one, and it carries the systemd units and the renderer that
+	// boot it.
+	for _, required := range []string{
+		"GOOS=linux GOARCH=amd64",
+		"fleet-linux-amd64",
+		"fleet-linux-amd64.cdx.json",
+		"BUILDINFO-linux-amd64.txt",
+		"archive linux-amd64",
+		"tart-runner-fleet-$version-$goos_arch.tar.gz",
+		"tart-runner-fleet-authority.service",
+		"tart-runner-fleet-updater.service",
+		"tart-runner-fleet-updater.timer",
+		"tart-runner-fleet-updater-handoff.service",
+		"render-systemd.sh",
+	} {
+		if !strings.Contains(string(buildScript), required) {
+			t.Errorf("release must publish the linux/amd64 node's generation: missing %q", required)
+		}
+	}
 
 	mainRelease, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
@@ -143,6 +215,28 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 		if !strings.Contains(string(mainRelease), required) {
 			t.Errorf("main release verification must require bootstrap asset %q", required)
 		}
+	}
+	// The publish step must verify the second node's archive with the same
+	// checksum manifest, member listing, and file-presence checks as the first,
+	// and upload it: a release missing one node type is not publishable.
+	for _, required := range []string{
+		`LINUX_ARCHIVE="tart-runner-fleet-${VERSION}-linux-amd64.tar.gz"`,
+		"fleet-linux-amd64",
+		"BUILDINFO-linux-amd64.txt",
+		"EXPECTED_LINUX_CONTENTS",
+		`ACTUAL_LINUX_CONTENTS="$(tar -tzf "dist/$LINUX_ARCHIVE" | LC_ALL=C sort)"`,
+		`test "$ACTUAL_LINUX_CONTENTS" = "$EXPECTED_LINUX_CONTENTS"`,
+		`"dist/$LINUX_ARCHIVE"`,
+		"dist/render-systemd.sh",
+		"dist/tart-runner-fleet-authority.service",
+		"dist/tart-runner-fleet-updater.timer",
+	} {
+		if !strings.Contains(string(mainRelease), required) {
+			t.Errorf("main release must verify and publish the linux/amd64 generation: missing %q", required)
+		}
+	}
+	if !strings.Contains(string(ci), "./scripts/observe-smoke.sh") {
+		t.Error("CI must prove the daemon reaches the observe steady state on the node it builds on")
 	}
 }
 
@@ -241,6 +335,115 @@ func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 	} {
 		if !strings.Contains(operationsText, required) {
 			t.Errorf("operations handoff is missing exact command %q", required)
+		}
+	}
+}
+
+// TestVersionedSystemdModesRenderWithoutAdHocUnitEdits is the Linux twin of the
+// launchd assertion above. ADR 0034's second node boots from `systemd --user`,
+// and issue #138 requires its three services — the controller, the five-minute
+// updater with its timer, and the updater handoff — to come from the release
+// being installed rather than from a hand-written file.
+func TestVersionedSystemdModesRenderWithoutAdHocUnitEdits(t *testing.T) {
+	templates := map[string][]string{
+		"tart-runner-fleet.service":                 {`"--mode=observe"`, "/fleetd.sock", "Restart=on-failure", "KillMode=process", "TimeoutStopSec=30", "UMask=0077"},
+		"tart-runner-fleet-shadow.service":          {`"--mode=shadow"`, "fleet-shadow.db", "fleet-shadow.sock", "Restart=on-failure", "KillMode=process"},
+		"tart-runner-fleet-canary.service":          {`"--mode=canary"`, `"--canary-scope=__CANARY_SCOPE__"`, `"--canary-profile=__CANARY_PROFILE__"`, "fleet-canary.db", "fleet-canary.sock"},
+		"tart-runner-fleet-authority.service":       {`"--mode=authority"`, "Restart=on-failure", "KillMode=process", "TimeoutStopSec=30"},
+		"tart-runner-fleet-updater.service":         {"update apply-latest", "automatic-release-update", "Type=oneshot"},
+		"tart-runner-fleet-updater.timer":           {"OnUnitActiveSec=300", "OnActiveSec=0", "Unit=tart-runner-fleet-updater.service"},
+		"tart-runner-fleet-updater-handoff.service": {"update finish-updater-handoff", "automatic-updater-handoff", "Restart=on-failure", "RestartSec=10"},
+	}
+	for name, required := range templates {
+		data, err := os.ReadFile(filepath.Join("../../systemd", name)) // #nosec G304 -- fixed repository fixture assembled from a closed unit set.
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		body := string(data)
+		required = append(required, "[Unit]")
+		if strings.HasSuffix(name, ".service") {
+			// The host probe reads /proc, so a unit that hid it would turn every
+			// admission decision on the node into an unavailable observation.
+			required = append(required, `"__RELEASE_DIR__/fleet"`, "NoNewPrivileges=yes")
+			if strings.Contains(body, "ProcSubset=") || strings.Contains(body, "ProtectProc=") {
+				t.Errorf("%s hides /proc from the host probe", name)
+			}
+		}
+		for _, token := range required {
+			if !strings.Contains(body, token) {
+				t.Errorf("%s systemd template is missing %q", name, token)
+			}
+		}
+	}
+
+	rendered := t.TempDir()
+	command := exec.Command("../../systemd/render-systemd.sh", "canary", // #nosec G204 -- fixed test arguments.
+		"/opt/tart runner fleet/releases/v1", "/tmp/fleet state", rendered, "fleet-repo", "small")
+	command.Env = append(os.Environ(), "FLEET_UNITS_DIR=/home/fleet/.config/systemd/user")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("render systemd canary: %v: %s", err, output)
+	}
+	for _, name := range []string{"tart-runner-fleet-canary.service", "tart-runner-fleet-updater.service",
+		"tart-runner-fleet-updater.timer", "tart-runner-fleet-updater-handoff.service"} {
+		info, err := os.Stat(filepath.Join(rendered, name))
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("rendered %s permissions = %v, %v", name, info, err)
+		}
+	}
+	// Every argument is quoted because a release directory may contain spaces
+	// and systemd splits an unquoted ExecStart on whitespace. A bare path
+	// fragment cannot prove that, so match whole quoted arguments.
+	unit, err := os.ReadFile(filepath.Join(rendered, "tart-runner-fleet-canary.service")) // #nosec G304 -- test-owned path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`"/opt/tart runner fleet/releases/v1/fleet"`,
+		`"--config=/tmp/fleet state/fleet.json"`,
+		`"--mode=canary"`,
+		`"--canary-scope=fleet-repo"`,
+		`"--canary-profile=small"`,
+	} {
+		if !strings.Contains(string(unit), required) {
+			t.Errorf("rendered canary unit is missing %q", required)
+		}
+	}
+	if strings.Contains(string(unit), "__") {
+		t.Error("rendered canary unit retains a template placeholder")
+	}
+
+	// The immutable root is derived from the release path, so the updater is
+	// pointed at the tree the release actually lives in.
+	updater, err := os.ReadFile(filepath.Join(rendered, "tart-runner-fleet-updater.service")) // #nosec G304 -- test-owned path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`"--root" "/opt/tart runner fleet"`,
+		`"--launch-agents-dir" "/home/fleet/.config/systemd/user"`,
+		`"--endpoint" "unix:///tmp/fleet state/fleet-canary.sock"`,
+		`"--mode" "canary"`,
+	} {
+		if !strings.Contains(string(updater), required) {
+			t.Errorf("rendered updater unit is missing %q", required)
+		}
+	}
+
+	refused := [][]string{
+		// A systemd specifier and a variable reference both expand inside
+		// ExecStart, so a path carrying either would escape the quoting.
+		{"authority", "/opt/%h/releases/v1", "/tmp/state", rendered},
+		{"authority", "/opt/$HOME/releases/v1", "/tmp/state", rendered},
+		{"authority", `/opt/"quoted"/releases/v1`, "/tmp/state", rendered},
+		// A release directory outside <root>/releases/<version> would silently
+		// point the updater at the wrong tree.
+		{"authority", "/opt/fleet/v1", "/tmp/state", rendered},
+		{"observe", "/opt/fleet/releases/v1", "/tmp/state", rendered, "extra", "arguments"},
+		{"nonsense", "/opt/fleet/releases/v1", "/tmp/state", rendered},
+	}
+	for _, args := range refused {
+		if err := exec.Command("../../systemd/render-systemd.sh", args...).Run(); err == nil { // #nosec G204 -- fixed injection regressions.
+			t.Errorf("systemd renderer accepted %v", args)
 		}
 	}
 }

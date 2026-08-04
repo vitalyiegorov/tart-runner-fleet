@@ -9,14 +9,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
@@ -233,6 +232,9 @@ func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
 }
 
 type dependencies struct {
+	// executes mirrors platform.executes: whether this node's backend can bring
+	// an instance into existence at all.
+	executes        bool
 	openConfig      func(string) (io.ReadCloser, error)
 	openStore       func(context.Context, string) (runtimeStore, error)
 	loadKey         func(context.Context, string, string, string) (*credentials.Secret, error)
@@ -289,8 +291,15 @@ var (
 	errScaleSetOpen  = errors.New("recreate scale-set session failed")
 )
 
-func defaultDependencies() dependencies {
+func defaultDependencies() dependencies { return newDependencies(runtime.GOOS) }
+
+// newDependencies is the production wiring for a node running goos. Everything
+// a node's execution technology decides comes from platformFor; everything else
+// is the same on every machine.
+func newDependencies(goos string) dependencies {
+	node := platformFor(goos)
 	return dependencies{
+		executes: node.executes,
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
@@ -305,8 +314,8 @@ func defaultDependencies() dependencies {
 		},
 		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver) app.Inventory {
 			return app.ProductionInventory{Store: store,
-				Executor:                   &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
-				Host:                       &macos.Probe{Timeout: cfg.Timeouts.Tart, PressureAccounting: cfg.Guards.PressureMemoryAccounting},
+				Executor:                   node.executor(cfg),
+				Host:                       node.host(cfg),
 				Recovery:                   recovery,
 				RecoveryConfirmationMaxAge: deletionConfirmationMaxAge,
 				Capacity:                   domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
@@ -321,28 +330,12 @@ func defaultDependencies() dependencies {
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
-		newVM: func(store runtimeStore, cfg config.Config, control lifecycle.DrainControl) lifecycle.VMControl {
-			return &tart.Adapter{Ownership: store, Confirmation: control, CommandTimeout: cfg.Timeouts.Tart,
-				StartTimeout: cfg.Timeouts.Boot, ConfirmationMaxAge: deletionConfirmationMaxAge,
-				MacOSVMPrefixes:      []string{"trf-" + strings.ToLower(cfg.MacOS.Builder.ID) + "-", "trf-" + strings.ToLower(cfg.MacOS.Maestro.ID) + "-"},
-				MacOSRootDiskOptions: cfg.MacOS.RootDiskOptions, MacOSSharedDirectoryPath: cfg.MacOS.SharedDirectoryPath,
-				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization}
-		},
-		// newReaper builds the discharge path's own Tart port. It deliberately omits
-		// Confirmation: Reap does not consult GitHub runner evidence, because the
-		// case it exists for is a registration that can never be confirmed released.
-		newReaper: func(store runtimeStore, cfg config.Config) discharge.VM {
-			return &tart.Adapter{Ownership: store, CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot}
-		},
-		readiness: func(cfg config.Config) lifecycle.Readiness {
-			return execReadiness{Runner: tart.ExecRunner{}, Timeout: cfg.Timeouts.Boot,
-				AttemptTimeout: cfg.Timeouts.Tart, RetryInterval: 250 * time.Millisecond, After: time.After}
-		},
-		bootstrap: func(cfg config.Config) lifecycle.Bootstrapper {
-			return lifecycle.StdinBootstrapper{Runner: lifecycle.ExecStdinRunner{Binary: "tart"}, Timeout: cfg.Timeouts.Tart}
-		},
-		now:   time.Now,
-		after: time.After,
+		newVM:     node.newVM,
+		newReaper: node.newReaper,
+		readiness: node.readiness,
+		bootstrap: node.bootstrap,
+		now:       time.Now,
+		after:     time.After,
 		leaseOwner: func(cfg config.Config) string {
 			owner := cfg.GitHub.SessionOwner
 			if owner == "" {
@@ -361,6 +354,15 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}
 	if opts.Mode == reconcile.Canary && (strings.TrimSpace(opts.CanaryScope) == "" || strings.TrimSpace(opts.CanaryProfile) == "") {
 		return errors.New("canary requires an exact scope and profile")
+	}
+	// A node with no execution technology may observe and nothing else. Shadow,
+	// canary and authority all exist to act on a machine this build cannot act
+	// on, and every plan they produced would end in a refused Create. Refusing
+	// here makes that a startup error an operator reads once, instead of a queue
+	// of parked dead letters they read for an hour (ADR 0034, and Phase 1 Part A
+	// of docs/MULTI_NODE_PLAN.md, which brings the node up in observe mode).
+	if !d.executes && opts.Mode != reconcile.Observe {
+		return fmt.Errorf("controller mode %s requires an execution backend, which this node's platform has none of", opts.Mode)
 	}
 	file, err := d.openConfig(opts.ConfigPath)
 	if err != nil {

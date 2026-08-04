@@ -4,6 +4,26 @@ The release pipeline treats binaries, configuration, checksums, SBOMs, notes,
 and the source revision as one immutable generation. Do not rebuild or replace
 an already-published generation.
 
+## One release, two node types
+
+ADR 0034 gives the fleet two kinds of node, so a release carries two archives:
+
+| Archive | Node | Boots from |
+| --- | --- | --- |
+| `tart-runner-fleet-<version>-darwin-arm64.tar.gz` | Apple silicon, Tart | four `launchd` plists plus `render-launchd.sh` |
+| `tart-runner-fleet-<version>-linux-amd64.tar.gz` | Linux/amd64 | seven `systemd --user` units plus `render-systemd.sh` |
+
+Each archive is a complete generation for its node — the controller unpacked as
+`fleet`, its CycloneDX SBOM, its `BUILDINFO.txt`, the guest bootstrap helpers,
+and the service definitions and renderer that boot it. Both are built from the
+same source, built twice, byte compared, and listed in one `SHA256SUMS`, so
+verifying the manifest verifies the whole release and neither archive can be
+published without the other having reproduced.
+
+The platform suffix appears only on the loose assets, where the two controllers
+(`fleet` and `fleet-linux-amd64`) and the two build manifests must coexist.
+`autoupdate.Target` is what selects the right archive for the node asking.
+
 ## Continuous production builds
 
 Every trusted push to `main` runs the complete CI pipeline. The publisher
@@ -91,8 +111,9 @@ Download the release assets and verify the manifest before installation:
 shasum -a 256 -c SHA256SUMS
 ```
 
-Inspect `BUILDINFO.txt` with the version manifest and release tag. Each binary
-also has a matching CycloneDX SBOM. GitHub artifact attestations are not enabled
+Inspect `BUILDINFO.txt` — or `BUILDINFO-linux-amd64.txt` for the Linux node's
+controller — with the version manifest and release tag. Each binary also has a
+matching CycloneDX SBOM. GitHub artifact attestations are not enabled
 because private repositories require GitHub Enterprise Cloud; enabling the
 action here would make valid production releases fail. Revisit attestations if
 the repository moves to a plan that supports them.

@@ -1,0 +1,29 @@
+# One quiescence-gated production release check. The `systemd --user`
+# equivalent of the updater LaunchAgent internal/autoupdate renders on macOS,
+# rendered here by render-systemd.sh so that a Linux node's three units come from
+# the release rather than from the running daemon.
+#
+# NOT ENABLED BY DEFAULT. `fleet update apply-latest` still drives a launchd
+# transaction — it lints a plist with `plutil` and swaps generations with
+# `launchctl` — so on this node it refuses with a message naming that gap
+# instead of half-applying a release. INSTALL-linux.md documents the manual
+# `systemctl --user` release bridge to use until the supervisor port lands.
+# Render the unit anyway: it is the exact shape that port will drive, and a node
+# rendered from its release must not need a hand-written file later.
+[Unit]
+Description=tart-runner-fleet forward-only production release check
+Documentation=https://github.com/vitalyiegorov/tart-runner-fleet
+
+[Service]
+Type=oneshot
+ExecStart="__RELEASE_DIR__/fleet" update apply-latest "--repo" "__REPOSITORY__" "--root" "__ROOT__" "--state-dir" "__STATE_DIR__" "--launch-agents-dir" "__UNITS_DIR__" "--mode" "__MODE__" "--config" "__STATE_DIR__/fleet.json" "--endpoint" "__ENDPOINT__" "--domain" "user" "--confirm" "automatic-release-update"
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=append:__STATE_DIR__/update.stdout.log
+StandardError=append:__STATE_DIR__/update.stderr.log
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictSUIDSGID=yes

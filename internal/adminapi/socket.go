@@ -7,21 +7,23 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/hostpaths"
 )
 
 const maxSocketPathBytes = 100
 
 var ErrInvalidSocket = errors.New("adminapi: invalid socket path")
 
-func DefaultSocketPath() string {
-	base, err := os.UserConfigDir()
-	if err != nil || base == "" {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "tart-runner-fleet", "state", "fleetd.sock")
-}
+// DefaultSocketPath is the socket inside the node's own state directory.
+//
+// It used to be derived from os.UserConfigDir, which is the installation root on
+// macOS but `~/.config` on Linux — so on any non-Apple node the daemon listened
+// somewhere its own operator interface, whose defaults were the literal Apple
+// paths, would never look. hostpaths.Layout is now the single answer both read.
+func DefaultSocketPath() string { return hostpaths.Default().SocketPath }
 
-func DefaultEndpoint() string { return "unix://" + DefaultSocketPath() }
+func DefaultEndpoint() string { return hostpaths.Default().Endpoint() }
 
 // Listen creates a private Unix socket. A stale socket owned by this process'
 // user is recoverable; every other filesystem object fails closed.

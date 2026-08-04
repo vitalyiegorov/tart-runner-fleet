@@ -4,6 +4,10 @@ This guide installs one immutable release, configures GitHub's runner control
 plane, and makes the selected controller generation survive login and reboot.
 It never installs from a mutable source checkout.
 
+Installing on a Linux node instead? Under ADR 0034 each machine is its own
+independent fleet, and the Linux node has its own layout, service manager, and
+bring-up sequence: [`INSTALL-linux.md`](INSTALL-linux.md).
+
 ## 1. Prerequisites
 
 - Apple Silicon macOS with [Tart](https://tart.run/) available at

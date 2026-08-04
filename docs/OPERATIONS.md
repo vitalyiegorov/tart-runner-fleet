@@ -328,6 +328,42 @@ fleet status --require-ready --output json
 fleet doctor --output json
 ```
 
+### The Linux node's release bridge
+
+Everything above is a `launchd` transaction: it lints a plist with `plutil` and
+swaps generations with `launchctl bootout` / `bootstrap` / `kickstart`. A Linux
+node (ADR 0034's node B) has none of those, and `fleet update apply-latest`
+refuses there rather than half-applying a generation — the refusal names the
+domain, because a `systemd --user` manager is not addressable as a launchd one.
+Automatic updates on that node arrive with the systemd release transaction; its
+units are already rendered by `render-systemd.sh` so the node will not need a
+hand-written file when it does.
+
+Until then a Linux node adopts a generation by hand, and the ordering rule is
+the same one the macOS bridge has: the unit and the recorded generation move
+together, and the result is *verified* rather than assumed.
+
+```sh
+ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/tart-runner-fleet"
+UNITS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+"$RELEASE_DIR/render-systemd.sh" observe "$RELEASE_DIR" "$ROOT/state" "$ROOT/systemd/$VERSION"
+install -m 0600 "$ROOT/systemd/$VERSION/tart-runner-fleet.service" \
+  "$UNITS_DIR/tart-runner-fleet.service"
+ln -sfn "$RELEASE_DIR" "$ROOT/current.new" && mv -Tf "$ROOT/current.new" "$ROOT/current"
+systemctl --user daemon-reload
+systemctl --user restart tart-runner-fleet.service
+systemctl --user status tart-runner-fleet.service
+"$RELEASE_DIR/fleet" status --require-ready --output json \
+  --endpoint "unix://$ROOT/state/fleetd.sock"
+```
+
+`systemctl --user restart` reports success as soon as the process starts, which
+is the same trap `launchctl bootstrap` sets: only `status --require-ready`
+proves the exact new version became ready. If it does not, re-render from the
+previous release directory and restart again. The full sequence, with the
+download and verification steps, is in
+[`INSTALL-linux.md`](../INSTALL-linux.md).
+
 ```sh
 set -eu
 RELEASE_DIR="$HOME/Library/Application Support/tart-runner-fleet/releases/$VERSION"

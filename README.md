@@ -78,7 +78,7 @@ RELEASE_DIR="$ROOT/releases/$VERSION"
 1. **Install a verified release.** Download the release assets, `shasum -a 256
    -c SHA256SUMS`, extract into `$RELEASE_DIR`, and run `"$RELEASE_DIR/fleet"
    version`. Full sequence, including launchd rendering and the reboot proof:
-   [`INSTALL.md`](INSTALL.md).
+   [`INSTALL.md`](INSTALL.md). On a Linux node, [`INSTALL-linux.md`](INSTALL-linux.md).
 2. **Configure.** `install -m 0600 config/fleet.example.json
    "$STATE_DIR/fleet.json"`, add the scoped `github` block, then
    `"$RELEASE_DIR/fleet" config validate "$STATE_DIR/fleet.json"`.
@@ -315,6 +315,7 @@ authority long enough to build and verify its successor.
 ## Documentation
 
 - [`INSTALL.md`](INSTALL.md) — verified install, launchd, auto-update adoption, reboot proof
+- [`INSTALL-linux.md`](INSTALL-linux.md) — the Linux node: XDG layout, `systemd --user` units, observe-mode bring-up
 - [`USAGE.md`](USAGE.md) — daily cockpit, resource model, scheduling, incidents
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — promotion, rollback, dead letters, recovery
 - [`docs/CLI.md`](docs/CLI.md) — full command, flag, output, and exit-code contract

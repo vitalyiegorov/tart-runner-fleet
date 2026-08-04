@@ -40,7 +40,7 @@ jobs:
       - name: Download the verified main artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ci-release-darwin-arm64-${{ github.event.workflow_run.head_sha }}
+          name: ci-release-${{ github.event.workflow_run.head_sha }}
           path: dist
           repository: ${{ github.repository }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -58,15 +58,20 @@ jobs:
 
           SHORT_SHA="$(printf '%.12s' "$HEAD_SHA")"
           VERSION="v0.1.${RUN_NUMBER}+main.${SHORT_SHA}"
+          # ADR 0034 gives the fleet two node types, so a release carries two
+          # archives and neither may be published without the other.
           ARCHIVE="tart-runner-fleet-${VERSION}-darwin-arm64.tar.gz"
+          LINUX_ARCHIVE="tart-runner-fleet-${VERSION}-linux-amd64.tar.gz"
 
           test "$(cat dist/RELEASE_VERSION)" = "$VERSION"
           for file in \
-            BUILDINFO.txt RELEASE_VERSION SHA256SUMS \
+            BUILDINFO.txt BUILDINFO-linux-amd64.txt RELEASE_VERSION SHA256SUMS \
             fleet \
+            fleet-linux-amd64 \
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
             fleet.cdx.json \
+            fleet-linux-amd64.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
             tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
             com.vitalyiegorov.tart-runner-fleet.plist \
@@ -74,40 +79,69 @@ jobs:
             com.vitalyiegorov.tart-runner-fleet.canary.plist \
             com.vitalyiegorov.tart-runner-fleet.authority.plist \
             render-launchd.sh \
-            "$ARCHIVE"; do
+            tart-runner-fleet.service \
+            tart-runner-fleet-shadow.service \
+            tart-runner-fleet-canary.service \
+            tart-runner-fleet-authority.service \
+            tart-runner-fleet-updater.service \
+            tart-runner-fleet-updater.timer \
+            tart-runner-fleet-updater-handoff.service \
+            render-systemd.sh \
+            "$ARCHIVE" "$LINUX_ARCHIVE"; do
             test -f "dist/$file"
           done
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
-          EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n' \
+          # Each archive is a complete generation for its node: the controller,
+          # its SBOM and build identity, the guest bootstrap helpers, and the
+          # service definitions plus renderer that boot it.
+          COMMON="$(printf '%s\n' \
             BUILDINFO.txt RELEASE_VERSION fleet fleet.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
-            tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-arm64.cdx.json)"
+          EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n%s\n' "$COMMON" "$(printf '%s\n' \
             com.vitalyiegorov.tart-runner-fleet.plist \
             com.vitalyiegorov.tart-runner-fleet.shadow.plist \
             com.vitalyiegorov.tart-runner-fleet.canary.plist \
             com.vitalyiegorov.tart-runner-fleet.authority.plist \
-            render-launchd.sh | LC_ALL=C sort)"
+            render-launchd.sh)" | LC_ALL=C sort)"
           ACTUAL_ARCHIVE_CONTENTS="$(tar -tzf "dist/$ARCHIVE" | LC_ALL=C sort)"
           test "$ACTUAL_ARCHIVE_CONTENTS" = "$EXPECTED_ARCHIVE_CONTENTS"
 
+          EXPECTED_LINUX_CONTENTS="$(printf '%s\n%s\n' "$COMMON" "$(printf '%s\n' \
+            tart-runner-fleet.service \
+            tart-runner-fleet-shadow.service \
+            tart-runner-fleet-canary.service \
+            tart-runner-fleet-authority.service \
+            tart-runner-fleet-updater.service \
+            tart-runner-fleet-updater.timer \
+            tart-runner-fleet-updater-handoff.service \
+            render-systemd.sh)" | LC_ALL=C sort)"
+          ACTUAL_LINUX_CONTENTS="$(tar -tzf "dist/$LINUX_ARCHIVE" | LC_ALL=C sort)"
+          test "$ACTUAL_LINUX_CONTENTS" = "$EXPECTED_LINUX_CONTENTS"
+
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "LINUX_ARCHIVE=$LINUX_ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Publish immutable production release
         run: |
           set -euo pipefail
           assets=(
             "dist/$ARCHIVE"
+            "dist/$LINUX_ARCHIVE"
             dist/SHA256SUMS
             dist/BUILDINFO.txt
+            dist/BUILDINFO-linux-amd64.txt
             dist/RELEASE_VERSION
             dist/fleet
+            dist/fleet-linux-amd64
             dist/tart-runner-fleet-bootstrap-darwin-arm64
             dist/tart-runner-fleet-bootstrap-linux-arm64
             dist/fleet.cdx.json
+            dist/fleet-linux-amd64.cdx.json
             dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
             dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json
             dist/com.vitalyiegorov.tart-runner-fleet.plist
@@ -115,6 +149,14 @@ jobs:
             dist/com.vitalyiegorov.tart-runner-fleet.canary.plist
             dist/com.vitalyiegorov.tart-runner-fleet.authority.plist
             dist/render-launchd.sh
+            dist/tart-runner-fleet.service
+            dist/tart-runner-fleet-shadow.service
+            dist/tart-runner-fleet-canary.service
+            dist/tart-runner-fleet-authority.service
+            dist/tart-runner-fleet-updater.service
+            dist/tart-runner-fleet-updater.timer
+            dist/tart-runner-fleet-updater-handoff.service
+            dist/render-systemd.sh
           )
           if gh release view "$VERSION" >/dev/null 2>&1; then
             IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"

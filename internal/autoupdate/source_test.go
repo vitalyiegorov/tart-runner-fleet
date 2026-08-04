@@ -65,7 +65,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 		{name: "tag", root: t.TempDir(), repository: "owner/repo", command: &releaseCommand{metadata: `{"tag_name":"../../bad"}`}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := LatestProductionRelease(context.Background(), test.root, test.repository, test.command); err == nil {
+			if _, err := LatestProductionRelease(context.Background(), test.root, test.repository, test.command, testTarget); err == nil {
 				t.Fatal("unsafe source accepted")
 			}
 		})
@@ -77,7 +77,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := &releaseCommand{metadata: `{"tag_name":"v2"}`}
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command); err == nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command, testTarget); err == nil {
 		t.Fatal("invalid existing generation accepted")
 	}
 
@@ -86,7 +86,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	command = &releaseCommand{metadata: `{"tag_name":"v2"}`, downloadErr: errors.New("download")}
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command); err == nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command, testTarget); err == nil {
 		t.Fatal("download failure ignored")
 	}
 
@@ -95,7 +95,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	command = &releaseCommand{metadata: `{"tag_name":"v2"}`}
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command); err == nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command, testTarget); err == nil {
 		t.Fatal("download directory failure ignored")
 	}
 
@@ -107,7 +107,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	command = &releaseCommand{metadata: `{"tag_name":"v2"}`, assets: makeReleaseAssets(t, root, "v2", false)}
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command); err == nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command, testTarget); err == nil {
 		t.Fatal("release path collision ignored")
 	}
 
@@ -118,7 +118,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 	if err := os.Symlink("v2", filepath.Join(root, "releases", "v2")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`}); err == nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`}, testTarget); err == nil {
 		t.Fatal("unreadable release path accepted")
 	}
 
@@ -128,7 +128,7 @@ func TestLatestProductionReleaseFailsClosedAtSourceBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(downloads, 0o700)
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`}); err == nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`}, testTarget); err == nil {
 		t.Fatal("unwritable download directory accepted")
 	}
 }
@@ -261,6 +261,45 @@ func TestStageChecksumManifestCopiesExternalAssetWithoutOverwriting(t *testing.T
 	}
 }
 
+// testTarget fixes the platform every source fixture is built for. CI runs on
+// whichever node it owns, so reading runtime.GOOS here would make these
+// assertions pass on one machine and fail on the other.
+var testTarget = Target{OS: "darwin", Arch: "arm64"}
+
+// TestTargetNamesOnePlatformsAssets pins both halves of the per-node release:
+// the archive an updater downloads and the service definition its generation
+// must carry a verified copy of.
+func TestTargetNamesOnePlatformsAssets(t *testing.T) {
+	apple := Target{OS: "darwin", Arch: "arm64"}
+	geekom := Target{OS: "linux", Arch: "amd64"}
+	if name := apple.ArchiveName("v1.2.3"); name != "tart-runner-fleet-v1.2.3-darwin-arm64.tar.gz" {
+		t.Errorf("darwin archive = %q", name)
+	}
+	if name := geekom.ArchiveName("v1.2.3"); name != "tart-runner-fleet-v1.2.3-linux-amd64.tar.gz" {
+		t.Errorf("linux archive = %q", name)
+	}
+	if definition := apple.ServiceDefinition(); definition != "com.vitalyiegorov.tart-runner-fleet.authority.plist" {
+		t.Errorf("darwin service definition = %q", definition)
+	}
+	if definition := geekom.ServiceDefinition(); definition != "tart-runner-fleet-authority.service" {
+		t.Errorf("linux service definition = %q", definition)
+	}
+	if current := CurrentTarget(); current.OS == "" || current.Arch == "" {
+		t.Errorf("current target = %#v", current)
+	}
+}
+
+// TestUnnamedTargetIsRefused keeps a caller from downloading whatever asset a
+// zero value happens to name.
+func TestUnnamedTargetIsRefused(t *testing.T) {
+	for _, target := range []Target{{}, {OS: "linux"}, {Arch: "amd64"}} {
+		if _, err := LatestProductionRelease(context.Background(), "/root", "owner/repo",
+			&releaseCommand{metadata: `{"tag_name":"v2"}`}, target); !errors.Is(err, ErrInvalidGeneration) {
+			t.Errorf("target %#v was accepted: %v", target, err)
+		}
+	}
+}
+
 func makeReleaseAssets(t *testing.T, root, version string, malicious bool, embedManifest ...bool) string {
 	t.Helper()
 	releaseRoot := filepath.Join(t.TempDir(), "fixture")
@@ -269,7 +308,7 @@ func makeReleaseAssets(t *testing.T, root, version string, malicious bool, embed
 	if err := os.MkdirAll(assets, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	archiveName := "tart-runner-fleet-" + version + "-darwin-arm64.tar.gz"
+	archiveName := testTarget.ArchiveName(version)
 	archivePath := filepath.Join(assets, archiveName)
 	file, err := os.Create(archivePath)
 	if err != nil {
@@ -327,14 +366,14 @@ func TestLatestProductionReleaseDownloadsVerifiesAndExtractsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := &releaseCommand{metadata: `{"tag_name":"v2","draft":false,"prerelease":false}`, assets: makeReleaseAssets(t, root, "v2", false)}
-	release, err := LatestProductionRelease(context.Background(), root, "owner/repo", command)
+	release, err := LatestProductionRelease(context.Background(), root, "owner/repo", command, testTarget)
 	if err != nil || release.Version != "v2" || release.Dir != filepath.Join(root, "releases", "v2") {
 		t.Fatalf("release=%+v err=%v", release, err)
 	}
 	if _, err := os.Stat(filepath.Join(release.Dir, "fleet")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command); err != nil {
+	if _, err := LatestProductionRelease(context.Background(), root, "owner/repo", command, testTarget); err != nil {
 		t.Fatal(err)
 	}
 	downloads := 0
@@ -374,7 +413,7 @@ func TestLatestProductionReleaseRejectsPrereleaseTamperingAndTraversal(t *testin
 					}
 				}
 			}
-			_, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: test.metadata, assets: assets})
+			_, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: test.metadata, assets: assets}, testTarget)
 			if err == nil {
 				t.Fatal("unsafe release accepted")
 			}
@@ -388,7 +427,7 @@ func TestLatestProductionReleaseRejectsArchiveEmbeddedChecksumManifest(t *testin
 		t.Fatal(err)
 	}
 	assets := makeReleaseAssets(t, root, "v2", false, true)
-	_, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`, assets: assets})
+	_, err := LatestProductionRelease(context.Background(), root, "owner/repo", &releaseCommand{metadata: `{"tag_name":"v2"}`, assets: assets}, testTarget)
 	if !errors.Is(err, ErrInvalidGeneration) {
 		t.Fatalf("embedded checksum manifest error=%v", err)
 	}

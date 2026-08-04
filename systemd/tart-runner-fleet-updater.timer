@@ -1,0 +1,22 @@
+# The five-minute release poll. `StartInterval` 300 plus `RunAtLoad` in launchd
+# is `OnActiveSec=0` plus `OnUnitActiveSec=300` here: fire once when the timer
+# is started, then every five minutes after the previous run finished.
+#
+# Persistent is deliberately false. A missed window is not work to catch up on:
+# the next tick queries GitHub for the latest release and reaches the same
+# conclusion, and a catch-up burst after a long shutdown would try to activate a
+# generation while the machine is still settling.
+[Unit]
+Description=tart-runner-fleet five-minute production release poll
+Documentation=https://github.com/vitalyiegorov/tart-runner-fleet
+Requires=tart-runner-fleet-updater.service
+
+[Timer]
+Unit=tart-runner-fleet-updater.service
+OnActiveSec=0
+OnUnitActiveSec=300
+AccuracySec=30
+Persistent=false
+
+[Install]
+WantedBy=timers.target

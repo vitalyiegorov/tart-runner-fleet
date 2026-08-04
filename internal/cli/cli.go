@@ -19,6 +19,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/hostpaths"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
@@ -263,16 +264,15 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 	operation := args[0]
 	flags := flag.NewFlagSet("fleet update "+operation, flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	home, _ := os.UserHomeDir()
-	rootDefault := filepath.Join(home, "Library", "Application Support", "tart-runner-fleet")
-	root := flags.String("root", rootDefault, "immutable installation root")
-	stateDir := flags.String("state-dir", filepath.Join(rootDefault, "state"), "fleet state directory")
-	launchAgentsDir := flags.String("launch-agents-dir", filepath.Join(home, "Library", "LaunchAgents"), "user LaunchAgents directory")
+	layout := hostpaths.Default()
+	root := flags.String("root", layout.Root, "immutable installation root")
+	stateDir := flags.String("state-dir", layout.StateDir, "fleet state directory")
+	launchAgentsDir := flags.String("launch-agents-dir", layout.UnitsDir, "per-user service definition directory")
 	repository := flags.String("repo", "vitalyiegorov/tart-runner-fleet", "GitHub release repository")
 	mode := flags.String("mode", "authority", "preserved controller mode")
-	configPath := flags.String("config", filepath.Join(rootDefault, "state", "fleet.json"), "persisted fleet configuration")
-	endpoint := flags.String("endpoint", "unix://"+filepath.Join(rootDefault, "state", "fleetd.sock"), "local readiness endpoint")
-	domain := flags.String("domain", fmt.Sprintf("gui/%d", os.Getuid()), "launchd domain")
+	configPath := flags.String("config", layout.ConfigPath, "persisted fleet configuration")
+	endpoint := flags.String("endpoint", layout.Endpoint(), "local readiness endpoint")
+	domain := flags.String("domain", layout.ServiceDomain, "per-user service supervisor domain")
 	confirm := flags.String("confirm", "", "exact mutation confirmation")
 	releaseDir := flags.String("release-dir", "", "current immutable release directory (adopt only)")
 	interval := flags.Duration("interval", 5*time.Minute, "production release poll interval")
@@ -329,7 +329,7 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		fmt.Fprintln(stderr, "--release-dir is valid only with adopt")
 		return exitUsage
 	}
-	release, err := autoupdate.LatestProductionRelease(ctx, *root, *repository, deps.command)
+	release, err := autoupdate.LatestProductionRelease(ctx, *root, *repository, deps.command, autoupdate.CurrentTarget())
 	if err != nil {
 		fmt.Fprintf(stderr, "resolve production release: %v\n", err)
 		return exitFailure

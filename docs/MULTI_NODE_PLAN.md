@@ -421,12 +421,18 @@ adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
 
 **Daemon**
 
-- [ ] Build the `linux/amd64` release: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`.
-      The tree has no `//go:build darwin` constraints and compiles today.
-- [ ] Install to `~/.local/share/tart-runner-fleet/{current,state,credentials}`,
-      mirroring node A's `~/Library/Application Support` layout.
-- [ ] Install the `systemd --user` unit (the `launchd` plist equivalent) and the
-      renderer beside `launchd/`.
+- [x] Build the `linux/amd64` release: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`.
+      Issue #138 made it a published release archive with its own SBOM, build
+      identity, and entry in the shared `SHA256SUMS`, so there is nothing to
+      build by hand — download it.
+- [x] Install to
+      `${XDG_DATA_HOME:-~/.local/share}/tart-runner-fleet/{current,state,credentials}`,
+      mirroring node A's `~/Library/Application Support` layout. Resolved by
+      `internal/hostpaths`, so the daemon, the CLI, and the renderer agree.
+- [x] Install the `systemd --user` units (the `launchd` plist equivalents) and
+      the renderer, shipped in `systemd/` beside `launchd/` and published in the
+      release archive. Install the controller unit only; see the correction
+      above for why the updater timer stays disabled.
 - [ ] Copy the GitHub App private key to
       `~/.local/share/tart-runner-fleet/credentials/github-app.pem`, mode `0600`,
       owner `fleet`.
@@ -435,7 +441,8 @@ adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
       explicitly, and **no `github.scopes` entries yet**.
 - [ ] Start in **observe** mode. Verify `fleet status`, `fleet doctor`,
       `fleet health` and that the host probe reports plausible CPU, memory,
-      disk, load, and swap from `/proc`.
+      disk, load, and swap from `/proc`. `scripts/observe-smoke.sh` is that
+      check as one command, and CI runs it on Linux on every commit.
 
 ### Part B — cutover, after Phase 2 is green
 
@@ -472,7 +479,7 @@ for an agent working with the existing test gates.
 | --- | --- | --- | ---: |
 | 2a | `hostBudget` | Node A gets an explicit ceiling; node C is unblocked. Ships as an ordinary release to node A alone. | 0.5 d |
 | 2b | Executor port extraction | **Done, issue #137.** `executor.InstanceSpec`, `executor.Backend`, `executor.Instance`, `executor.CommandRunner`, `domain.ValidateInstanceName`, and `executor.HostProbe` lifted out of `internal/adapters/macos`. Refactor only, zero behaviour change; all gates green and the DST corpus identical across three runs per arm; ships as a no-op release. | 1 d |
-| 2c | Linux/amd64 host support | `GOOS=linux` release artifact and updater asset name, `systemd --user` unit and renderer, XDG paths, file-based credentials replacing the Keychain, `launchctl`→`systemctl` in `internal/autoupdate/host.go`, a `/proc` host probe. **Deliverable: the daemon runs on any Linux box in observe mode.** | 2–3 d |
+| 2c | Linux/amd64 host support | **Done, issue #138**, with one correction below. `linux/amd64` release archive and platform-selected updater asset (`autoupdate.Target`), `systemd --user` units and `render-systemd.sh`, XDG paths (`internal/hostpaths`), file-based credentials, a `/proc` host probe (`internal/adapters/linux`), and `platformFor(goos)` wiring `noexecutor.Backend` on a node with no execution technology. **Deliverable met: the daemon runs on any Linux box in observe mode**, asserted on every commit by `scripts/observe-smoke.sh` in CI. | 2–3 d |
 | 2d | Container executor adapter | `internal/adapters/container` implementing `executor.Backend` over the Podman CLI, a container-mode bootstrap that does not need `systemd-run`, per-profile device grants for `/dev/kvm`, contract tests mirroring `internal/adapters/tart`'s. **Deliverable: node B serves `trf-linux-amd64-*`.** | 2–3 d |
 
 Roughly 1,500–2,000 lines of production code and a comparable amount of test
@@ -483,6 +490,48 @@ verifiable.
 Not required, and worth stating because the audit expected otherwise:
 `internal/scheduler` needs no generalization. Node B runs a single-platform
 configuration and exercises `planLinux` only.
+
+### Correction: `launchctl` → `systemctl` is not part of 2c
+
+The plan listed the release transaction's port with the rest of chunk 2c. It is
+not there, and the reason is worth recording. `internal/autoupdate.LocalHost`
+is a whole transaction expressed in launchd — a plist rendered and linted with
+`plutil`, generations swapped with `bootout`/`bootstrap`/`kickstart`, an updater
+that rewrites itself through a separate handoff job, and a rollback that undoes
+all of it. Porting it means a supervisor port with two implementations and two
+sets of failure-path tests, and none of it is needed to run a node in observe
+mode, which is what Part A is.
+
+So issue #138 shipped the packaging and stopped there. All three units are
+rendered by `render-systemd.sh` from the release, so node B will never need a
+hand-written unit; `NewLocalHost` refuses a domain that is not a launchd target,
+so `fleet update apply-latest` on node B names the gap instead of failing inside
+`plutil`; and the manual `systemctl --user` bridge is documented in
+`docs/OPERATIONS.md` and `INSTALL-linux.md`. The systemd release transaction is
+a separate chunk, and Part B does not depend on it: a node that is updated by
+hand can still be promoted to authority.
+
+### What the darwin-assumption audit actually found
+
+`GOOS=linux GOARCH=amd64 go build ./...` was already clean before issue #138
+began — the tree has no `//go:build darwin` constraints and every adapter is a
+CLI-shelling adapter that compiles anywhere. The problem was never compilation;
+it was what the binary does when it runs. Three findings were real:
+
+- `internal/daemon` wired Tart and `internal/adapters/macos` unconditionally, so
+  a Linux daemon would boot and then report an unavailable host observation and
+  an unavailable Tart inventory forever.
+- `adminapi.DefaultSocketPath` derived the socket from `os.UserConfigDir`, which
+  is the installation root on macOS but `~/.config` on Linux, while the operator
+  interface's own defaults were the literal Apple paths. A Linux daemon listened
+  on a socket its own CLI would not look for.
+- The updater's release asset name was the darwin/arm64 archive, unconditionally.
+
+The Keychain was not one of them: `credentials.GitHubAppKey` already prefers
+`github.app.privateKeyFile`, and multi-scope authority validation already accepts
+the file as a complete credential source. The one constraint to record is that
+the *legacy* single-scope authority path still requires Keychain fields
+(`config.go:749`), so a Linux node must use the scoped configuration form.
 
 ## Phase 3 — arch-floating labels and per-repository migration
 
@@ -556,17 +605,19 @@ forward-only updater and activates releases independently. Nothing couples
 release activation across machines; a node may sit a release behind
 indefinitely.
 
-Node B needs one addition: `internal/autoupdate/source.go` hardcodes the release
-asset `tart-runner-fleet-<tag>-darwin-arm64.tar.gz`, so the release workflow
-must also publish `linux-amd64` and the source must select by the running
-platform. That is part of chunk 2c.
+Node B needed one addition, and issue #138 made it: the release workflow now
+publishes `tart-runner-fleet-<tag>-linux-amd64.tar.gz` beside the darwin archive
+in the same `SHA256SUMS`, and `autoupdate.Target` selects the asset — and the
+service definition a generation must carry a verified copy of — by node type
+instead of hardcoding darwin/arm64.
 
 The manual release bridge on node A — swap the plist `Program` path and
 `state/installed-generation.json` together, `launchctl bootout`, wait twenty
 seconds, `enable` and `bootstrap`, then **verify** `launchctl list` — has a
 `systemd --user` equivalent on node B (`systemctl --user daemon-reload`,
-`restart`, then `systemctl --user status`). Document both in
-`docs/OPERATIONS.md` when chunk 2c lands.
+`restart`, then `systemctl --user status`). Both are in `docs/OPERATIONS.md`.
+On node B the bridge is not a fallback but the only path, until the systemd
+release transaction lands; see the correction under Phase 2.
 
 ## Simulation
 
