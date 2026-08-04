@@ -18,7 +18,7 @@ var markdownLink = regexp.MustCompile(`\[[^]]+\]\(([^)]+)\)`)
 // they narrate history, so ADR 0011 keeps its amended `fleetctl` text and ADR
 // 0019 keeps its before/after comparison.
 var operatorFacingDocs = []string{
-	"README.md", "INSTALL.md", "USAGE.md", "AGENTS.md",
+	"README.md", "INSTALL.md", "INSTALL-linux.md", "USAGE.md", "AGENTS.md",
 	"docs/AGENT_RUNBOOK.md", "docs/API.md", "docs/CLI.md", "docs/OPERATIONS.md",
 }
 
@@ -112,7 +112,7 @@ func documentationRoot(t *testing.T) string {
 func TestOperatorAndAgentDocumentationIsCompleteAndLinked(t *testing.T) {
 	root := documentationRoot(t)
 	required := []string{
-		"README.md", "INSTALL.md", "USAGE.md", "AGENTS.md",
+		"README.md", "INSTALL.md", "INSTALL-linux.md", "USAGE.md", "AGENTS.md",
 		"docs/AGENT_RUNBOOK.md", "docs/API.md", "docs/CLI.md",
 		"docs/OPERATIONS.md", "docs/SECURITY.md", "docs/TESTING.md",
 	}
@@ -190,7 +190,13 @@ func TestOperationalDocsTrackCurrentRuntimeContracts(t *testing.T) {
 		// TestOperatorDocsNameNoRetiredExecutable is the other half of this guard.
 		"USAGE.md":              {`FLEET="$ROOT/current/fleet"`, "trf-<os>-<arch>-<cpu>x<ramGiB>", "trf-macos-arm64-4x7"},
 		"docs/AGENT_RUNBOOK.md": {`FLEET="$ROOT/current/fleet"`, "installed-generation.json", "exit status 0"},
-		"docs/OPERATIONS.md":    {"five-minute readiness budget", "launchd bootstrap", "not running", "exit status 0"},
+		"docs/OPERATIONS.md": {"five-minute readiness budget", "launchd bootstrap", "not running", "exit status 0",
+			"systemctl --user daemon-reload", "systemctl --user restart"},
+		// The Linux node's guide must keep naming the three things that make it
+		// a different install rather than a retyped one, and must keep saying
+		// plainly which modes it cannot run.
+		"INSTALL-linux.md": {"tart-runner-fleet-<version>-linux-amd64.tar.gz", "render-systemd.sh",
+			"XDG_DATA_HOME", "systemd/user", "github.app.privateKeyFile", "observe", "./scripts/observe-smoke.sh"},
 	}
 	for name, fragments := range requireText {
 		body, err := os.ReadFile(filepath.Join(root, name))

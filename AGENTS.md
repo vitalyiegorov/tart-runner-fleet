@@ -38,7 +38,12 @@ all changes as safety critical.
 - `internal/adminapi`: versioned read-only DTOs, Unix socket, and bounded client.
 - `internal/executor`: the ports a node's execution technology and host probe
   implement; no layer above them may name a backend adapter (ADR 0034).
-- `internal/adapters`: GitHub, SQLite, Tart, and host implementations.
+- `internal/adapters`: GitHub, SQLite, Tart, container, and host-probe
+  implementations. `macos` and `linux` are the two host probes; `noexecutor` is
+  the backend of a node that has no execution technology yet (ADR 0034).
+- `internal/hostpaths`: where a node keeps its releases, state, and service
+  definitions, per platform. The one answer the daemon, the CLI, and the
+  renderers all read.
 - `internal/operations`: durable operations, leases, retries, and workers.
 - `internal/discharge`: the one guarded operator mutation and its ordering rules.
 - `internal/telemetry`: coherent status, health, readiness, and metrics.
@@ -52,6 +57,8 @@ Prefer the versioned JSON interface; do not scrape human tables or open the
 database while the daemon is running.
 
 ```sh
+# macOS; on a Linux node the root is $XDG_DATA_HOME/tart-runner-fleet
+# (default ~/.local/share/tart-runner-fleet) and everything below is identical.
 ROOT="$HOME/Library/Application Support/tart-runner-fleet"
 FLEET="$ROOT/current/fleet"
 ENDPOINT="unix://$ROOT/state/fleetd.sock"
@@ -97,5 +104,5 @@ production cutover from unit or integration evidence.
   operation payloads.
 - No weakening deadlines, coverage, race tests, socket permissions, or
   fail-closed observations to make a check pass.
-- No authority/canary enablement, launchd installation, or incumbent shutdown
-  without an explicit operational promotion task.
+- No authority/canary enablement, launchd or systemd unit installation, or
+  incumbent shutdown without an explicit operational promotion task.
