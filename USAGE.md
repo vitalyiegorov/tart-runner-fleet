@@ -133,6 +133,63 @@ the envelope is. It ships off, and enabling it on a host is an operational actio
 with the usual observe-then-promote evidence. See
 [`ADR 0018`](docs/adr/0018-second-pilot-elastic-host-envelope.md).
 
+### Capping a node below its hardware: `hostBudget`
+
+Second-pilot mode makes the fleet *polite*: it yields as the host's own tenant
+gets busy. It does not make the fleet *bounded*, because a tenant that is quiet
+right now is not a tenant that has gone away, and on a quiet machine the fleet
+expands to the whole of it.
+
+`hostBudget` is the missing static ceiling. It caps this node's **total**
+admission envelope — every platform charged against it together — below physical
+capacity:
+
+```json
+"hostBudget": { "cpu": 4, "memoryMb": 10240 }
+```
+
+Omit it and nothing changes: the envelope is the physical machine, exactly as
+before. Removing the setting is the whole rollback.
+
+[`config/fleet.example.json`](config/fleet.example.json) ships
+`"hostBudget": { "cpu": 10, "memoryMb": 23552 }` — the production Mac mini's own
+envelope, being its 10 cores and 24576 MiB less the 1024 MiB `minAvailableMemoryMb`
+reserve. Stated explicitly like that the budget binds at exactly the physical
+bound and changes nothing, which is what makes it the right first value on any
+node: it documents the share, and lowering the number later is a one-line change
+whose effect is bounded and obvious. Derive it from *your* machine — a budget
+above the host is refused at the probe, by design.
+
+- It **composes** with everything else by minimum and can only ever narrow an
+  envelope. A budget larger than the machine is a no-op, not a widening.
+- It is a **hard** bound, not an advisory throttle. Work past
+  `linuxReservationAgeSeconds` escapes the CPU-idle clamp above; it does not
+  escape the budget.
+- Every **live VM of either platform** is charged against it, so a macOS builder
+  and a Linux runner cannot each spend the full budget.
+- The **pressure guardrails still apply unchanged**. They read whole-host disk,
+  memory, swap, load, and idle and keep failing closed — that is the dynamic
+  protection for a co-tenant. `hostBudget` is the ceiling that holds at idle, and
+  admission sees the minimum of the two.
+
+Two configuration rules follow, and both are checked rather than documented:
+
+- **A profile this node exposes must be able to fit the budget.** A job routed to
+  a shape the node can never admit does not queue politely; it queues forever.
+  `fleet config validate` rejects it. A profile that is configured but named by
+  no `scaleSets` entry is not exposed, receives no jobs, and is not checked —
+  which is how a budgeted node keeps the mandatory `macosBurst.builder` in its
+  file while serving `maestro` alone.
+- **A budget must fit the machine.** `fleet config validate` decodes a file and
+  never probes a host, so this one is checked at the host probe: a budget above
+  the physical cores, or above physical memory less `minAvailableMemoryMb`,
+  reports the host observation unavailable with a reason naming both figures.
+  `fleet status`, `fleet doctor`, and `fleet observations` all show it. A
+  physical dimension the probe cannot read imposes no bound.
+
+Scale-set capacity is bounded by the budget too, so a node advertises the number
+of slots it can actually serve rather than the number its `maxActive` allows.
+
 ### Repairing a drifted scale set
 
 `scale-sets provision` creates what is missing and reuses what already matches.
