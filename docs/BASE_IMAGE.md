@@ -120,6 +120,34 @@ The last two are fleet contracts rather than workflow ones, and they are the
 easiest to get wrong: the Tartelet-era image kept its runner under
 `$HOME/actions-runner-cache/<version>`, which the Go daemon cannot start.
 
+### The daemon replaces PATH and the Android environment outright
+
+`internal/guestbootstrap/bootstrap.go` does not let the runner process inherit
+the guest's login `PATH`. On darwin it substitutes exactly
+
+```
+/Users/admin/.rbenv/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+(`runnerToolchainPath`), and it unconditionally exports
+`ANDROID_HOME=/Users/admin/android-sdk` and `ANDROID_SDK_ROOT` to the same
+path on every macOS job (`childEnvironmentForOS`, `darwinAndroidSDKPath`) —
+whether or not an Android SDK is actually present. Two consequences for this
+recipe:
+
+- Anything a job needs on `PATH` — `node`, `python3`, anything else — must
+  resolve on that exact list, not on whatever a login shell or
+  `brew shellenv` would produce. `/usr/local/bin` is on it; `/opt/homebrew/bin`
+  is too, but keg-only Homebrew formulae (which is how versioned formulae like
+  `node@24` install) never symlink themselves there. That is why this recipe
+  symlinks tools into `/usr/local/bin` explicitly rather than relying on Brew.
+- The "no Android SDK needed" framing in the next section is a build-input
+  claim, not an environment one. The Cirrus image ships an `android-sdk`
+  directory at that exact path, and every macOS job — `maestro` included —
+  gets `ANDROID_HOME`/`ANDROID_SDK_ROOT` pointed at it regardless. Node C not
+  building Android artifacts means nothing on this node reads the variable,
+  not that the variable is unset or the path absent.
+
 ## What node C does not need
 
 - **The Android build SDK, NDK, and its Temurin JDK.** This is the 2026-07-20
@@ -132,11 +160,13 @@ easiest to get wrong: the Tartelet-era image kept its runner under
   is configured out of reach deliberately.
 - **A Go toolchain.** It was never in the image; see the `-go` note above.
 - **`ccache`.** Node C compiles nothing.
-- **A second prewarmed simulator, strictly speaking.** Node C's budget admits
-  one 4-vCPU `maestro` guest at a time, and each guest boots exactly one device.
-  Keep two anyway for parity with node A and with the workflow comment that
-  describes two; the marginal cost is small and the behavioural risk of
-  diverging is not.
+- **Creating a second `iPhone 17 Pro` simulator, strictly speaking.** Node C's
+  budget admits one 4-vCPU `maestro` guest at a time, and each guest boots
+  exactly one device. Measured on `26.4.1`: the Cirrus image already ships one
+  available `iPhone 17 Pro` device. `ios-maestro.yml` selects a simulator by
+  exact name, so a second `simctl create` with the same device type produces a
+  same-named duplicate — an ambiguity, not a spare. The recipe below prewarms
+  whatever the image already shipped instead of creating anything.
 
 ## Build the node C image
 
@@ -201,12 +231,23 @@ xcrun simctl runtime dyld_shared_cache update --all
 
 # --- Node on PATH, and in the runner tool cache ------------------------------
 # run-maestro-suite.sh calls bare `node`; ios-maestro.yml has no setup-node step.
-brew list --versions node@22 >/dev/null 2>&1 || brew install node@22
-sudo ln -sfn /opt/homebrew/opt/node@22/bin/node /usr/local/bin/node
-sudo ln -sfn /opt/homebrew/opt/node@22/bin/npx  /usr/local/bin/npx
+# Measured on 26.4.1: the image already ships node@24 (v24.15.0) — running
+# `brew install node@22` here installs a second, conflicting Node instead of
+# satisfying the requirement. Symlink the shipped binary instead; v24.15.0 was
+# verified to resolve as `node` under the daemon exact runner PATH (see
+# "The daemon replaces PATH and the Android environment outright" above).
+node_prefix=$(brew --prefix node@24)
+sudo ln -sfn "$node_prefix/bin/node" /usr/local/bin/node
+sudo ln -sfn "$node_prefix/bin/npx"  /usr/local/bin/npx
 node --version
 
 # --- A JVM for the Maestro CLI ------------------------------------------------
+# Settled by measurement, not inferred: ~/.maestro/lib holds 195 jars and no
+# bundled JRE, and the maestro launcher is a Gradle start script that fails
+# outright (JAVA_HOME is not set and no java command could be found) without
+# one. A JDK is required. openjdk@17 is already in the image and already
+# registers at /Library/Java/JavaVirtualMachines/openjdk-17.jdk, so the steps
+# below are idempotent rather than load-bearing on a stock image.
 brew list --versions openjdk@17 >/dev/null 2>&1 || brew install openjdk@17
 sudo mkdir -p /Library/Java/JavaVirtualMachines
 sudo ln -sfn /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk \
@@ -217,6 +258,13 @@ java -version
 curl -fsSL https://get.maestro.mobile.dev | env MAESTRO_VERSION="$MAESTRO_VERSION" bash
 test "$(MAESTRO_CLI_NO_ANALYTICS=true "$HOME/.maestro/bin/maestro" --version \
   2>&1 | tail -n 1 | tr -d "\r")" = "$MAESTRO_VERSION"
+# ~/.maestro/bin is not on the daemon runner PATH above, so a bare `maestro`
+# invocation on this image alone would fail. ios-maestro.yml already accounts
+# for this itself, adding the directory via GITHUB_PATH before it calls
+# maestro — no symlink is required here for the job to find it. If one is
+# ever added anyway, /usr/local/bin/maestro -> ~/.maestro/bin/maestro is
+# safe: the launcher resolves symlinks before locating its jars relative to
+# its own path.
 '
 ```
 
@@ -242,13 +290,18 @@ test ! -e "$HOME/actions-runner/.credentials"
 ```
 
 And the bootstrap helper from the same release the node will run — see
-[`INSTALL.md`](../INSTALL.md) for downloading and verifying that release:
+[`INSTALL.md`](../INSTALL.md) for downloading and verifying that release. The
+released asset is named `tart-runner-fleet-bootstrap-darwin-arm64` (the
+architecture suffix is part of the filename, not just the install path):
 
 ```sh
-base64 < "$RELEASE_DIR/tart-runner-fleet-bootstrap" |
+base64 < "$RELEASE_DIR/tart-runner-fleet-bootstrap-darwin-arm64" |
   tart exec -i "$BASE" bash -lc '
 set -euo pipefail
 base64 -d > /tmp/bootstrap
+# /usr/local/libexec does not exist in the guest by default; the Cirrus image
+# never creates it, so `install` fails without this.
+sudo mkdir -p /usr/local/libexec
 sudo install -m 0755 -o root -g wheel /tmp/bootstrap \
   /usr/local/libexec/tart-runner-fleet-bootstrap
 rm /tmp/bootstrap
@@ -266,39 +319,45 @@ the XCUITest driver.
 A Tart clone preserves these on-disk device caches. It is **not** a RAM
 snapshot: every clone still performs a normal macOS and Simulator boot.
 
+Measured on `26.4.1`: the Cirrus image already ships an available
+`iPhone 17 Pro` device. `ios-maestro.yml` selects a simulator **by exact
+name**, so calling `simctl create` here would add a second device with the
+identical name — a same-named ambiguity, not a spare. Prewarm whatever the
+image already shipped instead of creating anything:
+
 ```sh
-tart exec "$BASE" env SIMULATOR_DEVICE_TYPE='iPhone 17 Pro' \
-  SIMULATOR_DEVICE_COUNT=2 SETTLE=180 bash -lc '
+tart exec "$BASE" env SIMULATOR_DEVICE_TYPE='iPhone 17 Pro' SETTLE=180 bash -lc '
 set -euo pipefail
 export DEVELOPER_DIR=/Applications/Xcode_26.4.1.app/Contents/Developer
-runtime=$(xcrun simctl list runtimes -j | python3 -c "
-import sys, json
-rs = [r for r in json.load(sys.stdin)[\"runtimes\"]
-      if r.get(\"isAvailable\", True) and \".SimRuntime.iOS-\" in r[\"identifier\"]]
-rs.sort(key=lambda r: [int(p) for p in r[\"version\"].split(\".\")], reverse=True)
-print(rs[0][\"identifier\"])")
-device_type=$(xcrun simctl list devicetypes -j | python3 -c "
-import sys, json, os
-name = os.environ[\"SIMULATOR_DEVICE_TYPE\"]
-print(next(d[\"identifier\"] for d in json.load(sys.stdin)[\"devicetypes\"]
-           if d[\"name\"] == name))")
-test -n "$runtime" && test -n "$device_type"
 
 xcrun simctl shutdown all >/dev/null 2>&1 || true
-mkdir -p "$HOME/.ci-base-manifest"
-: > "$HOME/.ci-base-manifest/macos-simulator-udids"
-for lane in $(seq 1 "$SIMULATOR_DEVICE_COUNT"); do
-  udid=$(xcrun simctl create "$SIMULATOR_DEVICE_TYPE" "$device_type" "$runtime")
-  echo "$udid" >> "$HOME/.ci-base-manifest/macos-simulator-udids"
+
+udids=$(xcrun simctl list devices -j | python3 -c "
+import sys, json, os
+name = os.environ[\"SIMULATOR_DEVICE_TYPE\"]
+devices = json.load(sys.stdin)[\"devices\"]
+for entries in devices.values():
+    for d in entries:
+        if d[\"name\"] == name and d.get(\"isAvailable\", True):
+            print(d[\"udid\"])")
+test -n "$udids"
+
+for udid in $udids; do
   xcrun simctl boot "$udid"
   xcrun simctl bootstatus "$udid" -b
   sleep "$SETTLE"          # let indexing and first-launch work drain
   xcrun simctl shutdown "$udid"
 done
-test "$(wc -l < "$HOME/.ci-base-manifest/macos-simulator-udids" | tr -d " ")" \
-  = "$SIMULATOR_DEVICE_COUNT"
 '
 ```
+
+This recipe does not maintain its own UDID manifest. An earlier draft wrote
+one to `~/.ci-base-manifest/macos-simulator-udids`, but no workflow reads that
+path — `ios-maestro.yml` queries `xcrun simctl list -j` directly at job time
+(its own comment references an unrelated `~/.budgie-ci/simulators.json`,
+which also is not this). Query `simctl` live, as above and in
+[Seal and verify](#seal-and-verify), rather than trusting a file that nothing
+downstream honors.
 
 ### 5. Host hygiene
 
@@ -325,11 +384,33 @@ brew cleanup
 
 ## Seal and verify
 
+**This step has exactly one way to fail silently, and it produces a corrupt
+base with no error anywhere.** `tart exec` runs commands with PATH
+`/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin` — there is no
+`/sbin` in it. `sudo shutdown -h now` therefore fails with
+`sudo: shutdown: command not found`, and because both commands below are
+chained with `|| true`, that failure is swallowed and the VM simply keeps
+running. A follower who does not check has sealed what is still a live,
+unstopped disk — every future clone inherits an unbooted-consistent,
+effectively corrupt base, and nothing says so until a job fails against it.
+Always call `shutdown` by its absolute path, and always verify the guest
+actually stopped before trusting the seal.
+
 Stop the base from inside, so the guest filesystem is consistent:
 
 ```sh
 tart exec "$BASE" sync || true
-tart exec "$BASE" sudo shutdown -h now || true
+tart exec "$BASE" sudo /sbin/shutdown -h now || true
+
+# Verify the VM actually stopped — do not trust the exit code above alone.
+until [ "$(tart list --format json | python3 -c '
+import json, sys
+name = sys.argv[1]
+rows = json.load(sys.stdin)
+print(any(v["Name"] == name and v["Running"] for v in rows))
+' "$BASE")" = "False" ]; do
+  sleep 2
+done
 ```
 
 Then boot once more and verify — a reboot check is what catches provisioning
@@ -352,15 +433,32 @@ command -v python3
 java -version
 "$HOME/.maestro/bin/maestro" --version
 xcrun swift -e "import Metal; precondition(MTLCreateSystemDefaultDevice() != nil)"
-while IFS= read -r udid; do xcrun simctl boot "$udid"; done \
-  < "$HOME/.ci-base-manifest/macos-simulator-udids"
-while IFS= read -r udid; do xcrun simctl bootstatus "$udid" -b; done \
-  < "$HOME/.ci-base-manifest/macos-simulator-udids"
+udids=$(xcrun simctl list devices -j | python3 -c "
+import sys, json
+devices = json.load(sys.stdin)[\"devices\"]
+for entries in devices.values():
+    for d in entries:
+        if d[\"name\"] == \"iPhone 17 Pro\" and d.get(\"isAvailable\", True):
+            print(d[\"udid\"])")
+test -n "$udids"
+for udid in $udids; do xcrun simctl boot "$udid"; done
+for udid in $udids; do xcrun simctl bootstatus "$udid" -b; done
 xcrun simctl shutdown all
 '
 
 tart exec "$BASE" sync || true
-tart exec "$BASE" sudo shutdown -h now || true
+tart exec "$BASE" sudo /sbin/shutdown -h now || true
+
+# Verify the VM actually stopped — see the warning above; this is the same
+# silent-failure risk on every seal, not just the first one.
+until [ "$(tart list --format json | python3 -c '
+import json, sys
+name = sys.argv[1]
+rows = json.load(sys.stdin)
+print(any(v["Name"] == name and v["Running"] for v in rows))
+' "$BASE")" = "False" ]; do
+  sleep 2
+done
 ```
 
 From here the base stays **stopped forever**. Maintenance follows node A's
@@ -393,6 +491,17 @@ toolchain and the Tartelet-era history; a node C image that answered to the same
 name would make two materially different images indistinguishable in an
 incident.
 
+**`macosBurst.baseVm` in the checked-in config is the source of truth, not the
+name suggested above.** Observed on node C: the config committed there points
+`baseVm` at `macos-tartelet-base`, not `macos-maestro-base` — itself a
+collision with node A's pre-`-go` Tartelet-era base, the opposite of the
+distinct-name advice this section gives. Before wiring anything in, read
+node C's actual config and reconcile the two: either name the built image
+`macos-tartelet-base` to match it, or change the config's `baseVm` to a
+distinct name and build under that instead. Whatever the config says is what
+the daemon clones on the first job; a recipe followed under the wrong
+assumption produces a base nothing points at.
+
 `builder` is still required by config validation, so configure it out of reach
 of the 4 vCPU / 10240 MiB budget as `MULTI_NODE_PLAN.md` specifies, and confirm
 the budget binds: with one `maestro` guest live, `fleet status` must report no
@@ -416,9 +525,21 @@ in the chain has the same 140 GB virtual disk):
 | `…-pre-prewarm-20260719` | 82 |
 | `ghcr.io/cirruslabs/macos-sequoia-xcode:26.4.1` as pulled | 84 |
 
-A Maestro-only node C image should land near **85–89 GB** — the Cirrus baseline,
-plus roughly 5 GB of settled simulators and hygiene, plus about 1.5 GB of Node,
-JDK, Maestro, and the runner payload, minus the roughly 4 GB Android layer.
+A Maestro-only node C image was predicted to land near **85–89 GB** — the
+Cirrus baseline, plus roughly 5 GB of settled simulators and hygiene, plus
+about 1.5 GB of Node, JDK, Maestro, and the runner payload, minus the roughly
+4 GB Android layer.
+
+**Measured on node C's `26.4.1` build, it did not land there: it added no
+measurable disk at all.** `tart list` reported **84 GB both before and after**
+the full recipe — identical to the pulled image, not the predicted 85–89 GB.
+Two things the prediction did not account for absorbed what it expected to
+add: `brew cleanup` in the host-hygiene step freed about 220 MB on its own,
+and the image's dyld shared caches are already built by Apple, so
+`xcrun simctl runtime dyld_shared_cache update --all` and the simulator
+prewarm cost rounding-error space rather than gigabytes. Treat 85–89 GB as an
+upper bound this recipe did not reach, not an expectation, and measure with
+`tart list` rather than budgeting off this table.
 
 **State the saving honestly: it is small, and it is not the point.** Xcode and
 the bundled simulator runtimes dominate the image, and node C needs both. The
@@ -446,14 +567,12 @@ Stated so a future operator does not mistake inference for measurement.
   from that day survives. The cache path, the digest, and the 2026-06-12
   `tart clone` are the evidence; the pull is inferred from them. The digest
   match is exact, so this does not weaken the recipe.
-- **What the Cirrus image already ships is not fully enumerated.** The
-  provisioning steps for Node and the JDK are written to be idempotent for that
-  reason. Verify inside the guest before assuming either is missing or present,
-  and adjust rather than reinstall.
-- **Whether Maestro 2.6.1 still needs a separate JVM is unverified.** The legacy
-  updater installed `openjdk@17` explicitly and the workflow sets
-  `JAVA_TOOL_OPTIONS`, so a JDK is included here. Recent Maestro releases may
-  bundle a runtime; if a guest test proves it does, the JDK can be dropped.
+- **What the Cirrus image already ships is not fully enumerated.** Node
+  (`node@24`, v24.15.0) and `openjdk@17` are confirmed present by direct
+  measurement on `26.4.1` — see [step 3](#3-provision) — but nothing else in
+  the image has been enumerated the same way. The provisioning steps stay
+  idempotent for that reason. Verify inside the guest before assuming
+  anything else is missing, and adjust rather than reinstall.
 - **The image's exact `xcrun simctl` runtime version is inferred**, not read.
   The prewarm step selects the newest available iOS runtime rather than pinning
   one, matching what the consumer workflow does.
@@ -461,6 +580,9 @@ Stated so a future operator does not mistake inference for measurement.
   is unexplained. It is most likely `brew cleanup` plus sparse-file accounting,
   but no measurement confirms it.
 - **The optional simulator-runtime trim is unquantified**, as noted above.
-- **Node C's `fleet.json` does not exist yet.** The fragment above follows
-  `MULTI_NODE_PLAN.md` and node A's live configuration; the authoritative
-  values are whatever that node's rendered config ends up carrying.
+- **Node C's config exists and disagrees with this document's suggested
+  `baseVm`.** An earlier draft of this section assumed `fleet.json` did not
+  exist yet; it does, and its `macosBurst.baseVm` is `macos-tartelet-base`,
+  not `macos-maestro-base`. See
+  [Wire it to the node C configuration](#wire-it-to-the-node-c-configuration)
+  — the config is the authoritative value, not the fragment above.
