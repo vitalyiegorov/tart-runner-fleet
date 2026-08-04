@@ -332,17 +332,22 @@ func interchangeable(left, right Binding) bool {
 // #144 spike measured, where GitHub assigns rather than offers and Available is
 // zero, that number IS statistics.totalAssignedJobs.
 //
-// Two rules keep the bound from over-correcting.
+// Two rules make the bound safe to apply.
 //
-// An unreadable, unobserved, or stale statistic does not bound anything. ADR
-// 0026 expires durable demand from what a COMPLETE snapshot did not contain, so
-// silently shrinking a snapshot during a statistics outage would retire work
-// that is genuinely queued. Absence of a bound is not a bound of zero.
+// A job this binding's own durable demand already names is never surrendered,
+// whatever the count says. The broker is the mutation authority (ADR 0015) and
+// its word on which jobs belong to this scale set outranks any statistic; it is
+// also what makes the bound safe against ADR 0026, because a demand whose job
+// is still queued is always corroborated by the snapshot that carries it and can
+// never be expired by a truncation.
 //
-// And a job this binding's own durable demand already names is never
-// surrendered. The broker telling this node about a job is stronger evidence of
-// ownership than any counter, and it is also what keeps a lagging snapshot or a
-// delayed statistics message from truncating a node's own backlog.
+// And statistics that are absent, stale, or ahead of the clock bound the claim
+// to that vouched set alone rather than to nothing. On a shared label an
+// unbounded claim IS the defect, and a scale set with no fresh statistics has no
+// evidence of a share beyond the work its broker already named. Under-claiming
+// costs a queue-depth report the peer node is making anyway; over-claiming costs
+// a duplicate guest. An unreadable statistics store is different from an absent
+// one and still fails the whole observation: not knowing is not evidence.
 func (c DemandCoordinator) boundToOwnShare(ctx context.Context, binding Binding,
 	jobs []operations.GitHubJobObservation,
 ) ([]operations.GitHubJobObservation, error) {
@@ -353,19 +358,15 @@ func (c DemandCoordinator) boundToOwnShare(ctx context.Context, binding Binding,
 	if !ok {
 		return jobs, nil
 	}
+	share := 0
 	statistics, err := statisticsStore.DemandStatistics(ctx, binding.durableKey())
-	if errors.Is(err, operations.ErrNotFound) {
-		return jobs, nil
-	}
-	if err != nil {
+	switch {
+	case err == nil:
+		share = c.observedShare(statistics)
+	case errors.Is(err, operations.ErrNotFound):
+	default:
 		return nil, err
 	}
-	now := c.now()
-	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
-		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
-		return jobs, nil
-	}
-	share := max(statistics.Available+statistics.Assigned-statistics.Running, 0)
 	if len(jobs) <= share {
 		return jobs, nil
 	}
@@ -376,8 +377,8 @@ func (c DemandCoordinator) boundToOwnShare(ctx context.Context, binding Binding,
 	kept := make([]operations.GitHubJobObservation, 0, len(jobs))
 	contested := make([]operations.GitHubJobObservation, 0, len(jobs))
 	for _, job := range jobs {
-		if job.CreatedAt.After(statistics.ObservedAt) ||
-			vouched[restCorrelationKey(job.Owner, job.Repository, job.WorkflowRunID, job.DisplayName)] {
+		if vouched[restCorrelationKey(job.Owner, job.Repository, job.WorkflowRunID, job.DisplayName)] ||
+			vouched[restJobKey(job.WorkflowJobID)] {
 			kept = append(kept, job)
 			continue
 		}
@@ -401,6 +402,19 @@ func (c DemandCoordinator) boundToOwnShare(ctx context.Context, binding Binding,
 	return kept, nil
 }
 
+// observedShare is how much of a scope's queue this scale set may still be
+// waiting on: work GitHub has offered it, plus work GitHub has assigned it that
+// has not started. Statistics that are stale or ahead of the clock report no
+// share at all, on the same freshness rule QueuedDemands bounds admission by.
+func (c DemandCoordinator) observedShare(statistics operations.DemandStatistics) int {
+	now := c.now()
+	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
+		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
+		return 0
+	}
+	return max(statistics.Available+statistics.Assigned-statistics.Running, 0)
+}
+
 // vouchedJobs is the set of queued jobs this binding's own durable demand
 // names. The broker is the mutation authority (ADR 0015), so its word on which
 // jobs belong to this scale set outranks any count derived from statistics.
@@ -409,9 +423,15 @@ func (c DemandCoordinator) vouchedJobs(ctx context.Context, binding Binding) (ma
 	if err != nil {
 		return nil, err
 	}
-	vouched := make(map[string]bool, len(records))
+	vouched := make(map[string]bool, 2*len(records))
 	for _, record := range records {
 		vouched[restCorrelationKey(record.Owner, record.Repository, record.WorkflowRunID, record.DisplayName)] = true
+		if record.WorkflowJobID > 0 {
+			// A demand a previous snapshot already correlated carries REST's own
+			// stable identity, which survives a display name the two lanes spell
+			// differently.
+			vouched[restJobKey(record.WorkflowJobID)] = true
+		}
 	}
 	return vouched, nil
 }
@@ -423,6 +443,12 @@ func (c DemandCoordinator) vouchedJobs(ctx context.Context, binding Binding) (ma
 func restCorrelationKey(owner, repository string, runID int64, displayName string) string {
 	return strings.ToLower(owner) + "/" + strings.ToLower(repository) +
 		"\x00" + strconv.FormatInt(runID, 10) + "\x00" + displayName
+}
+
+// restJobKey names a workflow job by the stable numeric identity REST supplies,
+// which a demand carries only once a previous snapshot has correlated it.
+func restJobKey(workflowJobID int64) string {
+	return "job\x00" + strconv.FormatInt(workflowJobID, 10)
 }
 
 // expireGhostDemand retires demand this snapshot has now proven absent for

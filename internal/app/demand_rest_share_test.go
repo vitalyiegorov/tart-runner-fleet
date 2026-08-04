@@ -192,21 +192,28 @@ func TestRESTAttributionIsBoundedByTheScaleSetsOwnShare(t *testing.T) {
 			want:       map[int64][]int64{1: {101, 102, 103, 104}},
 		},
 		{
-			// Statistics are the bound, so an absent bound is not a bound of
-			// zero. ADR 0026 expires demand from what a COMPLETE snapshot did
-			// not contain; silently shrinking one on a statistics outage would
-			// expire genuinely queued work.
-			name:     "an unobserved scale set is not a scale set with no share",
+			// A shared label with no fresh statistics is the case that must not
+			// claim the whole scope: on this evidence the set knows nothing
+			// about its share beyond the work its own broker already named.
+			name:     "an unobserved scale set claims only what its broker vouched for",
 			bindings: []Binding{nodeA}, jobs: four,
 			statistics: map[int64]operations.DemandStatistics{},
-			want:       map[int64][]int64{1: {101, 102, 103, 104}},
+			records: map[int64][]operations.DemandRecord{1: {{ScaleSetID: 1, RunnerRequestID: 9, Owner: "owner",
+				Repository: "repo", WorkflowRunID: 1_020, DisplayName: "Maestro", Status: operations.DemandJobAvailable}}},
+			want: map[int64][]int64{1: {102}},
 		},
 		{
-			name:     "stale statistics do not bound a fresh observation",
+			// Stale statistics are no evidence of a share either, and the same
+			// vouched floor keeps the set's own queued demand corroborated so
+			// ADR 0026 can never expire it out from under the truncation.
+			name:     "stale statistics bound the claim to the set's own demand",
 			bindings: []Binding{nodeA}, jobs: four,
-			statistics: map[int64]operations.DemandStatistics{1: {MessageID: 1, Available: 1,
+			statistics: map[int64]operations.DemandStatistics{1: {MessageID: 1, Available: 4,
 				ObservedAt: restShareEpoch.Add(-time.Hour)}},
-			want: map[int64][]int64{1: {101, 102, 103, 104}},
+			records: map[int64][]operations.DemandRecord{1: {{ScaleSetID: 1, RunnerRequestID: 9,
+				WorkflowJobID: 103, Owner: "owner", Repository: "repo", WorkflowRunID: 1_030,
+				DisplayName: "renamed by the broker", Status: operations.DemandJobAvailable}}},
+			want: map[int64][]int64{1: {103}},
 		},
 		{
 			// The broker vouching for a job is stronger evidence of ownership

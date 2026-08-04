@@ -385,6 +385,11 @@ func (w *world) noteIngestFailure(err error) {
 func (w *world) captureSnapshot() {
 	snapshot := &simSnapshot{at: w.now, deliverAt: w.tick + w.restLag}
 	for _, job := range w.jobs {
+		switch job.status {
+		case jobQueued, jobAcquired, jobRunning:
+			snapshot.outstanding++
+		case jobDone, jobCancelled:
+		}
 		if job.status != jobQueued || job.silentCancel {
 			// A silently cancelled run is absent from REST while the broker still
 			// advertises it. That disagreement is the only evidence ADR 0026 accepts.
@@ -412,6 +417,10 @@ func (w *world) deliverSnapshots() {
 			remaining = append(remaining, snapshot)
 			continue
 		}
+		// The observation the fleet has just committed. In a federated scope
+		// EVERY one of its jobs matches BOTH scale sets, so it is also the
+		// observation two unbounded attributions would double (#153).
+		w.restCommitted = snapshot
 		if _, err := w.demand.ReconcileQueuedJobs(w.ctx, w.cfg.Bindings, simSnapshotView{snapshot: snapshot}); err != nil {
 			w.record(findingStoreError, fmt.Sprintf("reconcile REST snapshot: %v", err))
 		}
@@ -443,13 +452,41 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 	return job
 }
 
+// bindingFor is GitHub's placement decision, not the fleet's. A profile served
+// by one scale set has one answer. A profile served by two identically-labelled
+// sets in one scope has the answer the #144 spike measured: the job goes to the
+// set with the most room, so each set fills to the capacity it last advertised
+// and the remainder stays queued. Ties break on the lower index so a (seed,
+// world) pair still names one exact history.
 func (w *world) bindingFor(profile domain.ProfileID) int {
+	chosen, room := -1, 0
 	for index, binding := range w.cfg.Bindings {
-		if binding.Profile.ID == profile {
-			return index
+		if binding.Profile.ID != profile {
+			continue
+		}
+		free := w.cfg.Scheduler.Profiles[profile].MaxActive - w.outstandingJobs(index)
+		if chosen < 0 || free > room {
+			chosen, room = index, free
 		}
 	}
-	return -1
+	return chosen
+}
+
+// outstandingJobs is what one scale set is already holding: everything GitHub
+// has given it that has not finished.
+func (w *world) outstandingJobs(binding int) int {
+	held := 0
+	for _, job := range w.jobs {
+		if job.binding != binding {
+			continue
+		}
+		switch job.status {
+		case jobQueued, jobAcquired, jobRunning:
+			held++
+		case jobDone, jobCancelled:
+		}
+	}
+	return held
 }
 
 func splitRepo(repo string) (owner, name string) {
