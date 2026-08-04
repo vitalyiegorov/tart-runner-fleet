@@ -473,7 +473,7 @@ for an agent working with the existing test gates.
 | 2a | `hostBudget` | Node A gets an explicit ceiling; node C is unblocked. Ships as an ordinary release to node A alone. | 0.5 d |
 | 2b | Executor port extraction | **Done, issue #137.** `executor.InstanceSpec`, `executor.Backend`, `executor.Instance`, `executor.CommandRunner`, `domain.ValidateInstanceName`, and `executor.HostProbe` lifted out of `internal/adapters/macos`. Refactor only, zero behaviour change; all gates green and the DST corpus identical across three runs per arm; ships as a no-op release. | 1 d |
 | 2c | Linux/amd64 host support | `GOOS=linux` release artifact and updater asset name, `systemd --user` unit and renderer, XDG paths, file-based credentials replacing the Keychain, `launchctl`→`systemctl` in `internal/autoupdate/host.go`, a `/proc` host probe. **Deliverable: the daemon runs on any Linux box in observe mode.** | 2–3 d |
-| 2d | Container executor adapter | `internal/adapters/container` implementing `domain.Backend` over the Podman CLI, a container-mode bootstrap that does not need `systemd-run`, per-profile device grants for `/dev/kvm`, contract tests mirroring `internal/adapters/tart`'s. **Deliverable: node B serves `trf-linux-amd64-*`.** | 2–3 d |
+| 2d | Container executor adapter | `internal/adapters/container` implementing `executor.Backend` over the Podman CLI, a container-mode bootstrap that does not need `systemd-run`, per-profile device grants for `/dev/kvm`, contract tests mirroring `internal/adapters/tart`'s. **Deliverable: node B serves `trf-linux-amd64-*`.** | 2–3 d |
 
 Roughly 1,500–2,000 lines of production code and a comparable amount of test
 code, across about 25 files. Sequenced so that 2a and 2b land on node A as
