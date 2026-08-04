@@ -492,8 +492,16 @@ func identityUniquenessChecker() checker {
 // believes, the machine must never be oversubscribed, the slot ceiling must
 // hold, a repository must never exceed its cap, and a macOS profile must never
 // exceed MaxActive.
+//
+// On a node with a configured hostBudget the resource ceiling is the budget
+// rather than the machine (issue #136). That is the stronger claim, and it is
+// the one the operator actually bought: a budget exists because somebody else's
+// work is on this host, so committing vectors that fit the machine but exceed
+// the declared share is the failure the setting was added to prevent. The
+// oracle derives its own ceiling from the configured facts and never from the
+// scheduler's envelope arithmetic, so it cannot inherit the bug it is checking.
 func conservationChecker(cfg worldConfig) checker {
-	memoryCeiling := int(cfg.PhysicalMemoryMB - cfg.Guards.MinAvailableMemoryMB)
+	ceiling := cfg.hostCeiling()
 	return func(w *world, observation tickObservation) []finding {
 		var findings []finding
 		total := domain.Resources{}
@@ -533,17 +541,17 @@ func conservationChecker(cfg worldConfig) checker {
 				linuxRepos[instance.Repo]++
 			}
 		}
-		if total.CPU > int(cfg.PhysicalCPU) {
+		if total.CPU > ceiling.CPU {
 			findings = append(findings, finding{Kind: findingConservation, Tick: observation.Tick,
-				Detail: fmt.Sprintf("live instances hold %d CPU on a %d-core host", total.CPU, cfg.PhysicalCPU)})
+				Detail: fmt.Sprintf("live instances hold %d CPU above the %d-CPU ceiling of %s", total.CPU, ceiling.CPU, cfg.ceilingSource())})
 		}
-		if total.MemoryMB > memoryCeiling {
+		if total.MemoryMB > ceiling.MemoryMB {
 			findings = append(findings, finding{Kind: findingConservation, Tick: observation.Tick,
-				Detail: fmt.Sprintf("live instances hold %d MB above the %d MB envelope", total.MemoryMB, memoryCeiling)})
+				Detail: fmt.Sprintf("live instances hold %d MB above the %d MB envelope of %s", total.MemoryMB, ceiling.MemoryMB, cfg.ceilingSource())})
 		}
-		if total.Slots > cfg.Scheduler.LinuxCapacity.Slots {
+		if total.Slots > ceiling.Slots {
 			findings = append(findings, finding{Kind: findingConservation, Tick: observation.Tick,
-				Detail: fmt.Sprintf("live instances hold %d slots above the %d-slot ceiling", total.Slots, cfg.Scheduler.LinuxCapacity.Slots)})
+				Detail: fmt.Sprintf("live instances hold %d slots above the %d-slot ceiling", total.Slots, ceiling.Slots)})
 		}
 		findings = append(findings, repositoryCapFindings(cfg, observation, linuxRepos, macRepos)...)
 		for _, profile := range sortedProfiles(macProfiles) {
@@ -636,8 +644,8 @@ func sortedKeys(counts map[string]int) []string {
 // arithmetic -- so it cannot inherit the bug it is meant to catch.
 //
 // A demand is called feasible only when there is definitely room for it: its
-// vector fits both the measured residual and the physical total net of live
-// occupancy, a slot is free, its repository is under cap, no live instance
+// vector fits both the measured residual and the host ceiling -- the physical
+// total net of live occupancy, narrowed by any configured hostBudget -- a slot is free, its repository is under cap, no live instance
 // already incarnates it, no idle runner already matches it (which is how
 // consumeCompatibleIdle serves a demand without spawning), and, for macOS, the
 // profile is under MaxActive and may coexist with whatever cohort is live.
@@ -666,9 +674,7 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 			repos[instance.Repo]++
 		}
 	}
-	physical := domain.Resources{CPU: int(cfg.PhysicalCPU),
-		MemoryMB: int(cfg.PhysicalMemoryMB - cfg.Guards.MinAvailableMemoryMB), Slots: cfg.Scheduler.LinuxCapacity.Slots}
-	headroom, ok := physical.Sub(live)
+	headroom, ok := cfg.hostCeiling().Sub(live)
 	if !ok {
 		return nil
 	}

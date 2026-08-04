@@ -27,7 +27,25 @@ var (
 // story.
 func TestSimFuzz(t *testing.T) {
 	t.Parallel()
-	cfg := defaultWorld()
+	sweep(t, "TestSimFuzz", defaultWorld())
+}
+
+// TestSimFuzzBudgetedHost is the same sweep on the shared Mac Studio of issue
+// #136: a machine far larger than the share the fleet is allowed, held to an
+// explicit 4-vCPU / 10 GiB ceiling. It runs as its own arm rather than as a case
+// inside TestSimFuzz because the seed stream is a function of the world, so one
+// binary exploring two worlds must explore each of them fully.
+//
+// Property (g) is what this arm exists to exercise. Its resource ceiling is the
+// budget, not the machine, so a committed vector that fits the hardware but
+// exceeds the declared share is a conservation violation here and nowhere else.
+func TestSimFuzzBudgetedHost(t *testing.T) {
+	t.Parallel()
+	sweep(t, "TestSimFuzzBudgetedHost", budgetedWorld())
+}
+
+func sweep(t *testing.T, name string, cfg worldConfig) {
+	t.Helper()
 	for offset := range *seedsFlag {
 		seed := *seedBase + int64(offset)
 		trace := generateTrace(seed, *ticksFlag, cfg)
@@ -36,8 +54,8 @@ func TestSimFuzz(t *testing.T) {
 			continue
 		}
 		minimal, reduced := shrink(t, cfg, trace, firstKind(findings))
-		t.Fatalf("seed %d violated %s\nreproduce: go test ./tests/simulation -run TestSimFuzz -seeds=1 -seed-base=%d -sim-ticks=%d\n%s\n%s",
-			seed, firstKind(findings), seed, *ticksFlag, reduced[0], minimal)
+		t.Fatalf("seed %d violated %s\nreproduce: go test ./tests/simulation -run %s -seeds=1 -seed-base=%d -sim-ticks=%d\n%s\n%s",
+			seed, firstKind(findings), name, seed, *ticksFlag, reduced[0], minimal)
 	}
 }
 
