@@ -23,6 +23,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/discharge"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
@@ -304,12 +305,12 @@ func defaultDependencies() dependencies {
 		},
 		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver) app.Inventory {
 			return app.ProductionInventory{Store: store,
-				Tart:                       &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
+				Executor:                   &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot},
 				Host:                       &macos.Probe{Timeout: cfg.Timeouts.Tart, PressureAccounting: cfg.Guards.PressureMemoryAccounting},
 				Recovery:                   recovery,
 				RecoveryConfirmationMaxAge: deletionConfirmationMaxAge,
 				Capacity:                   domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
-				Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
+				Guards: executor.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
@@ -334,7 +335,7 @@ func defaultDependencies() dependencies {
 			return &tart.Adapter{Ownership: store, CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot}
 		},
 		readiness: func(cfg config.Config) lifecycle.Readiness {
-			return tartReadiness{Runner: tart.ExecRunner{}, Timeout: cfg.Timeouts.Boot,
+			return execReadiness{Runner: tart.ExecRunner{}, Timeout: cfg.Timeouts.Boot,
 				AttemptTimeout: cfg.Timeouts.Tart, RetryInterval: 250 * time.Millisecond, After: time.After}
 		},
 		bootstrap: func(cfg config.Config) lifecycle.Bootstrapper {
@@ -798,16 +799,20 @@ func workerConcurrency(mode reconcile.Mode, cfg config.Config) int {
 	return cfg.Linux.MaxInstances
 }
 
-type tartReadiness struct {
-	Runner         tart.Runner
+// execReadiness waits for a guest to answer, by asking the node's backend to
+// execute a trivial command inside it. The verb is `exec <instance> true` on
+// both supported backends, so the probe is typed on the neutral command runner
+// and a second backend changes the wiring, not this code.
+type execReadiness struct {
+	Runner         executor.CommandRunner
 	Timeout        time.Duration
 	AttemptTimeout time.Duration
 	RetryInterval  time.Duration
 	After          func(time.Duration) <-chan time.Time
 }
 
-func (p tartReadiness) Wait(ctx context.Context, instance operations.Instance) error {
-	if p.Runner == nil || tart.ValidateName(instance.ID) != nil || p.Timeout <= 0 || p.AttemptTimeout < 0 || p.RetryInterval < 0 {
+func (p execReadiness) Wait(ctx context.Context, instance operations.Instance) error {
+	if p.Runner == nil || domain.ValidateInstanceName(instance.ID) != nil || p.Timeout <= 0 || p.AttemptTimeout < 0 || p.RetryInterval < 0 {
 		return operations.ErrInvalid
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, p.Timeout)

@@ -10,46 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 )
-
-type Freshness string
-
-const (
-	Fresh       Freshness = "fresh"
-	Stale       Freshness = "stale"
-	Unavailable Freshness = "unavailable"
-)
-
-type Snapshot struct {
-	Freshness         Freshness
-	ObservedAt        time.Time
-	AvailableMemoryMB int64
-	FreeDiskGB        int64
-	SwapUsedMB        int64
-	SwapOuts          int64
-	CPUidlePercent    float64
-	LoadAverage       float64
-	// SwapOutRatePerSecond is the page-out rate since the previous fresh
-	// observation, the signal that distinguishes a host paging RIGHT NOW from one
-	// merely carrying residue: macOS does not eagerly reclaim swap, so SwapUsedMB
-	// behaves closer to a high-water mark than a current pressure reading.
-	//
-	// SwapOutRateObserved separates a measured zero from "no prior sample to
-	// measure against". A rate needs two observations, so the first one after a
-	// daemon start cannot have it, and consumers must fail closed on the level
-	// rather than read an unmeasured rate as a quiet host.
-	SwapOutRatePerSecond float64
-	SwapOutRateObserved  bool
-	// PhysicalCPU and PhysicalMemoryMB are the machine's real totals, used to
-	// bound aggregate fleet reservations by the host that actually exists rather
-	// than by a configured constant. Zero means the fact could not be read and
-	// consumers must fall back to configuration: these are advisory, so an
-	// unreadable total never degrades the observation and never masquerades as a
-	// measurement of a zero-resource machine.
-	PhysicalCPU      int64
-	PhysicalMemoryMB int64
-	Cause            error
-}
 
 type CommandRunner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
@@ -76,7 +39,7 @@ type Probe struct {
 	PressureAccounting bool
 	Now                func() time.Time
 	mu                 sync.Mutex
-	last               Snapshot
+	last               executor.HostSnapshot
 }
 
 // Permissive advisory defaults cannot by themselves deny admission: full CPU
@@ -88,7 +51,7 @@ const (
 	permissiveSwapUsedMB     = 0
 )
 
-func (p *Probe) Snapshot(ctx context.Context) Snapshot {
+func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()()
@@ -127,8 +90,8 @@ func (p *Probe) Snapshot(ctx context.Context) Snapshot {
 	// reading and then to a permissive default. This is the difference between
 	// throttling on unmeasurable soft pressure and bricking the scheduler.
 	swapOutRate, swapOutRateObserved := p.swapOutRate(now, swapouts, hasPrior)
-	snapshot := Snapshot{
-		Freshness:            Fresh,
+	snapshot := executor.HostSnapshot{
+		Freshness:            executor.Fresh,
 		ObservedAt:           now,
 		AvailableMemoryMB:    availableMemoryMB,
 		FreeDiskGB:           freeDiskGB,
@@ -214,12 +177,12 @@ func parseSwapFloat(value string) (float64, error) {
 	return float64(swapUsedMB), err
 }
 
-func (p *Probe) degraded(now time.Time, cause error) Snapshot {
+func (p *Probe) degraded(now time.Time, cause error) executor.HostSnapshot {
 	if p.last.ObservedAt.IsZero() {
-		return Snapshot{Freshness: Unavailable, ObservedAt: now, Cause: cause}
+		return executor.HostSnapshot{Freshness: executor.Unavailable, ObservedAt: now, Cause: cause}
 	}
 	stale := p.last
-	stale.Freshness = Stale
+	stale.Freshness = executor.Stale
 	stale.Cause = cause
 	return stale
 }

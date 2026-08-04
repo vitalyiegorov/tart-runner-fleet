@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -16,7 +17,7 @@ func reapFixture(t *testing.T) (*Adapter, *fakeRunner, operations.Ownership) {
 	t.Helper()
 	now := time.Unix(100, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
-	runner.vms["trf-maestro-096ffcb3a52d8624"] = VM{Name: "trf-maestro-096ffcb3a52d8624", Running: false}
+	runner.vms["trf-maestro-096ffcb3a52d8624"] = executor.Instance{Name: "trf-maestro-096ffcb3a52d8624", Running: false}
 	registry.data["trf-maestro-096ffcb3a52d8624"] = ownership
 	return adapter, runner, ownership
 }

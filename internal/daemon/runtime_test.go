@@ -24,6 +24,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
@@ -1049,7 +1050,7 @@ func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
-	want := macos.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
+	want := executor.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
 	if production.Guards != want {
 		t.Fatalf("wired guards = %+v, want %+v", production.Guards, want)
 	}
@@ -1554,7 +1555,7 @@ func TestRunMultiScopeUsesCorrectInstallationAndStoreKeys(t *testing.T) {
 
 func TestTartReadinessUsesFixedBoundedArgumentVector(t *testing.T) {
 	recorder := &recordingTartRunner{fails: 1}
-	probe := tartReadiness{Runner: recorder, Timeout: time.Second, AttemptTimeout: 100 * time.Millisecond, RetryInterval: time.Millisecond}
+	probe := execReadiness{Runner: recorder, Timeout: time.Second, AttemptTimeout: 100 * time.Millisecond, RetryInterval: time.Millisecond}
 	instance := operations.Instance{ID: "trf-small-ready"}
 	if err := probe.Wait(context.Background(), instance); err != nil {
 		t.Fatal(err)
@@ -1569,14 +1570,14 @@ func TestTartReadinessUsesFixedBoundedArgumentVector(t *testing.T) {
 			t.Fatalf("unsafe readiness command: %#v", call)
 		}
 	}
-	if err := (tartReadiness{Runner: &recordingTartRunner{}, Timeout: time.Second}).Wait(context.Background(), operations.Instance{ID: "bad name"}); !errors.Is(err, operations.ErrInvalid) {
+	if err := (execReadiness{Runner: &recordingTartRunner{}, Timeout: time.Second}).Wait(context.Background(), operations.Instance{ID: "bad name"}); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("invalid name err=%v", err)
 	}
 }
 
 func TestTartReadinessDefaultsRemainBounded(t *testing.T) {
 	recorder := &recordingTartRunner{fails: 100}
-	probe := tartReadiness{Runner: recorder, Timeout: 2 * time.Millisecond}
+	probe := execReadiness{Runner: recorder, Timeout: 2 * time.Millisecond}
 	if err := probe.Wait(context.Background(), operations.Instance{ID: "trf-timeout"}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("timeout err=%v", err)
 	}
@@ -2113,7 +2114,7 @@ type lifecycleVM struct {
 	start atomic.Int32
 }
 
-func (v *lifecycleVM) Clone(context.Context, tart.Request) error {
+func (v *lifecycleVM) Create(context.Context, executor.InstanceSpec) error {
 	v.clone.Add(1)
 	return nil
 }

@@ -5,6 +5,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -372,4 +373,22 @@ type Reservation struct {
 	Profile   ProfileID
 	Resources Resources
 	Since     time.Time
+}
+
+// instanceName is the fleet's one instance-identity grammar. It was Tart's VM
+// name rule and is now the whole fleet's, because the same string is the guest's
+// name, the GitHub runner's name, and the durable row's primary key, and those
+// three must agree on every backend. The rule is already legal as an OCI
+// container name, so a container node inherits it unchanged.
+var instanceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ValidateInstanceName reports whether a string may name an instance. It is
+// deliberately in the dependency-free domain package: every layer from the
+// executor port down to the durable store validates names, and none of them may
+// have to import a backend adapter to do it.
+func ValidateInstanceName(name string) error {
+	if !instanceName.MatchString(name) || name == "." || name == ".." {
+		return errors.New("invalid instance name")
+	}
+	return nil
 }

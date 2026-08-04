@@ -338,7 +338,9 @@ still holds.
   admission chokepoint that `hostBudget` extends, and `physicalBound`, the
   "zero means unset" primitive it reuses.
 - `internal/adapters/macos/guard.go:37-57` — whole-host pressure gates that
-  already yield to a co-tenant and cannot express a share.
+  already yield to a co-tenant and cannot express a share. (Since issue #137
+  these gates are `Guardrails.Evaluate` in `internal/executor/host.go`,
+  unchanged; see the amendment below.)
 - `internal/config/labels.go:19-23, 41, 105-114` — the canonical grammar and the
   `arm64` constant that becomes per-node.
 - `internal/config/config.go:281-312, 418-426` — strict single-document decoding,
@@ -347,13 +349,45 @@ still holds.
   refusal to guess when a job matches two scale sets, which is why §3 declines
   to advertise one label from two nodes.
 
+## Amendment 2026-08-04: the port is `internal/executor` (issue #137)
+
+The seam this record deferred now exists, and it is named. `internal/executor`
+holds two ports and nothing else: `Backend`, which is a node's execution
+technology, and `HostProbe`, which is how a node measures the machine it runs
+on. Every layer above them speaks only those types, and a lint rule denies
+`internal/adapters/tart` and `internal/adapters/macos` to `internal/lifecycle`,
+`internal/app`, `internal/scheduler`, `internal/reconcile`, and
+`internal/discharge`. Choosing an implementation is `internal/daemon`'s job and
+no one else's.
+
+`Backend` is seven verbs — `Create`, `Start`, `Stop`, `Delete`, `Running`,
+`Reap`, `List` — over an `InstanceSpec` whose `Image` is a Tart base VM on node
+A and an OCI reference on node B. "Clone a base image" and "create a container
+from an image" are one verb, which is what makes the partition of §3 an
+implementation detail of the port rather than a fork of the lifecycle.
+
+`docs/MULTI_NODE_PLAN.md` proposed `internal/domain` for these types. That
+placement does not survive the import graph: `internal/operations` imports
+`internal/domain`, so a port taking an `operations.Ownership` cannot live there,
+and `domain.Instance` already names the scheduler's live instance. Only the
+instance-name grammar moved to `domain`, as `domain.ValidateInstanceName`,
+because it is pure and every layer validates names. The plan document is
+corrected in place; nothing else about the plan changes.
+
+The extraction changed no behaviour: the persisted operation kind and failure
+stage remain the literal string `clone`, the guardrail evaluation is
+byte-identical, and the deterministic-simulation corpus of
+[ADR 0031](0031-deterministic-simulation-testing.md) — 64 seeds x 200 ticks on
+both world arms, three runs each — reduces to the same counts and the same
+digest before and after.
+
 ## Not addressed here
 
 **The x86 executor is chosen but not specified in this record.** Which container
-runtime serves node B, how a runner container is created, bootstrapped, and
-reaped, and how the Tart-shaped ports in `internal/lifecycle/executor.go:115-129`
-become backend-neutral, are the subject of `docs/MULTI_NODE_PLAN.md` and its
-implementation epic.
+runtime serves node B, and how a runner container is created, bootstrapped, and
+reaped, are the subject of `docs/MULTI_NODE_PLAN.md` and its implementation
+epic. How the Tart-shaped ports in `internal/lifecycle/executor.go` become
+backend-neutral was also deferred here, and is answered by the amendment above.
 
 **Simulation stays single-node and needs no change.** `tests/simulation` models
 one host because ADR 0031 says so, and under this record one host is still one

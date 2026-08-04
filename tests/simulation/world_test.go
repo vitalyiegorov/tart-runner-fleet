@@ -26,11 +26,10 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
@@ -61,7 +60,7 @@ type worldConfig struct {
 	Name             string
 	PhysicalCPU      int64
 	PhysicalMemoryMB int64
-	Guards           macos.Guardrails
+	Guards           executor.Guardrails
 	Scheduler        scheduler.Config
 	Bindings         []app.Binding
 	Repos            []string
@@ -134,7 +133,7 @@ func defaultWorld() worldConfig {
 		Name:             "m4-mac-mini",
 		PhysicalCPU:      10,
 		PhysicalMemoryMB: 24_576,
-		Guards: macos.Guardrails{MinFreeDiskGB: 20, MinAvailableMemoryMB: 2_048,
+		Guards: executor.Guardrails{MinFreeDiskGB: 20, MinAvailableMemoryMB: 2_048,
 			MaxSwapUsedMB: 8_192, MaxLoadAverage: 24, MinCPUidlePercent: 5},
 		Scheduler: scheduler.Config{
 			LinuxCapacity:   domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
@@ -218,7 +217,7 @@ func (c worldConfig) ceilingSource() string {
 // of ADR 0018 is exercised against a machine that really does get busy.
 type simHost struct{ world *world }
 
-func (h simHost) Snapshot(context.Context) macos.Snapshot {
+func (h simHost) Snapshot(context.Context) executor.HostSnapshot {
 	w := h.world
 	usedCPU, usedMemory := w.fleetOccupancy()
 	idle := float64(w.cfg.PhysicalCPU-int64(usedCPU)-int64(w.tenantCPU)) / float64(w.cfg.PhysicalCPU) * 100
@@ -230,10 +229,10 @@ func (h simHost) Snapshot(context.Context) macos.Snapshot {
 		available = 0
 	}
 	if w.hostProbeStale > 0 {
-		return macos.Snapshot{Freshness: macos.Stale, ObservedAt: w.now}
+		return executor.HostSnapshot{Freshness: executor.Stale, ObservedAt: w.now}
 	}
-	return macos.Snapshot{
-		Freshness: macos.Fresh, ObservedAt: w.now, AvailableMemoryMB: available, FreeDiskGB: 400,
+	return executor.HostSnapshot{
+		Freshness: executor.Fresh, ObservedAt: w.now, AvailableMemoryMB: available, FreeDiskGB: 400,
 		SwapUsedMB: 0, SwapOuts: 0, CPUidlePercent: idle, LoadAverage: float64(usedCPU + w.tenantCPU),
 		SwapOutRatePerSecond: 0, SwapOutRateObserved: true,
 		PhysicalCPU: w.cfg.PhysicalCPU, PhysicalMemoryMB: w.cfg.PhysicalMemoryMB,
@@ -244,7 +243,7 @@ func (h simHost) Snapshot(context.Context) macos.Snapshot {
 // an absent or powered-off VM is a fact the real inventory adapter classifies.
 type simTart struct{ world *world }
 
-func (a simTart) List(context.Context) ([]tart.VM, error) {
+func (a simTart) List(context.Context) ([]executor.Instance, error) {
 	w := a.world
 	if w.tartUnavailable > 0 {
 		return nil, fmt.Errorf("simulated tart failure")
@@ -254,9 +253,9 @@ func (a simTart) List(context.Context) ([]tart.VM, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	vms := make([]tart.VM, 0, len(names))
+	vms := make([]executor.Instance, 0, len(names))
 	for _, name := range names {
-		vms = append(vms, tart.VM{Name: name, Running: w.vms[name]})
+		vms = append(vms, executor.Instance{Name: name, Running: w.vms[name]})
 	}
 	return vms, nil
 }
@@ -480,7 +479,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		Store: store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,
 		ControllerID: simOwner, Mode: reconcile.Authority, Now: func() time.Time { return w.now },
 		Inventory: app.ProductionInventory{
-			Store: simInstances{world: w}, Tart: simTart{world: w}, Host: simHost{world: w},
+			Store: simInstances{world: w}, Executor: simTart{world: w}, Host: simHost{world: w},
 			Recovery: simRecovery{world: w}, Capacity: cfg.Scheduler.LinuxCapacity, Guards: cfg.Guards,
 			ElasticHostEnvelope: cfg.Scheduler.ElasticHostEnvelope, HostBudget: cfg.Scheduler.HostBudget,
 		},

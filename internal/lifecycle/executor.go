@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -112,9 +112,12 @@ type StateStore interface {
 	Advance(context.Context, StateChange) (operations.Instance, error)
 }
 
-// VMControl is implemented by tart.Adapter.
+// VMControl is the slice of executor.Backend one runner's lifecycle needs: the
+// mutating verbs and the power observation, and nothing that enumerates the
+// host. Every executor.Backend satisfies it — tests/contract pins that — so the
+// node's backend is chosen once in internal/daemon and never named here.
 type VMControl interface {
-	Clone(context.Context, tart.Request) error
+	Create(context.Context, executor.InstanceSpec) error
 	Start(context.Context, string, operations.Ownership) error
 	Stop(context.Context, string, operations.Ownership) error
 	Delete(context.Context, string, operations.Ownership) error
@@ -216,12 +219,12 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			// would release dependent operations as if provisioning succeeded.
 			return safeError(StagePersist)
 		case operations.StatePlanned:
-			base := e.Bases[instance.Platform]
-			if e.VM == nil || tart.ValidateName(base) != nil {
+			image := e.Bases[instance.Platform]
+			if e.VM == nil || domain.ValidateInstanceName(image) != nil {
 				return e.fail(ctx, instance, StageClone)
 			}
-			if err := e.VM.Clone(ctx, tart.Request{
-				Name: instance.ID, Base: base, CPU: instance.Resources.CPU, MemoryMB: instance.Resources.MemoryMB,
+			if err := e.VM.Create(ctx, executor.InstanceSpec{
+				Name: instance.ID, Image: image, CPU: instance.Resources.CPU, MemoryMB: instance.Resources.MemoryMB,
 				DiskGB: e.DiskGiB[instance.Profile], Ownership: instance.Ownership,
 			}); err != nil {
 				return e.fail(ctx, instance, StageClone)
@@ -642,7 +645,7 @@ func (e DrainExecutor) after(delay time.Duration) <-chan time.Time {
 
 func validateOwned(instance operations.Instance, resourceID string) error {
 	if instance.ID == "" || instance.ID != resourceID || !instance.Ownership.Valid() || !instance.SchedulingMetadataValid() ||
-		tart.ValidateName(instance.ID) != nil {
+		domain.ValidateInstanceName(instance.ID) != nil {
 		return operations.ErrInvalid
 	}
 	return nil
@@ -677,7 +680,7 @@ type StdinBootstrapper struct {
 }
 
 func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret) error {
-	if tart.ValidateName(name) != nil || secret == nil || b.Runner == nil {
+	if domain.ValidateInstanceName(name) != nil || secret == nil || b.Runner == nil {
 		return operations.ErrInvalid
 	}
 	encoded := secret.Reveal()

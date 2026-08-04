@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 )
 
 type fakeCommands struct {
@@ -67,48 +69,24 @@ func TestProbeFreshStaleUnavailableAndGuardrails(t *testing.T) {
 	runner := &fakeCommands{outputs: outputs}
 	probe := &Probe{Runner: runner, Timeout: time.Second, Now: func() time.Time { return now }}
 	snapshot := probe.Snapshot(context.Background())
-	if snapshot.Freshness != Fresh || snapshot.AvailableMemoryMB != 4843 || snapshot.FreeDiskGB != 80 || snapshot.SwapUsedMB != 512 || snapshot.SwapOuts != 7 || snapshot.CPUidlePercent != 90 {
+	if snapshot.Freshness != executor.Fresh || snapshot.AvailableMemoryMB != 4843 || snapshot.FreeDiskGB != 80 || snapshot.SwapUsedMB != 512 || snapshot.SwapOuts != 7 || snapshot.CPUidlePercent != 90 {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
-	guard := Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15}
-	if decision := guard.Evaluate(snapshot, Request{MemoryMB: 2000}); !decision.Allowed {
+	guard := executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15}
+	if decision := guard.Evaluate(snapshot, executor.AdmissionRequest{MemoryMB: 2000}); !decision.Allowed {
 		t.Fatalf("healthy host rejected: %#v", decision)
 	}
 	runner.err = errors.New("host unavailable")
 	stale := probe.Snapshot(context.Background())
-	if stale.Freshness != Stale || stale.Cause == nil {
+	if stale.Freshness != executor.Stale || stale.Cause == nil {
 		t.Fatalf("expected stale cache: %#v", stale)
 	}
-	if guard.Evaluate(stale, Request{}).Allowed {
+	if guard.Evaluate(stale, executor.AdmissionRequest{}).Allowed {
 		t.Fatal("stale observation allowed")
 	}
 	empty := (&Probe{Runner: runner, Now: func() time.Time { return now }}).Snapshot(context.Background())
-	if empty.Freshness != Unavailable {
+	if empty.Freshness != executor.Unavailable {
 		t.Fatalf("expected unavailable: %#v", empty)
-	}
-}
-
-func TestGuardrailReasons(t *testing.T) {
-	base := Snapshot{Freshness: Fresh, AvailableMemoryMB: 8000, FreeDiskGB: 100, SwapUsedMB: 10, CPUidlePercent: 50, LoadAverage: 2}
-	guard := Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 100, MaxLoadAverage: 8, MinCPUidlePercent: 15}
-	tests := []struct {
-		name     string
-		snapshot Snapshot
-		request  Request
-		reason   string
-	}{
-		{"invalid memory", base, Request{MemoryMB: -1}, "invalid requested memory"},
-		{"disk", func() Snapshot { s := base; s.FreeDiskGB = 10; return s }(), Request{}, "disk reserve"},
-		{"memory", base, Request{MemoryMB: 7000}, "memory reserve"},
-		{"swap", func() Snapshot { s := base; s.SwapUsedMB = 101; return s }(), Request{}, "swap pressure"},
-		{"cpu", func() Snapshot { s := base; s.LoadAverage = 9; s.CPUidlePercent = 10; return s }(), Request{}, "cpu pressure"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if decision := guard.Evaluate(test.snapshot, test.request); decision.Allowed || decision.Reason != test.reason {
-				t.Fatalf("unexpected decision: %#v", decision)
-			}
-		})
 	}
 }
 
@@ -178,15 +156,15 @@ func TestCriticalProbeFailuresDegradeAdvisoryFailuresDoNot(t *testing.T) {
 				outputs[test.badKey] = []byte("bad")
 			}
 			snapshot := (&Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }}).Snapshot(context.Background())
-			if snapshot.Freshness != Unavailable || snapshot.Cause == nil {
+			if snapshot.Freshness != executor.Unavailable || snapshot.Cause == nil {
 				t.Fatalf("critical failure not degraded: %#v", snapshot)
 			}
 		})
 	}
 
 	// Swap, CPU, and load are advisory throttles: a failure with no prior
-	// reading must still produce a Fresh snapshot carrying the real memory and
-	// disk figures with permissive advisory defaults, never Unavailable. A
+	// reading must still produce a executor.Fresh snapshot carrying the real memory and
+	// disk figures with permissive advisory defaults, never executor.Unavailable. A
 	// flaky `top` bricking the whole scheduler was an 18h fleet-wide outage.
 	advisory := []struct {
 		name   string
@@ -210,7 +188,7 @@ func TestCriticalProbeFailuresDegradeAdvisoryFailuresDoNot(t *testing.T) {
 				outputs[test.badKey] = []byte("bad")
 			}
 			snapshot := (&Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }}).Snapshot(context.Background())
-			if snapshot.Freshness != Fresh {
+			if snapshot.Freshness != executor.Fresh {
 				t.Fatalf("advisory failure bricked the observation: %#v", snapshot)
 			}
 			if snapshot.AvailableMemoryMB != 4843 || snapshot.FreeDiskGB != 80 {
@@ -222,17 +200,17 @@ func TestCriticalProbeFailuresDegradeAdvisoryFailuresDoNot(t *testing.T) {
 
 func TestAdvisoryFailureStaysAdmissibleAndRecoversLastKnown(t *testing.T) {
 	now := time.Unix(300, 0).UTC()
-	guard := Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15}
+	guard := executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15}
 
 	// Regression for the 18h wedge: a daemon that restarts while `top` is flaky
-	// has no prior snapshot, so a CPU-probe failure must still yield a Fresh,
+	// has no prior snapshot, so a CPU-probe failure must still yield a executor.Fresh,
 	// admissible observation on permissive defaults instead of bricking.
 	coldStart := &fakeCommands{outputs: validOutputs(), errors: map[string]error{"top:0": errors.New("top hung")}}
 	fresh := (&Probe{Runner: coldStart, Now: func() time.Time { return now }}).Snapshot(context.Background())
-	if fresh.Freshness != Fresh || fresh.CPUidlePercent != permissiveCPUidlePercent {
+	if fresh.Freshness != executor.Fresh || fresh.CPUidlePercent != permissiveCPUidlePercent {
 		t.Fatalf("cold-start CPU probe failure did not degrade permissively: %#v", fresh)
 	}
-	if !guard.Evaluate(fresh, Request{MemoryMB: 2000}).Allowed {
+	if !guard.Evaluate(fresh, executor.AdmissionRequest{MemoryMB: 2000}).Allowed {
 		t.Fatal("healthy host with an unreadable CPU probe was denied admission")
 	}
 
@@ -244,7 +222,7 @@ func TestAdvisoryFailureStaysAdmissibleAndRecoversLastKnown(t *testing.T) {
 	}
 	probe.Runner = &fakeCommands{outputs: validOutputs(), errors: map[string]error{"top:0": errors.New("top hung")}}
 	carried := probe.Snapshot(context.Background())
-	if carried.Freshness != Fresh || carried.CPUidlePercent != 90 {
+	if carried.Freshness != executor.Fresh || carried.CPUidlePercent != 90 {
 		t.Fatalf("advisory failure did not carry the last-known reading: %#v", carried)
 	}
 }
@@ -256,7 +234,7 @@ func TestPressureAccountingPrimaryAndFallback(t *testing.T) {
 	// (25769803776 B = 24576 MiB, level 78 => 19169 MiB), replacing the legacy
 	// page figure (4843 MiB) that understates reality by gigabytes.
 	on := &Probe{Runner: &fakeCommands{outputs: validOutputs()}, Now: func() time.Time { return now }, PressureAccounting: true}
-	if snapshot := on.Snapshot(context.Background()); snapshot.Freshness != Fresh || snapshot.AvailableMemoryMB != 19169 {
+	if snapshot := on.Snapshot(context.Background()); snapshot.Freshness != executor.Fresh || snapshot.AvailableMemoryMB != 19169 {
 		t.Fatalf("pressure path did not compute memsize x level: %#v", snapshot)
 	}
 
@@ -276,7 +254,7 @@ func TestPressureAccountingPrimaryAndFallback(t *testing.T) {
 	}
 
 	// Every pressure read/parse failure falls back to the vm_stat page figure
-	// without degrading the observation (Fresh, 4843 MiB).
+	// without degrading the observation (executor.Fresh, 4843 MiB).
 	fallbacks := []struct {
 		name    string
 		errKey  string
@@ -302,16 +280,16 @@ func TestPressureAccountingPrimaryAndFallback(t *testing.T) {
 			}
 			probe := &Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }, PressureAccounting: true}
 			snapshot := probe.Snapshot(context.Background())
-			if snapshot.Freshness != Fresh || snapshot.AvailableMemoryMB != 4843 {
+			if snapshot.Freshness != executor.Fresh || snapshot.AvailableMemoryMB != 4843 {
 				t.Fatalf("pressure failure did not fall back to the page figure: %#v", snapshot)
 			}
 		})
 	}
 
 	// vm_stat remains the fail-closed base: with the flag on, a vm_stat failure
-	// still degrades the whole observation to Unavailable.
+	// still degrades the whole observation to executor.Unavailable.
 	degraded := &Probe{Runner: &fakeCommands{outputs: validOutputs(), errors: map[string]error{"vm_stat": errors.New("failed")}}, Now: func() time.Time { return now }, PressureAccounting: true}
-	if snapshot := degraded.Snapshot(context.Background()); snapshot.Freshness != Unavailable || snapshot.Cause == nil {
+	if snapshot := degraded.Snapshot(context.Background()); snapshot.Freshness != executor.Unavailable || snapshot.Cause == nil {
 		t.Fatalf("pressure flag masked a critical vm_stat failure: %#v", snapshot)
 	}
 }
@@ -346,7 +324,7 @@ func (blockingCommands) Run(ctx context.Context, _ string, _ ...string) ([]byte,
 
 func TestProbeTimeoutDefaultsAndExecRunner(t *testing.T) {
 	probe := &Probe{Runner: blockingCommands{}, Timeout: time.Millisecond}
-	if snapshot := probe.Snapshot(context.Background()); snapshot.Freshness != Unavailable || !errors.Is(snapshot.Cause, context.DeadlineExceeded) {
+	if snapshot := probe.Snapshot(context.Background()); snapshot.Freshness != executor.Unavailable || !errors.Is(snapshot.Cause, context.DeadlineExceeded) {
 		t.Fatalf("timeout not classified: %#v", snapshot)
 	}
 	defaultProbe := &Probe{DiskPath: "/tmp"}

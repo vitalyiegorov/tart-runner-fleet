@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -189,6 +190,28 @@ func TestAbsentTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
 		}
 		if mode, err := DeriveHostMode([]Instance{absent}); err != nil || mode != HostIdle {
 			t.Fatalf("absent %s mode = %s, %v", state, mode, err)
+		}
+	}
+}
+
+// The instance grammar is the fleet's one identity rule, shared by the guest
+// name, the GitHub runner name, and the durable row's primary key. It lives here
+// rather than in a backend adapter precisely so a second backend inherits it
+// unchanged; tests/contract additionally proves it is legal as a container name.
+func TestInstanceNameGrammar(t *testing.T) {
+	for _, name := range []string{"a", "trf-small-1", "trf-macos-builder-096ffcb3a52d8624", "A.b_c-9",
+		strings.Repeat("z", 128)} {
+		if err := ValidateInstanceName(name); err != nil {
+			t.Fatalf("rejected %q: %v", name, err)
+		}
+	}
+	// "." and ".." match the character class but are path traversal, and a name
+	// is interpolated into a filesystem-backed guest identity on at least one
+	// backend, so they are refused explicitly rather than by luck.
+	for _, name := range []string{"", ".", "..", "-leading", ".leading", "has space", "has/slash",
+		strings.Repeat("z", 129)} {
+		if err := ValidateInstanceName(name); err == nil {
+			t.Fatalf("accepted %q", name)
 		}
 	}
 }

@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -49,8 +50,11 @@ type StartedCommand interface {
 	Output() []byte
 }
 
+// Runner is the tart command line: the neutral argument-vector primitive every
+// CLI-shelling backend shares, plus the detached start this adapter needs to
+// poll a `tart run` that never returns.
 type Runner interface {
-	Run(context.Context, ...string) ([]byte, error)
+	executor.CommandRunner
 	Start(context.Context, ...string) (StartedCommand, error)
 }
 
@@ -190,7 +194,10 @@ type ConfirmationProvider interface {
 	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
 }
 
-type VM struct {
+// vm is one row of `tart list --format json`. It stays unexported: the shape
+// callers see is executor.Instance, and this adapter's decoding of one CLI's
+// JSON is nobody else's business.
+type vm struct {
 	Name    string `json:"Name"`
 	Running bool   `json:"Running"`
 	Source  string `json:"Source"`
@@ -224,43 +231,43 @@ type Adapter struct {
 	mu                        sync.Mutex
 }
 
-type Request struct {
-	Name      string
-	Base      string
-	CPU       int
-	MemoryMB  int
-	DiskGB    int
-	Ownership operations.Ownership
-}
-
-var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-
-func ValidateName(name string) error {
-	if !validName.MatchString(name) || name == "." || name == ".." {
+// validateName applies the fleet-wide instance grammar of
+// domain.ValidateInstanceName and reports a rejection in this adapter's own
+// error vocabulary, so a bad name stays an invalid operation rather than a
+// command failure.
+func validateName(name string) error {
+	if domain.ValidateInstanceName(name) != nil {
 		return fmt.Errorf("%w: invalid Tart VM name", operations.ErrInvalid)
 	}
 	return nil
 }
 
-func (a *Adapter) List(ctx context.Context) ([]VM, error) {
+func (a *Adapter) List(ctx context.Context) ([]executor.Instance, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout())
 	defer cancel()
 	output, err := a.runner().Run(ctx, "list", "--format", "json")
 	if err != nil {
 		return nil, err
 	}
-	var vms []VM
+	var vms []vm
 	if err := json.Unmarshal(output, &vms); err != nil {
 		return nil, &Error{Op: "list", Kind: ErrorUncertain, ExitCode: -1, Stderr: string(output), Err: err}
 	}
-	return vms, nil
+	instances := make([]executor.Instance, 0, len(vms))
+	for _, item := range vms {
+		instances = append(instances, executor.Instance{Name: item.Name, Running: item.Running, Source: item.Source})
+	}
+	return instances, nil
 }
 
-func (a *Adapter) Clone(ctx context.Context, request Request) error {
-	if err := ValidateName(request.Name); err != nil {
+// Create clones the base VM named by spec.Image and sizes it to the spec. It is
+// the Tart implementation of executor.Backend's Create verb; "clone" survives as
+// the durable operation kind and failure stage, which are persisted state.
+func (a *Adapter) Create(ctx context.Context, request executor.InstanceSpec) error {
+	if err := validateName(request.Name); err != nil {
 		return err
 	}
-	if err := ValidateName(request.Base); err != nil {
+	if err := validateName(request.Image); err != nil {
 		return err
 	}
 	if !request.Ownership.Valid() {
@@ -280,7 +287,7 @@ func (a *Adapter) Clone(ctx context.Context, request Request) error {
 	}
 	if !exists {
 		commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
-		_, commandErr := a.runner().Run(commandCtx, "clone", request.Base, request.Name)
+		_, commandErr := a.runner().Run(commandCtx, "clone", request.Image, request.Name)
 		cancel()
 		if commandErr != nil {
 			exists, observeErr := a.existsOwned(ctx, request.Name, request.Ownership)
@@ -295,7 +302,7 @@ func (a *Adapter) Clone(ctx context.Context, request Request) error {
 	return a.ensureResources(ctx, request)
 }
 
-func (a *Adapter) ensureResources(ctx context.Context, request Request) error {
+func (a *Adapter) ensureResources(ctx context.Context, request executor.InstanceSpec) error {
 	config, err := a.getConfig(ctx, request.Name)
 	if err != nil {
 		return err
@@ -327,7 +334,7 @@ func (a *Adapter) ensureResources(ctx context.Context, request Request) error {
 	return &Error{Op: "set", Kind: ErrorUncertain, ExitCode: -1, Err: errors.New("resource resize was not observed")}
 }
 
-func resourcesMatch(config VMConfig, request Request) bool {
+func resourcesMatch(config VMConfig, request executor.InstanceSpec) bool {
 	diskMatches := request.DiskGB == 0 || config.Disk >= request.DiskGB
 	return config.CPU == request.CPU && config.Memory == request.MemoryMB && diskMatches
 }
@@ -347,7 +354,7 @@ func (a *Adapter) getConfig(ctx context.Context, name string) (VMConfig, error) 
 }
 
 func (a *Adapter) Start(ctx context.Context, name string, ownership operations.Ownership) error {
-	if err := ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return err
 	}
 	vm, err := a.ownedVM(ctx, name, ownership)
@@ -407,7 +414,7 @@ func (a *Adapter) isMacOSVM(name string) bool {
 }
 
 func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ownership) error {
-	if err := ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return err
 	}
 	vm, err := a.ownedVM(ctx, name, ownership)
@@ -434,7 +441,7 @@ func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ow
 }
 
 func (a *Adapter) Delete(ctx context.Context, name string, ownership operations.Ownership) error {
-	if err := ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return err
 	}
 	vm, err := a.ownedVM(ctx, name, ownership)
@@ -500,28 +507,28 @@ func (a *Adapter) existsOwned(ctx context.Context, name string, ownership operat
 	return err == nil, err
 }
 
-func (a *Adapter) ownedVM(ctx context.Context, name string, expected operations.Ownership) (VM, error) {
+func (a *Adapter) ownedVM(ctx context.Context, name string, expected operations.Ownership) (executor.Instance, error) {
 	actual, err := a.Ownership.Ownership(ctx, name)
 	if err != nil {
-		return VM{}, err
+		return executor.Instance{}, err
 	}
 	if actual != expected {
-		return VM{}, operations.ErrConflict
+		return executor.Instance{}, operations.ErrConflict
 	}
 	return a.find(ctx, name)
 }
 
-func (a *Adapter) find(ctx context.Context, name string) (VM, error) {
-	vms, err := a.List(ctx)
+func (a *Adapter) find(ctx context.Context, name string) (executor.Instance, error) {
+	instances, err := a.List(ctx)
 	if err != nil {
-		return VM{}, err
+		return executor.Instance{}, err
 	}
-	for _, vm := range vms {
-		if vm.Name == name {
-			return vm, nil
+	for _, instance := range instances {
+		if instance.Name == name {
+			return instance, nil
 		}
 	}
-	return VM{}, operations.ErrNotFound
+	return executor.Instance{}, operations.ErrNotFound
 }
 
 func (a *Adapter) timeout() time.Duration {
