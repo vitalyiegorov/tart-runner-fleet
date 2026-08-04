@@ -233,8 +233,14 @@ func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
 
 type dependencies struct {
 	// executes mirrors platform.executes: whether this node's backend can bring
-	// an instance into existence at all.
-	executes        bool
+	// an instance into existence at all. It is a question asked of the decoded
+	// configuration, because on Linux the answer is a configured backend rather
+	// than a kernel (ADR 0034, issue #139).
+	executes func(config.Config) bool
+	// preflight mirrors platform.preflight: the fail-closed check that a
+	// configured execution technology is actually usable on this machine.
+	preflight       func(context.Context, config.Config) error
+	linuxImage      func(config.Config) string
 	openConfig      func(string) (io.ReadCloser, error)
 	openStore       func(context.Context, string) (runtimeStore, error)
 	loadKey         func(context.Context, string, string, string) (*credentials.Secret, error)
@@ -279,11 +285,17 @@ const (
 	// than the single attempt that has been ending the process.
 	authorityLeaseRenewRetry   = 2 * time.Second
 	deletionConfirmationMaxAge = 30 * time.Second
-	scaleSetCloseTimeout       = 20 * time.Second
-	scaleSetCloseConcurrency   = 4
-	lifecycleRetryMaxAttempts  = 0
-	provisionRetryMaximum      = 30 * time.Second
-	drainRetryMaximum          = 30 * time.Second
+	// containerStopGrace is how long podman lets a runner container's process
+	// finish before it is killed. It is deliberately a constant rather than
+	// Timeouts.Tart: the grace is spent *inside* the `podman stop` this adapter
+	// runs under that timeout, so deriving one from the other would let a stop
+	// that used its whole grace be cancelled at the exact moment it succeeded.
+	containerStopGrace        = 10 * time.Second
+	scaleSetCloseTimeout      = 20 * time.Second
+	scaleSetCloseConcurrency  = 4
+	lifecycleRetryMaxAttempts = 0
+	provisionRetryMaximum     = 30 * time.Second
+	drainRetryMaximum         = 30 * time.Second
 )
 
 var (
@@ -299,7 +311,9 @@ func defaultDependencies() dependencies { return newDependencies(runtime.GOOS) }
 func newDependencies(goos string) dependencies {
 	node := platformFor(goos)
 	return dependencies{
-		executes: node.executes,
+		executes:   node.executes,
+		preflight:  node.preflight,
+		linuxImage: node.linuxImage,
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
@@ -355,15 +369,6 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	if opts.Mode == reconcile.Canary && (strings.TrimSpace(opts.CanaryScope) == "" || strings.TrimSpace(opts.CanaryProfile) == "") {
 		return errors.New("canary requires an exact scope and profile")
 	}
-	// A node with no execution technology may observe and nothing else. Shadow,
-	// canary and authority all exist to act on a machine this build cannot act
-	// on, and every plan they produced would end in a refused Create. Refusing
-	// here makes that a startup error an operator reads once, instead of a queue
-	// of parked dead letters they read for an hour (ADR 0034, and Phase 1 Part A
-	// of docs/MULTI_NODE_PLAN.md, which brings the node up in observe mode).
-	if !d.executes && opts.Mode != reconcile.Observe {
-		return fmt.Errorf("controller mode %s requires an execution backend, which this node's platform has none of", opts.Mode)
-	}
 	file, err := d.openConfig(opts.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("open config: %w", err)
@@ -377,8 +382,30 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		return fmt.Errorf("close config: %w", closeErr)
 	}
 	if opts.Mode != reconcile.Observe {
+		// A node with no execution technology may observe and nothing else. Shadow,
+		// canary and authority all exist to act on a machine this build cannot act
+		// on, and every plan they produced would end in a refused Create. Refusing
+		// here makes that a startup error an operator reads once, instead of a queue
+		// of parked dead letters they read for an hour (ADR 0034, and Phase 1 Part A
+		// of docs/MULTI_NODE_PLAN.md, which brings the node up in observe mode).
+		//
+		// The question is asked of the configuration rather than of the platform,
+		// because on Linux the two stages of the bring-up differ only by an
+		// `executor` block: issue #138's node has none and observes, and issue
+		// #139's names podman and provisions.
+		if !d.executes(cfg) {
+			return fmt.Errorf("controller mode %s requires an execution backend, which this node has none configured for", opts.Mode)
+		}
 		if err := cfg.ValidateAuthority(); err != nil {
 			return err
+		}
+		// The backend is configured; now prove it is there. An absent or root-ful
+		// container runtime is a refusal to start, never a node that promises
+		// GitHub a runner it cannot build.
+		if d.preflight != nil {
+			if err := d.preflight(ctx, cfg); err != nil {
+				return fmt.Errorf("execution backend preflight: %w", err)
+			}
 		}
 	}
 	store, err := d.openStore(ctx, opts.DatabasePath)
@@ -577,7 +604,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
 					Registration: control, Bootstrap: d.bootstrap(cfg), Bases: map[domain.Platform]string{
-						domain.PlatformLinux: cfg.Linux.BaseVM, domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB},
+						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
 			},

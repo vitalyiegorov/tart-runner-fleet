@@ -381,13 +381,77 @@ byte-identical, and the deterministic-simulation corpus of
 both world arms, three runs each — reduces to the same counts and the same
 digest before and after.
 
+## Amendment 2026-08-04: the container backend, and the one contract it moved (issue #139)
+
+Node B's execution technology is built: `internal/adapters/podman` implements
+`Backend` over the rootless podman command line, and `internal/daemon` chooses
+it. Three decisions in it are load-bearing enough to record here rather than in
+the plan document.
+
+**A Linux node's backend is a property of its configuration, not of its kernel.**
+`platformFor(goos)` no longer answers "can this node execute" from `goos` alone,
+because the same machine is both stages of the bring-up: with no `executor`
+block it is Phase 1 Part A, wiring `noexecutor` and observing, and with
+`executor.backend: podman` it is the authority node. `executes` therefore became
+a question asked of the decoded configuration, and the daemon asks a second one
+beside it — a node that names podman must prove podman is installed and rootless
+before it starts in any mutating mode. Rootless is not a preference: §"Why
+rootless specifically" of the plan puts approved third-party code on this node,
+and a root-owned container daemon is root-equivalent.
+
+**A container is created, never adopted.** ADR 0010 makes an ephemeral guest
+single-use, and the Tart adapter can honour that while still finding its own
+clone after a lost response, because a Tart VM is a directory that outlives the
+process that made it. A container is not: one that already holds a name the
+scheduler has just minted was made by something else, or by an operation whose
+job has already run in it. So `Create` writes durable ownership, then refuses a
+name held by a container that does not carry *this operation's*
+`trf.operation` label. The label is written by this adapter's create and by
+nothing else.
+
+**`/dev/kvm` is a grant to a named profile, derived from the instance name.**
+`InstanceSpec` carries no profile — `tests/contract/executor_port_test.go` pins
+its field set, and a field there is a field every backend must answer for — so
+the adapter reads the profile off the `trf-<profile>-` prefix
+`reconcile.Controller` mints, which is exactly how the Tart adapter already
+recognises a macOS guest. The list of profiles is `executor.kvmProfiles`, and
+naming a profile the node does not declare is a refused configuration rather
+than a grant that silently does nothing.
+
+### One contract moved
+
+`internal/lifecycle` validated the base image with `domain.ValidateInstanceName`.
+That is the *instance* grammar — `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` — and an
+OCI reference's slashes, colons, and digest `@` are precisely the characters it
+forbids, so the provisioning path could never have created a container. The
+amendment above claimed `InstanceSpec.Image` was already backend-neutral; it was
+neutral in its type and not in its validation.
+
+The neutral rule is now `domain.ValidateImageReference`: present, unpadded, no
+whitespace or NUL, and not readable as a command-line option. It asserts only
+what is true of an image on every backend and knowable without a registry. A
+backend narrows it — `internal/adapters/tart` still requires a full instance
+name, because a Tart base VM *is* one — and only a registry or a hypervisor can
+say whether the image is really there. Nothing else about the port changed: the
+seven verbs, the field sets, and the caller-side ports are byte-for-byte as
+issue #137 left them, which is what let the container adapter be written against
+a target that could not move.
+
 ## Not addressed here
 
-**The x86 executor is chosen but not specified in this record.** Which container
-runtime serves node B, and how a runner container is created, bootstrapped, and
-reaped, are the subject of `docs/MULTI_NODE_PLAN.md` and its implementation
-epic. How the Tart-shaped ports in `internal/lifecycle/executor.go` become
-backend-neutral was also deferred here, and is answered by the amendment above.
+**Whether the container adapter works against a real container runtime is not
+proved by any automated gate yet.** Its verbs, error classification, wiring, and
+sufficiency for the whole runner lifecycle are covered on every commit; that
+podman accepts these argument vectors and prints this JSON is covered by
+`scripts/podman-smoke.sh`, which CI can only skip because the fleet's own Linux
+runners are Tart guests with no container runtime. The node B bring-up checklist
+in `docs/MULTI_NODE_PLAN.md` requires that script to pass before any job is
+routed there, and that requirement is the mitigation.
+
+**How a base image reaches a node, and what is in it.** The runner image must
+carry the JIT bootstrap helper and start the runner without `systemd-run`, which
+a container does not have. That is image work on node B, and it is per-node
+operator work until measurement says otherwise.
 
 **Simulation stays single-node and needs no change.** `tests/simulation` models
 one host because ADR 0031 says so, and under this record one host is still one
@@ -399,6 +463,5 @@ code. The harness gains one new dimension when node B ships, and it is the
 existing one: a single-platform configuration, which the world config already
 expresses.
 
-**Nothing here decides how a base image reaches a node.** Node B needs an x86
-runner image and node C needs a macOS image, and keeping them current is
+Node C still needs a macOS image, and keeping every node's base image current is
 per-node operator work until measurement says otherwise.

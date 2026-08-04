@@ -120,8 +120,11 @@ func TestProvisionExecutorEveryStageFailsWithBoundedCode(t *testing.T) {
 		mutate func(*ProvisionExecutor, *fakeVM, *fakeRegistration, *fakeReady, *fakeBootstrap)
 	}{
 		{"missing vm clone", operations.StatePlanned, StageClone, func(e *ProvisionExecutor, _ *fakeVM, _ *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) { e.VM = nil }},
-		{"invalid base", operations.StatePlanned, StageClone, func(e *ProvisionExecutor, _ *fakeVM, _ *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {
-			e.Bases[domain.PlatformLinux] = "../bad"
+		{"unconfigured base", operations.StatePlanned, StageClone, func(e *ProvisionExecutor, _ *fakeVM, _ *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {
+			e.Bases[domain.PlatformLinux] = ""
+		}},
+		{"base that reads as an option", operations.StatePlanned, StageClone, func(e *ProvisionExecutor, _ *fakeVM, _ *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {
+			e.Bases[domain.PlatformLinux] = "--privileged"
 		}},
 		{"missing vm start", operations.StateCloning, StageStart, func(e *ProvisionExecutor, _ *fakeVM, _ *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) { e.VM = nil }},
 		{"start", operations.StateCloning, StageStart, func(_ *ProvisionExecutor, vm *fakeVM, _ *fakeRegistration, _ *fakeReady, _ *fakeBootstrap) {

@@ -44,6 +44,20 @@ func TestSimFuzzBudgetedHost(t *testing.T) {
 	sweep(t, "TestSimFuzzBudgetedHost", budgetedWorld())
 }
 
+// TestSimFuzzContainerNode is the same sweep on the x86 Linux node of issue
+// #139: every Linux profile, no macOS profile, twelve cores. It is the
+// single-platform world docs/MULTI_NODE_PLAN.md reserves for chunk 2d, and it
+// runs as its own arm for the same reason the budgeted host does -- the seed
+// stream is a function of the world.
+//
+// It exercises what the other two arms cannot: the `planLinux` path with no
+// two-platform admission logic present at all, which is the arrangement ADR 0034
+// §1 calls "heterogeneity expressed as single-platform configurations per node".
+func TestSimFuzzContainerNode(t *testing.T) {
+	t.Parallel()
+	sweep(t, "TestSimFuzzContainerNode", containerNodeWorld())
+}
+
 func sweep(t *testing.T, name string, cfg worldConfig) {
 	t.Helper()
 	for offset := range *seedsFlag {

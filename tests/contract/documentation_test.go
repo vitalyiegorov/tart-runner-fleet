@@ -192,11 +192,17 @@ func TestOperationalDocsTrackCurrentRuntimeContracts(t *testing.T) {
 		"docs/AGENT_RUNBOOK.md": {`FLEET="$ROOT/current/fleet"`, "installed-generation.json", "exit status 0"},
 		"docs/OPERATIONS.md": {"five-minute readiness budget", "launchd bootstrap", "not running", "exit status 0",
 			"systemctl --user daemon-reload", "systemctl --user restart"},
-		// The Linux node's guide must keep naming the three things that make it
-		// a different install rather than a retyped one, and must keep saying
-		// plainly which modes it cannot run.
+		// The Linux node's guide must keep naming the things that make it a
+		// different install rather than a retyped one, must keep saying plainly
+		// which modes it cannot run, and -- since issue #139 -- must keep
+		// documenting the execution backend that decides which of those it is:
+		// the block that turns it on, the device grant ADR 0034 restricts, the
+		// rootless requirement, and the smoke test that proves the runtime is
+		// really there.
 		"INSTALL-linux.md": {"tart-runner-fleet-<version>-linux-amd64.tar.gz", "render-systemd.sh",
-			"XDG_DATA_HOME", "systemd/user", "github.app.privateKeyFile", "observe", "./scripts/observe-smoke.sh"},
+			"XDG_DATA_HOME", "systemd/user", "github.app.privateKeyFile", "observe", "./scripts/observe-smoke.sh",
+			`"backend": "podman"`, "kvmProfiles", "rootless", "TRF_PODMAN_SMOKE=required ./scripts/podman-smoke.sh",
+			"/usr/local/libexec/tart-runner-fleet-bootstrap"},
 	}
 	for name, fragments := range requireText {
 		body, err := os.ReadFile(filepath.Join(root, name))

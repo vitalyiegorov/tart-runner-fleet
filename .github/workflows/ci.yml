@@ -175,6 +175,16 @@ jobs:
       - name: Linux observe-mode daemon smoke test
         run: ./scripts/observe-smoke.sh
 
+      # The acceptance criterion of issue #139 that no fake can produce: the
+      # Podman adapter against a real rootless podman. It is best-effort here on
+      # purpose. The fleet's own Linux runners are Tart guests whose image does
+      # not ship a container runtime, so this reports SKIP today and turns into a
+      # real gate the moment one does. The node this adapter exists for runs the
+      # same script with TRF_PODMAN_SMOKE=required, which is a checklist item in
+      # docs/MULTI_NODE_PLAN.md and not an optional one.
+      - name: Rootless Podman executor smoke test (skips where podman is absent)
+        run: ./scripts/podman-smoke.sh
+
       - name: Reproduce complete release candidate for every node type
         run: |
           set -euo pipefail
