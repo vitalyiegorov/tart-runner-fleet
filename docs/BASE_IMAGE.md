@@ -2,11 +2,15 @@
 
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) makes each node
 responsible for its own guests, and [`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md)
-assigns node C — a remote Mac Studio — the `maestro` scale set of one scope.
-Neither record says where a macOS base image comes from. This document closes
-that gap: it reconstructs how node A's image was actually built, and gives a
-node C operator a recipe that produces an equivalent Maestro-only image locally
-instead of copying node A's 91 GB disk across a residential uplink.
+has mac-studio — a remote Mac Studio — share mac-mini's `maestro` (and, per the
+shared-label amendment, `builder` and the Linux tiers) rather than owning one
+scope's scale set alone. Neither record says where a macOS base image comes
+from. This document closes that gap: it reconstructs how mac-mini's image was
+actually built, and gives a mac-studio operator a recipe that produces an
+equivalent Maestro-only image locally instead of copying mac-mini's 91 GB disk
+across a residential uplink. It predates the shared-label amendment and still
+only covers `maestro`; see [Known unknowns](#known-unknowns) for what that
+leaves open now that mac-studio also declares `builder`.
 
 The fleet never builds images. It clones a stopped base and sizes the clone
 ([ADR 0006](adr/0006-per-profile-disk-floors.md)). Image construction is an
@@ -14,18 +18,18 @@ operator activity, performed once per node and repeated only for maintenance.
 
 ## Contents
 
-- [Provenance of node A's image](#provenance-of-node-as-image)
+- [Provenance of mac-mini's image](#provenance-of-mac-minis-image)
 - [What a Maestro job actually needs](#what-a-maestro-job-actually-needs)
-- [What node C does not need](#what-node-c-does-not-need)
-- [Build the node C image](#build-the-node-c-image)
+- [What mac-studio does not need](#what-mac-studio-does-not-need)
+- [Build the mac-studio image](#build-the-mac-studio-image)
 - [Seal and verify](#seal-and-verify)
-- [Wire it to the node C configuration](#wire-it-to-the-node-c-configuration)
+- [Wire it to the mac-studio configuration](#wire-it-to-the-mac-studio-configuration)
 - [Size expectations](#size-expectations)
 - [Known unknowns](#known-unknowns)
 
-## Provenance of node A's image
+## Provenance of mac-mini's image
 
-Node A's `macos-tartelet-base-go` was never produced by a checked-in script.
+mac-mini's `macos-tartelet-base-go` was never produced by a checked-in script.
 It is the end of a hand-applied clone chain that begins at one public Cirrus
 Labs image. The chain is recoverable because every layer was snapshotted under
 a dated name before it was replaced, and those snapshots are still on disk.
@@ -41,7 +45,7 @@ a dated name before it was replaced, and those snapshots are still on disk.
 ### The source image is pinned exactly
 
 The pull landed in `~/.tart/cache/OCIs/ghcr.io/cirruslabs/macos-sequoia-xcode`,
-which still exists on node A (emptied by a later prune, but the path is the
+which still exists on mac-mini (emptied by a later prune, but the path is the
 record). It was pulled as `:latest` at digest
 `sha256:31413f28df83c37b94e76f8feea8046fb1950b3ed42195523408477189a3f76d`.
 
@@ -52,8 +56,8 @@ That digest is still resolvable, and it is **the tag `26.4.1`**:
 latest => sha256:985623eba2a05fd455527464229f41ddccf7875b8fcd7a9f04712cbbc19acc2d
 ```
 
-So node A's ancestor is byte-exactly reproducible today, and `:latest` has since
-moved on. Any node C recipe that says `:latest` would install a different Xcode
+So mac-mini's ancestor is byte-exactly reproducible today, and `:latest` has since
+moved on. Any mac-studio recipe that says `:latest` would install a different Xcode
 and break the consumer workflow's version assertion on the first job. **Pin the
 digest.**
 
@@ -61,7 +65,7 @@ digest.**
 
 The guest reports `ProductVersion: 15.7.3`, `BuildVersion: 24G419`, Darwin
 24.6.0, arm64 — macOS 15 Sequoia — and it never changed across the whole chain.
-macOS 26 is the *host* on node A. Do not read `macos-sequoia-*` as stale: it is
+macOS 26 is the *host* on mac-mini. Do not read `macos-sequoia-*` as stale: it is
 the guest OS, deliberately, and Xcode 26.4.1 runs on it.
 
 ### Xcode was never installed; it shipped in the image
@@ -79,7 +83,7 @@ On 2026-07-13 the incumbent bases were forked with
 `tart clone macos-tartelet-base macos-tartelet-base-go` so that the shell-era
 `linux-burst-manager.sh` bases stayed intact as a rollback. The suffix records
 which control plane owns the image. **No Go toolchain was ever added to the
-macOS image**, so there is nothing Go-related for node C to leave out.
+macOS image**, so there is nothing Go-related for mac-studio to leave out.
 
 ### The one checked-in script never ran against this image
 
@@ -94,12 +98,12 @@ layers actually did, not from either alone.
 ## What a Maestro job actually needs
 
 Audited from `vitalyiegorov/suuudokuuu` — the scope
-[`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) assigns to node C.
+[`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) assigns to mac-studio.
 
 `mobile-e2e.yml` builds both embedded apps on `macos-builder` first, then
 `ios-maestro.yml` runs two shards on `macos-maestro`. The Maestro guest
 **downloads a prebuilt `.app` artifact**; it never compiles the application.
-That is what makes a lean node C image possible.
+That is what makes a lean mac-studio image possible.
 
 The job supplies for itself: the Maestro CLI (installs pinned `2.6.1` if absent
 or mismatched), the app under test, and its own flows.
@@ -144,23 +148,29 @@ recipe:
 - The "no Android SDK needed" framing in the next section is a build-input
   claim, not an environment one. The Cirrus image ships an `android-sdk`
   directory at that exact path, and every macOS job — `maestro` included —
-  gets `ANDROID_HOME`/`ANDROID_SDK_ROOT` pointed at it regardless. Node C not
+  gets `ANDROID_HOME`/`ANDROID_SDK_ROOT` pointed at it regardless. mac-studio not
   building Android artifacts means nothing on this node reads the variable,
   not that the variable is unset or the path absent.
 
-## What node C does not need
+## What mac-studio does not need
 
 - **The Android build SDK, NDK, and its Temurin JDK.** This is the 2026-07-20
-  layer, present only so `suuudokuuu`'s APK build could occupy node A's macOS
+  layer, present only so `suuudokuuu`'s APK build could occupy mac-mini's macOS
   builder in the absence of an arm64-Linux NDK. `MULTI_NODE_PLAN.md` moves that
-  build to node B. Measured cost on node A: about 4 GB.
+  build to geekom. Measured cost on mac-mini: about 4 GB.
 - **Anything `builder`-only** — EAS CLI, CocoaPods, the Expo toolchain, build
-  caches. Node C's budget is 4 vCPU / 10240 MiB and `builder` is 6 vCPU /
-  12288 MiB, so **no builder job can ever be admitted on node C**. The profile
-  is configured out of reach deliberately.
+  caches. This image is Maestro-only **by scope, not by the host's admission
+  envelope.** mac-studio's `hostBudget` was originally 4 vCPU / 10240 MiB,
+  which put `builder` (6 vCPU / 12288 MiB) permanently out of reach; it was
+  since revised to **6 vCPU / 16384 MiB**, which does fit `builder`, and per
+  ADR 0034's shared-label amendment mac-studio now declares the `builder`
+  label alongside mac-mini. That is a scheduling change, not an image one:
+  this recipe still builds a lean, Maestro-only image, and a `builder` job
+  routed to mac-studio would fail on missing tooling until a separate image
+  update adds it. Building that image is future work, not covered here.
 - **A Go toolchain.** It was never in the image; see the `-go` note above.
-- **`ccache`.** Node C compiles nothing.
-- **Creating a second `iPhone 17 Pro` simulator, strictly speaking.** Node C's
+- **`ccache`.** mac-studio compiles nothing.
+- **Creating a second `iPhone 17 Pro` simulator, strictly speaking.** mac-studio's
   budget admits one 4-vCPU `maestro` guest at a time, and each guest boots
   exactly one device. Measured on `26.4.1`: the Cirrus image already ships one
   available `iPhone 17 Pro` device. `ios-maestro.yml` selects a simulator by
@@ -168,9 +178,9 @@ recipe:
   same-named duplicate — an ambiguity, not a spare. The recipe below prewarms
   whatever the image already shipped instead of creating anything.
 
-## Build the node C image
+## Build the mac-studio image
 
-Run these on the Mac Studio. Nothing here contacts node A.
+Run these on the Mac Studio. Nothing here contacts mac-mini.
 
 ### 0. Preconditions
 
@@ -310,7 +320,7 @@ rm /tmp/bootstrap
 
 ### 4. Prewarm the simulators
 
-This is the 2026-07-19 layer, and on node A it was worth more than everything
+This is the 2026-07-19 layer, and on mac-mini it was worth more than everything
 else combined: a Maestro VM went from 91 minutes cold to 51 minutes prewarmed.
 Without it, each clone creates a fresh device on first use and pays an iOS 26
 first-boot asset, extension, and accessibility-indexing storm that also breaks
@@ -461,20 +471,20 @@ print(any(v["Name"] == name and v["Running"] for v in rows))
 done
 ```
 
-From here the base stays **stopped forever**. Maintenance follows node A's
+From here the base stays **stopped forever**. Maintenance follows mac-mini's
 discipline, which is also [ADR 0011](adr/0011-atomic-production-updates.md)'s
 shape: clone a dated candidate, change the candidate, verify it, then promote by
 rename and keep the outgoing image as `<base>-pre-<change>-<yyyymmdd>`. Never
-edit a live base in place — node A's recoverable history exists only because
+edit a live base in place — mac-mini's recoverable history exists only because
 every layer was renamed rather than overwritten.
 
-## Wire it to the node C configuration
+## Wire it to the mac-studio configuration
 
 `macosBurst.baseVm` must equal the Tart name exactly:
 
 ```json
 {
-  "hostBudget": { "cpu": 4, "memoryMb": 10240 },
+  "hostBudget": { "cpu": 6, "memoryMb": 16384 },
   "macosBurst": {
     "enabled": true,
     "baseVm": "macos-maestro-base",
@@ -486,26 +496,30 @@ every layer was renamed rather than overwritten.
 }
 ```
 
-Use a distinct name. Node A's `macos-tartelet-base-go` carries the Android
-toolchain and the Tartelet-era history; a node C image that answered to the same
+Use a distinct name. mac-mini's `macos-tartelet-base-go` carries the Android
+toolchain and the Tartelet-era history; a mac-studio image that answered to the same
 name would make two materially different images indistinguishable in an
 incident.
 
 **`macosBurst.baseVm` in the checked-in config is the source of truth, not the
-name suggested above.** Observed on node C: the config committed there points
+name suggested above.** Observed on mac-studio: the config committed there points
 `baseVm` at `macos-tartelet-base`, not `macos-maestro-base` — itself a
-collision with node A's pre-`-go` Tartelet-era base, the opposite of the
+collision with mac-mini's pre-`-go` Tartelet-era base, the opposite of the
 distinct-name advice this section gives. Before wiring anything in, read
-node C's actual config and reconcile the two: either name the built image
+mac-studio's actual config and reconcile the two: either name the built image
 `macos-tartelet-base` to match it, or change the config's `baseVm` to a
 distinct name and build under that instead. Whatever the config says is what
 the daemon clones on the first job; a recipe followed under the wrong
 assumption produces a base nothing points at.
 
-`builder` is still required by config validation, so configure it out of reach
-of the 4 vCPU / 10240 MiB budget as `MULTI_NODE_PLAN.md` specifies, and confirm
-the budget binds: with one `maestro` guest live, `fleet status` must report no
-remaining envelope.
+`builder` fits inside the 6 vCPU / 16384 MiB budget (12288 MiB ≤ 16384 MiB), and
+`docs/MULTI_NODE_PLAN.md` has mac-studio declare it alongside `maestro` and the
+Linux tiers, sharing mac-mini's labels. This image does not carry `builder`'s
+toolchain — see [Known unknowns](#known-unknowns) — so wiring `builder` into
+this node's configuration before that second image pass exists will admit jobs
+this image cannot run. Confirm the budget binds regardless: with one `builder`
+or one `maestro` guest live, `fleet status` must report no remaining envelope
+that would let a second 6-vCPU-class guest start alongside it.
 
 Do **not** set `diskGb` on a macOS profile. ADR 0006 requires a positive floor
 only for Linux profiles in authority mode; macOS guests keep the base's
@@ -515,22 +529,22 @@ the Cirrus image whether or not it is wanted.
 
 ## Size expectations
 
-Measured on node A with `tart list` (`Size` is GB actually consumed; every image
+Measured on mac-mini with `tart list` (`Size` is GB actually consumed; every image
 in the chain has the same 140 GB virtual disk):
 
 | Image | Used GB |
 | --- | ---: |
-| `macos-tartelet-base-go` (node A today) | 91 |
+| `macos-tartelet-base-go` (mac-mini today) | 91 |
 | `…-pre-androidsdk-20260720` (before the Android layer) | 87 |
 | `…-pre-prewarm-20260719` | 82 |
 | `ghcr.io/cirruslabs/macos-sequoia-xcode:26.4.1` as pulled | 84 |
 
-A Maestro-only node C image was predicted to land near **85–89 GB** — the
+A Maestro-only mac-studio image was predicted to land near **85–89 GB** — the
 Cirrus baseline, plus roughly 5 GB of settled simulators and hygiene, plus
 about 1.5 GB of Node, JDK, Maestro, and the runner payload, minus the roughly
 4 GB Android layer.
 
-**Measured on node C's `26.4.1` build, it did not land there: it added no
+**Measured on mac-studio's `26.4.1` build, it did not land there: it added no
 measurable disk at all.** `tart list` reported **84 GB both before and after**
 the full recipe — identical to the pulled image, not the predicted 85–89 GB.
 Two things the prediction did not account for absorbed what it expected to
@@ -542,15 +556,15 @@ upper bound this recipe did not reach, not an expectation, and measure with
 `tart list` rather than budgeting off this table.
 
 **State the saving honestly: it is small, and it is not the point.** Xcode and
-the bundled simulator runtimes dominate the image, and node C needs both. The
+the bundled simulator runtimes dominate the image, and mac-studio needs both. The
 reason to build rather than transfer is *where the bytes come from*:
 
-| | Transfer node A's image | Build on node C |
+| | Transfer mac-mini's image | Build on mac-studio |
 | --- | --- | --- |
 | Bytes | ~91 GB of raw disk | 64.6 GB compressed |
-| Source | node A's residential uplink | GitHub's CDN, at node C's downlink |
+| Source | mac-mini's residential uplink | GitHub's CDN, at mac-studio's downlink |
 | Realistic time | days | under an hour on a fast link |
-| Effect on production | competes with live job traffic for the whole transfer | none — node A is not involved |
+| Effect on production | competes with live job traffic for the whole transfer | none — mac-mini is not involved |
 | Reproducible later | no, it is a copy of a hand-built artifact | yes, the digest is pinned |
 
 If the image must be smaller, the only large remaining target is the non-iOS
@@ -580,9 +594,20 @@ Stated so a future operator does not mistake inference for measurement.
   is unexplained. It is most likely `brew cleanup` plus sparse-file accounting,
   but no measurement confirms it.
 - **The optional simulator-runtime trim is unquantified**, as noted above.
-- **Node C's config exists and disagrees with this document's suggested
+- **mac-studio's config exists and disagrees with this document's suggested
   `baseVm`.** An earlier draft of this section assumed `fleet.json` did not
   exist yet; it does, and its `macosBurst.baseVm` is `macos-tartelet-base`,
   not `macos-maestro-base`. See
-  [Wire it to the node C configuration](#wire-it-to-the-node-c-configuration)
+  [Wire it to the mac-studio configuration](#wire-it-to-the-mac-studio-configuration)
   — the config is the authoritative value, not the fragment above.
+- **This image does not carry `builder` tooling, even though mac-studio's
+  revised `hostBudget` (6 vCPU / 16384 MiB) now fits `builder`'s 6 vCPU /
+  12288 MiB, and `docs/MULTI_NODE_PLAN.md` has mac-studio declare the
+  `builder` label alongside mac-mini.** That is a scheduling decision, not an
+  image one, and this recipe was written and executed against the narrower,
+  Maestro-only scope. A `builder` job routed to mac-studio today would be
+  admitted by the scheduler and then fail inside the guest for missing EAS
+  CLI, CocoaPods, and the Expo toolchain. Closing this gap is a second,
+  separate image pass — provision the same base with `builder`'s
+  requirements, following the same seal-and-verify discipline — and it is not
+  done here.

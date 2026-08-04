@@ -19,6 +19,20 @@ the elastic envelope are now per node, and gain a static ceiling below physical
 capacity. Changes nothing in [ADR 0031](0031-deterministic-simulation-testing.md):
 the simulated world stays one node, because a node is still one fleet.
 
+**Amended 2026-08-04 (node names):** this record originally named the fleet's
+machines "node A", "node B", and "node C". It is edited throughout to name them
+by what they are — **mac-mini**, **geekom**, **mac-studio** — for legibility.
+The mapping, for anyone arriving from an issue or commit that still says a
+letter: A = mac-mini, B = geekom, C = mac-studio. See the amendment "Node
+names, not letters" for why and what did not change.
+
+**Amended 2026-08-04 (shared labels):** §3's refusal to let two nodes advertise
+one label is withdrawn on measured evidence that GitHub distributes work across
+identically-labelled scale sets by advertised capacity. The architecture is
+unchanged; the partition is not. §8's steward triggers are narrowed
+accordingly. See the amendment "Two nodes may advertise one label, because
+GitHub places" for the evidence and its two preconditions.
+
 ## Context
 
 The fleet runs on one Apple-silicon Mac mini (10 cores, 24 GiB). Two more
@@ -145,31 +159,37 @@ it.
 
 | Node | Machine | Platform | Serves |
 | --- | --- | --- | --- |
-| A | Mac mini M4, 10c / 24 GiB | macOS on Apple silicon | macOS `builder` and `maestro` |
-| B | GEEKOM A9 Max, 12c/24t x86_64 | Linux on x86_64 | every Linux profile, `trf-linux-amd64-*` |
-| C | Mac Studio, remote, budgeted | macOS on Apple silicon | macOS `maestro` overflow for named scopes |
+| mac-mini | Mac mini M4, 10c / 24 GiB | macOS on Apple silicon | macOS `builder` and `maestro` |
+| geekom | GEEKOM A9 Max, 12c/24t x86_64 | Linux on x86_64 | every Linux profile, `trf-linux-amd64-*` |
+| mac-studio | Mac Studio, 14c / 36 GiB physical, remote, `hostBudget` 6c/16384 MiB | macOS on Apple silicon | every profile it fits, same labels as mac-mini |
 
-Nodes A and B have disjoint capability sets, so their partition strands nothing:
-no job either can run is a job the other could have taken.
+mac-mini and geekom have disjoint capability sets, so their partition strands nothing:
+no job either can run is a job the other could have taken. This holds once geekom
+exists; today, with geekom not yet delivered, mac-mini is the fleet's only Linux
+capability and nothing partitions against it.
 
-Node C overlaps node A. Its partition is therefore by **scope**: node C owns the
-`maestro` scale set of specific repositories, node A owns the rest. A static
-scope partition can strand capacity — node C idles while node A queues for a
-scope node C does not own — and that is accepted for the MVP, because it is the
-only arrangement in which no job can be offered to two owners. The measured
-stranding is the trigger condition in §8.
+mac-studio overlaps mac-mini. This record originally partitioned that overlap by
+**scope** — mac-studio owning the `maestro` scale set of specific repositories and
+mac-mini the rest — because a static scope partition was the only arrangement in
+which no job could be offered to two owners, and because whether GitHub
+distributes across identically-labelled scale sets was unanswered.
 
-Node C does **not** get a label that node A also advertises. Two scale sets in
-one scope advertising one label makes GitHub's choice between them load-bearing
-and undocumented; this record does not rely on undocumented behaviour. Whether
-GitHub distributes across identically-labelled scale sets is Spike 3 in
-`docs/MULTI_NODE_PLAN.md`, and until it is answered, ownership is by scope and
-consumers change nothing.
+**It is answered, and the answer reverses this paragraph.** Two scale sets in
+one scope may advertise identical labels, and GitHub distributes the work
+between them, filling each to the capacity it last advertised. The overlap
+between mac-mini and mac-studio is therefore **not** partitioned: both are
+Apple-silicon Tart hosts, so both advertise the same labels for every profile
+each fits — `builder` and `maestro`, and, for as long as geekom is not yet
+delivered, the Linux profiles too — and GitHub places by advertised capacity.
+See the amendment "Two nodes may advertise one label, because GitHub places"
+below, which carries the evidence and the two conditions this depends on. Which
+profiles are actually declared where, and why, is placement detail and lives in
+`docs/MULTI_NODE_PLAN.md`, not in this architectural record.
 
 ### 4. The canonical label carries the architecture, as ADR 0032 intended
 
 ADR 0032 spelled `arch` out in `trf-<os>-<arch>-<cpu>x<ramGiB>` precisely "so a
-host of another architecture could never reuse these names." Node B's profiles
+host of another architecture could never reuse these names." geekom's profiles
 derive `trf-linux-amd64-1x2`, `trf-linux-amd64-2x4`, `trf-linux-amd64-4x8`,
 `trf-linux-amd64-6x12`, and the shapes its larger core count affords. Nothing
 about the derivation changes except that `arch` stops being the constant
@@ -178,8 +198,8 @@ configuration, still derived and still unable to lie.
 
 Arch-*pinned* consumers name a canonical label and get exactly one architecture.
 Arch-*floating* consumers name an alias — `linux-small`, `linux-medium` — which
-node B advertises after node A stops. Migration is therefore a provisioning run
-on node B and a scale-set removal on node A, not an edit to every workflow;
+geekom advertises after mac-mini stops. Migration is therefore a provisioning run
+on geekom and a scale-set removal on mac-mini, not an edit to every workflow;
 per-repository arch audits live in the plan document.
 
 ### 5. Configuration is repo-versioned per node, derived from shared definitions
@@ -197,9 +217,9 @@ config/
       scopes.json             scopes, targets, installations - identical everywhere
       profiles.linux.json     the Linux variant matrix, arch-free vectors
       profiles.macos.json     builder and maestro vectors
-    mac-mini.json             node A: overlay + scale-set ownership
-    geekom.json               node B: overlay + scale-set ownership
-    mac-studio.json           node C: overlay + hostBudget + scale-set ownership
+    mac-mini.json             mac-mini: overlay + scale-set ownership
+    geekom.json               geekom: overlay + scale-set ownership
+    mac-studio.json           mac-studio: overlay + hostBudget + scale-set ownership
   nodes/rendered/             generated, committed, what each node installs
 ```
 
@@ -215,8 +235,11 @@ still edits one place per fact.
 A new optional top-level setting:
 
 ```json
-"hostBudget": { "cpu": 4, "memoryMb": 10240 }
+"hostBudget": { "cpu": 6, "memoryMb": 16384 }
 ```
+
+(the value mac-studio actually runs, a 14-core / 36 GiB machine shared with
+other work).
 
 It bounds the *total* admission envelope of the node across every platform,
 charging live instances against it exactly as ADR 0018's probed physical total
@@ -237,7 +260,7 @@ The setting is enforced in one place, `freeCapacity` in
 admission pass — young, aged, reserved-head, drain-backfill, Linux, macOS —
 obtains its envelope.
 
-`hostBudget` is not only for the remote node. Node A and node B set it too:
+`hostBudget` is not only for the remote node. mac-mini and geekom set it too:
 an explicit ceiling that an operator chose is better than a ceiling implied by
 `maxLinuxCpu` happening to equal the core count.
 
@@ -250,23 +273,30 @@ is SSH, which is outside the fleet's contract. The updater is per node,
 unchanged, and activates releases independently.
 
 A node behind NAT, on a residential line, in another country, or asleep for a
-weekend is therefore an ordinary node. Node C's location costs nothing.
+weekend is therefore an ordinary node. mac-studio's location costs nothing.
 
 ### 8. When the steward returns
 
-Issue #99's design is not wrong; it is early. It becomes the right next step
-when, and only when, one of these is measured:
+Issue #99's design is not wrong; it is early. Both of its original trigger
+conditions have been dissolved by the amendment below: same-capability sets on
+two nodes no longer strand capacity, and arch-floating aliases advertised by
+more than one node no longer need a local owner for the ambiguity, because
+GitHub resolves it. What remains as a trigger is narrower:
 
-- **Same-capability sets on two or more nodes compete for one scope's work**,
-  so that a static partition demonstrably strands capacity. The observable is
-  a scope queueing on node A while node C's identical profile sits idle, in
-  `fleet queues` on both nodes.
-- **Arch-floating aliases must be advertised by more than one node at once**,
-  which requires an owner for the ambiguity that §3 refuses to create.
+- **Placement must obey a policy GitHub does not implement.** Advertised
+  capacity is the only signal a node can send. If the fleet ever needs
+  cross-node priority, aging, or repository fairness — rather than "fill each
+  node to its truthful capacity" — no header expresses it, and a steward is the
+  only way to hold that policy.
+- **The distribution behaviour regresses.** It is a preview API. If GitHub
+  reverts to preferring one set, the fleet degrades to exactly the scope
+  partition this record originally specified, and the trigger becomes the
+  measured stranding named in the previous revision of this section.
 
-Its two GitHub-API spikes remain the entry gate and are not answered here:
-whether a peer can delete an inherited session and immediately create its own,
-and whether GitHub accepts a `maxCapacity` decrease while jobs are assigned.
+Its two GitHub-API spikes were the entry gate, and both are now answered
+affirmatively — a peer can delete an inherited session and immediately create
+its own, and advertised capacity may be lowered while jobs are assigned. Being
+feasible is not being necessary; see the amendment.
 Its ownership-signature migration warning — adding host identity to the value
 that authorizes VM mutation must happen on a drained fleet or hosts orphan
 their own guests — applies to any future work that introduces node identity
@@ -346,8 +376,12 @@ still holds.
 - `internal/config/config.go:281-312, 418-426` — strict single-document decoding,
   which forces configuration sharing to be a render step.
 - `internal/app/demand.go:101-114, 229-235` — subset label matching, and the
-  refusal to guess when a job matches two scale sets, which is why §3 declines
-  to advertise one label from two nodes.
+  refusal to guess when a job matches two scale sets. Originally cited for why
+  §3 declined to advertise one label from two nodes; the amendment "Two nodes
+  may advertise one label, because GitHub places" below is why that refusal no
+  longer implies a scope partition — REST-derived demand still must not guess,
+  which is exactly the per-set attribution bound that amendment makes a
+  precondition.
 
 ## Amendment 2026-08-04: the port is `internal/executor` (issue #137)
 
@@ -361,8 +395,8 @@ on. Every layer above them speaks only those types, and a lint rule denies
 no one else's.
 
 `Backend` is seven verbs — `Create`, `Start`, `Stop`, `Delete`, `Running`,
-`Reap`, `List` — over an `InstanceSpec` whose `Image` is a Tart base VM on node
-A and an OCI reference on node B. "Clone a base image" and "create a container
+`Reap`, `List` — over an `InstanceSpec` whose `Image` is a Tart base VM on
+mac-mini and an OCI reference on geekom. "Clone a base image" and "create a container
 from an image" are one verb, which is what makes the partition of §3 an
 implementation detail of the port rather than a fork of the lifecycle.
 
@@ -383,7 +417,7 @@ digest before and after.
 
 ## Amendment 2026-08-04: the container backend, and the one contract it moved (issue #139)
 
-Node B's execution technology is built: `internal/adapters/podman` implements
+geekom's execution technology is built: `internal/adapters/podman` implements
 `Backend` over the rootless podman command line, and `internal/daemon` chooses
 it. Three decisions in it are load-bearing enough to record here rather than in
 the plan document.
@@ -437,6 +471,133 @@ seven verbs, the field sets, and the caller-side ports are byte-for-byte as
 issue #137 left them, which is what let the container adapter be written against
 a target that could not move.
 
+## Amendment 2026-08-04: two nodes may advertise one label, because GitHub places
+
+§3 refused to let two nodes advertise the same label, on the stated ground that
+"this record does not rely on undocumented behaviour." The behaviour has now
+been measured, and the refusal costs more than it buys. This amendment removes
+it. **Nothing else in this record changes**: no control plane, no steward, no
+election, no cross-node RPC, no shared database, no registry, no heartbeat. Each
+node still owns its own scale sets, holds its own single session, and keeps its
+own SQLite. The only thing that changes is that two nodes' sets may carry the
+same labels, and GitHub decides which set each job goes to.
+
+### What was measured
+
+Two scale sets were created in one throwaway repository scope with byte-identical
+label lists, `[self-hosted, trf-spike-dup]`, and long-polled concurrently while a
+four-job workflow was dispatched repeatedly. Full request and response transcripts
+are in
+[issue #144](https://github.com/vitalyiegorov/tart-runner-fleet/issues/144#issuecomment-5180794736).
+
+1. **Identical labels are accepted.** Both `POST /_apis/runtime/runnerscalesets`
+   calls returned `200`. What GitHub rejects is a duplicate *name* — `400`,
+   `RunnerScaleSetExistsException`. Uniqueness is on the name, not on the labels.
+2. **GitHub distributes, server-side, before either listener sees the work.**
+   Every message was `JobAssigned`, never `JobAvailable` with a race to acquire.
+   Each set saw only its own share. The rule is not creation order, not
+   round-robin, and not first-acquire-wins: each set is filled to the capacity it
+   most recently advertised. With one set advertising `1` and the other `5`, a
+   four-job dispatch split exactly `1` and `3`. With both full, the remainder
+   stayed `queued`, and raising one set's advertised capacity pulled that backlog
+   onto it on the next poll.
+3. **Advertised capacity is not a stored property.** `maxCapacity` in a create or
+   `PATCH` body is accepted and ignored; `RunnerScaleSet` has no such field.
+   Capacity is the per-poll `X-ScaleSetMaxCapacity` header
+   (`github.com/actions/scaleset@v0.4.0/client.go:38-40`, `session_client.go:142`),
+   fed here from configured `maxCapacity` through `ScaleSetConfig.MaxCapacity`
+   (`internal/adapters/githubscaleset/scaleset.go:45, 89`). Lowering it while jobs
+   are assigned is accepted and does not revoke them.
+
+The consequence worth stating in one line: **the number this fleet already
+computes for ADR 0015's truthful-capacity invariant is the number GitHub uses to
+place work across nodes.** Through `budgetedCapacity`
+(`internal/config/config.go:898-905`), mac-studio's 6 vCPU / 16384 MiB
+`hostBudget` yields a `maestro` (4 vCPU / 7168 MiB) capacity of 1 — the CPU term
+floors `6/4` to `1`, the memory term floors `16384/7168` to `2`, and the bound
+is the minimum — against mac-mini's larger, unbudgeted machine, and whatever
+ratio each node's `hostBudget` yields is the split GitHub applies. The same
+budget change that leaves `maestro`'s capacity at 1 is what newly admits
+`builder` at all: `12288 MiB` fits inside `16384 MiB` where it never fit inside
+`10240 MiB`. Cross-node placement is not new machinery; it is an existing
+invariant read by a
+new consumer.
+
+### The two conditions this depends on
+
+**Advertised capacity must be truthful.** `canonicalJobInventory` is off in the
+live configuration, and while it is off `internal/config/config.go:776` *requires*
+`maxCapacity > runtime capacity` as queue lookahead. Two nodes both inflating
+would have GitHub split by fiction and hand a node work it must then queue while
+its peer idles — the stranding this record set out to avoid, relocated. A scope
+whose label is advertised by two nodes must therefore run with
+`canonicalJobInventory: true`, which is ADR 0015's model and is already
+implemented and validated.
+
+**REST-derived demand must be attributed per set.** Enabling
+`canonicalJobInventory` also enables the REST inventory lane, and that lane
+attributes *repository-wide queued jobs* to a binding by label match
+(`internal/app/demand.go:229-243`). Under a shared label both nodes would
+attribute the same queued job to their own set and both would spawn a guest for
+it; the loser would hold a runner against work GitHub never assigned it, and the
+ghost-demand reclaim of [ADR 0026](0026-queued-demand-expires-on-proven-absence.md)
+would have to clear it. The correction is bounded and the signal is already
+ingested: a binding's REST-derived demand is capped by that set's own
+`statistics.totalAssignedJobs`, which arrives on every message and is already
+carried as `Demand.Assigned`
+(`internal/adapters/githubscaleset/scaleset.go:97-103`). This is a precondition
+of the amendment, not a follow-up — tracked as issue #153.
+
+### Why relying on undocumented behaviour is acceptable here, and only here
+
+The general rule §3 invoked is sound. It is overridden by the shape of the
+failure, not by the size of the prize. The API is preview and the placement rule
+is not contractual — but if it regresses to preferring one set, the fleet lands
+in *exactly the scope partition this record already specified*: one node busy,
+one node idle, no job lost, no runner orphaned, no state corrupted, no schema
+migrated. Every node keeps its own set, its own session, and its own database
+either way. The blast radius of being wrong is a utilisation regression, and the
+rollback is deleting one node's scale sets.
+
+That is the test this amendment asks to be held to: an undocumented behaviour may
+be depended on when its failure mode is the documented behaviour.
+
+### What this does not license
+
+Repository caps, `maxActive`, and aging stay per node, exactly as §9 says. GitHub
+distributes by capacity and knows nothing of this fleet's fairness policy, so a
+scope's work may be split in a way no single node would have chosen. That is
+accepted: it is the same trade this record already made when it made caps
+per-node. If a policy GitHub cannot express becomes necessary, that is the
+steward trigger in §8, and it is the only one left.
+
+## Amendment 2026-08-04: node names, not letters
+
+This record, and `docs/MULTI_NODE_PLAN.md`, originally referred to the fleet's
+machines as node A (Mac mini), node B (GEEKOM A9 Max), and node C (Mac Studio).
+That was adequate while only one machine existed and the other two were rows in
+a table. It stopped being adequate the day a second machine — mac-studio — went
+into bring-up (issue #140): every status update, log line, and conversation
+needed a decoder ring between an opaque letter and the actual box, and the
+letter carried no information the name doesn't carry for free.
+
+This document, `docs/MULTI_NODE_PLAN.md`, `docs/BASE_IMAGE.md`, and
+`INSTALL-linux.md` are edited throughout to name machines by what they are:
+**mac-mini**, **mac-studio**, **geekom**. No decision changes because of this
+edit. Where the letters already shipped — issue titles, commit subjects, prior
+PR descriptions — that history is not rewritten; the mapping for anyone arriving
+from an old link is stated once, at the top of this record: A = mac-mini,
+B = geekom, C = mac-studio.
+
+One fact changed alongside the rename, and it is called out so it is not mistaken
+for a renaming artefact: mac-studio's physical specification was confirmed on
+arrival as 14 cores / 36 GiB, and its `hostBudget` was set at **6 vCPU /
+16384 MiB** — larger than the 4 vCPU / 10240 MiB this record originally
+estimated before the machine was in hand. Every figure in this document and in
+`docs/MULTI_NODE_PLAN.md` uses the confirmed value. geekom remains ordered and
+not yet delivered, expected in about two weeks; every statement about it in
+this record is prospective until it arrives.
+
 ## Not addressed here
 
 **Whether the container adapter works against a real container runtime is not
@@ -444,13 +605,13 @@ proved by any automated gate yet.** Its verbs, error classification, wiring, and
 sufficiency for the whole runner lifecycle are covered on every commit; that
 podman accepts these argument vectors and prints this JSON is covered by
 `scripts/podman-smoke.sh`, which CI can only skip because the fleet's own Linux
-runners are Tart guests with no container runtime. The node B bring-up checklist
+runners are Tart guests with no container runtime. The geekom bring-up checklist
 in `docs/MULTI_NODE_PLAN.md` requires that script to pass before any job is
 routed there, and that requirement is the mitigation.
 
 **How a base image reaches a node, and what is in it.** The runner image must
 carry the JIT bootstrap helper and start the runner without `systemd-run`, which
-a container does not have. That is image work on node B, and it is per-node
+a container does not have. That is image work on geekom, and it is per-node
 operator work until measurement says otherwise.
 
 **Simulation stays single-node and needs no change.** `tests/simulation` models
@@ -459,9 +620,9 @@ whole fleet: every property it checks — liveness, bounded starvation, identity
 uniqueness, no double admission, conservation, no stranded demand, no drain
 churn — is a per-node property with no cross-node counterpart. A second
 simulated node would model only GitHub's routing, which is not this codebase's
-code. The harness gains one new dimension when node B ships, and it is the
+code. The harness gains one new dimension when geekom ships, and it is the
 existing one: a single-platform configuration, which the world config already
 expresses.
 
-Node C still needs a macOS image, and keeping every node's base image current is
+mac-studio still needs a macOS image, and keeping every node's base image current is
 per-node operator work until measurement says otherwise.

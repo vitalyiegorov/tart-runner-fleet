@@ -332,7 +332,7 @@ fleet doctor --output json
 
 Everything above is a `launchd` transaction: it lints a plist with `plutil` and
 swaps generations with `launchctl bootout` / `bootstrap` / `kickstart`. A Linux
-node (ADR 0034's node B) has none of those, and `fleet update apply-latest`
+node (ADR 0034's geekom) has none of those, and `fleet update apply-latest`
 refuses there rather than half-applying a generation — the refusal names the
 domain, because a `systemd --user` manager is not addressable as a launchd one.
 Automatic updates on that node arrive with the systemd release transaction; its

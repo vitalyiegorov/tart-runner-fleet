@@ -1,87 +1,137 @@
 # Multi-node fleet plan
 
 The implementation plan for [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md):
-three independent fleet daemons, one per machine, coordinated only by GitHub's
+independent fleet daemons, one per machine, coordinated only by GitHub's
 one-session-per-scale-set rule. This document carries the placement decisions,
 the executor choice, the phased delivery, and the bring-up checklists. The ADR
 carries the architecture and its non-goals.
 
-The plan began as a two-node design and grew a third node while it was being
-written; the file is named for what it now describes.
+**Two machines run today, mac-mini and mac-studio, both Apple silicon.** A
+third, geekom, x86_64, is ordered and arrives in about two weeks; it is
+covered below as future work whose code is already merged and waiting for the
+hardware. The plan began as a two-node design and grew a third node while it
+was being written; the file is named for what it now describes.
 
 ## Contents
 
 - [The nodes](#the-nodes)
 - [Workload placement](#workload-placement)
-- [Executor technology for node B](#executor-technology-for-node-b)
+- [Executor technology for geekom](#executor-technology-for-geekom)
 - [The executor seam](#the-executor-seam)
 - [`hostBudget`](#hostbudget)
 - [Configuration layout](#configuration-layout)
-- [Phase 1 — node B bring-up](#phase-1--node-b-bring-up)
+- [Phase 1 — geekom bring-up](#phase-1--geekom-bring-up)
 - [Phase 2 — the x86 executor adapter](#phase-2--the-x86-executor-adapter)
 - [Phase 3 — arch-floating labels and per-repository migration](#phase-3--arch-floating-labels-and-per-repository-migration)
-- [Node C — Mac Studio](#node-c--mac-studio)
+- [mac-studio bring-up](#mac-studio-bring-up)
 - [Observability](#observability)
 - [Updater](#updater)
 - [Simulation](#simulation)
-- [Sequencing](#sequencing)
 - [Open spikes](#open-spikes)
 - [Working agreement](#working-agreement)
 
 ## The nodes
 
-| | Node A | Node B | Node C |
+| | mac-mini | mac-studio | geekom |
 | --- | --- | --- | --- |
-| Machine | Mac mini M4 | GEEKOM A9 Max | Mac Studio |
-| CPU | 10 cores, Apple silicon | Ryzen AI 9 HX 370, 12c / 24t, x86_64 | Apple silicon |
-| Memory | 24 GiB | 32–64 GiB | shared with other work |
-| Location | owner's desk | owner's desk | remote |
-| OS | macOS | Linux | macOS |
-| Guest tech | Tart (Apple Virtualization) | ephemeral containers | Tart |
-| `hostBudget` | full machine, stated explicitly | full machine, stated explicitly | **4 vCPU / 10240 MiB** |
-| Platforms | macOS only | Linux/amd64 only | macOS only |
-| Status | live | ordered | ordered |
+| Machine | Mac mini M4 | Mac Studio | GEEKOM A9 Max |
+| CPU | 10 cores, Apple silicon | 14 cores, Apple silicon | Ryzen AI 9 HX 370, 12c / 24t, x86_64 |
+| Memory | 24 GiB | 36 GiB physical | 32–64 GiB |
+| Location | owner's desk | remote, shared with other work | owner's desk |
+| OS | macOS | macOS | Linux |
+| Guest tech | Tart (Apple Virtualization) | Tart (Apple Virtualization) | ephemeral containers |
+| `hostBudget` | full machine, stated explicitly | **6 vCPU / 16384 MiB** | full machine, stated explicitly |
+| Platforms today | macOS + Linux/arm64 | macOS + Linux/arm64 | **not yet delivered** |
+| Platforms once geekom is live | macOS only | macOS only | Linux/amd64 only |
+| Status | live | live, bring-up in progress (#140) | **ordered, arrives ~2 weeks** |
 
-Node A and node B have disjoint capabilities. Node C overlaps node A and is
-partitioned by scope, per ADR 0034 §3.
+mac-mini and mac-studio are both Apple-silicon Tart hosts, so — per ADR 0034's
+shared-label amendment — they advertise the same labels for every profile each
+fits, and GitHub places by advertised capacity; see
+[Workload placement](#workload-placement) below for which profiles that is
+today. geekom has a disjoint capability set from both (x86_64 Linux only, no
+macOS ever), so once it arrives its partition is by capability, not scope, and
+strands nothing: no job either mac-mini/mac-studio or geekom can run is a job
+the other could have taken.
 
 ## Workload placement
 
-Derived from seven days of real instance starts on node A (2026-07-28 to
-2026-08-04), plus an audit of every consumer workflow's `runs-on`.
+Derived from an audit of every consumer workflow's `runs-on` declarations,
+conducted 2026-08-04 — the authoritative source for the table below — plus
+seven days of real instance starts on mac-mini (2026-07-28 to 2026-08-04) for
+the per-repository breakdown that follows it. Declaration counts:
+`linux-medium` 17, `linux-small` 10, `linux-large` 7, `macos-builder` 6,
+`macos-maestro` 2, `linux-xl` 2, and **zero** for `linux-8x16` and `linux-2x8`
+— the two speculative sizes ADR 0032 proposed the matrix room for. Nothing
+requests either; neither is declared on any node below.
 
-### By profile
+### Today: two Apple-silicon Macs, shared labels
 
-| Profile | Vector | Today | End state | Canonical label at end state |
-| --- | --- | --- | --- | --- |
-| `small` | 1×2 | Node A (Linux/arm64) | **Node B** | `trf-linux-amd64-1x2` |
-| `medium` | 2×4 | Node A | **Node B** | `trf-linux-amd64-2x4` |
-| `large` | 4×8 | Node A | **Node B** | `trf-linux-amd64-4x8` |
-| `xl` | 6×12 | Node A — **transitional, retire in Phase 1** | **Node B** | `trf-linux-amd64-6x12` |
-| new | 8×16 | — | Node B, one job takes a large slice | `trf-linux-amd64-8x16` |
-| new | 12×24 | — | Node B, whole-node jobs | `trf-linux-amd64-12x24` |
-| `builder` | 6×12 | Node A | **Node A only** | `trf-macos-arm64-6x12` |
-| `maestro` | 4×7 | Node A | Node A + **Node C** for named scopes | `trf-macos-arm64-4x7` |
+Both mac-mini and mac-studio are Apple-silicon Tart hosts and can run every
+profile they fit. Per ADR 0034's shared-label amendment, **both declare the
+same labels for every profile they can host**, so GitHub splits load between
+them automatically by each node's advertised capacity — no scope partition,
+no steward.
 
-Node C cannot host `builder`: 6 vCPU and 12288 MiB both exceed its 4 vCPU /
-10240 MiB budget. `maestro` fits exactly.
+| Profile | Vector | Declarations | mac-mini declares | mac-studio declares | Why |
+| --- | --- | ---: | :---: | :---: | --- |
+| `small` | 1×2 | 10 | yes | yes | Fits both; shared like every other profile. |
+| `medium` | 2×4 | 17 | yes | yes | Highest-demand Linux tier; shared. |
+| `large` | 4×8 | 7 | yes | yes | Fits both; shared. |
+| `xl` | 6×12 | 2 | yes | yes | Fits mac-mini's whole machine and mac-studio's whole budget; on mac-studio it consumes the entire 6-vCPU envelope, so it cannot coexist there with a second `xl` or a `builder`. |
+| `builder` | 6×12 | 6 | yes | yes | mac-studio's 6 vCPU / 16384 MiB budget fits it exactly (12288 MiB ≤ 16384 MiB); this was not true at the 4 vCPU / 10240 MiB budget ADR 0034 originally specified. |
+| `maestro` | 4×7 | 2 | yes | yes | Fits both easily; the profile ADR 0034 always intended mac-studio to serve. |
+| new | 8×16 | 0 | no | no | Zero declarations. Not worth a scale set, a session, or a queue on either node. |
+| new | 2×8 | 0 | no | no | Same. |
+
+Every profile above resolves to the same canonical label on both nodes —
+`trf-linux-arm64-1x2` … `trf-macos-arm64-4x7` — because both nodes are
+`arm64`. mac-studio provisions its **own** scale set per profile per scope,
+with a distinct **name** but mac-mini's exact labels; mac-mini's configuration
+is never edited to make room, so there is no scope-hand-off and no window
+where a scope is unserved. See [mac-studio bring-up](#mac-studio-bring-up) for
+the preconditions (`canonicalJobInventory`, the REST-demand attribution bound
+of issue #153) this depends on.
+
+### End state, once geekom arrives
+
+geekom's x86_64 Linux capability is disjoint from both Macs', so its arrival
+is a capability partition, not a rebalance of the shared pair: every Linux
+profile above moves off Apple silicon and onto geekom, mac-mini and
+mac-studio narrow to macOS-only (`builder`, `maestro` — still shared between
+themselves), and geekom picks up the shapes its larger core count affords.
+
+| Profile | Vector | End state | Canonical label at end state |
+| --- | --- | --- | --- |
+| `small` | 1×2 | **geekom** | `trf-linux-amd64-1x2` |
+| `medium` | 2×4 | **geekom** | `trf-linux-amd64-2x4` |
+| `large` | 4×8 | **geekom** | `trf-linux-amd64-4x8` |
+| `xl` | 6×12 | **geekom** | `trf-linux-amd64-6x12` |
+| new | 8×16 | geekom, if demand ever appears — currently zero | `trf-linux-amd64-8x16` |
+| new | 12×24 | geekom, whole-node jobs | `trf-linux-amd64-12x24` |
+| `builder` | 6×12 | mac-mini **and** mac-studio, shared labels | `trf-macos-arm64-6x12` |
+| `maestro` | 4×7 | mac-mini **and** mac-studio, shared labels | `trf-macos-arm64-4x7` |
+
+mac-studio's budget still cannot host `builder` **and** anything else
+concurrently — 6 vCPU is the whole budget — but it hosts `builder` alone, which
+the original 4 vCPU / 10240 MiB budget could not.
 
 ### By repository and workload
 
 | Repository | Workload | 7-day starts | Today | End state | Note |
 | --- | --- | ---: | --- | --- | --- |
-| `tart-runner-fleet` | CI: preflight, quality, unit, race, build | 364 Linux | A | **B** | Pure Go, `CGO_ENABLED=0`, cross-compiles the darwin/arm64 release from any arch. Arch-floating. |
-| `knee-doctor` | Node build, tests, Playwright chromium+webkit | 109 Linux | A | **B** | Playwright is first-class on amd64; arm64 support is the constrained one. Arch-floating, improves. |
-| `hotel-provence` | Node build, tests, Playwright | low | A | **B** | Same. Arch-floating. |
-| `budgie` | Node/Expo web build, lint, tests | 35 Linux | A | **B** | Arch-floating. |
-| `budgie` | Android build on `ubuntu-24.04` | GitHub-hosted | GitHub | **B** | Already x86_64 Linux with `ndk;27.x`. Comes home at zero risk — the arch it wants is the arch node B is. |
-| `budgie` | iOS native build / publish | 30 macOS | A | **A** | `builder` / `macos-tartelet`. |
-| `suuudokuuu` | Web build, lint, unit, web E2E | 105 Linux | A | **B** | Arch-floating. |
-| `suuudokuuu` | Android APK build | inside `builder`'s 126 | **A (macOS builder)** | **B** | Only on macOS because no arm64-Linux NDK exists. The x86_64 Linux NDK is the *supported* one. Frees the fleet's scarcest profile. |
-| `suuudokuuu` | Android Maestro E2E — Redroid arm64 | 52 `xl` | **A — transitional** | **B**, KVM emulator | See [Android](#android-is-the-load-bearing-migration). Retire with node A's Linux. |
-| `suuudokuuu` | iOS Maestro E2E | 109 macOS | A | **A**, overflow to **C** | Biggest `maestro` consumer; the scope to move to node C first. |
-| `rnw-community` | Android Maestro E2E — x86_64 AVD | 46 `xl`, failing | A | **B** | Cannot ever work on node A. The single clearest justification for node B. |
-| `rnw-community` | iOS Maestro E2E | 99 macOS | A | **A** | Stays; node C takes `suuudokuuu` instead so one scope moves, not two. |
+| `tart-runner-fleet` | CI: preflight, quality, unit, race, build | 364 Linux | mac-mini | **geekom** | Pure Go, `CGO_ENABLED=0`, cross-compiles the darwin/arm64 release from any arch. Arch-floating. |
+| `knee-doctor` | Node build, tests, Playwright chromium+webkit | 109 Linux | mac-mini | **geekom** | Playwright is first-class on amd64; arm64 support is the constrained one. Arch-floating, improves. |
+| `hotel-provence` | Node build, tests, Playwright | low | mac-mini | **geekom** | Same. Arch-floating. |
+| `budgie` | Node/Expo web build, lint, tests | 35 Linux | mac-mini | **geekom** | Arch-floating. |
+| `budgie` | Android build on `ubuntu-24.04` | GitHub-hosted | GitHub | **geekom** | Already x86_64 Linux with `ndk;27.x`. Comes home at zero risk — the arch it wants is the arch geekom is. |
+| `budgie` | iOS native build / publish | 30 macOS | mac-mini | **mac-mini + mac-studio**, shared | `builder` / `macos-tartelet`. |
+| `suuudokuuu` | Web build, lint, unit, web E2E | 105 Linux | mac-mini | **geekom** | Arch-floating. |
+| `suuudokuuu` | Android APK build | inside `builder`'s 126 | **mac-mini (macOS builder)** | **geekom** | Only on macOS because no arm64-Linux NDK exists. The x86_64 Linux NDK is the *supported* one. Frees the fleet's scarcest profile. |
+| `suuudokuuu` | Android Maestro E2E — Redroid arm64 | 52 `xl` | **mac-mini — transitional** | **geekom**, KVM emulator | See [Android](#android-is-the-load-bearing-migration). Retire with mac-mini's Linux. |
+| `suuudokuuu` | iOS Maestro E2E | 109 macOS | mac-mini | **mac-mini + mac-studio**, shared | Biggest `maestro` consumer; the first scope moved to mac-studio during bring-up. |
+| `rnw-community` | Android Maestro E2E — x86_64 AVD | 46 `xl`, failing | mac-mini | **geekom** | Cannot ever work on mac-mini. The single clearest justification for geekom. |
+| `rnw-community` | iOS Maestro E2E | 99 macOS | mac-mini | **mac-mini + mac-studio**, shared | Every `maestro` scope shares labels once mac-studio is authority; no scope is pinned to one node. |
 
 Every cross-job handoff in every consumer repository already uses
 `actions/upload-artifact` / `actions/download-artifact`. The same-host
@@ -91,22 +141,22 @@ dependency, so splitting a build from its E2E across nodes is safe.
 ### Android is the load-bearing migration
 
 The two consumers took opposite routes around the same missing thing — a fast
-Android runtime on arm64 Linux — and node B removes the need for both.
+Android runtime on arm64 Linux — and geekom removes the need for both.
 
 `suuudokuuu` runs **Redroid**, Android in a privileged container over the host
 `binder_linux` module, at native arm64 speed. Its own workflow comment states
 why: "Google ships no emulator for arm64 linux and nested-KVM boots are
 unstable on the host, so Android runs as a privileged container ... no
 virtualization inside the guest at all." This is a good workaround and it is
-**transitional**: it exists only because node A is the only node. It retires
-with node A's Linux profiles in Phase 1.
+**transitional**: it exists only because mac-mini is the only node. It retires
+with mac-mini's Linux profiles in Phase 1.
 
 `rnw-community` runs `reactivecircus/android-emulator-runner` with
 `arch: x86_64`, `api-level: 34`, `google_apis` — on `linux-xl`, which is arm64.
 There is no hardware acceleration for an x86_64 guest on an Apple-silicon host.
 The workflow is on `master` and its dispatches fail.
 
-**On node B, Android is the KVM-accelerated x86_64 Google emulator**, not
+**On geekom, Android is the KVM-accelerated x86_64 Google emulator**, not
 Redroid. Reasons, in order:
 
 1. `rnw-community`'s workflow already asks for exactly this and needs no edit.
@@ -116,15 +166,15 @@ Redroid. Reasons, in order:
 3. Google ships x86_64 system images as the first-class emulator target. The
    whole reason Redroid was adopted is that arm64 Linux has no emulator; on
    x86_64 that reason is gone.
-4. Node B is bare metal, so KVM is first-level. Node A's Redroid path pays a
-   nested-virtualization tax that node B does not.
+4. geekom is bare metal, so KVM is first-level. mac-mini's Redroid path pays a
+   nested-virtualization tax that geekom does not.
 
 Cost, stated honestly: `suuudokuuu` must build its E2E APK with the `x86_64`
 ABI instead of `arm64-v8a` (`ANDROID_E2E_ABI` in `mobile-build.yml`), and that
-build moves to node B at the same time. Both are Phase 3 edits in one PR, and
+build moves to geekom at the same time. Both are Phase 3 edits in one PR, and
 both are net simplifications — the APK build stops occupying `builder`.
 
-### Should node A keep a small Linux profile?
+### Should mac-mini keep a small Linux profile?
 
 **No.** Three reasons, and one is arithmetic:
 
@@ -132,18 +182,26 @@ both are net simplifications — the APK build stops occupying `builder`.
   machine. Any Linux guest at all re-creates the starvation photographed in the
   ADR. A `small` at 1 vCPU makes the builder wait behind it just as surely as
   an `xl` does.
-- Node A's own bursts are the fleet's macOS work, which is not Linux work.
-- Keeping one Linux profile keeps the two-platform admission paths live on node
-  A for no throughput, which is the complexity the partition exists to remove.
+- mac-mini's own bursts are the fleet's macOS work, which is not Linux work.
+- Keeping one Linux profile keeps the two-platform admission paths live on
+  mac-mini for no throughput, which is the complexity the partition exists to
+  remove.
 
-Mechanically, node A's Linux profiles stay in `fleet.json` because
+Mechanically, mac-mini's Linux profiles stay in `fleet.json` because
 `internal/config/config.go:555-563` requires them, but **no scope lists a Linux
 scale set**, so no Linux demand can reach the node. After the retirement,
 revisit `maxLinuxWhenMacosIdle`, `mixedPlatformAdmission`, and
-`mixedProfileCohorts` on node A: with Linux unreachable they describe a
+`mixedProfileCohorts` on mac-mini: with Linux unreachable they describe a
 situation that can no longer occur, and their settings should be made to say so.
 
-## Executor technology for node B
+The same argument applies to mac-studio once geekom is live: its temporary
+Linux declarations exist only because geekom does not yet exist. The day
+geekom is authority for `small`/`medium`/`large`/`xl`, drain those labels from
+mac-studio the same way as mac-mini's — remove the scale sets from every
+scope, watch `fleet queues` empty, then retire the declarations — so mac-studio
+ends up macOS-only too, sharing only `builder` and `maestro` with mac-mini.
+
+## Executor technology for geekom
 
 **Decision: rootless Podman, one ephemeral unprivileged container per job.**
 
@@ -174,9 +232,9 @@ jobs come free.
 ### Why rootless specifically
 
 The fleet repository is public and accepts fork pull requests behind approval.
-Approved third-party code will execute on node B. Rootless Podman puts every
+Approved third-party code will execute on geekom. Rootless Podman puts every
 container in a user namespace owned by an unprivileged user, with no root-owned
-daemon and no `docker` group, which is root-equivalent. It also mirrors node A's
+daemon and no `docker` group, which is root-equivalent. It also mirrors mac-mini's
 shape: the daemon is a `launchd` **LaunchAgent** on macOS and becomes a
 `systemd --user` service on Linux, and rootless Podman is a `systemd --user`
 service too. One unprivileged account owns the daemon, the container runtime,
@@ -188,18 +246,18 @@ file-mode `0600`, readable by the daemon only — never mounted into a runner.
 ### Why not microVMs
 
 Stronger isolation, and the honest cost of not choosing them: containers are a
-weaker boundary than the full Tart VMs node A uses today, so this is a security
+weaker boundary than the full Tart VMs mac-mini uses today, so this is a security
 regression relative to the status quo. It is accepted because the compensating
-controls are real — fork-PR approval gates every third-party execution, node B
+controls are real — fork-PR approval gates every third-party execution, geekom
 holds no data other than the fleet's own credentials, runner registrations are
 per-job JIT tokens, and containers run unprivileged in per-container UID ranges.
 
 Against that, microVMs cost: kernel and rootfs images to build and keep current,
 TAP networking to configure, no `exec -i` primitive so bootstrap needs vsock or
 SSH, no reap/list verbs that map to the existing ports, and a second-level
-virtualization tax on the Android emulator, which is the workload node B exists
+virtualization tax on the Android emulator, which is the workload geekom exists
 for. That is weeks, not days, and it re-introduces the nested-virt problem the
-move to x86 solves. Revisit if node B ever serves untrusted code without a human
+move to x86 solves. Revisit if geekom ever serves untrusted code without a human
 approval gate.
 
 ### Why not plain processes
@@ -217,9 +275,9 @@ between jobs. It contradicts ADR 0010 and is not considered further.
   `systemd-run`, which is not present in an ordinary container. **Carried into
   the image contract by issue #139:** the daemon's side of the bootstrap is
   `podman exec -i <name> /usr/local/libexec/tart-runner-fleet-bootstrap` with the
-  JIT configuration on stdin, unchanged from node A, so it is the helper *inside
+  JIT configuration on stdin, unchanged from mac-mini, so it is the helper *inside
   the runner image* that must detach without `systemd-run`. Building that image
-  is node B bring-up work, not adapter work, and the checklist below names it.
+  is geekom bring-up work, not adapter work, and the checklist below names it.
 - `/dev/kvm` is granted to the Android profile only, not to every profile.
   Issue #139 made that a validated configuration key, `executor.kvmProfiles`,
   and the adapter reads the profile off the `trf-<profile>-` instance-name
@@ -234,7 +292,7 @@ between jobs. It contradicts ADR 0010 and is not considered further.
 The audit found the coupling narrower than the package layout suggests.
 `internal/provision`, `internal/reconcile`, `internal/operations`, and
 `lifecycle.ControlRouter` import no Tart type at all and need no change.
-`internal/scheduler` needs no change either, because node B runs a
+`internal/scheduler` needs no change either, because geekom runs a
 single-platform configuration and takes the already-proven `planLinux` path.
 
 Four concrete leaks had to close, all in `internal/lifecycle/executor.go` and
@@ -337,8 +395,11 @@ dispatch table.
 An optional top-level configuration key:
 
 ```json
-"hostBudget": { "cpu": 4, "memoryMb": 10240 }
+"hostBudget": { "cpu": 6, "memoryMb": 16384 }
 ```
+
+(mac-studio's actual value, on a 14-core / 36 GiB machine shared with other
+work.)
 
 Enforced in `freeCapacity` (`internal/scheduler/scheduler.go:498`), the single
 point at which every admission pass obtains its envelope, using the existing
@@ -359,7 +420,7 @@ One decision to take with the implementation:
 advertised `maxCapacity` per ADR 0015. A budget below `maxLinuxCpu` makes those
 advertised capacities inflated. Fold the budget in, which is
 ADR-0015-consistent and a breaking validation change for any host that sets
-both `canonicalJobInventory` and `hostBudget`. Node C is the only host that
+both `canonicalJobInventory` and `hostBudget`. mac-studio is the only host that
 needs a narrow budget, so the blast radius is one file.
 
 Tests: a case in the `internal/config` decode/encode/round-trip/omit table,
@@ -378,9 +439,9 @@ config/
       scopes.json                    scopes, targets, installations
       profiles.linux.json            Linux variant vectors, arch-free
       profiles.macos.json            builder and maestro vectors
-    mac-mini.json                    node A overlay + scale-set ownership
-    geekom.json                      node B overlay + scale-set ownership
-    mac-studio.json                  node C overlay + hostBudget + ownership
+    mac-mini.json                    mac-mini overlay + scale-set ownership
+    geekom.json                      geekom overlay + scale-set ownership
+    mac-studio.json                  mac-studio overlay + hostBudget + ownership
     rendered/
       mac-mini.json                  generated, committed, installed as-is
       geekom.json
@@ -396,13 +457,13 @@ stale, if two nodes claim the same `(scope, scale-set name)` pair — the
 invariant of ADR 0034 §2 — or if any rendered file fails `config.Validate`.
 
 Secrets are never rendered. The GitHub App private key stays at a per-node path
-referenced by `github.app.privateKeyFile`; node A may keep using the Keychain.
+referenced by `github.app.privateKeyFile`; mac-mini may keep using the Keychain.
 
-## Phase 1 — node B bring-up
+## Phase 1 — geekom bring-up
 
 Part A is doable the hour the machine arrives. Part B is gated on Phase 2,
 because the daemon cannot provision a Linux runner on x86 without the executor
-adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
+adapter. Do not start Part B before Phase 2 is green on geekom in observe mode.
 
 ### Part A — the day the GEEKOM arrives
 
@@ -458,7 +519,7 @@ adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
       build by hand — download it.
 - [x] Install to
       `${XDG_DATA_HOME:-~/.local/share}/tart-runner-fleet/{current,state,credentials}`,
-      mirroring node A's `~/Library/Application Support` layout. Resolved by
+      mirroring mac-mini's `~/Library/Application Support` layout. Resolved by
       `internal/hostpaths`, so the daemon, the CLI, and the renderer agree.
 - [x] Install the `systemd --user` units (the `launchd` plist equivalents) and
       the renderer, shipped in `systemd/` beside `launchd/` and published in the
@@ -480,25 +541,25 @@ adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
 - [ ] Add `github.scopes` to `geekom.json`, listing the Linux scale sets for
       `fleet-repo`, `knee-repo`, `hotel-repo`, `sudoku-repo`, `budgie-org`,
       `rnw-repo`, with **new names** (`trf-<scope>-<profile>-amd64`) so they
-      cannot collide with node A's live sets.
+      cannot collide with mac-mini's live sets.
 - [ ] `fleet scale-sets provision --config ... ` (dry run), inspect, then
-      `--apply --write --confirm provision-scale-sets --reason "node B bring-up"`.
-- [ ] Promote node B to authority. Confirm one job end to end on
+      `--apply --write --confirm provision-scale-sets --reason "geekom bring-up"`.
+- [ ] Promote geekom to authority. Confirm one job end to end on
       `trf-linux-amd64-1x2` via the fleet's own canary workflow.
-- [ ] Advertise the arch-floating aliases (`linux-small` … `linux-xl`) on node
-      B's sets, so consumers keep working unchanged.
-- [ ] **Drain node A's Linux**: remove every Linux scale set from every scope in
-      `mac-mini.json`, re-render, re-provision node A. Watch `fleet queues` on
-      node A go to zero for `small`/`medium`/`large`/`xl` and node B's rise.
-- [ ] Delete node A's Linux scale sets in GitHub once node A reports no Linux
+- [ ] Advertise the arch-floating aliases (`linux-small` … `linux-xl`) on
+      geekom's sets, so consumers keep working unchanged.
+- [ ] **Drain mac-mini's Linux**: remove every Linux scale set from every scope in
+      `mac-mini.json`, re-render, re-provision mac-mini. Watch `fleet queues` on
+      mac-mini go to zero for `small`/`medium`/`large`/`xl` and geekom's rise.
+- [ ] Delete mac-mini's Linux scale sets in GitHub once mac-mini reports no Linux
       instances and no Linux demand for a full day.
-- [ ] Confirm the arithmetic on node A: `builder` and `maestro` now coexist, and
+- [ ] Confirm the arithmetic on mac-mini: `builder` and `maestro` now coexist, and
       `fleet queues` no longer shows `builder` waiting behind a Linux guest.
 - [ ] Revisit `maxLinuxWhenMacosIdle`, `mixedPlatformAdmission`,
-      `mixedProfileCohorts`, `linuxReservationAgeSeconds` on node A; they now
+      `mixedProfileCohorts`, `linuxReservationAgeSeconds` on mac-mini; they now
       describe a case that cannot occur.
-- [ ] Rollback at any point: re-add node A's Linux scale sets from git history,
-      re-provision, stop node B's daemon. Node A's configuration is a committed
+- [ ] Rollback at any point: re-add mac-mini's Linux scale sets from git history,
+      re-provision, stop geekom's daemon. mac-mini's configuration is a committed
       file, so this is one revert and one provisioning run.
 
 ## Phase 2 — the x86 executor adapter
@@ -508,14 +569,14 @@ for an agent working with the existing test gates.
 
 | # | Chunk | Deliverable | Effort |
 | --- | --- | --- | ---: |
-| 2a | `hostBudget` | Node A gets an explicit ceiling; node C is unblocked. Ships as an ordinary release to node A alone. | 0.5 d |
+| 2a | `hostBudget` | mac-mini gets an explicit ceiling; mac-studio is unblocked. Ships as an ordinary release to mac-mini alone. | 0.5 d |
 | 2b | Executor port extraction | **Done, issue #137.** `executor.InstanceSpec`, `executor.Backend`, `executor.Instance`, `executor.CommandRunner`, `domain.ValidateInstanceName`, and `executor.HostProbe` lifted out of `internal/adapters/macos`. Refactor only, zero behaviour change; all gates green and the DST corpus identical across three runs per arm; ships as a no-op release. | 1 d |
 | 2c | Linux/amd64 host support | **Done, issue #138**, with one correction below. `linux/amd64` release archive and platform-selected updater asset (`autoupdate.Target`), `systemd --user` units and `render-systemd.sh`, XDG paths (`internal/hostpaths`), file-based credentials, a `/proc` host probe (`internal/adapters/linux`), and `platformFor(goos)` wiring `noexecutor.Backend` on a node with no execution technology. **Deliverable met: the daemon runs on any Linux box in observe mode**, asserted on every commit by `scripts/observe-smoke.sh` in CI. | 2–3 d |
-| 2d | Container executor adapter | **Done, issue #139.** `internal/adapters/podman` implementing `executor.Backend` over the rootless Podman CLI, an `executor` configuration block selecting the backend, the OCI image, the podman binary, the `/dev/kvm` profile grant and the hold command, `platformFor(goos)` wiring the adapter when a Linux node names it, a fail-closed startup probe, and the executor-port conformance harness extended to drive the real lifecycle through it. **Deliverable met in code: node B can serve `trf-linux-amd64-*` the moment it exists.** | 2–3 d |
+| 2d | Container executor adapter | **Done, issue #139.** `internal/adapters/podman` implementing `executor.Backend` over the rootless Podman CLI, an `executor` configuration block selecting the backend, the OCI image, the podman binary, the `/dev/kvm` profile grant and the hold command, `platformFor(goos)` wiring the adapter when a Linux node names it, a fail-closed startup probe, and the executor-port conformance harness extended to drive the real lifecycle through it. **Deliverable met in code: geekom can serve `trf-linux-amd64-*` the moment it exists.** | 2–3 d |
 
 Roughly 1,500–2,000 lines of production code and a comparable amount of test
-code, across about 25 files. Sequenced so that 2a and 2b land on node A as
-ordinary releases before node B exists, and each of 2c and 2d is separately
+code, across about 25 files. Sequenced so that 2a and 2b land on mac-mini as
+ordinary releases before geekom exists, and each of 2c and 2d is separately
 verifiable.
 
 ### What CI covers of chunk 2d, and what it cannot
@@ -537,15 +598,15 @@ job would add a package pull to every commit for a runtime the node under test
 does not otherwise need. So CI runs `scripts/podman-smoke.sh` in best-effort
 mode: it prints `SKIPPED` and exits 0 today, and becomes a real gate with no code
 change the day a runner image ships podman — which is itself a reasonable thing
-to do once node B builds the images.
+to do once geekom builds the images.
 
 Until then the honest statement is: **the adapter has never been run against a
 real container runtime by an automated gate.** The bring-up checklist closes
-that with `TRF_PODMAN_SMOKE=required`, and no job may be routed to node B before
+that with `TRF_PODMAN_SMOKE=required`, and no job may be routed to geekom before
 it passes.
 
 Not required, and worth stating because the audit expected otherwise:
-`internal/scheduler` needs no generalization. Node B runs a single-platform
+`internal/scheduler` needs no generalization. geekom runs a single-platform
 configuration and exercises `planLinux` only.
 
 ### Correction: `launchctl` → `systemctl` is not part of 2c
@@ -560,9 +621,9 @@ sets of failure-path tests, and none of it is needed to run a node in observe
 mode, which is what Part A is.
 
 So issue #138 shipped the packaging and stopped there. All three units are
-rendered by `render-systemd.sh` from the release, so node B will never need a
+rendered by `render-systemd.sh` from the release, so geekom will never need a
 hand-written unit; `NewLocalHost` refuses a domain that is not a launchd target,
-so `fleet update apply-latest` on node B names the gap instead of failing inside
+so `fleet update apply-latest` on geekom names the gap instead of failing inside
 `plutil`; and the manual `systemctl --user` bridge is documented in
 `docs/OPERATIONS.md` and `INSTALL-linux.md`. The systemd release transaction is
 a separate chunk, and Part B does not depend on it: a node that is updated by
@@ -592,14 +653,14 @@ the *legacy* single-scope authority path still requires Keychain fields
 
 ## Phase 3 — arch-floating labels and per-repository migration
 
-Node B's canonical labels are `trf-linux-amd64-*`; the arch component stops
+geekom's canonical labels are `trf-linux-amd64-*`; the arch component stops
 being the `arm64` constant at `internal/config/labels.go:23` and becomes a
 node property, still derived and still unable to lie (about 150 lines).
 
 Consumers then fall into two groups.
 
 **Arch-floating** — name an alias, get whatever the owning node is. No workflow
-edit at all; the migration is provisioning on node B and removal on node A.
+edit at all; the migration is provisioning on geekom and removal on mac-mini.
 
 | Repository | Audit |
 | --- | --- |
@@ -619,32 +680,61 @@ edit at all; the migration is provisioning on node B and removal on node A.
 Migrate one repository per pull request, in that order, most-broken first.
 `rnw-community` is first because its workflow is failing today.
 
-## Node C — Mac Studio
+## mac-studio bring-up
 
-- [ ] Build the Maestro-only macOS base locally from the pinned public Cirrus
-      image, following [`BASE_IMAGE.md`](BASE_IMAGE.md). Do not transfer node
-      A's 91 GB image: it carries an Android toolchain node C cannot use, and
-      the copy would saturate node A's uplink for days while it serves jobs.
-- [ ] Install the same release as node A; `launchd` LaunchAgent, unchanged.
-- [ ] Render `config/nodes/rendered/mac-studio.json`:
-      `hostBudget: {cpu: 4, memoryMb: 10240}`, `macosBurst.enabled: true` with
-      `maestro` only and `builder` capped out of reach, no Linux scale sets.
-- [ ] Assign node C the `maestro` scale set of the `sudoku-repo` scope **only**
-      — the largest single `maestro` consumer at 109 starts in seven days.
-      Remove that one scale set from node A's configuration in the same change.
-      No new label, no consumer edit, no routing ambiguity.
-- [ ] Verify the budget binds: with one `maestro` guest live (4 vCPU /
-      7168 MiB), `fleet status` on node C must show no remaining envelope, even
-      when the machine is otherwise idle.
-- [ ] Confirm outbound-only: no inbound port, no link to node A or B, operator
-      access by SSH outside the fleet's contract.
-- [ ] Rollback: move the scale set back to node A's configuration and
-      re-provision. One file, one command.
+Physical machine, confirmed on arrival: 14 cores / 36 GiB, remote, shared with
+its owner's other work. `hostBudget` is set below physical capacity, not at it:
+**6 vCPU / 16384 MiB**, chosen so a single `builder` (6 vCPU / 12288 MiB) or a
+single `xl` (6 vCPU / 12288 MiB) can run, but the budget's whole CPU share is
+spent doing it — only one 6-vCPU guest at a time, of any profile. In progress,
+tracked by issue #140; the Maestro-only base image build in
+[`BASE_IMAGE.md`](BASE_IMAGE.md) is furthest along.
 
-An alias-based overflow lane — node C advertising `macos-maestro-overflow`
-across every scope — is the alternative, and it is deferred until Spike 3
-answers whether GitHub distributes across two scale sets that advertise one
-label. Scope ownership needs no such answer.
+- [x] Build the macOS base locally from the pinned public Cirrus image,
+      following [`BASE_IMAGE.md`](BASE_IMAGE.md). Do not transfer mac-mini's
+      91 GB image: it carries an Android toolchain mac-studio cannot use, and
+      the copy would saturate mac-mini's uplink for days while it serves jobs.
+- [ ] Install the same release as mac-mini; `launchd` LaunchAgent, unchanged.
+- [ ] Render `config/nodes/rendered/mac-studio.json`: `hostBudget: {cpu: 6,
+      memoryMb: 16384}`, `macosBurst.enabled: true`. Per the shared-label
+      amendment to ADR 0034, declare the **same labels mac-mini declares** for
+      every profile mac-studio's budget fits — `builder`, `maestro`, and,
+      while geekom is not yet delivered, `small`/`medium`/`large`/`xl` too, so
+      those declarations narrow to macOS-only the day geekom takes Linux. Do
+      not declare `linux-8x16` or `linux-2x8` anywhere: zero consumer
+      declarations request either, per the `runs-on` audit above.
+- [ ] Give mac-studio **its own** scale set per profile per scope it should
+      serve, with a distinct **name** (GitHub rejects a duplicate name with
+      `400 RunnerScaleSetExistsException`) and the **same labels** as
+      mac-mini's. mac-mini's configuration is **not** edited and nothing is
+      removed from it, so no scope is ever unserved. Start with `sudoku-repo`'s
+      `maestro` set — the largest single `maestro` consumer at 109 starts in
+      seven days — then widen.
+- [ ] Set `canonicalJobInventory: true` for every scope whose label two nodes
+      advertise, so each node advertises its true capacity and GitHub's split
+      is truthful; see ADR 0034's shared-label amendment, "the two conditions
+      this depends on".
+- [ ] Land the per-set attribution bound on REST-derived demand (issue #153)
+      before enabling a shared label anywhere, so mac-mini and mac-studio never
+      both claim the same queued job.
+- [ ] Verify the budget binds: with one `builder` or `xl` guest live (6 vCPU /
+      12288 MiB), `fleet status` on mac-studio must show no remaining CPU
+      envelope even when the machine is otherwise idle; with one `maestro`
+      guest live (4 vCPU / 7168 MiB) it must still admit a `small`/`medium` or
+      a second `maestro` alongside it.
+- [ ] Verify the split: with both nodes advertising the same labels, a burst of
+      jobs on a shared profile must appear in `fleet queues` on **both** nodes
+      in proportion to their advertised capacity.
+- [ ] Confirm outbound-only: no inbound port, no link to mac-mini or geekom,
+      operator access by SSH outside the fleet's contract.
+- [ ] Rollback: delete mac-studio's scale sets. mac-mini was never edited, so
+      there is nothing to restore.
+
+A separate overflow label — mac-studio advertising `macos-maestro-overflow` —
+is not needed. Spike 3 is answered: GitHub distributes across two scale sets
+advertising one label, so mac-studio shares mac-mini's labels and consumers
+change nothing. Full spike transcripts are in
+[issue #144](https://github.com/vitalyiegorov/tart-runner-fleet/issues/144#issuecomment-5180794736).
 
 ## Observability
 
@@ -666,18 +756,18 @@ forward-only updater and activates releases independently. Nothing couples
 release activation across machines; a node may sit a release behind
 indefinitely.
 
-Node B needed one addition, and issue #138 made it: the release workflow now
+geekom needed one addition, and issue #138 made it: the release workflow now
 publishes `tart-runner-fleet-<tag>-linux-amd64.tar.gz` beside the darwin archive
 in the same `SHA256SUMS`, and `autoupdate.Target` selects the asset — and the
 service definition a generation must carry a verified copy of — by node type
 instead of hardcoding darwin/arm64.
 
-The manual release bridge on node A — swap the plist `Program` path and
+The manual release bridge on mac-mini — swap the plist `Program` path and
 `state/installed-generation.json` together, `launchctl bootout`, wait twenty
 seconds, `enable` and `bootstrap`, then **verify** `launchctl list` — has a
-`systemd --user` equivalent on node B (`systemctl --user daemon-reload`,
+`systemd --user` equivalent on geekom (`systemctl --user daemon-reload`,
 `restart`, then `systemctl --user status`). Both are in `docs/OPERATIONS.md`.
-On node B the bridge is not a fallback but the only path, until the systemd
+On geekom the bridge is not a fallback but the only path, until the systemd
 release transaction lands; see the correction under Phase 2.
 
 ## Simulation
@@ -691,17 +781,21 @@ a second node would simulate GitHub's routing, which is not this codebase's
 code.
 
 The harness gains one configuration it already supports: a single-platform world
-with `macosBurst.enabled: false`, which is node B's shape. Add that to the
+with `macosBurst.enabled: false`, which is geekom's shape. Add that to the
 world-config sweep in chunk 2d; add nothing else.
 
 ## Open spikes
 
-| # | Question | Gates |
+Spikes 1 to 3 were run on 2026-08-04 against a throwaway repository and two
+throwaway scale sets. Full transcripts:
+[issue #144](https://github.com/vitalyiegorov/tart-runner-fleet/issues/144#issuecomment-5180794736).
+
+| # | Question | Answer |
 | --- | --- | --- |
-| 1 | Can a peer delete an inherited scale-set session and immediately create its own? | Carried over from issue #99. Not needed by this plan; needed by any future steward. |
-| 2 | Does GitHub accept a `maxCapacity` decrease while jobs are assigned? | Carried over from issue #99. Needed before any elastic cross-node capacity. |
-| 3 | Given two scale sets in one scope advertising the same label, does GitHub distribute jobs between them, or prefer one deterministically? | Gates the alias-based overflow lane for node C. Until answered, node C owns scale sets by scope. |
-| 4 | Does the `suuudokuuu` Maestro suite pass against an x86_64 emulator at the timings its challenge flows assume? | Gates the `suuudokuuu` Android migration in Phase 3. |
+| 1 | Can a peer delete an inherited scale-set session and immediately create its own? | **Yes.** `DELETE` from an independently minted admin connection returns `204`, and the successor's `POST` returns `200` under two seconds. But sessions are **not enumerable** (`GET .../sessions` → `404`), so the id must be handed over. Still not needed by this plan; needed by any future steward. |
+| 2 | Does GitHub accept a `maxCapacity` decrease while jobs are assigned? | **Yes, and the question is obsolete.** There is no persisted `maxCapacity`; it is the per-poll `X-ScaleSetMaxCapacity` header. Lowering it mid-flight is accepted and does not revoke assigned jobs; raising it pulls backlog on the next poll. |
+| 3 | Given two scale sets in one scope advertising the same label, does GitHub distribute jobs between them, or prefer one deterministically? | **It distributes**, server-side, filling each set to the capacity it last advertised. One set advertising 1 and another advertising 5 split a four-job dispatch 1 / 3. This is what ADR 0034's shared-label amendment acts on, and it is why mac-mini and mac-studio advertise the same labels today instead of partitioning by scope. |
+| 4 | Does the `suuudokuuu` Maestro suite pass against an x86_64 emulator at the timings its challenge flows assume? | Open. Gates the `suuudokuuu` Android migration in Phase 3. |
 
 ## Working agreement
 

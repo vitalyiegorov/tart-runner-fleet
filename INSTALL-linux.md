@@ -26,7 +26,7 @@ configuration, it never talks to another node, and GitHub's one-session-per-scal
 | `fleet update apply-latest` | **No.** The release transaction drives `launchctl` and `plutil`. It refuses with a message naming the gap; use the manual bridge below. |
 
 Bring a node up in observe mode **first**, with no `executor` block and no
-scopes. That is Part A of `docs/MULTI_NODE_PLAN.md`'s node B bring-up, and it is
+scopes. That is Part A of `docs/MULTI_NODE_PLAN.md`'s geekom bring-up, and it is
 deliberately a whole step: a node with no execution backend that reaches the
 observe steady state is what proves the daemon, the configuration, the host
 probe, and the packaging are right before any runner is at stake. Step 4a adds
