@@ -43,6 +43,13 @@ const (
 	// deadline that planned the drain, so a second abort is a loop rather than an
 	// unlucky race.
 	findingDrainChurn findingKind = "drain_churn"
+	// findingUnheardDemand is property (j): a job the broker has actually
+	// delivered a JobAvailable for must be in the fleet's durable ledger. Every
+	// other oracle here reads the fleet's own view of demand, so all of them are
+	// silent exactly when the fleet cannot hear GitHub at all -- which is how a
+	// binding stayed deaf for three days in issue #165 while `fleet queues` read
+	// zero and `fleet doctor` read PASS.
+	findingUnheardDemand findingKind = "unheard_demand"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -191,6 +198,10 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// operator to the scheduler for a binding defect (issue #123).
 		strandedDemandChecker(cfg),
 		drainChurnChecker(cfg),
+		// (j) precedes liveness for the same reason: a binding that cannot hear
+		// the broker produces an empty queue, and an empty queue is indistinguishable
+		// from an idle fleet to every oracle that reads only the fleet's own view.
+		unheardDemandChecker(cfg),
 		livenessChecker(cfg),
 		boundedStarvationChecker(cfg),
 		quiescenceChecker(cfg),
@@ -719,6 +730,66 @@ func macOSAdmissible(cfg worldConfig, profile domain.Profile, active map[domain.
 		}
 	}
 	return true
+}
+
+// ---------------------------------------------------------------------------
+// (j) Every advertised job is heard.
+// ---------------------------------------------------------------------------
+
+// unheardDemandChecker is the issue #165 oracle, and it is the only one that
+// reads GitHub's truth rather than the fleet's.
+//
+// The broker delivered a JobAvailable. Ingestion is synchronous with delivery --
+// the coordinator commits before the message is acknowledged (rule 6) -- so
+// within a tick or two of delivery that job must exist in the durable demand
+// ledger, whatever the scheduler then decides to do with it. When it does not,
+// the fleet is not slow, over capacity, or fair-sharing: it is deaf, and the job
+// is invisible to every queue count, health reason, and metric the fleet
+// publishes. That is precisely the state scale set 8077185082566234948 held from
+// 2026-08-01T18:37Z to 2026-08-04T19:40Z.
+//
+// The oracle is measured from delivery, not creation, so message delay is not a
+// violation; and a silently cancelled run is exempt because GitHub advertising a
+// job it has already retired is ADR 0026's ghost, not a lost message.
+func unheardDemandChecker(cfg worldConfig) checker {
+	return func(w *world, observation tickObservation) []finding {
+		budget := cfg.HearingH
+		if budget <= 0 {
+			return nil
+		}
+		for _, job := range w.jobs {
+			if job.status != jobQueued || job.silentCancel || job.advertisedAt == 0 ||
+				observation.Tick-job.advertisedAt <= budget {
+				continue
+			}
+			if w.durablyKnows(job) {
+				continue
+			}
+			return []finding{{Kind: findingUnheardDemand, Tick: observation.Tick,
+				Detail: fmt.Sprintf("scale set %d was handed request %d at tick %d and still holds no durable demand for it %d ticks later",
+					cfg.Bindings[job.binding].StoreKey, job.requestID, job.advertisedAt, observation.Tick-job.advertisedAt)}}
+		}
+		return nil
+	}
+}
+
+// durablyKnows asks the real store whether this binding holds any demand record
+// for the job the broker advertised. Any status counts: the question is whether
+// the evidence was heard at all, not what the scheduler concluded from it.
+func (w *world) durablyKnows(job *simJob) bool {
+	records, err := w.store.ActiveDemands(w.ctx, w.cfg.Bindings[job.binding].StoreKey)
+	if err != nil {
+		// Rule 4: an unreadable ledger is not an empty one. The store's own
+		// fail-closed channel reports it; this oracle must not double-report it as
+		// a lost message.
+		return true
+	}
+	for _, record := range records {
+		if record.RunnerRequestID == job.requestID {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
