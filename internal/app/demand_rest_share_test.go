@@ -28,8 +28,8 @@ func newShardedDemandStore() *shardedDemandStore {
 		records: map[int64][]operations.DemandRecord{}, jobs: map[int64][]operations.GitHubJobObservation{}}
 }
 
-func (s *shardedDemandStore) ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (bool, error) {
-	return false, nil
+func (s *shardedDemandStore) ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (operations.DemandBatchResult, error) {
+	return operations.DemandBatchResult{}, nil
 }
 
 func (s *shardedDemandStore) ActiveDemands(_ context.Context, scaleSetID int64) ([]operations.DemandRecord, error) {
@@ -386,7 +386,7 @@ func TestRESTAttributionWithoutAStatisticsStoreIsUnbounded(t *testing.T) {
 // statisticsFreeStore is a REST store with no scale-set statistics surface.
 type statisticsFreeStore struct{ inner *shardedDemandStore }
 
-func (s *statisticsFreeStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+func (s *statisticsFreeStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (operations.DemandBatchResult, error) {
 	return s.inner.ApplyDemandBatch(ctx, scaleSetID, messageID, events)
 }
 

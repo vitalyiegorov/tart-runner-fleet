@@ -19,6 +19,7 @@ type fakeDemandStore struct {
 	scaleSetID  int64
 	cursor      int64
 	applied     bool
+	reset       operations.DemandSequenceReset
 	err         error
 	projected   []operations.DemandEvent
 	projectErr  error
@@ -29,7 +30,7 @@ type fakeDemandStore struct {
 
 type noStatisticsStore struct{ inner *fakeDemandStore }
 
-func (s noStatisticsStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+func (s noStatisticsStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (operations.DemandBatchResult, error) {
 	return s.inner.ApplyDemandBatch(ctx, scaleSetID, messageID, events)
 }
 func (s noStatisticsStore) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operations.DemandRecord, error) {
@@ -225,14 +226,14 @@ func (f *fakeDemandStore) ProjectDemandEvent(_ context.Context, _ int64, event o
 	return f.projectErr
 }
 
-func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (operations.DemandBatchResult, error) {
 	if f.err != nil {
-		return false, f.err
+		return operations.DemandBatchResult{}, f.err
 	}
 	f.cursor = messageID
 	f.scaleSetID = scaleSetID
 	f.batches = append([]operations.DemandEvent(nil), events...)
-	return f.applied, nil
+	return operations.DemandBatchResult{Applied: f.applied, Reset: f.reset}, nil
 }
 func (f *fakeDemandStore) ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error) {
 	return append([]operations.DemandRecord(nil), f.records...), f.err
@@ -400,6 +401,42 @@ func TestIngestResultPreservesDurableChangeAcrossAcknowledgementFailure(t *testi
 	changed, err = (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source)
 	if changed || err != nil {
 		t.Fatalf("duplicate IngestOnceResult() = %v, %v", changed, err)
+	}
+}
+
+// TestIngestReportsAnAdoptedSequenceGeneration keeps the store's self-repair
+// visible. The inbox heals a restarted broker sequence by itself (ADR 0035), but
+// a durable event that used to need three days and hand-written SQL must reach
+// the daemon that can name the binding it happened to (issue #165).
+func TestIngestReportsAnAdoptedSequenceGeneration(t *testing.T) {
+	reset := operations.DemandSequenceReset{Detected: true, Generation: 1,
+		RetiredMessageID: 100000086, AdoptedMessageID: 100000004}
+	store := &fakeDemandStore{applied: true, reset: reset}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 100000004}}
+	binding := Binding{StoreKey: 8077185082566234948, ScaleSetID: 2, Scope: "knee-repo",
+		Profile: domain.Profile{ID: "large", Route: "linux-large", Platform: domain.PlatformLinux}}
+	var reported []operations.DemandSequenceReset
+	coordinator := DemandCoordinator{Store: store, OnSequenceReset: func(got Binding, event operations.DemandSequenceReset) {
+		if got.StoreKey != binding.StoreKey {
+			t.Errorf("reset reported for binding %d, want %d", got.StoreKey, binding.StoreKey)
+		}
+		reported = append(reported, event)
+	}}
+	if _, err := coordinator.IngestOnceResult(context.Background(), binding, source); err != nil {
+		t.Fatalf("IngestOnceResult() = %v", err)
+	}
+	if len(reported) != 1 || reported[0] != reset {
+		t.Fatalf("reported = %#v, want exactly the store's evidence", reported)
+	}
+	// A message that adopted nothing reports nothing, and a coordinator without a
+	// reporter ingests exactly the same way.
+	store.reset = operations.DemandSequenceReset{}
+	if _, err := coordinator.IngestOnceResult(context.Background(), binding, source); err != nil || len(reported) != 1 {
+		t.Fatalf("ordinary ingest reported %#v: %v", reported, err)
+	}
+	store.reset = reset
+	if _, err := (DemandCoordinator{Store: store}).IngestOnceResult(context.Background(), binding, source); err != nil {
+		t.Fatalf("unreported reset must still ingest: %v", err)
 	}
 }
 

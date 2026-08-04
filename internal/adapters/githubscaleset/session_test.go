@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
 const brokerSecret = "Bearer AAABBBCCC message queue token"
@@ -78,6 +80,14 @@ func TestSessionRecoveryPolicyBoundsAmbiguousFailures(t *testing.T) {
 		{name: "zero policy keeps retrying below the default bound",
 			state: SessionFailureState{Consecutive: 1, Since: start}, err: ambiguous, now: start.Add(time.Second),
 			reason: ReasonMessagePollFailed, expected: 2},
+		// A session is not what refused the message, so escalation must not
+		// rename a durable conflict after itself (issue #165). It keeps the
+		// session and reports what actually happened, past the bound.
+		{name: "durable commit conflict is named past the escalation bound", policy: policy,
+			state:  SessionFailureState{Consecutive: 9, Since: start},
+			err:    fmt.Errorf("commit demand message 100000004: %w", operations.ErrConflict),
+			now:    start.Add(time.Hour),
+			reason: ReasonDemandCommitConflict, expected: 10},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -98,7 +108,7 @@ func TestSessionRecoveryPolicyBoundsAmbiguousFailures(t *testing.T) {
 func TestIngestFailureReasonVocabularyIsClosed(t *testing.T) {
 	closed := []string{ReasonSessionExpired, ReasonSessionReleaseFailed, ReasonSessionCreateFailed,
 		ReasonRecreatedAfterFailures, ReasonMessagePollFailed, ReasonQueueObservationFailed,
-		ReasonQueueObservationStale, ReasonQueueReconcileFailed}
+		ReasonQueueObservationStale, ReasonQueueReconcileFailed, ReasonDemandCommitConflict}
 	for _, reason := range closed {
 		if !ValidFailureReason(reason) {
 			t.Fatalf("ValidFailureReason(%q) = false", reason)
@@ -131,6 +141,12 @@ func TestIngestFailureDetailOnlyEmitsClosedVocabulary(t *testing.T) {
 			err:    fmt.Errorf("%s: %w", brokerSecret, scaleset.MessageQueueTokenExpiredError),
 			detail: ReasonSessionExpired},
 		{name: "unclassified transient failure", err: errors.New(brokerSecret), detail: ReasonMessagePollFailed},
+		// A durable commit conflict is the fleet refusing the message, not the
+		// network failing to deliver it. Reporting it as a poll failure is what
+		// hid a three-day outage (issue #165).
+		{name: "durable commit conflict",
+			err:    fmt.Errorf("commit demand message 100000004: %w", operations.ErrConflict),
+			detail: ReasonDemandCommitConflict},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

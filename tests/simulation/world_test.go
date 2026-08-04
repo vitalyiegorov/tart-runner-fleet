@@ -85,6 +85,16 @@ type worldConfig struct {
 	// between planning and execution; a second is a loop, because aborting
 	// restarts the very deadline that planned it.
 	DrainChurnN int
+	// HearingH bounds property (j): a job the broker has actually delivered a
+	// JobAvailable for must be in the fleet's durable ledger within this many
+	// ticks. It is a delivery budget, not a scheduling one -- ingestion is
+	// synchronous with delivery, so anything beyond one tick of slack means the
+	// binding refused evidence it was handed (issue #165).
+	HearingH int
+	// SequenceResetAt is the tick at which GitHub restarts the broker's
+	// message-id sequence, as it did for scale set 8077185082566234948 on
+	// 2026-08-01T18:32Z. Zero means the sequence is never restarted.
+	SequenceResetAt int
 }
 
 func simProfiles() map[domain.ProfileID]domain.Profile {
@@ -156,6 +166,7 @@ func defaultWorld() worldConfig {
 		QuiesceQ:    40,
 		StrandedG:   10,
 		DrainChurnN: 1,
+		HearingH:    2,
 	}
 }
 
@@ -494,9 +505,15 @@ type simJob struct {
 	// finishedAt is when the runner handed the result back, which is what frees
 	// the capacity the next job waits for.
 	finishedAt time.Time
-	status     jobStatus
-	runner     string
-	remaining  int
+	// advertisedAt is the tick at which the broker actually delivered this job's
+	// JobAvailable to the fleet. Property (j) is measured from it.
+	advertisedAt int
+	// heard latches property (j)'s answer. A demand row the fleet has committed
+	// is not un-committed, so the oracle asks once and never again.
+	heard     bool
+	status    jobStatus
+	runner    string
+	remaining int
 	// announced records which broker events have already been produced, so a
 	// redelivery is a duplicate rather than a new fact.
 	announced map[operations.DemandEventKind]bool
@@ -629,6 +646,7 @@ func (w *world) run() []finding {
 		w.now = simEpoch.Add(time.Duration(w.tick) * simTick)
 		w.applyTraceEvents()
 		w.advancePhysics()
+		w.restartSequence()
 		w.produceMessages()
 		w.deliverMessages()
 		w.deliverSnapshots()

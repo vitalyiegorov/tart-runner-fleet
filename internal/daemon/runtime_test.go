@@ -1356,6 +1356,57 @@ func TestFailureReporterLogsOncePerComponentPerWindow(t *testing.T) {
 	fallback.report("operations", "")
 }
 
+// TestFailureReporterNamesTheBindingAndItsAdoptedGeneration is the operability
+// half of issue #165. For three days the entire published account of one scale
+// set that had stopped hearing GitHub was `component=ingest
+// reason=message_poll_failed`: no scope, no profile, no scale set, and the wrong
+// cause.
+func TestFailureReporterNamesTheBindingAndItsAdoptedGeneration(t *testing.T) {
+	var buffer bytes.Buffer
+	now := time.Date(2026, 8, 4, 19, 15, 39, 0, time.UTC)
+	reporter := newFailureReporter(&buffer, func() time.Time { return now })
+	binding := app.Binding{StoreKey: 8077185082566234948, ScaleSetID: 2, Scope: "knee-repo",
+		Profile: domain.Profile{ID: "large", Route: "linux-large", Platform: domain.PlatformLinux}}
+
+	reporter.reportBinding(binding, githubscaleset.ReasonDemandCommitConflict)
+	line := buffer.String()
+	for _, fragment := range []string{"binding ingest failure", "scope=knee-repo", "profile=large", "scaleSet=2",
+		"observation=github-8077185082566234948", "reason=" + githubscaleset.ReasonDemandCommitConflict} {
+		if !strings.Contains(line, fragment) {
+			t.Fatalf("binding failure line missing %q: %q", fragment, line)
+		}
+	}
+	// Rate limited per binding and reason, like the component line it complements.
+	reporter.reportBinding(binding, githubscaleset.ReasonDemandCommitConflict)
+	if got := strings.Count(buffer.String(), "binding ingest failure"); got != 1 {
+		t.Fatalf("in-window binding lines = %d: %q", got, buffer.String())
+	}
+	// A reason outside the closed vocabulary is withheld rather than rendered:
+	// this line is fed by an error classifier, and upstream text must never reach
+	// it.
+	reporter.reportBinding(binding, "Bearer AAABBBCCC")
+	if strings.Contains(buffer.String(), "Bearer") {
+		t.Fatalf("unclassified reason reached the log: %q", buffer.String())
+	}
+
+	buffer.Reset()
+	reporter.reportSequenceReset(binding, operations.DemandSequenceReset{Detected: true, Generation: 1,
+		RetiredMessageID: 100000086, AdoptedMessageID: 100000004})
+	line = buffer.String()
+	for _, fragment := range []string{"broker message sequence restarted", "scope=knee-repo", "scaleSet=2",
+		"generation=1", "retiredMessageId=100000086", "adoptedMessageId=100000004"} {
+		if !strings.Contains(line, fragment) {
+			t.Fatalf("sequence restart line missing %q: %q", fragment, line)
+		}
+	}
+	// An ordinary message adopted nothing and says nothing.
+	buffer.Reset()
+	reporter.reportSequenceReset(binding, operations.DemandSequenceReset{})
+	if buffer.Len() != 0 {
+		t.Fatalf("a message that adopted no generation logged: %q", buffer.String())
+	}
+}
+
 func TestEngineTickerMarksOperationSummaryUnavailable(t *testing.T) {
 	d := testDependencies(t)
 	store, err := d.openStore(context.Background(), filepath.Join(t.TempDir(), "fleet.db"))

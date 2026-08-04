@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
 // The ingest failure vocabulary is closed. A reason is the only part of a
@@ -34,6 +36,14 @@ const (
 	// ReasonQueueReconcileFailed marks a REST queue snapshot that could not be
 	// reconciled durably.
 	ReasonQueueReconcileFailed = "queue_reconcile_failed"
+	// ReasonDemandCommitConflict marks a broker message the durable store
+	// refused. It is not a network condition and no retry of the same message
+	// can clear it: the fleet holds state the message contradicts, and until
+	// that is resolved every redelivery fails the same way. Degrading it to
+	// ReasonMessagePollFailed reported a durable write conflict as broker
+	// flapping for three days (issue #165), which is the opposite operator
+	// response.
+	ReasonDemandCommitConflict = "demand_commit_conflict"
 )
 
 // ValidFailureReason guards the closed vocabulary at every recording site so an
@@ -42,7 +52,7 @@ func ValidFailureReason(reason string) bool {
 	switch reason {
 	case ReasonSessionExpired, ReasonSessionReleaseFailed, ReasonSessionCreateFailed,
 		ReasonRecreatedAfterFailures, ReasonMessagePollFailed, ReasonQueueObservationFailed,
-		ReasonQueueObservationStale, ReasonQueueReconcileFailed:
+		ReasonQueueObservationStale, ReasonQueueReconcileFailed, ReasonDemandCommitConflict:
 		return true
 	default:
 		return false
@@ -107,6 +117,11 @@ func SessionTerminal(err error) bool {
 // IngestFailureDetail reduces any ingest failure to one closed-vocabulary
 // reason. It is total: an unrecognized failure degrades to the generic poll
 // reason rather than exposing upstream text.
+//
+// A durable commit conflict is classified before that degradation. It reaches
+// here as operations.ErrConflict from the store, carries nothing renderable, and
+// means something categorically different from a failed poll: the fleet, not the
+// network, refused the message, and no amount of redelivery will change that.
 func IngestFailureDetail(err error) string {
 	if err == nil {
 		return ""
@@ -117,6 +132,9 @@ func IngestFailureDetail(err error) string {
 	}
 	if SessionTerminal(err) {
 		return ReasonSessionExpired
+	}
+	if errors.Is(err, operations.ErrConflict) {
+		return ReasonDemandCommitConflict
 	}
 	return ReasonMessagePollFailed
 }
@@ -171,6 +189,14 @@ func (p SessionRecoveryPolicy) OnFailure(state SessionFailureState, err error, n
 	}
 	if SessionTerminal(err) {
 		return SessionRecoveryDecision{State: next, Reason: ReasonSessionExpired, Discard: true}
+	}
+	// A durable commit conflict is classified before the bounded escalation, and
+	// deliberately: escalation reports recreated_after_failures, which is a
+	// statement about the SESSION, and a session is not what refused the message.
+	// Reporting it that way is how a three-day durable defect read as broker
+	// flapping (issue #165).
+	if errors.Is(err, operations.ErrConflict) {
+		return SessionRecoveryDecision{State: next, Reason: ReasonDemandCommitConflict}
 	}
 	if next.Consecutive >= policy.MaxConsecutiveFailures || now.Sub(next.Since) >= policy.FailureWindow {
 		return SessionRecoveryDecision{State: next, Reason: ReasonRecreatedAfterFailures, Discard: true}

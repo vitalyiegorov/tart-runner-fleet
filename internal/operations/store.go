@@ -9,7 +9,7 @@ type Store interface {
 	Migrate(context.Context) error
 	ApplyPlan(context.Context, Plan) (bool, error)
 	SchedulerState(context.Context) (SchedulerState, error)
-	ApplyDemandBatch(context.Context, int64, int64, []DemandEvent) (bool, error)
+	ApplyDemandBatch(context.Context, int64, int64, []DemandEvent) (DemandBatchResult, error)
 	ActiveDemands(context.Context, int64) ([]DemandRecord, error)
 	DemandCursor(context.Context, int64) (int64, error)
 	CreateInstance(context.Context, Instance) error
