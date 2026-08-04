@@ -9,15 +9,10 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
-// TestBackendSatisfiesThePort keeps the stand-in and the real backends
-// interchangeable: the day issue #139's container adapter lands, the wiring
-// swaps one value for another and nothing above the port changes.
-func TestBackendSatisfiesThePort(t *testing.T) {
-	var backend executor.Backend = Backend{}
-	if backend == nil {
-		t.Fatal("nil backend")
-	}
-}
+// Backend must remain interchangeable with the real backends: the day issue
+// #139's container adapter lands, the wiring swaps one value for another and
+// nothing above the port changes.
+var _ executor.Backend = Backend{}
 
 // TestEveryMutationIsRefused is the safety property. A node in Phase 1 Part A
 // must never appear to have provisioned something, so each verb that acts fails
