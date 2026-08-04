@@ -93,3 +93,50 @@ does not fetch repository runner inventory. Official lifecycle events correlate
 terminal cleanup to the authoritative runner name as specified by ADR 0016.
 Workflow-concurrency classification, ETag caching, scheduler v2, and stable
 launcher activation remain separately gated work.
+
+## Amendment: a shared label bounds the lane by the set's own share
+
+Two decisions above assume a scale set is alone on its labels within its scope:
+"profile routing mirrors GitHub's label-subset match", and "an unmatched or
+multiply matched self-hosted job makes the observation unavailable". Both were
+right while ownership was partitioned.
+[ADR 0034](0034-a-node-serves-the-scale-sets-it-owns.md) now permits two nodes
+to own two scale sets in one scope carrying identical labels, because GitHub
+places the work between them itself. Under that topology the REST scope
+observation returns the whole scope's queue, every job in it matches both sets
+by label, and this record as written has both nodes record all of it — so one
+job becomes two nodes' demand, and each spawns a guest for it. Issue #153.
+
+What changes, and only for a scale set whose labels are declared shared or
+observed to be:
+
+1. **A binding claims at most its own share of the scope's queue.** The share is
+   the scale set's own statistics — work GitHub has offered it, plus work GitHub
+   has assigned it that has not started — which is the same expression this
+   record already uses to bound acquisition, and which equals
+   `statistics.totalAssignedJobs` in the shape ADR 0034's spike observed. A job
+   the binding's own durable demand already names is never surrendered to that
+   bound; the broker is the mutation authority and its word on ownership
+   outranks a counter. Statistics that are absent, stale, or ahead of the clock
+   bound the claim to that vouched set alone, because on a shared label an
+   unbounded claim is the defect being fixed; an *unreadable* statistics store
+   is different and still makes the whole observation unavailable.
+2. **A multiply matched job is no longer automatically unavailable.** Two
+   bindings serving one scope with one profile are interchangeable servers of
+   the job, and the bound above is what makes recording it on both safe. A job
+   matching two *profiles* names two different guest shapes and a job matching
+   two *scopes* names a repository routed twice; both remain the conflict this
+   record specifies, because no capacity number disambiguates them.
+
+The cost is stated plainly: on a shared-label scope the queue this node reports
+is its own share, not the scope's backlog, so the queue lookahead past a set's
+own advertised capacity is no longer available there. That is the honest number
+for that node — the peer is reporting the rest — and it is the price of not
+being able to see the peer at all. Scopes without a shared label are unaffected,
+in behaviour and in reported queue depth.
+
+The declaration is per scale set (`sharedLabels`) and requires
+`canonicalJobInventory`, which ADR 0034 already states as a precondition: GitHub
+splits a shared queue by advertised capacity, so two nodes both inflating that
+number for lookahead would have it split by fiction. It cannot be inferred,
+because ADR 0034's first decision is that no node is aware of another.

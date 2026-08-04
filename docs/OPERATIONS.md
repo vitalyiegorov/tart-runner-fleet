@@ -162,6 +162,18 @@ A scope carries a scale set only for the variants it lists, so this arithmetic
 is done per variant per scope that exposes it, not for the whole matrix in every
 scope ([ADR 0032](adr/0032-resource-explicit-runner-labels.md)).
 
+When another node owns a scale set advertising the **same labels in the same
+scope**, set `sharedLabels: true` on this node's scale set. GitHub places the
+work between the two sets by the capacity each last advertised, but it does not
+tell either node about the other, and the REST observer polls the whole scope:
+without the declaration both nodes attribute every queued job in that scope to
+themselves and each spawns a guest for it
+([ADR 0015](adr/0015-canonical-inventory-and-truthful-capacity.md)'s shared-label
+amendment). With it, this node claims only the share GitHub gave it, and
+`fleet status` reports that share rather than the scope's whole backlog — the
+peer reports the rest. The field requires `canonicalJobInventory: true` and
+truthful capacity, and configuration validation rejects it without them.
+
 For an existing authority that still uses inflated lookahead, first grant the
 read-only App permission and validate a versioned candidate with
 `canonicalJobInventory: true` and truthful capacity using the candidate

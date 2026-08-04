@@ -99,6 +99,14 @@ func soleBinding(key int64) Binding {
 		Profile:        domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS}}
 }
 
+// otherRepoBinding is a declared shared-label set in the same scope that serves
+// a different repository, so the scope's observation never names its work.
+func otherRepoBinding(key int64) Binding {
+	binding := sharedLabelBinding(key)
+	binding.Targets = []string{"owner/elsewhere"}
+	return binding
+}
+
 // restJob is one repository-wide queued job carrying the shared label. age
 // orders the queue, so a truncation that is not oldest-first is visible.
 func restJob(id int64, age time.Duration) githubscaleset.WorkflowJob {
@@ -180,6 +188,15 @@ func TestRESTAttributionIsBoundedByTheScaleSetsOwnShare(t *testing.T) {
 			bindings: []Binding{nodeA}, jobs: four,
 			statistics: map[int64]operations.DemandStatistics{1: freshStatistics(2, 2, 0)},
 			want:       map[int64][]int64{1: {101, 102, 103, 104}},
+		},
+		{
+			// A declared set whose scope observation contains nothing of its own
+			// has nothing to bound, and must not be charged a statistics read to
+			// discover that.
+			name:     "a set the observation says nothing about is left alone",
+			bindings: []Binding{nodeA, otherRepoBinding(3)}, jobs: four,
+			statistics: map[int64]operations.DemandStatistics{1: freshStatistics(0, 4, 0)},
+			want:       map[int64][]int64{1: {101, 102, 103, 104}, 3: {}},
 		},
 		{
 			// An undeclared scale set alone on its labels is never bounded at
@@ -345,4 +362,44 @@ func TestQueueSummaryReportsOnlyTheSetsOwnShareOfAFederatedScope(t *testing.T) {
 	if total != 4 {
 		t.Fatalf("federated scope reported a queue of %d for four queued jobs", total)
 	}
+}
+
+// TestRESTAttributionWithoutAStatisticsStoreIsUnbounded keeps the bound
+// evidential at the other end of the interface. A store that carries no
+// scale-set statistics at all is the pre-ADR-0015 shape, and it has never been
+// able to answer what a set was assigned; it therefore bounds nothing rather
+// than bounding everything to zero.
+func TestRESTAttributionWithoutAStatisticsStoreIsUnbounded(t *testing.T) {
+	t.Parallel()
+	store := &statisticsFreeStore{inner: newShardedDemandStore()}
+	coordinator := DemandCoordinator{Store: store, Now: func() time.Time { return restShareEpoch }}
+	if _, err := coordinator.ReconcileQueuedJobs(context.Background(), []Binding{sharedLabelBinding(1)},
+		fakeQueueSnapshot{at: restShareEpoch, jobs: []githubscaleset.WorkflowJob{
+			restJob(901, 2*time.Minute), restJob(902, time.Minute)}}); err != nil {
+		t.Fatalf("reconcile REST snapshot: %v", err)
+	}
+	if got := store.inner.attributed(1); len(got) != 2 {
+		t.Fatalf("a statistics-free store attributed %v, want both queued jobs", got)
+	}
+}
+
+// statisticsFreeStore is a REST store with no scale-set statistics surface.
+type statisticsFreeStore struct{ inner *shardedDemandStore }
+
+func (s *statisticsFreeStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+	return s.inner.ApplyDemandBatch(ctx, scaleSetID, messageID, events)
+}
+
+func (s *statisticsFreeStore) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operations.DemandRecord, error) {
+	return s.inner.ActiveDemands(ctx, scaleSetID)
+}
+
+func (s *statisticsFreeStore) ReconcileGitHubJobSnapshot(ctx context.Context, observedAt time.Time,
+	snapshot map[int64][]operations.GitHubJobObservation,
+) (bool, error) {
+	return s.inner.ReconcileGitHubJobSnapshot(ctx, observedAt, snapshot)
+}
+
+func (s *statisticsFreeStore) QueuedGitHubJobs(ctx context.Context, scaleSetID int64) ([]operations.GitHubJobObservation, error) {
+	return s.inner.QueuedGitHubJobs(ctx, scaleSetID)
 }
