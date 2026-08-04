@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -417,5 +418,35 @@ func TestDiskRunnerExecutesTheRealBinary(t *testing.T) {
 	}
 	if _, err := (DiskRunner{}).Run(context.Background(), "--tart-runner-fleet-not-a-flag"); err == nil {
 		t.Fatal("the default binary accepted an invalid argument")
+	}
+}
+
+// TestDiskRunnerForcesTheCLocale is a machine-specific failure caught by
+// reasoning rather than by a test host: parseFreeDiskGB finds the free-space
+// column by its header name, and `df` translates that header, so on an operator
+// whose locale is not English the disk would read as unreadable — which fails
+// the whole host observation closed and leaves the daemon permanently unready.
+// The inherited environment must not be able to win.
+func TestDiskRunnerForcesTheCLocale(t *testing.T) {
+	t.Setenv("LC_ALL", "fr_FR.UTF-8")
+	t.Setenv("LANG", "fr_FR.UTF-8")
+	t.Setenv("LANGUAGE", "fr")
+	output, err := DiskRunner{Binary: "/usr/bin/env"}.Run(context.Background())
+	if err != nil {
+		t.Fatalf("env: %v", err)
+	}
+	locale := map[string]string{}
+	for _, line := range strings.Split(string(output), "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if found {
+			locale[name] = value
+		}
+	}
+	// exec.Cmd keeps the last occurrence of a duplicated key, so the inherited
+	// French values must have been superseded rather than merely accompanied.
+	for name, want := range map[string]string{"LC_ALL": "C", "LANG": "C", "LANGUAGE": ""} {
+		if locale[name] != want {
+			t.Errorf("%s=%q, want %q", name, locale[name], want)
+		}
 	}
 }

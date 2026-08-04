@@ -70,7 +70,19 @@ func (r DiskRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	// #nosec G204 -- the binary is fixed configuration and the arguments are an
 	// argument vector, never shell text.
-	return exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, binary, args...)
+	// parseFreeDiskGB locates the free-space column by its header name, and `df`
+	// translates that header. A node whose operator's locale is not English would
+	// otherwise report an unreadable disk, which fails the whole host observation
+	// closed and leaves the daemon permanently unready — a machine-specific
+	// failure that no amount of testing on an English host would ever surface.
+	//
+	// All three variables are needed and all three are appended, because
+	// exec.Cmd keeps the last occurrence of a duplicated key: LC_ALL outranks
+	// LANG in POSIX, and GNU gettext's LANGUAGE outranks both, so clearing it is
+	// what actually stops the translation.
+	command.Env = append(os.Environ(), "LANG=C", "LC_ALL=C", "LANGUAGE=")
+	return command.CombinedOutput()
 }
 
 // Probe reads one Linux machine. The zero value reads the real `/proc` and the
