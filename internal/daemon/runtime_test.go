@@ -487,9 +487,12 @@ func writeMultiScopeConfig(t *testing.T) string {
 	return path
 }
 
+// testDependencies wires a node that has an execution technology, because that
+// is what every mode above observe requires and what these tests are about. The
+// platform a node with no backend gets is covered in platform_test.go.
 func testDependencies(t *testing.T) dependencies {
 	t.Helper()
-	d := defaultDependencies()
+	d := newDependencies("darwin")
 	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory { return runtimeInventory{} }
 	d.listen = func(_, _ string) (net.Listener, error) { return newFakeListener(), nil }
 	d.adminListen = func(string) (net.Listener, error) { return newFakeListener(), nil }
@@ -1046,7 +1049,7 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	cfg := config.Default()
 	cfg.Guards = config.Guards{MinFreeDiskGiB: 70, MinAvailableMemoryMiB: 1536, MaxSwapUsedMiB: 3072, MaxLoadAverage: 8.5, MinCPUIdlePercent: 7.5}
-	production, ok := defaultDependencies().inventory(nil, cfg, nil).(app.ProductionInventory)
+	production, ok := newDependencies("darwin").inventory(nil, cfg, nil).(app.ProductionInventory)
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
@@ -1059,7 +1062,7 @@ func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 func TestProductionInventoryWiresPressureMemoryAccounting(t *testing.T) {
 	cfg := config.Default()
 	cfg.Guards.PressureMemoryAccounting = true
-	production, ok := defaultDependencies().inventory(nil, cfg, nil).(app.ProductionInventory)
+	production, ok := newDependencies("darwin").inventory(nil, cfg, nil).(app.ProductionInventory)
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
@@ -1072,7 +1075,7 @@ func TestProductionInventoryWiresPressureMemoryAccounting(t *testing.T) {
 	}
 
 	cfg.Guards.PressureMemoryAccounting = false
-	legacy := defaultDependencies().inventory(nil, cfg, nil).(app.ProductionInventory).Host.(*macos.Probe)
+	legacy := newDependencies("darwin").inventory(nil, cfg, nil).(app.ProductionInventory).Host.(*macos.Probe)
 	if legacy.PressureAccounting {
 		t.Fatal("legacy configuration enabled pressure accounting")
 	}
@@ -1082,7 +1085,7 @@ func TestProductionVMControlWiresMacOSPerformanceOptions(t *testing.T) {
 	cfg := config.Default()
 	cfg.MacOS.RootDiskOptions = "sync=none"
 	cfg.MacOS.SharedDirectoryPath = "/private/tmp/ci-shared"
-	control, ok := defaultDependencies().newVM(nil, cfg, nil).(*tart.Adapter)
+	control, ok := newDependencies("darwin").newVM(nil, cfg, nil).(*tart.Adapter)
 	if !ok {
 		t.Fatal("production VM adapter type changed")
 	}
