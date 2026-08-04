@@ -100,6 +100,20 @@ Bring the node up with **no `github.scopes` entries**. A node with no scopes
 takes no demand, which is what makes an observe-mode bring-up risk-free: nothing
 in GitHub can change because of it.
 
+**Restate `hostBudget` for this machine, or remove it.** The checked-in example
+declares the live Mac mini's envelope — ten cores and 23552 MiB — and a budget
+is a claim about one specific machine. When the machine cannot honour it the
+host observation fails closed, every tick's plan is blocked, and the daemon
+never becomes ready; it reports the reason in `fleet status`, naming both
+figures. That is the correct answer to an operator claiming capacity this node
+does not have, and it is the first thing to check if step 6 does not go green.
+
+```sh
+# state this node's own envelope ...
+"$RELEASE_DIR/fleet" config validate "$STATE_DIR/fleet.json"   # after editing hostBudget
+# ... or omit the key entirely, which imposes no bound.
+```
+
 There is no Keychain on Linux, so the GitHub App private key is always a file:
 set `github.app.privateKeyFile` to a `0600`, non-symlink, service-account-owned
 path, and leave `keychainService` and `keychainAccount` unset. The daemon refuses
@@ -162,6 +176,12 @@ installed version in `observe` mode, the `scheduler` observation is `fresh`, and
 `hostPressure` carries plausible memory, disk, swap, load, and idle CPU read
 from `/proc`. A stale or unavailable observation on a machine that is plainly
 running means the probe could not read the host; do not proceed.
+
+`hostPressure.admissionAllowed` may be `false` — a node with less free disk than
+`guards.minFreeDiskGiB`, for instance, correctly refuses to admit work. That is
+a measurement, not a fault, and it does not stop the node reaching the steady
+state. An unavailable *observation* does. The `scheduler` observation's `detail`
+names which one and why.
 
 The repository ships the same check as one command, which is what CI runs on
 every commit:

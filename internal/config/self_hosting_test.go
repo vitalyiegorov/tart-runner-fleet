@@ -59,6 +59,56 @@ func TestExampleConfigCanBuildItsSuccessor(t *testing.T) {
 	}
 }
 
+// TestExampleConfigIsPortableOnlyOnceItsHostBudgetIsRemoved pins the reason the
+// observe smoke test cannot use `config/fleet.example.json` verbatim.
+//
+// `hostBudget` is a claim about ONE machine — the example states the live Mac
+// mini's ten cores and 23552 MiB — and `app.budgetExceedsHost` fails the host
+// observation closed when the machine cannot honour it (issue #136). An
+// unavailable host observation blocks every tick's plan, so the daemon never
+// records a successful tick and never becomes ready. That is exactly right for a
+// node whose operator claims capacity it does not have, and exactly wrong for a
+// two-core CI guest booting the shipped example: it cost issue #138 a red gate.
+//
+// The two halves are asserted together so they cannot drift. If the example
+// stops declaring a budget the smoke script's removal becomes a silent no-op and
+// its comment becomes a lie; if the script stops removing it, CI breaks again on
+// any machine smaller than node A.
+func TestExampleConfigIsPortableOnlyOnceItsHostBudgetIsRemoved(t *testing.T) {
+	file, err := os.Open("../../config/fleet.example.json") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	cfg, err := Decode(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HostBudget.CPU <= 0 || cfg.HostBudget.MemoryMiB <= 0 {
+		t.Fatalf("the example declares node A's envelope explicitly; hostBudget = %+v", cfg.HostBudget)
+	}
+
+	smoke, err := os.ReadFile("../../scripts/observe-smoke.sh") // #nosec G304 -- fixed repository fixture.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"config/fleet.example.json",
+		`config.pop("hostBudget", None)`,
+	} {
+		if !strings.Contains(string(smoke), required) {
+			t.Errorf("the observe smoke test must derive its configuration from the example: missing %q", required)
+		}
+	}
+	// A timeout that prints nothing is a gate nobody can act on. The smoke test
+	// must surface the daemon's own account of why it never became ready.
+	for _, required := range []string{"status --output json", "doctor --output json", "readyz"} {
+		if !strings.Contains(string(smoke), required) {
+			t.Errorf("the observe smoke test must be self-diagnosing on timeout: missing %q", required)
+		}
+	}
+}
+
 func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
