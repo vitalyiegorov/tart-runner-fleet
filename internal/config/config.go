@@ -260,6 +260,15 @@ type ScaleSet struct {
 	ID          int      `json:"id"`
 	MaxCapacity int      `json:"maxCapacity"`
 	Labels      []string `json:"labels,omitempty"`
+	// SharedLabels declares that another node owns a scale set advertising these
+	// same labels in this same scope. ADR 0034 as amended permits that topology
+	// because GitHub places the work itself, but the REST inventory lane cannot
+	// see the peer: it attributes repository-wide queued jobs by label match, so
+	// without this declaration both nodes would derive demand for one job
+	// (issue #153). It cannot be inferred — a node is not aware of another node
+	// by construction — so it is declared, exactly like the inventory flag it
+	// requires.
+	SharedLabels bool `json:"sharedLabels,omitempty"`
 }
 
 type Config struct {
@@ -1106,6 +1115,15 @@ func validateScopeScaleSets(scope GitHubScope, labelSets map[string]LabelSet, ca
 		if !canonicalJobInventory && scaleSet.MaxCapacity <= runtimeCapacity {
 			return fmt.Errorf("scale set %q in GitHub scope %q requires queue lookahead until canonicalJobInventory is enabled: maxCapacity=%d, runtime capacity=%d",
 				scaleSet.Name, scope.Name, scaleSet.MaxCapacity, runtimeCapacity)
+		}
+		// ADR 0034's shared-label amendment states this as a precondition, not a
+		// recommendation: GitHub splits a shared queue by each set's advertised
+		// capacity, so two nodes both inflating that number for lookahead would
+		// have GitHub split by fiction. Truthful capacity is what makes the split
+		// mean anything, and it arrives with the inventory flag.
+		if scaleSet.SharedLabels && !canonicalJobInventory {
+			return fmt.Errorf("scale set %q in GitHub scope %q declares sharedLabels, which requires canonicalJobInventory and truthful capacity",
+				scaleSet.Name, scope.Name)
 		}
 		if _, duplicate := seenProfiles[scaleSet.Profile]; duplicate {
 			return fmt.Errorf("duplicate scale set profile %q in GitHub scope %q", scaleSet.Profile, scope.Name)

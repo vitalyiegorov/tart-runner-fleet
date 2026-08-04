@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,11 @@ type Binding struct {
 	ScaleSetLabels []string
 	RequiredLabels []string
 	Profile        domain.Profile
+	// SharedLabels marks a scale set another node also advertises in this scope
+	// (ADR 0034 as amended). It is the one thing the REST inventory lane cannot
+	// observe for itself, and it is what bounds this binding's claim on the
+	// scope's queue to the share GitHub gave it (issue #153).
+	SharedLabels bool
 }
 
 func (b Binding) valid() bool {
@@ -221,6 +227,10 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 		return false, operations.ErrInvalid
 	}
 	observations := make(map[int64][]operations.GitHubJobObservation, len(bindings))
+	// shared collects the scale sets this snapshot proved are not alone on their
+	// labels, which is the case a declaration cannot cover: two bindings of one
+	// node, and the two-node topology as the simulator expresses it.
+	shared := make(map[int64]bool, len(bindings))
 	for _, binding := range bindings {
 		if !binding.valid() {
 			return false, operations.ErrInvalid
@@ -228,29 +238,39 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 		observations[binding.durableKey()] = nil
 	}
 	for _, job := range snapshot.QueuedJobs() {
-		var matched *Binding
-		for i := range bindings {
-			binding := &bindings[i]
-			if !binding.accepts(job.Repository.Owner+"/"+job.Repository.Name) || !binding.matchesRESTLabels(job.Labels) {
-				continue
-			}
-			if matched != nil {
-				return false, fmt.Errorf("GitHub job %d matches scale sets %d and %d: %w",
-					job.ID, matched.ScaleSetID, binding.ScaleSetID, operations.ErrConflict)
-			}
-			matched = binding
+		matched, err := matchingBindings(bindings, job)
+		if err != nil {
+			return false, err
 		}
-		if matched == nil {
+		if len(matched) == 0 {
 			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") {
 				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
 			}
 			continue
 		}
-		key := matched.durableKey()
-		observations[key] = append(observations[key], operations.GitHubJobObservation{WorkflowJobID: job.ID,
-			Owner: job.Repository.Owner, Repository: job.Repository.Name, WorkflowRunID: job.RunID,
-			RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
-			Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
+		for _, binding := range matched {
+			key := binding.durableKey()
+			if len(matched) > 1 {
+				// A second claimant is the shared label observed rather than
+				// declared, and it binds every set that matched.
+				shared[key] = true
+			}
+			observations[key] = append(observations[key], operations.GitHubJobObservation{WorkflowJobID: job.ID,
+				Owner: job.Repository.Owner, Repository: job.Repository.Name, WorkflowRunID: job.RunID,
+				RunAttempt: job.RunAttempt, DisplayName: job.Name, Labels: append([]string(nil), job.Labels...),
+				Status: job.Status, CreatedAt: job.CreatedAt, QueueTimeExact: job.QueueTimeExact})
+		}
+	}
+	for _, binding := range bindings {
+		key := binding.durableKey()
+		if !binding.SharedLabels && !shared[key] {
+			continue
+		}
+		bounded, err := c.boundToOwnShare(ctx, binding, observations[key])
+		if err != nil {
+			return false, err
+		}
+		observations[key] = bounded
 	}
 	changed, err := store.ReconcileGitHubJobSnapshot(ctx, snapshot.ObservedAt(), observations)
 	if err != nil {
@@ -258,6 +278,151 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 	}
 	expired, err := c.expireGhostDemand(ctx, bindings, snapshot.ObservedAt())
 	return changed || expired, err
+}
+
+// matchingBindings returns every scale set a repository-wide queued job may
+// belong to.
+//
+// ADR 0034 as amended permits two nodes to own two scale sets in ONE scope
+// carrying identical labels, because GitHub itself places the work between them
+// by each set's last-advertised capacity. Under that topology a label match is
+// no longer a routing decision, so failing the whole scope observation closed on
+// a second match — which is every job in a federated scope — would make the REST
+// lane unusable exactly where it is a precondition.
+//
+// Interchangeability is what makes the second match benign, and it is narrow:
+// the bindings must serve the same scope with the same profile, so the job runs
+// on the same shape of guest whichever set receives it. A job matching two
+// PROFILES names two different VM shapes, and a job matching two SCOPES names a
+// repository routed twice; neither is federation and neither is disambiguated by
+// any capacity number, so both remain the ADR 0015 conflict.
+func matchingBindings(bindings []Binding, job githubscaleset.WorkflowJob) ([]*Binding, error) {
+	var matched []*Binding
+	repository := job.Repository.Owner + "/" + job.Repository.Name
+	for i := range bindings {
+		binding := &bindings[i]
+		if !binding.accepts(repository) || !binding.matchesRESTLabels(job.Labels) {
+			continue
+		}
+		if len(matched) > 0 && !interchangeable(*matched[0], *binding) {
+			return nil, fmt.Errorf("GitHub job %d matches scale sets %d and %d: %w",
+				job.ID, matched[0].ScaleSetID, binding.ScaleSetID, operations.ErrConflict)
+		}
+		matched = append(matched, binding)
+	}
+	return matched, nil
+}
+
+// interchangeable reports whether two bindings are two federated peers serving
+// one queue rather than two distinct routes that happen to overlap.
+func interchangeable(left, right Binding) bool {
+	return strings.EqualFold(left.Scope, right.Scope) && left.Profile.ID == right.Profile.ID
+}
+
+// boundToOwnShare caps what one binding may claim out of a REST scope
+// observation at that scale set's OWN advertised share (issue #153).
+//
+// The REST lane attributes repository-wide queued jobs by label match, which
+// under a shared label hands every node the whole scope backlog: both would
+// derive demand for one job and each would spawn a guest for it, while GitHub
+// had already given it to exactly one of them. The bound is already ingested —
+// every broker message carries this scale set's own statistics — and it is the
+// same expression the broker lane is bounded by in QueuedDemands: work offered
+// to this set, plus work assigned to it that has not started. In the shape the
+// #144 spike measured, where GitHub assigns rather than offers and Available is
+// zero, that number IS statistics.totalAssignedJobs.
+//
+// Two rules keep the bound from over-correcting.
+//
+// An unreadable, unobserved, or stale statistic does not bound anything. ADR
+// 0026 expires durable demand from what a COMPLETE snapshot did not contain, so
+// silently shrinking a snapshot during a statistics outage would retire work
+// that is genuinely queued. Absence of a bound is not a bound of zero.
+//
+// And a job this binding's own durable demand already names is never
+// surrendered. The broker telling this node about a job is stronger evidence of
+// ownership than any counter, and it is also what keeps a lagging snapshot or a
+// delayed statistics message from truncating a node's own backlog.
+func (c DemandCoordinator) boundToOwnShare(ctx context.Context, binding Binding,
+	jobs []operations.GitHubJobObservation,
+) ([]operations.GitHubJobObservation, error) {
+	if len(jobs) == 0 {
+		return jobs, nil
+	}
+	statisticsStore, ok := c.Store.(DemandStatisticsStore)
+	if !ok {
+		return jobs, nil
+	}
+	statistics, err := statisticsStore.DemandStatistics(ctx, binding.durableKey())
+	if errors.Is(err, operations.ErrNotFound) {
+		return jobs, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	now := c.now()
+	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
+		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
+		return jobs, nil
+	}
+	share := max(statistics.Available+statistics.Assigned-statistics.Running, 0)
+	if len(jobs) <= share {
+		return jobs, nil
+	}
+	vouched, err := c.vouchedJobs(ctx, binding)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]operations.GitHubJobObservation, 0, len(jobs))
+	contested := make([]operations.GitHubJobObservation, 0, len(jobs))
+	for _, job := range jobs {
+		if job.CreatedAt.After(statistics.ObservedAt) ||
+			vouched[restCorrelationKey(job.Owner, job.Repository, job.WorkflowRunID, job.DisplayName)] {
+			kept = append(kept, job)
+			continue
+		}
+		contested = append(contested, job)
+	}
+	// Oldest first, then by stable numeric identity: the scope's queue is served
+	// in age order everywhere else, and a truncation must name one exact subset
+	// however the REST page happened to be ordered.
+	sort.Slice(contested, func(i, j int) bool {
+		if !contested[i].CreatedAt.Equal(contested[j].CreatedAt) {
+			return contested[i].CreatedAt.Before(contested[j].CreatedAt)
+		}
+		return contested[i].WorkflowJobID < contested[j].WorkflowJobID
+	})
+	for _, job := range contested {
+		if len(kept) >= share {
+			break
+		}
+		kept = append(kept, job)
+	}
+	return kept, nil
+}
+
+// vouchedJobs is the set of queued jobs this binding's own durable demand
+// names. The broker is the mutation authority (ADR 0015), so its word on which
+// jobs belong to this scale set outranks any count derived from statistics.
+func (c DemandCoordinator) vouchedJobs(ctx context.Context, binding Binding) (map[string]bool, error) {
+	records, err := c.Store.ActiveDemands(ctx, binding.durableKey())
+	if err != nil {
+		return nil, err
+	}
+	vouched := make(map[string]bool, len(records))
+	for _, record := range records {
+		vouched[restCorrelationKey(record.Owner, record.Repository, record.WorkflowRunID, record.DisplayName)] = true
+	}
+	return vouched, nil
+}
+
+// restCorrelationKey is the identity a REST observation and a broker demand
+// share before either has learned the other's numeric job ID. It is deliberately
+// the same tuple the durable logical key is built from, minus the fields REST
+// does not carry.
+func restCorrelationKey(owner, repository string, runID int64, displayName string) string {
+	return strings.ToLower(owner) + "/" + strings.ToLower(repository) +
+		"\x00" + strconv.FormatInt(runID, 10) + "\x00" + displayName
 }
 
 // expireGhostDemand retires demand this snapshot has now proven absent for

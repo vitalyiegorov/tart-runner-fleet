@@ -76,7 +76,7 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 				}
 				seenKeys[key] = identity
 				bindings = append(bindings, Binding{StoreKey: key, ScaleSetID: int64(scaleSet.ID), Scope: scope.Name,
-					Targets: append([]string(nil), scope.Targets...), Profile: profile,
+					Targets: append([]string(nil), scope.Targets...), Profile: profile, SharedLabels: scaleSet.SharedLabels,
 					ScaleSetLabels: effectiveScaleSetLabels(scaleSet, labelSets[scaleSet.Profile])})
 			}
 		}
@@ -88,7 +88,7 @@ func BuildBindings(cfg config.Config, schedulerConfig scheduler.Config) ([]Bindi
 		if err != nil {
 			return nil, err
 		}
-		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID),
+		bindings = append(bindings, Binding{StoreKey: int64(scaleSet.ID), ScaleSetID: int64(scaleSet.ID), SharedLabels: scaleSet.SharedLabels,
 			ScaleSetLabels: effectiveScaleSetLabels(scaleSet, labelSets[scaleSet.Profile]), Profile: profile})
 	}
 	return bindings, nil
