@@ -15,7 +15,7 @@ import (
 )
 
 type DemandStore interface {
-	ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (bool, error)
+	ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (operations.DemandBatchResult, error)
 	ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error)
 }
 
@@ -131,6 +131,12 @@ type DemandCoordinator struct {
 	StatisticsMaxAge time.Duration
 	GhostAbsence     time.Duration
 	StrictJobRouting bool
+	// OnSequenceReset reports that a broker restarted its message-id sequence and
+	// the fleet adopted a new inbox generation for this binding. The store heals
+	// itself, but a rare durable event that repairs a three-day outage class must
+	// never be silent: this is the seam that names the binding it happened to
+	// (issue #165). Optional; nil means the daemon wired no reporter.
+	OnSequenceReset func(Binding, operations.DemandSequenceReset)
 }
 
 const defaultStatisticsMaxAge = 2 * time.Minute
@@ -522,8 +528,11 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 			}
 			events = append(events, convertEvent(event))
 		}
-		applied, err := c.Store.ApplyDemandBatch(ctx, binding.durableKey(), int64(demand.MessageID), events)
-		changed = changed || applied
+		batch, err := c.Store.ApplyDemandBatch(ctx, binding.durableKey(), int64(demand.MessageID), events)
+		changed = changed || batch.Applied
+		if batch.Reset.Detected && c.OnSequenceReset != nil {
+			c.OnSequenceReset(binding, batch.Reset)
+		}
 		if err != nil {
 			return err
 		}

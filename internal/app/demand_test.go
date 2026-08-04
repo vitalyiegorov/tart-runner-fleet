@@ -19,6 +19,7 @@ type fakeDemandStore struct {
 	scaleSetID  int64
 	cursor      int64
 	applied     bool
+	reset       operations.DemandSequenceReset
 	err         error
 	projected   []operations.DemandEvent
 	projectErr  error
@@ -29,7 +30,7 @@ type fakeDemandStore struct {
 
 type noStatisticsStore struct{ inner *fakeDemandStore }
 
-func (s noStatisticsStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+func (s noStatisticsStore) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (operations.DemandBatchResult, error) {
 	return s.inner.ApplyDemandBatch(ctx, scaleSetID, messageID, events)
 }
 func (s noStatisticsStore) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operations.DemandRecord, error) {
@@ -225,14 +226,14 @@ func (f *fakeDemandStore) ProjectDemandEvent(_ context.Context, _ int64, event o
 	return f.projectErr
 }
 
-func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+func (f *fakeDemandStore) ApplyDemandBatch(_ context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (operations.DemandBatchResult, error) {
 	if f.err != nil {
-		return false, f.err
+		return operations.DemandBatchResult{}, f.err
 	}
 	f.cursor = messageID
 	f.scaleSetID = scaleSetID
 	f.batches = append([]operations.DemandEvent(nil), events...)
-	return f.applied, nil
+	return operations.DemandBatchResult{Applied: f.applied, Reset: f.reset}, nil
 }
 func (f *fakeDemandStore) ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error) {
 	return append([]operations.DemandRecord(nil), f.records...), f.err

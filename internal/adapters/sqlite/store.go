@@ -680,6 +680,57 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 12: %w", err)
 		}
 	}
+	if version < 13 {
+		now := time.Now().UTC().UnixNano()
+		// Broker message-id sequences are not unique for the life of a database
+		// (issue #165). GitHub restarted the sequence for scale set
+		// 8077185082566234948 on 2026-08-01T18:32Z, every redelivered id collided
+		// with a July row, and the binding refused every message for three days.
+		// The idempotency key gains the generation the row was ingested under, so
+		// a retired sequence can never collide with the live one again. Existing
+		// rows are generation zero: they were all ingested under one sequence.
+		var generation int
+		if err := s.txRow(ctx, tx, "migrate.v13.inbox-generation",
+			`SELECT COUNT(*) FROM pragma_table_info('scale_set_inbox') WHERE name='generation'`).Scan(&generation); err != nil {
+			return fmt.Errorf("inspect migration 13 inbox generation: %w", err)
+		}
+		if generation == 0 {
+			// The primary key itself changes, which SQLite expresses as a rebuild.
+			for _, step := range []struct{ point, query string }{
+				{"create", `CREATE TABLE scale_set_inbox_v13 (
+					scale_set_id INTEGER NOT NULL,
+					generation INTEGER NOT NULL DEFAULT 0,
+					message_id INTEGER NOT NULL,
+					digest BLOB NOT NULL,
+					events BLOB NOT NULL,
+					created_at INTEGER NOT NULL,
+					PRIMARY KEY(scale_set_id,generation,message_id)
+				)`},
+				{"copy", `INSERT INTO scale_set_inbox_v13(scale_set_id,generation,message_id,digest,events,created_at)
+					SELECT scale_set_id,0,message_id,digest,events,created_at FROM scale_set_inbox`},
+				{"drop", `DROP TABLE scale_set_inbox`},
+				{"rename", `ALTER TABLE scale_set_inbox_v13 RENAME TO scale_set_inbox`},
+			} {
+				if _, err := s.txExec(ctx, tx, "migrate.v13."+step.point, step.query); err != nil {
+					return fmt.Errorf("migration 13 inbox %s: %w", step.point, err)
+				}
+			}
+		}
+		var cursorGeneration int
+		if err := s.txRow(ctx, tx, "migrate.v13.cursor-generation",
+			`SELECT COUNT(*) FROM pragma_table_info('scale_set_cursors') WHERE name='generation'`).Scan(&cursorGeneration); err != nil {
+			return fmt.Errorf("inspect migration 13 cursor generation: %w", err)
+		}
+		if cursorGeneration == 0 {
+			if _, err := s.txExec(ctx, tx, "migrate.v13.cursor",
+				`ALTER TABLE scale_set_cursors ADD COLUMN generation INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migration 13 cursor generation: %w", err)
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v13.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(13, ?)`, now); err != nil {
+			return fmt.Errorf("record migration 13: %w", err)
+		}
+	}
 	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
 	// creates and first seeds the table, so it always exists by this point; an
 	// operator deleting the row (incident 2026-07-22, which wedged every tick on

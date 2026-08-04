@@ -313,6 +313,38 @@ type DemandEvent struct {
 	Result          string          `json:"result,omitempty"`
 }
 
+// A broker message id identifies a message only within the sequence that issued
+// it. GitHub restarts that sequence -- it did so for scale set
+// 8077185082566234948 on 2026-08-01T18:32Z -- so the fleet stamps every inbox
+// row with the generation it was ingested under, and the idempotency key is
+// (scale_set_id, generation, message_id). A generation is adopted only on
+// unambiguous evidence: the ledger already holds this id, in this generation,
+// under different content. A redelivery of the same message is byte-identical
+// by construction, so that divergence cannot be one -- and it is the exact
+// moment the old key would have started refusing a job forever.
+//
+// DemandSequenceReset is what such a message proved. The zero value means the
+// message belonged to the sequence already in use, which is the normal case.
+type DemandSequenceReset struct {
+	// Detected reports whether this message adopted a new inbox generation.
+	Detected bool
+	// Generation is the generation adopted.
+	Generation int64
+	// RetiredMessageID is the high-water mark the retired sequence left behind,
+	// which is what the long poll was still asking the broker to continue from.
+	RetiredMessageID int64
+	// AdoptedMessageID is the id of the message that proved the restart.
+	AdoptedMessageID int64
+}
+
+// DemandBatchResult is what one broker message did to the durable inbox.
+// Applied is false for a recognized redelivery, which is the normal and safe
+// outcome of at-least-once delivery.
+type DemandBatchResult struct {
+	Applied bool
+	Reset   DemandSequenceReset
+}
+
 func (e DemandEvent) Valid() bool {
 	if e.RunnerRequestID <= 0 {
 		return false

@@ -508,9 +508,9 @@ type simJob struct {
 	// advertisedAt is the tick at which the broker actually delivered this job's
 	// JobAvailable to the fleet. Property (j) is measured from it.
 	advertisedAt int
-	status     jobStatus
-	runner     string
-	remaining  int
+	status       jobStatus
+	runner       string
+	remaining    int
 	// announced records which broker events have already been produced, so a
 	// redelivery is a duplicate rather than a new fact.
 	announced map[operations.DemandEventKind]bool

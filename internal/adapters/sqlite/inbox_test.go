@@ -313,19 +313,23 @@ func TestDemandInboxAtomicDuplicateConflictRestartAndSanitization(t *testing.T) 
 		t.Fatal(err)
 	}
 	events := []operations.DemandEvent{demandEvent(operations.DemandJobAvailable, 10), demandEvent(operations.DemandJobAssigned, 11)}
-	if applied, err := store.ApplyDemandBatch(ctx, 9, 42, events); err != nil || !applied {
-		t.Fatalf("first batch: %v %v", applied, err)
+	if result, err := store.ApplyDemandBatch(ctx, 9, 42, events); err != nil || !result.Applied {
+		t.Fatalf("first batch: %#v %v", result, err)
 	}
-	if applied, err := store.ApplyDemandBatch(ctx, 9, 42, events); err != nil || applied {
-		t.Fatalf("duplicate batch: %v %v", applied, err)
+	if result, err := store.ApplyDemandBatch(ctx, 9, 42, events); err != nil || result.Applied {
+		t.Fatalf("duplicate batch: %#v %v", result, err)
 	}
+	// Divergent content under one message id is no longer refused forever: it is
+	// evidence the sequence that issued the id has been retired, and a delivered
+	// job must never be dropped (issue #165). The retired row stays readable
+	// under its own generation.
 	conflict := append([]operations.DemandEvent(nil), events...)
 	conflict[0].Repository = "different"
-	if applied, err := store.ApplyDemandBatch(ctx, 9, 42, conflict); applied || !errors.Is(err, operations.ErrConflict) {
-		t.Fatalf("conflicting redelivery: %v %v", applied, err)
+	if result, err := store.ApplyDemandBatch(ctx, 9, 42, conflict); err != nil || !result.Applied || !result.Reset.Detected {
+		t.Fatalf("divergent redelivery: %#v %v", result, err)
 	}
 	var encoded string
-	if err := store.db.QueryRow(`SELECT events FROM scale_set_inbox WHERE scale_set_id=9 AND message_id=42`).Scan(&encoded); err != nil {
+	if err := store.db.QueryRow(`SELECT events FROM scale_set_inbox WHERE scale_set_id=9 AND generation=0 AND message_id=42`).Scan(&encoded); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.ToLower(encoded), "acquirejob") || strings.Contains(strings.ToLower(encoded), "jit") || strings.Contains(encoded, "secret") {
@@ -403,8 +407,8 @@ func TestDemandInboxRejectsSyntheticIdentityCollision(t *testing.T) {
 	}
 	second := first
 	second.JobID = "different-job-uuid"
-	if applied, err := store.ApplyDemandBatch(context.Background(), 1, 2, []operations.DemandEvent{second}); applied || !errors.Is(err, operations.ErrConflict) {
-		t.Fatalf("collision = applied %v err %v", applied, err)
+	if result, err := store.ApplyDemandBatch(context.Background(), 1, 2, []operations.DemandEvent{second}); result.Applied || !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("collision = %#v err %v", result, err)
 	}
 }
 
@@ -442,7 +446,8 @@ func TestDemandInboxValidationAndEmptySnapshot(t *testing.T) {
 }
 
 func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
-	for _, point := range []string{"inbox.begin", "inbox.load", "inbox.demand.load", "inbox.group", "inbox.group.load", "inbox.project", "inbox.record", "inbox.cursor", "inbox.commit"} {
+	for _, point := range []string{"inbox.begin", "inbox.cursor.generation", "inbox.load", "inbox.demand.load", "inbox.group",
+		"inbox.group.load", "inbox.project", "inbox.record", "inbox.cursor", "inbox.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)
 			store.injectFault = func(candidate string) error {
@@ -451,8 +456,8 @@ func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
 				}
 				return nil
 			}
-			if applied, err := store.ApplyDemandBatch(context.Background(), 1, 1, []operations.DemandEvent{demandEvent(operations.DemandJobAvailable, 1)}); applied || err == nil {
-				t.Fatalf("fault %s was ignored: %v %v", point, applied, err)
+			if result, err := store.ApplyDemandBatch(context.Background(), 1, 1, []operations.DemandEvent{demandEvent(operations.DemandJobAvailable, 1)}); result.Applied || err == nil {
+				t.Fatalf("fault %s was ignored: %#v %v", point, result, err)
 			}
 			store.injectFault = nil
 			var count int

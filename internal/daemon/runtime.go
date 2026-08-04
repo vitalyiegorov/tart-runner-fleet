@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -487,8 +488,10 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		_ = adminServer.Shutdown(shutdown)
 	}()
 
+	reporter := newFailureReporter(os.Stderr, d.now)
+	reporter.counter = health
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
-		StrictJobRouting: opts.Mode != reconcile.Canary}
+		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
@@ -547,7 +550,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				closers = append(closers, source)
 				ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
-					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey)})
+					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey), reporter: reporter})
 				for _, target := range bindingTargets(binding, cfg.Targets) {
 					key := lifecycle.SourceKey{Repo: target, Profile: binding.Profile.ID}
 					if _, duplicate := controls[key]; duplicate {
@@ -618,8 +621,6 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
-	reporter := newFailureReporter(os.Stderr, d.now)
-	reporter.counter = health
 	go func() {
 		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, Worker: worker,
 			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond,
@@ -1053,6 +1054,7 @@ type boundIngester struct {
 	source      app.MessageSource
 	health      *telemetry.Health
 	observation string
+	reporter    *failureReporter
 }
 
 type restQueueIngester struct {
@@ -1161,15 +1163,23 @@ func (b boundIngester) Ingest(ctx context.Context) error {
 
 func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 	changed, err := b.coordinator.IngestOnceResult(ctx, b.binding, b.source)
+	// The detail is closed vocabulary. It explains why one binding's ingestion
+	// failed without exposing a token, a JIT configuration, or an upstream
+	// response body.
+	detail := githubscaleset.IngestFailureDetail(err)
 	if b.health != nil && b.observation != "" {
 		freshness := telemetry.ObservationFresh
 		if err != nil {
 			freshness = telemetry.ObservationUnavailable
 		}
-		// The detail is closed vocabulary. It explains why one binding's
-		// ingestion failed without exposing a token, a JIT configuration, or an
-		// upstream response body.
-		_ = b.health.RecordObservationDetail(b.observation, freshness, githubscaleset.IngestFailureDetail(err))
+		_ = b.health.RecordObservationDetail(b.observation, freshness, detail)
+	}
+	// The aggregate loop failure names the component and nothing else, so for
+	// three days `component=ingest reason=message_poll_failed` was the whole
+	// signal that one named scale set had stopped hearing GitHub (issue #165).
+	// A binding failure now says which binding.
+	if err != nil && ctx.Err() == nil && b.reporter != nil {
+		b.reporter.reportBinding(b.binding, detail)
 	}
 	return changed, err
 }
@@ -1217,22 +1227,61 @@ func (r *failureReporter) report(component, reason string) {
 	if r.counter != nil {
 		r.counter.RecordComponentFailure(component, reason)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	now := r.now()
 	// Rate limiting keys on component and reason together. The reason vocabulary
 	// is closed, so cardinality stays bounded while a changed reason — the
 	// signal an operator needs — is never suppressed by an older one.
-	key := component + "\x00" + reason
-	if last, ok := r.last[key]; ok && now.Sub(last) < r.window {
+	if !r.admit(component + "\x00" + reason) {
 		return
 	}
-	r.last[key] = now
 	if reason == "" {
 		r.logger.Warn("component loop failure", "component", component)
 		return
 	}
 	r.logger.Warn("component loop failure", "component", component, "reason", reason)
+}
+
+// reportBinding names the scope, profile, and scale set behind one ingest
+// failure. It is rate limited per binding and reason, so a hot loop cannot drown
+// stderr while a CHANGED reason on any binding is always emitted, and it does
+// not count: the aggregate component counter already counts the same failure,
+// and counting it twice would make one incident read as two.
+func (r *failureReporter) reportBinding(binding app.Binding, reason string) {
+	if !githubscaleset.ValidFailureReason(reason) {
+		return
+	}
+	if !r.admit("binding\x00" + strconv.FormatInt(binding.StoreKey, 10) + "\x00" + reason) {
+		return
+	}
+	r.logger.Warn("binding ingest failure", "scope", binding.Scope, "profile", string(binding.Profile.ID),
+		"scaleSet", binding.ScaleSetID, "observation", fmt.Sprintf("github-%d", binding.StoreKey), "reason", reason)
+}
+
+// reportSequenceReset records that a broker restarted its message-id sequence
+// and the fleet adopted a new inbox generation. It is not a failure -- the fleet
+// recovered by itself, which is the whole point of the contract -- but it is
+// durable, rare, and the exact event that once needed three days and hand-written
+// SQL, so it is never silent. It is not rate limited: a reset per delivery would
+// mean the detection is oscillating, and an operator must see that.
+func (r *failureReporter) reportSequenceReset(binding app.Binding, reset operations.DemandSequenceReset) {
+	if !reset.Detected {
+		return
+	}
+	r.logger.Warn("broker message sequence restarted", "scope", binding.Scope, "profile", string(binding.Profile.ID),
+		"scaleSet", binding.ScaleSetID, "observation", fmt.Sprintf("github-%d", binding.StoreKey),
+		"generation", reset.Generation, "retiredMessageId", reset.RetiredMessageID,
+		"adoptedMessageId", reset.AdoptedMessageID)
+}
+
+// admit is the shared rate-limit gate: one line per key per window.
+func (r *failureReporter) admit(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	if last, ok := r.last[key]; ok && now.Sub(last) < r.window {
+		return false
+	}
+	r.last[key] = now
+	return true
 }
 
 type engineTicker struct {

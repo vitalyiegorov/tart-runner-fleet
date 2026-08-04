@@ -491,7 +491,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 	}
 	var version int
 	var journal string
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 12 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err != nil || journal != "wal" {
@@ -523,7 +523,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 12 {
+	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("upgrade version=%d err=%v", version, err)
 	}
 }
@@ -555,7 +555,7 @@ func TestMigrationNineOrdersDeadAcquireProvisionIntoCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 12 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	instance, err := store.Instance(ctx, "orphan")
@@ -644,7 +644,7 @@ func TestMigrationSevenRequeuesV071DeregisterDeadLetterExactlyOnce(t *testing.T)
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	assertDrainMigrationRequeuedOnce(t, store, "v071-drain", 5, 12)
+	assertDrainMigrationRequeuedOnce(t, store, "v071-drain", 5, 13)
 }
 
 func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing.T) {
@@ -660,7 +660,7 @@ func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	assertDrainMigrationRequeuedOnce(t, store, "replacement-job-drain", 12, 12)
+	assertDrainMigrationRequeuedOnce(t, store, "replacement-job-drain", 12, 13)
 }
 
 func seedOwnedDeadDrain(t *testing.T, store *Store, instanceID string, operationID string, ownership string, instanceVersion int, attempts int, now int64) {
