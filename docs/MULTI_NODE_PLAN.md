@@ -435,6 +435,9 @@ adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
       SDK/NDK (`ndk;27.x`) + emulator + `platform-tools` + Maestro, plus the
       `tart-runner-fleet-bootstrap` binary at
       `/usr/local/libexec/tart-runner-fleet-bootstrap`. Tag and pin by digest.
+      Start from [`LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md), which is the
+      same package set built and verified on arm64 — its "Adapting this for
+      node B" section lists what changes for amd64 and for containers.
       The helper must launch the runner and **detach without `systemd-run`**,
       which an ordinary container does not have; this is the one item of Phase 2
       that is image work rather than adapter work.
@@ -625,6 +628,13 @@ Migrate one repository per pull request, in that order, most-broken first.
       image, following [`BASE_IMAGE.md`](BASE_IMAGE.md). Do not transfer node
       A's 91 GB image: it carries an Android toolchain node C cannot use, and
       the copy would saturate node A's uplink for days while it serves jobs.
+- [ ] If the node's configuration also carries Linux profiles — the deployed
+      `fleet.json` does, which this plan does not anticipate — build its Linux
+      base locally too, following
+      [`LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md). The same
+      do-not-transfer argument applies and has already been proven the hard
+      way: four `rsync` attempts of an 8.6 GB `disk.img` over the home uplink
+      failed or truncated silently.
 - [ ] Install the same release as node A; `launchd` LaunchAgent, unchanged.
 - [ ] Render `config/nodes/rendered/mac-studio.json`:
       `hostBudget: {cpu: 4, memoryMb: 10240}`, `macosBurst.enabled: true` with
