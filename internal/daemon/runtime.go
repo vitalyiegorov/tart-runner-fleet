@@ -312,7 +312,8 @@ func defaultDependencies() dependencies {
 				Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
-				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope}
+				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
+				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB}}
 		},
 		listen:      net.Listen,
 		adminListen: adminapi.Listen,

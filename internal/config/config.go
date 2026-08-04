@@ -224,8 +224,20 @@ type ScaleSet struct {
 }
 
 type Config struct {
-	PollInterval    time.Duration
-	ReservationAge  time.Duration
+	PollInterval   time.Duration
+	ReservationAge time.Duration
+	// HostBudget is an explicit ceiling on the TOTAL admission envelope of this
+	// node -- every platform charged against it together -- for a machine the
+	// fleet shares with work it does not own. It is a static bound at idle, which
+	// is precisely what the host pressure guardrails cannot express: those read
+	// whole-host signals and narrow admission as a co-tenant gets busy, so they
+	// protect the co-tenant dynamically but leave the fleet free to take the
+	// entire machine whenever the co-tenant happens to be quiet.
+	//
+	// The zero value means unset and imposes no bound, which is today's behavior
+	// byte-for-byte: the envelope stays the physical machine (or the configured
+	// constant under the static model). Rollback is removing the setting.
+	HostBudget      Resources
 	Linux           Linux
 	MacOS           MacOS
 	GitHub          GitHub
@@ -236,26 +248,30 @@ type Config struct {
 }
 
 type wireConfig struct {
-	BaseVM                    string    `json:"baseVm"`
-	VMPrefix                  string    `json:"vmPrefix"`
-	PollSeconds               int       `json:"pollSeconds"`
-	MaxLinuxWhenMacOSIdle     int       `json:"maxLinuxWhenMacosIdle"`
-	MaxLinuxCPU               int       `json:"maxLinuxCpu"`
-	MaxLinuxMemoryMiB         int       `json:"maxLinuxMemoryMb"`
-	LinuxReservationAgeSecs   int       `json:"linuxReservationAgeSeconds"`
-	LinuxProfiles             []Profile `json:"linuxProfiles"`
-	LinuxNestedVirtualization bool      `json:"linuxNestedVirtualization,omitempty"`
-	MinFreeDiskGiB            int       `json:"minFreeDiskGb"`
-	MinAvailableMemoryMiB     int       `json:"minAvailableMemoryMb,omitempty"`
-	MaxSwapUsedMiB            int       `json:"maxSwapUsedMb,omitempty"`
-	MaxLoadAverage            float64   `json:"maxLoadAverage,omitempty"`
-	MinCPUIdlePercent         float64   `json:"minCpuIdlePercent,omitempty"`
-	PressureMemoryAccounting  bool      `json:"pressureMemoryAccounting,omitempty"`
-	ElasticHostEnvelope       bool      `json:"elasticHostEnvelope,omitempty"`
-	GitHubTimeoutSeconds      int       `json:"githubTimeoutSeconds"`
-	TartControlTimeoutSeconds int       `json:"tartControlTimeoutSeconds"`
-	BootTimeoutSeconds        int       `json:"bootTimeoutSeconds"`
-	AssignedTimeoutSeconds    int       `json:"assignedTimeoutSeconds,omitempty"`
+	BaseVM                string `json:"baseVm"`
+	VMPrefix              string `json:"vmPrefix"`
+	PollSeconds           int    `json:"pollSeconds"`
+	MaxLinuxWhenMacOSIdle int    `json:"maxLinuxWhenMacosIdle"`
+	MaxLinuxCPU           int    `json:"maxLinuxCpu"`
+	MaxLinuxMemoryMiB     int    `json:"maxLinuxMemoryMb"`
+	// HostBudget is a pointer so an unset budget is absent from the encoded file
+	// rather than present as a zero object: a release older than this setting
+	// decodes with DisallowUnknownFields and would refuse the key outright.
+	HostBudget                *Resources `json:"hostBudget,omitempty"`
+	LinuxReservationAgeSecs   int        `json:"linuxReservationAgeSeconds"`
+	LinuxProfiles             []Profile  `json:"linuxProfiles"`
+	LinuxNestedVirtualization bool       `json:"linuxNestedVirtualization,omitempty"`
+	MinFreeDiskGiB            int        `json:"minFreeDiskGb"`
+	MinAvailableMemoryMiB     int        `json:"minAvailableMemoryMb,omitempty"`
+	MaxSwapUsedMiB            int        `json:"maxSwapUsedMb,omitempty"`
+	MaxLoadAverage            float64    `json:"maxLoadAverage,omitempty"`
+	MinCPUIdlePercent         float64    `json:"minCpuIdlePercent,omitempty"`
+	PressureMemoryAccounting  bool       `json:"pressureMemoryAccounting,omitempty"`
+	ElasticHostEnvelope       bool       `json:"elasticHostEnvelope,omitempty"`
+	GitHubTimeoutSeconds      int        `json:"githubTimeoutSeconds"`
+	TartControlTimeoutSeconds int        `json:"tartControlTimeoutSeconds"`
+	BootTimeoutSeconds        int        `json:"bootTimeoutSeconds"`
+	AssignedTimeoutSeconds    int        `json:"assignedTimeoutSeconds,omitempty"`
 	// GitHubSessionMaxIngestFailures and GitHubSessionFailureWindowSeconds are
 	// omitted while they hold the shipped defaults so a rewritten file stays
 	// decodable by older strict releases.
@@ -291,6 +307,7 @@ func Decode(r io.Reader) (Config, error) {
 	cfg := Config{
 		PollInterval:   time.Duration(w.PollSeconds) * time.Second,
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
+		HostBudget:     hostBudget(w.HostBudget),
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
 			NestedVirtualization: w.LinuxNestedVirtualization},
@@ -369,6 +386,10 @@ func Encode(w io.Writer, cfg Config) error {
 	}
 	if cfg.SessionRecovery.FailureWindow != defaultSessionFailureWindow {
 		wire.GitHubSessionFailureWindowSeconds = sessionWindowSeconds
+	}
+	if cfg.HostBudget != (Resources{}) {
+		budget := cfg.HostBudget
+		wire.HostBudget = &budget
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
@@ -449,6 +470,17 @@ func normalizeGuards(w wireConfig) Guards {
 		guards.MinCPUIdlePercent = defaultMinCPUIdlePercent
 	}
 	return guards
+}
+
+// hostBudget reads the optional ceiling. An absent object is the zero vector,
+// which imposes no bound anywhere; a present one is carried through untouched so
+// Validate reports what the operator actually wrote rather than a normalized
+// version of it.
+func hostBudget(budget *Resources) Resources {
+	if budget == nil {
+		return Resources{}
+	}
+	return *budget
 }
 
 func normalizeSessionRecovery(w wireConfig) SessionRecovery {
@@ -622,10 +654,74 @@ func (c Config) Validate() error {
 			}
 		}
 	}
+	if err := c.validateHostBudget(); err != nil {
+		return err
+	}
 	// Label derivation runs last so a broken vector is reported as the vector
 	// error it is, not as the naming failure it also causes.
 	_, err := c.profileLabelSets()
 	return err
+}
+
+// validateHostBudget checks the two things about a ceiling that are knowable
+// from a file alone. Whether the budget fits the physical machine is not one of
+// them -- `fleet config validate` decodes a configuration and never probes a
+// host -- so that check lives at the runtime probe (see internal/app).
+//
+// The second rule is the ADR 0032 interaction. A profile is named by a runner
+// label, GitHub routes jobs to it through a scale set, and a job routed to a
+// shape whose vector cannot fit inside the budget can never be admitted on this
+// node: not throttled, not delayed behind other work, but queued forever. That
+// is a configuration error, so it is refused here rather than discovered as a
+// starving queue. Only profiles this node actually exposes are checked, because
+// a profile with no scale set anywhere receives no jobs -- which is what lets a
+// budgeted node keep the mandatory macosBurst.builder in its file while serving
+// maestro alone.
+func (c Config) validateHostBudget() error {
+	if c.HostBudget == (Resources{}) {
+		return nil
+	}
+	if c.HostBudget.CPU <= 0 || c.HostBudget.MemoryMiB <= 0 {
+		return fmt.Errorf("host budget must set a positive cpu and memoryMb, got %d cpu and %d MiB",
+			c.HostBudget.CPU, c.HostBudget.MemoryMiB)
+	}
+	exposed := c.exposedProfiles()
+	for _, raw := range c.budgetedProfiles() {
+		profile := raw.normalized()
+		if _, routed := exposed[profile.ID]; !routed {
+			continue
+		}
+		if profile.Resources.CPU > c.HostBudget.CPU || profile.Resources.MemoryMiB > c.HostBudget.MemoryMiB {
+			return fmt.Errorf("profile %s needs %d cpu and %d MiB, which can never fit the host budget of %d cpu and %d MiB",
+				profile.ID, profile.Resources.CPU, profile.Resources.MemoryMiB, c.HostBudget.CPU, c.HostBudget.MemoryMiB)
+		}
+	}
+	return nil
+}
+
+// budgetedProfiles is every profile this node can boot. macOS profiles count
+// only when macOS is enabled, matching what the scheduler is given.
+func (c Config) budgetedProfiles() []Profile {
+	profiles := append([]Profile(nil), c.Linux.Profiles...)
+	if c.MacOS.Enabled {
+		profiles = append(profiles, c.MacOS.Builder, c.MacOS.Maestro)
+	}
+	return profiles
+}
+
+// exposedProfiles is every profile GitHub can route a job to on this node: the
+// profile of each scale set, in the legacy flat list and in every scope.
+func (c Config) exposedProfiles() map[string]struct{} {
+	exposed := make(map[string]struct{}, len(c.GitHub.ScaleSets))
+	for _, scaleSet := range c.GitHub.ScaleSets {
+		exposed[scaleSet.Profile] = struct{}{}
+	}
+	for _, scope := range c.GitHub.Scopes {
+		for _, scaleSet := range scope.ScaleSets {
+			exposed[scaleSet.Profile] = struct{}{}
+		}
+	}
+	return exposed
 }
 
 // ValidateAuthority adds requirements for making GitHub or Tart mutations.
@@ -788,13 +884,25 @@ func (c Config) authorityProfileCapacities() map[string]int {
 		limit := c.Linux.MaxInstances
 		limit = min(limit, c.Linux.Capacity.CPU/profile.Resources.CPU)
 		limit = min(limit, c.Linux.Capacity.MemoryMiB/profile.Resources.MemoryMiB)
-		capacities[profile.ID] = limit
+		capacities[profile.ID] = c.budgetedCapacity(limit, profile)
 	}
 	if c.MacOS.Enabled {
-		capacities[c.MacOS.Builder.ID] = c.MacOS.Builder.MaxActive
-		capacities[c.MacOS.Maestro.ID] = c.MacOS.Maestro.MaxActive
+		capacities[c.MacOS.Builder.ID] = c.budgetedCapacity(c.MacOS.Builder.MaxActive, c.MacOS.Builder)
+		capacities[c.MacOS.Maestro.ID] = c.budgetedCapacity(c.MacOS.Maestro.MaxActive, c.MacOS.Maestro)
 	}
 	return capacities
+}
+
+// budgetedCapacity keeps ADR 0015's truthful-capacity promise on a budgeted
+// node. A scale set advertising slots the envelope can never hold is advertising
+// capacity this node cannot serve, and under canonicalJobInventory that number
+// is what GitHub is told. An unset budget leaves the figure exactly as it was.
+func (c Config) budgetedCapacity(limit int, raw Profile) int {
+	if c.HostBudget == (Resources{}) {
+		return limit
+	}
+	profile := raw.normalized()
+	return min(limit, c.HostBudget.CPU/profile.Resources.CPU, c.HostBudget.MemoryMiB/profile.Resources.MemoryMiB)
 }
 
 func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {

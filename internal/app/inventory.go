@@ -41,6 +41,9 @@ type ProductionInventory struct {
 	// the scheduler can size the fleet against the host it shares rather than a
 	// static constant. Default false preserves the configured-envelope model.
 	ElasticHostEnvelope bool
+	// HostBudget is the operator's declared ceiling on this node's total
+	// admission envelope. The zero vector is unset and imposes no bound.
+	HostBudget domain.Resources
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
@@ -49,7 +52,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 	}
 	now := time.Now().UTC()
 	hostSnapshot := p.Host.Snapshot(ctx)
-	host := hostObservation(hostSnapshot, p.Capacity, p.Guards, p.ElasticHostEnvelope)
+	host := hostObservation(hostSnapshot, p.Capacity, p.Guards, p.ElasticHostEnvelope, p.HostBudget)
 	stored, err := p.Store.LiveInstances(ctx)
 	if err != nil {
 		return domain.Unavailable[[]domain.Instance]("durable instance inventory unavailable"), host
@@ -167,7 +170,13 @@ func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {
 // When true the observation additionally reports the real machine so aggregate
 // reservations can be bounded by it, and derives available CPU from measured
 // idle so the fleet yields as the host's own tenant gets busy.
-func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails, elastic bool) domain.Observation[domain.Host] {
+//
+// A configured host budget is checked here rather than in config validation
+// because it is the only place both halves of the claim exist: `fleet config
+// validate` decodes a file and never probes a machine, so a budget larger than
+// the host it runs on cannot be caught until the host is observed.
+func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails, elastic bool,
+	budget domain.Resources) domain.Observation[domain.Host] {
 	switch snapshot.Freshness {
 	case macos.Fresh:
 		// Continue with explicit guardrails below.
@@ -177,6 +186,9 @@ func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards 
 		return domain.Unavailable[domain.Host]("host probe unavailable")
 	default:
 		return domain.Unavailable[domain.Host]("host probe freshness is invalid")
+	}
+	if reason := budgetExceedsHost(snapshot, guards, budget); reason != "" {
+		return domain.Unavailable[domain.Host](reason)
 	}
 	decision := guards.Evaluate(snapshot, macos.Request{})
 	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
@@ -202,6 +214,32 @@ func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards 
 		}
 	}
 	return domain.Fresh(domain.Host{Available: available, Capacity: physical, Pressure: pressure}, snapshot.ObservedAt)
+}
+
+// budgetExceedsHost reports why a configured ceiling is not one this machine can
+// honour, or the empty string when it is. A budget above the host is not a
+// narrower envelope -- the physical bound would simply keep binding first -- it
+// is an operator who believes this node offers capacity it does not have, and
+// on a node whose whole purpose is a promise to a co-tenant that belief is worth
+// failing closed over. The reason names both figures so the fix is the message.
+//
+// A dimension the probe could not read imposes no bound, exactly as it does for
+// the physical total in ADR 0018: an unobserved fact must never masquerade as a
+// measurement of a zero-resource machine.
+func budgetExceedsHost(snapshot macos.Snapshot, guards macos.Guardrails, budget domain.Resources) string {
+	if budget == (domain.Resources{}) {
+		return ""
+	}
+	if snapshot.PhysicalCPU > 0 && int64(budget.CPU) > snapshot.PhysicalCPU {
+		return fmt.Sprintf("host budget of %d CPU exceeds the %d physical cores this host has",
+			budget.CPU, snapshot.PhysicalCPU)
+	}
+	usable := snapshot.PhysicalMemoryMB - guards.MinAvailableMemoryMB
+	if snapshot.PhysicalMemoryMB > 0 && int64(budget.MemoryMB) > usable {
+		return fmt.Sprintf("host budget of %d MB memory exceeds the %d MB this host can offer (%d MB physical less the %d MB reserve)",
+			budget.MemoryMB, usable, snapshot.PhysicalMemoryMB, guards.MinAvailableMemoryMB)
+	}
+	return ""
 }
 
 // physicalCapacity reports the machine's real totals as an admission bound.

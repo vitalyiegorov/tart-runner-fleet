@@ -68,10 +68,7 @@ func TestHostBudgetCapsTheTotalEnvelopeUnderEveryCapacityModel(t *testing.T) {
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			in := budgetInput(test.budget, test.elastic, nil, test.profile)
-			plan, err := PlanTick(in)
-			if err != nil {
-				t.Fatalf("PlanTick() error = %v", err)
-			}
+			plan := PlanTick(in)
 			admitted := admittedVector(in, plan)
 			if len(spawnedKeys(plan)) != test.wantSpec || admitted.CPU != test.wantCPU {
 				t.Fatalf("plan admitted %d spawns holding %+v, want %d spawns and %d CPU",
@@ -91,10 +88,7 @@ func TestHostBudgetChargesLiveInstancesOfEveryPlatform(t *testing.T) {
 		State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
 	in := budgetInput(domain.Resources{CPU: 6, MemoryMB: 12_288}, true, []domain.Instance{live}, "medium")
 	in.Config.RepoCaps["mac-a"] = 2
-	plan, err := PlanTick(in)
-	if err != nil {
-		t.Fatalf("PlanTick() error = %v", err)
-	}
+	plan := PlanTick(in)
 	admitted := admittedVector(in, plan)
 	if admitted.CPU+live.Resources.CPU > 6 || admitted.MemoryMB+live.Resources.MemoryMB > 12_288 {
 		t.Fatalf("live %+v plus admitted %+v exceeds the 6 CPU / 12288 MB budget", live.Resources, admitted)
@@ -118,10 +112,7 @@ func TestHostBudgetBindsAgedWorkToo(t *testing.T) {
 	host := budgetHost()
 	host.Value.Available.CPU = 0
 	in.Host = host
-	plan, err := PlanTick(in)
-	if err != nil {
-		t.Fatalf("PlanTick() error = %v", err)
-	}
+	plan := PlanTick(in)
 	if admitted := admittedVector(in, plan); admitted.CPU != 4 {
 		t.Fatalf("aged admission held %+v, want exactly the 4 CPU the budget allows", admitted)
 	}
@@ -132,14 +123,8 @@ func TestHostBudgetBindsAgedWorkToo(t *testing.T) {
 func TestHostBudgetNeverWidensAnEnvelope(t *testing.T) {
 	generous := budgetInput(domain.Resources{CPU: 64, MemoryMB: 262_144}, true, nil, "medium")
 	unbudgeted := budgetInput(domain.Resources{}, true, nil, "medium")
-	generousPlan, err := PlanTick(generous)
-	if err != nil {
-		t.Fatalf("PlanTick(generous) error = %v", err)
-	}
-	unbudgetedPlan, err := PlanTick(unbudgeted)
-	if err != nil {
-		t.Fatalf("PlanTick(unbudgeted) error = %v", err)
-	}
+	generousPlan := PlanTick(generous)
+	unbudgetedPlan := PlanTick(unbudgeted)
 	if admittedVector(generous, generousPlan) != admittedVector(unbudgeted, unbudgetedPlan) {
 		t.Fatalf("a budget above the machine changed admission: %+v vs %+v",
 			admittedVector(generous, generousPlan), admittedVector(unbudgeted, unbudgetedPlan))
@@ -153,10 +138,7 @@ func TestHostBudgetComposesWithTheClosedPressureGate(t *testing.T) {
 	in := budgetInput(domain.Resources{CPU: 4, MemoryMB: 10_240}, true, nil, "medium")
 	in.Host = domain.Fresh(domain.Host{Pressure: domain.HostPressure{AdmissionAllowed: false,
 		AdmissionReason: "host memory pressure"}}, testNow)
-	plan, err := PlanTick(in)
-	if err != nil {
-		t.Fatalf("PlanTick() error = %v", err)
-	}
+	plan := PlanTick(in)
 	if len(spawnedKeys(plan)) != 0 {
 		t.Fatalf("plan admitted %d spawns through a closed pressure gate", len(spawnedKeys(plan)))
 	}
