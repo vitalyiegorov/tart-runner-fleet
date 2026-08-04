@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/hostpaths"
 )
 
 func TestUnixClientReadsBoundedStatusAndMetrics(t *testing.T) {
@@ -278,12 +280,13 @@ func TestListenValidationAndStaleSocketRecovery(t *testing.T) {
 	}
 }
 
-func TestDefaultEndpointIsAbsoluteUnixSocket(t *testing.T) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantPath := filepath.Join(configDir, "tart-runner-fleet", "state", "fleetd.sock")
+// TestDefaultEndpointIsTheStateDirectorySocket pins the socket to the node's own
+// state directory on whatever platform the suite runs. Deriving it from
+// os.UserConfigDir instead put a Linux daemon's socket in `~/.config` while its
+// operator interface looked under the installation root, so `fleet status`
+// against a running daemon reported the daemon unavailable.
+func TestDefaultEndpointIsTheStateDirectorySocket(t *testing.T) {
+	wantPath := filepath.Join(hostpaths.Default().StateDir, "fleetd.sock")
 	if path, endpoint := DefaultSocketPath(), DefaultEndpoint(); path != wantPath || endpoint != "unix://"+wantPath {
 		t.Fatalf("path=%q endpoint=%q", path, endpoint)
 	}
@@ -292,6 +295,7 @@ func TestDefaultEndpointIsAbsoluteUnixSocket(t *testing.T) {
 func TestDefaultSocketFallsBackToPrivateTemporaryDirectoryWithoutHome(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
 	wantPath := filepath.Join(os.TempDir(), "tart-runner-fleet", "state", "fleetd.sock")
 	if path, endpoint := DefaultSocketPath(), DefaultEndpoint(); path != wantPath || endpoint != "unix://"+wantPath {
 		t.Fatalf("path=%q endpoint=%q", path, endpoint)
