@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -22,11 +22,11 @@ func (f fakeInstances) LiveInstances(context.Context) ([]operations.Instance, er
 }
 
 type fakeTart struct {
-	values []tart.VM
+	values []executor.Instance
 	err    error
 }
 
-func (f fakeTart) List(context.Context) ([]tart.VM, error) { return f.values, f.err }
+func (f fakeTart) List(context.Context) ([]executor.Instance, error) { return f.values, f.err }
 
 type fakeHost struct{ value macos.Snapshot }
 
@@ -60,7 +60,7 @@ func healthySnapshot(now time.Time) macos.Snapshot {
 func TestProductionInventoryFreshSnapshot(t *testing.T) {
 	now := time.Now().UTC()
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
-		Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}, Guards: macos.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2048}}
 	instances, host := inv.Observe(context.Background())
 	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].State != domain.InstanceRunning || instances.Value[0].Power != domain.InstancePowerRunning {
@@ -78,7 +78,7 @@ func TestProductionInventoryFreshSnapshot(t *testing.T) {
 func TestProductionInventoryMarksStoppedOwnedRunner(t *testing.T) {
 	now := time.Now().UTC()
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateAssigned)}},
-		Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: false}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: false}}}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	instances, _ := inv.Observe(context.Background())
 	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].Power != domain.InstancePowerStopped {
@@ -103,7 +103,7 @@ func TestAbsentOwnedVMDuringCleanupIsPerInstanceNotHostWide(t *testing.T) {
 			healthy := inventoryInstance(operations.StateRunning)
 			healthy.ID = "trf-small-2"
 			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{absent, healthy}},
-				Tart: fakeTart{values: []tart.VM{{Name: "trf-small-2", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+				Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-2", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
 				Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 			instances, _ := inv.Observe(context.Background())
 			if instances.State != domain.ObservationFresh || len(instances.Value) != 2 {
@@ -130,7 +130,7 @@ func TestAbsentOwnedVMOutsideCleanupStaysHostWideUnavailable(t *testing.T) {
 		operations.StateRegistering, operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning, operations.StateFailed} {
 		t.Run(string(state), func(t *testing.T) {
 			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(state)}},
-				Tart: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+				Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 			instances, _ := inv.Observe(context.Background())
 			if instances.State != domain.ObservationUnavailable || instances.Reason != "owned VM trf-small-1 missing from Tart" {
 				t.Fatalf("observation = %#v", instances)
@@ -138,7 +138,7 @@ func TestAbsentOwnedVMOutsideCleanupStaysHostWideUnavailable(t *testing.T) {
 		})
 	}
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateDraining)}},
-		Tart: fakeTart{err: errors.New("tart is unreachable")}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{err: errors.New("tart is unreachable")}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	instances, _ := inv.Observe(context.Background())
 	if instances.State != domain.ObservationUnavailable || instances.Reason != "Tart inventory unavailable" {
@@ -150,7 +150,7 @@ func TestProductionInventoryMarksRunningCompletedRunnerRecoverableFromFreshEvide
 	now := time.Now().UTC()
 	confirmation := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
-		Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
 		Recovery: fakeRecoveryObserver{confirmation: confirmation}, RecoveryConfirmationMaxAge: time.Minute,
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	instances, _ := inv.Observe(context.Background())
@@ -171,7 +171,7 @@ func TestProductionInventoryObservesLingeringRunnerEvidence(t *testing.T) {
 	running.UpdatedAt = entered
 	base := func() ProductionInventory {
 		return ProductionInventory{Store: fakeInstances{values: []operations.Instance{running}},
-			Tart: fakeTart{values: []tart.VM{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+			Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
 			RecoveryConfirmationMaxAge: time.Minute, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	}
 	for _, test := range []struct {
@@ -212,7 +212,7 @@ func TestProductionInventoryKnownPressureReturnsFreshZeroCapacity(t *testing.T) 
 	now := time.Now().UTC()
 	snapshot := healthySnapshot(now)
 	snapshot.FreeDiskGB = 1
-	inv := ProductionInventory{Store: fakeInstances{}, Tart: fakeTart{}, Host: fakeHost{snapshot}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}, Guards: macos.Guardrails{MinFreeDiskGB: 60}}
+	inv := ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{}, Host: fakeHost{snapshot}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}, Guards: macos.Guardrails{MinFreeDiskGB: 60}}
 	_, host := inv.Observe(context.Background())
 	if !host.Usable() || host.Value.Available != (domain.Resources{}) || host.Reason != "disk reserve" {
 		t.Fatalf("host = %#v", host)
@@ -244,13 +244,13 @@ func TestProductionInventoryFailsClosedOnUncertainty(t *testing.T) {
 		inv       ProductionInventory
 		wantState domain.ObservationState
 	}{
-		{name: "store", inv: ProductionInventory{Store: fakeInstances{err: want}, Tart: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
-		{name: "tart", inv: ProductionInventory{Store: fakeInstances{}, Tart: fakeTart{err: want}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
-		{name: "stale host", inv: ProductionInventory{Store: fakeInstances{}, Tart: fakeTart{}, Host: fakeHost{macos.Snapshot{Freshness: macos.Stale, ObservedAt: now}}}, wantState: domain.ObservationStale},
-		{name: "unavailable host", inv: ProductionInventory{Store: fakeInstances{}, Tart: fakeTart{}, Host: fakeHost{macos.Snapshot{Freshness: macos.Unavailable}}}, wantState: domain.ObservationUnavailable},
-		{name: "missing vm", inv: ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}}, Tart: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
-		{name: "orphan vm", inv: ProductionInventory{Store: fakeInstances{}, Tart: fakeTart{values: []tart.VM{{Name: "trf-orphan", Running: true}}}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
-		{name: "bad metadata", inv: ProductionInventory{Store: fakeInstances{values: []operations.Instance{{ID: "trf-bad", State: operations.StatePlanned}}}, Tart: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
+		{name: "store", inv: ProductionInventory{Store: fakeInstances{err: want}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
+		{name: "tart", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{err: want}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
+		{name: "stale host", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{}, Host: fakeHost{macos.Snapshot{Freshness: macos.Stale, ObservedAt: now}}}, wantState: domain.ObservationStale},
+		{name: "unavailable host", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{}, Host: fakeHost{macos.Snapshot{Freshness: macos.Unavailable}}}, wantState: domain.ObservationUnavailable},
+		{name: "missing vm", inv: ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
+		{name: "orphan vm", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{values: []executor.Instance{{Name: "trf-orphan", Running: true}}}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
+		{name: "bad metadata", inv: ProductionInventory{Store: fakeInstances{values: []operations.Instance{{ID: "trf-bad", State: operations.StatePlanned}}}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,7 +270,7 @@ func TestProductionInventoryFailsClosedOnUncertainty(t *testing.T) {
 func TestPlannedInstanceMayPrecedeTartCloneAndValidation(t *testing.T) {
 	now := time.Now().UTC()
 	planned := inventoryInstance(operations.StatePlanned)
-	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{planned}}, Tart: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16000, Slots: 4}}
+	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{planned}}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16000, Slots: 4}}
 	instances, _ := inv.Observe(context.Background())
 	if !instances.Usable() || len(instances.Value) != 1 {
 		t.Fatalf("instances=%#v", instances)

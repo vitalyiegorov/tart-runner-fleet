@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -52,8 +52,8 @@ type fakeVM struct {
 	runningErr                  error
 }
 
-func (v fakeVM) Clone(_ context.Context, request tart.Request) error {
-	*v.calls = append(*v.calls, fmt.Sprintf("clone:%s:%s:%d:%d:%d", request.Base, request.Name, request.CPU, request.MemoryMB, request.DiskGB))
+func (v fakeVM) Create(_ context.Context, request executor.InstanceSpec) error {
+	*v.calls = append(*v.calls, fmt.Sprintf("clone:%s:%s:%d:%d:%d", request.Image, request.Name, request.CPU, request.MemoryMB, request.DiskGB))
 	return v.cloneErr
 }
 func (v fakeVM) Start(_ context.Context, name string, _ operations.Ownership) error {

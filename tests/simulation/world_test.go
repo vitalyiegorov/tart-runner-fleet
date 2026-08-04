@@ -28,9 +28,9 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
@@ -244,7 +244,7 @@ func (h simHost) Snapshot(context.Context) macos.Snapshot {
 // an absent or powered-off VM is a fact the real inventory adapter classifies.
 type simTart struct{ world *world }
 
-func (a simTart) List(context.Context) ([]tart.VM, error) {
+func (a simTart) List(context.Context) ([]executor.Instance, error) {
 	w := a.world
 	if w.tartUnavailable > 0 {
 		return nil, fmt.Errorf("simulated tart failure")
@@ -254,9 +254,9 @@ func (a simTart) List(context.Context) ([]tart.VM, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	vms := make([]tart.VM, 0, len(names))
+	vms := make([]executor.Instance, 0, len(names))
 	for _, name := range names {
-		vms = append(vms, tart.VM{Name: name, Running: w.vms[name]})
+		vms = append(vms, executor.Instance{Name: name, Running: w.vms[name]})
 	}
 	return vms, nil
 }
@@ -480,7 +480,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		Store: store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,
 		ControllerID: simOwner, Mode: reconcile.Authority, Now: func() time.Time { return w.now },
 		Inventory: app.ProductionInventory{
-			Store: simInstances{world: w}, Tart: simTart{world: w}, Host: simHost{world: w},
+			Store: simInstances{world: w}, Executor: simTart{world: w}, Host: simHost{world: w},
 			Recovery: simRecovery{world: w}, Capacity: cfg.Scheduler.LinuxCapacity, Guards: cfg.Guards,
 			ElasticHostEnvelope: cfg.Scheduler.ElasticHostEnvelope, HostBudget: cfg.Scheduler.HostBudget,
 		},

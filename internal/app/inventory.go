@@ -7,16 +7,20 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
 type LiveInstanceStore interface {
 	LiveInstances(context.Context) ([]operations.Instance, error)
 }
-type TartInventory interface {
-	List(context.Context) ([]tart.VM, error)
+
+// ExecutorInventory is the enumeration half of executor.Backend: what the node's
+// execution technology can see, which is the only evidence that an owned
+// instance vanished or that an untracked one exists.
+type ExecutorInventory interface {
+	List(context.Context) ([]executor.Instance, error)
 }
 type HostInventory interface {
 	Snapshot(context.Context) macos.Snapshot
@@ -31,7 +35,7 @@ type RecoveryObserver interface {
 
 type ProductionInventory struct {
 	Store                      LiveInstanceStore
-	Tart                       TartInventory
+	Executor                   ExecutorInventory
 	Host                       HostInventory
 	Recovery                   RecoveryObserver
 	RecoveryConfirmationMaxAge time.Duration
@@ -47,7 +51,7 @@ type ProductionInventory struct {
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
-	if p.Store == nil || p.Tart == nil || p.Host == nil {
+	if p.Store == nil || p.Executor == nil || p.Host == nil {
 		return domain.Unavailable[[]domain.Instance]("inventory adapters are required"), domain.Unavailable[domain.Host]("inventory adapters are required")
 	}
 	now := time.Now().UTC()
@@ -57,11 +61,16 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 	if err != nil {
 		return domain.Unavailable[[]domain.Instance]("durable instance inventory unavailable"), host
 	}
-	vms, err := p.Tart.List(ctx)
+	// The unavailable reason and the missing-VM reason below still say "Tart".
+	// They are operator-visible strings carried into status, doctor, and the
+	// durable observation, so renaming them is a behaviour change and belongs to
+	// the change that gives this node a second backend, not to the port
+	// extraction.
+	vms, err := p.Executor.List(ctx)
 	if err != nil {
 		return domain.Unavailable[[]domain.Instance]("Tart inventory unavailable"), host
 	}
-	byName := make(map[string]tart.VM, len(vms))
+	byName := make(map[string]executor.Instance, len(vms))
 	for _, vm := range vms {
 		byName[vm.Name] = vm
 	}

@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
 )
@@ -100,7 +100,7 @@ func TestSecondPilotEnvelopeUsesIdleHostEndToEnd(t *testing.T) {
 	plan := func(elastic bool) (scheduler.Plan, domain.Observation[domain.Host]) {
 		cfg := secondPilotConfig(t, elastic)
 		inventory := app.ProductionInventory{
-			Store: emptyStore{}, Tart: emptyTart{}, Host: incidentProbe{},
+			Store: emptyStore{}, Executor: emptyTart{}, Host: incidentProbe{},
 			Capacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB,
 				Slots: cfg.Linux.MaxInstances},
 			Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
@@ -164,7 +164,7 @@ func (emptyStore) LiveInstances(context.Context) ([]operations.Instance, error) 
 
 type emptyTart struct{}
 
-func (emptyTart) List(context.Context) ([]tart.VM, error) { return nil, nil }
+func (emptyTart) List(context.Context) ([]executor.Instance, error) { return nil, nil }
 
 func spawnedProfiles(plan scheduler.Plan) []domain.ProfileID {
 	var profiles []domain.ProfileID

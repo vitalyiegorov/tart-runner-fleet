@@ -30,7 +30,7 @@ import (
 // half of that evidence is exactly what a leaked registration withholds forever.
 // The operator supplies that judgement instead, with a recorded reason.
 func (a *Adapter) Reap(ctx context.Context, name string, ownership operations.Ownership) error {
-	if err := ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return err
 	}
 	vm, err := a.ownedVM(ctx, name, ownership)
