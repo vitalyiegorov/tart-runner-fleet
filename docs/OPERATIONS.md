@@ -668,11 +668,45 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
 | `message_poll_failed` | Ordinary long-poll failure. | None if transient. |
+| `demand_commit_conflict` | The durable store refused a broker message. This is not a network condition and redelivering the same message cannot clear it: the fleet holds state the message contradicts. | Read the `binding ingest failure` warning for the scope, profile, and scale set, then see [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md). A restarted message-id sequence resolves itself on the next colliding delivery; anything else is a genuine durable contradiction and needs the demand rows read. |
 | `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out. | Check API reachability and rate limits. |
 | `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |
 
 The rate-limited `component loop failure` warning now carries the same
-`reason=` attribute, so stderr and the admin API agree.
+`reason=` attribute, so stderr and the admin API agree. It names the component
+and nothing else, so a second, binding-scoped warning names the binding:
+
+```
+level=WARN msg="binding ingest failure" scope=knee-repo profile=large \
+  scaleSet=2 observation=github-8077185082566234948 reason=demand_commit_conflict
+```
+
+It is rate limited to one line per binding and reason per minute, on the same
+window as the component warning, and it carries no upstream text.
+
+### A broker message-id sequence restarted
+
+GitHub's message ids are unique only inside one broker sequence, and GitHub
+restarts the sequence (it did so for scale set `8077185082566234948` on
+2026-08-01, which stranded every `linux-large` job in that repository for three
+days — [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md)).
+The fleet detects a restart on the first delivered message that contradicts its
+ledger, adopts a new inbox generation, and keeps ingesting. It reports itself:
+
+```
+level=WARN msg="broker message sequence restarted" scope=knee-repo profile=large \
+  scaleSet=2 observation=github-8077185082566234948 generation=1 \
+  retiredMessageId=100000086 adoptedMessageId=100000004
+```
+
+**No operator action is required, and there is no command to run.** The
+recovery is durable and idempotent, and it applies equally to a database that
+was already poisoned before the fix: the next colliding delivery heals the
+binding. Do not delete inbox rows or rewind cursors by hand — the hand-written
+SQL that ended this incident is exactly what the generation contract replaces.
+
+Investigate only if the line repeats for the same binding on every delivery,
+which would mean detection is oscillating rather than converging.
 
 The scheduler component classifies its own failures the same way. Each token
 names a distinct repair, so a reasonless `component=scheduler` warning is now a
