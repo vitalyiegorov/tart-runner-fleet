@@ -54,6 +54,7 @@ Invariants an agent must respect:
 - [docs/adr/0026-queued-demand-expires-on-proven-absence.md](docs/adr/0026-queued-demand-expires-on-proven-absence.md): queued demand expires only on proven absence.
 - [docs/adr/0031-deterministic-simulation-testing.md](docs/adr/0031-deterministic-simulation-testing.md): cross-pass defects are found by deterministic simulation, not by coverage.
 - [docs/adr/0032-resource-explicit-runner-labels.md](docs/adr/0032-resource-explicit-runner-labels.md): a runner label is `trf-<os>-<arch>-<cpu>x<ramGiB>`, derived from the profile vector; role names survive as aliases.
+- [docs/adr/0034-a-node-serves-the-scale-sets-it-owns.md](docs/adr/0034-a-node-serves-the-scale-sets-it-owns.md): each machine runs an independent fleet; GitHub's one-session-per-scale-set rule is the only coordination between nodes.
 
 ## Reference
 
@@ -68,4 +69,4 @@ Invariants an agent must respect:
 - [docs/SECURITY.md](docs/SECURITY.md): threat model and secret handling.
 - [docs/TESTING.md](docs/TESTING.md): unit, contract, integration, replay, and chaos layers.
 - [docs/RELEASING.md](docs/RELEASING.md): release channels, version selection, retry semantics.
-- [docs/adr/](docs/adr): all 32 architecture decision records.
+- [docs/adr/](docs/adr): all 34 architecture decision records.
