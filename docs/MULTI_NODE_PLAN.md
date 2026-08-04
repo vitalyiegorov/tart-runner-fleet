@@ -621,6 +621,10 @@ Migrate one repository per pull request, in that order, most-broken first.
 
 ## Node C — Mac Studio
 
+- [ ] Build the Maestro-only macOS base locally from the pinned public Cirrus
+      image, following [`BASE_IMAGE.md`](BASE_IMAGE.md). Do not transfer node
+      A's 91 GB image: it carries an Android toolchain node C cannot use, and
+      the copy would saturate node A's uplink for days while it serves jobs.
 - [ ] Install the same release as node A; `launchd` LaunchAgent, unchanged.
 - [ ] Render `config/nodes/rendered/mac-studio.json`:
       `hostBudget: {cpu: 4, memoryMb: 10240}`, `macosBurst.enabled: true` with

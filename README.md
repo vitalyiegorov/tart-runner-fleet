@@ -324,4 +324,5 @@ authority long enough to build and verify its successor.
 - [`docs/TESTING.md`](docs/TESTING.md) · [`docs/RELEASING.md`](docs/RELEASING.md) — verification layers, release process
 - [`docs/FLEET_ARCHITECTURE_PLAN.md`](docs/FLEET_ARCHITECTURE_PLAN.md) — target architecture, SLOs, sequencing
 - [`docs/MULTI_NODE_PLAN.md`](docs/MULTI_NODE_PLAN.md) — three independent nodes, workload placement, phased delivery
+- [`docs/BASE_IMAGE.md`](docs/BASE_IMAGE.md) — macOS base image provenance, and building a Maestro-only image from a pinned public image
 - [`docs/adr/`](docs/adr) — 34 architecture decision records
