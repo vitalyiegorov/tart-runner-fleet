@@ -1,9 +1,12 @@
 # Install on a Linux node
 
 This guide installs one immutable release on a Linux machine and brings it up in
-**observe mode**, which is what a Linux node can do today. It is the Linux twin
-of [`INSTALL.md`](INSTALL.md), and the two differ in exactly three places: the
-directory layout, the service manager, and how a release is activated.
+**observe mode**, and then — if the machine has a rootless container runtime —
+gives it an execution backend so it can serve runners. It is the Linux twin of
+[`INSTALL.md`](INSTALL.md), and the two differ in exactly four places: the
+directory layout, the service manager, how a release is activated, and the
+execution technology, which on a Linux node is rootless Podman rather than
+Tart.
 
 Read [ADR 0034](docs/adr/0034-a-node-serves-the-scale-sets-it-owns.md) and
 [`docs/MULTI_NODE_PLAN.md`](docs/MULTI_NODE_PLAN.md) first. Under ADR 0034 each
@@ -17,14 +20,17 @@ configuration, it never talks to another node, and GitHub's one-session-per-scal
 | --- | --- |
 | Run the daemon, measure the host, serve `status`/`doctor`/`queues`/`health`/`metrics` | **Yes.** The host probe reads `/proc` and `df`. |
 | Observe mode | **Yes.** |
-| Shadow, canary, authority | **No.** The daemon refuses to start: those modes exist to act on a machine this build has no execution technology for. |
-| Provision runners | **No.** Issue [#139](https://github.com/vitalyiegorov/tart-runner-fleet/issues/139) adds the container backend. |
+| Shadow, canary, authority | **Only with an `executor` block.** Without one the daemon refuses to start: those modes exist to act on a machine that has told it no execution technology. |
+| Provision runners | **Yes, in containers.** One rootless, unprivileged, ephemeral Podman container per job, never reused. Configure it in step 4a. |
+| Run macOS guests | **No, ever.** Apple's Virtualization framework is macOS-only. |
 | `fleet update apply-latest` | **No.** The release transaction drives `launchctl` and `plutil`. It refuses with a message naming the gap; use the manual bridge below. |
 
-This is Part A of `docs/MULTI_NODE_PLAN.md`'s node B bring-up, and it is
-deliberately the whole of it. A node with no execution backend that reaches the
+Bring a node up in observe mode **first**, with no `executor` block and no
+scopes. That is Part A of `docs/MULTI_NODE_PLAN.md`'s node B bring-up, and it is
+deliberately a whole step: a node with no execution backend that reaches the
 observe steady state is what proves the daemon, the configuration, the host
-probe, and the packaging are right before any runner is at stake.
+probe, and the packaging are right before any runner is at stake. Step 4a adds
+the backend afterwards.
 
 ## 1. Prerequisites
 
@@ -113,6 +119,59 @@ does not have, and it is the first thing to check if step 6 does not go green.
 "$RELEASE_DIR/fleet" config validate "$STATE_DIR/fleet.json"   # after editing hostBudget
 # ... or omit the key entirely, which imposes no bound.
 ```
+
+### 4a. The container executor
+
+A Linux node with no `executor` block observes and nothing else. Adding the
+block is what makes it able to provision, and it is the only difference between
+the two stages of the bring-up.
+
+```json
+"executor": {
+  "backend": "podman",
+  "image": "ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08",
+  "binary": "/usr/bin/podman",
+  "kvmProfiles": ["xl"],
+  "holdCommand": ["sleep", "infinity"]
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `backend` | `podman` is the only value this release implements. Omit the whole block for an observe-only node. |
+| `image` | The OCI reference every runner container is created from. It takes the place of `linux.baseVm`, which stays in the file because the schema requires it and means nothing on this node. Pin it by digest in production. |
+| `binary` | Optional. Empty resolves `podman` through `PATH`, which is what a distribution package installs. |
+| `kvmProfiles` | The profile IDs whose containers get `--device /dev/kvm`. Per ADR 0034 this is the Android emulator profile and nothing else; a profile named here that the node does not declare is a refused configuration. |
+| `holdCommand` | Optional. What keeps a created container alive and idle until the JIT bootstrap runs inside it; the default is `sleep infinity`. |
+
+The runtime must be **rootless**. The daemon shells `podman info` before it
+starts in any mutating mode and refuses a runtime that is absent, unusable, or
+running as root — approved third-party code executes in these containers, and a
+root-owned container daemon or a `docker` group is root-equivalent. That refusal
+is a startup error you read once, not a queue of parked jobs you read an hour
+later.
+
+```sh
+sudo apt install podman uidmap slirp4netns fuse-overlayfs
+podman info --format '{{.Host.Security.Rootless}}'   # must print: true
+podman pull ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08
+```
+
+The runner image must contain the JIT bootstrap helper at
+`/usr/local/libexec/tart-runner-fleet-bootstrap` and a `sleep` for the hold
+command. The daemon starts the runner by executing that helper inside the
+container with the JIT configuration on standard input; the configuration never
+appears in argv, in the environment, or in an image layer.
+
+Prove the whole adapter against this machine's real podman before serving a job:
+
+```sh
+TRF_PODMAN_SMOKE=required ./scripts/podman-smoke.sh
+```
+
+On a node configured to execute jobs in containers, `SKIPPED` is not an answer.
+
+### 4b. GitHub credentials
 
 There is no Keychain on Linux, so the GitHub App private key is always a file:
 set `github.app.privateKeyFile` to a `0600`, non-symlink, service-account-owned
@@ -235,4 +294,4 @@ systemctl --user disable --now tart-runner-fleet.service
 - [`USAGE.md`](USAGE.md) — the operator command surface, identical on every node.
 - [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) — monitoring and incidents.
 - [`docs/MULTI_NODE_PLAN.md`](docs/MULTI_NODE_PLAN.md) — Part B, the cutover
-  that gives this node scale sets, and the executor adapter it waits on.
+  that gives this node scale sets.

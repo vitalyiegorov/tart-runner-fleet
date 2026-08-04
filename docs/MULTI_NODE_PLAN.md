@@ -161,7 +161,11 @@ readiness, pipes a JIT runner configuration into the guest over stdin, and later
 stops and deletes it. That is `podman create` from an image, `podman start`,
 `podman exec -i`, `podman rm -f`. The adapter is a CLI-shelling adapter of the
 same shape as `internal/adapters/tart`, which is the cheapest possible new
-backend and the one whose failure modes the codebase already models.
+backend and the one whose failure modes the codebase already models. It shipped
+as `internal/adapters/podman` rather than the `internal/adapters/container` this
+document first proposed: the package shells one runtime's command line, and a
+name that hides which one would be a promise of neutrality the code does not
+keep. Neutrality lives in `internal/executor`, which is the whole point of it.
 
 Ephemerality is already the design (ADR 0010), and a container is ephemeral by
 construction. Per-job isolation, clean filesystem, and no state carried between
@@ -210,10 +214,20 @@ between jobs. It contradicts ADR 0010 and is not considered further.
   Redroid step. If one appears, the escape hatch is a per-profile privileged
   flag, not a fleet-wide daemon socket mount.
 - `internal/guestbootstrap/systemd_linux.go` launches the runner with
-  `systemd-run`, which is not present in an ordinary container. The bootstrap
-  needs a container mode that detaches with the existing `detach_unix.go` path
-  instead. Small, and a Phase 2 work item.
+  `systemd-run`, which is not present in an ordinary container. **Carried into
+  the image contract by issue #139:** the daemon's side of the bootstrap is
+  `podman exec -i <name> /usr/local/libexec/tart-runner-fleet-bootstrap` with the
+  JIT configuration on stdin, unchanged from node A, so it is the helper *inside
+  the runner image* that must detach without `systemd-run`. Building that image
+  is node B bring-up work, not adapter work, and the checklist below names it.
 - `/dev/kvm` is granted to the Android profile only, not to every profile.
+  Issue #139 made that a validated configuration key, `executor.kvmProfiles`,
+  and the adapter reads the profile off the `trf-<profile>-` instance-name
+  prefix because `executor.InstanceSpec` deliberately carries no profile field.
+- **A container is created, never adopted.** ADR 0010 forbids reusing an
+  ephemeral guest, and unlike a Tart clone a container that already holds a
+  freshly minted name has unknown history. `Create` therefore refuses a name
+  held by a container without this operation's `trf.operation` label.
 
 ## The executor seam
 
@@ -410,14 +424,31 @@ adapter. Do not start Part B before Phase 2 is green on node B in observe mode.
 - [ ] Create the unprivileged service account `fleet`; enable lingering:
       `loginctl enable-linger fleet`.
 - [ ] `apt install podman uidmap slirp4netns fuse-overlayfs`; verify rootless:
-      `sudo -u fleet podman info | grep -i rootless`.
+      `sudo -u fleet podman info | grep -i rootless`. The daemon refuses to start
+      in any mutating mode against a runtime that is absent, unusable, or
+      root-ful, so this is a hard prerequisite and not a recommendation.
 - [ ] Add `fleet` to the `kvm` group; verify
       `sudo -u fleet podman run --rm --device /dev/kvm alpine ls -l /dev/kvm`.
 - [ ] Set `/etc/containers/registries.conf` to the registries the runner image
       needs and nothing else.
 - [ ] Provision the runner base image: Ubuntu 24.04 + Node 22 + Go + Android
       SDK/NDK (`ndk;27.x`) + emulator + `platform-tools` + Maestro, plus the
-      `tart-runner-fleet-bootstrap` binary. Tag and pin by digest.
+      `tart-runner-fleet-bootstrap` binary at
+      `/usr/local/libexec/tart-runner-fleet-bootstrap`. Tag and pin by digest.
+      The helper must launch the runner and **detach without `systemd-run`**,
+      which an ordinary container does not have; this is the one item of Phase 2
+      that is image work rather than adapter work.
+- [ ] **Run the real-podman acceptance test, and require it to pass:**
+      `TRF_PODMAN_SMOKE=required ./scripts/podman-smoke.sh`, with
+      `TRF_PODMAN_IMAGE` set to the runner image. This is the gap CI cannot
+      close — see below — and on this node `SKIPPED` is not an answer.
+- [ ] Confirm the resource limits actually bind. Rootless podman honours
+      `--cpus` and `--memory` only where the cgroup controllers are delegated to
+      the service account; with lingering enabled on a cgroups-v2 host they are,
+      and `podman run --rm --cpus 1 --memory 512m <image> true` printing no
+      warning is the check. An unenforced limit is not a correctness failure —
+      the scheduler's own envelope is what bounds the node — but it is a fact
+      an operator should know before the first Android emulator boots.
 
 **Daemon**
 
@@ -480,12 +511,38 @@ for an agent working with the existing test gates.
 | 2a | `hostBudget` | Node A gets an explicit ceiling; node C is unblocked. Ships as an ordinary release to node A alone. | 0.5 d |
 | 2b | Executor port extraction | **Done, issue #137.** `executor.InstanceSpec`, `executor.Backend`, `executor.Instance`, `executor.CommandRunner`, `domain.ValidateInstanceName`, and `executor.HostProbe` lifted out of `internal/adapters/macos`. Refactor only, zero behaviour change; all gates green and the DST corpus identical across three runs per arm; ships as a no-op release. | 1 d |
 | 2c | Linux/amd64 host support | **Done, issue #138**, with one correction below. `linux/amd64` release archive and platform-selected updater asset (`autoupdate.Target`), `systemd --user` units and `render-systemd.sh`, XDG paths (`internal/hostpaths`), file-based credentials, a `/proc` host probe (`internal/adapters/linux`), and `platformFor(goos)` wiring `noexecutor.Backend` on a node with no execution technology. **Deliverable met: the daemon runs on any Linux box in observe mode**, asserted on every commit by `scripts/observe-smoke.sh` in CI. | 2–3 d |
-| 2d | Container executor adapter | `internal/adapters/container` implementing `executor.Backend` over the Podman CLI, a container-mode bootstrap that does not need `systemd-run`, per-profile device grants for `/dev/kvm`, contract tests mirroring `internal/adapters/tart`'s. **Deliverable: node B serves `trf-linux-amd64-*`.** | 2–3 d |
+| 2d | Container executor adapter | **Done, issue #139.** `internal/adapters/podman` implementing `executor.Backend` over the rootless Podman CLI, an `executor` configuration block selecting the backend, the OCI image, the podman binary, the `/dev/kvm` profile grant and the hold command, `platformFor(goos)` wiring the adapter when a Linux node names it, a fail-closed startup probe, and the executor-port conformance harness extended to drive the real lifecycle through it. **Deliverable met in code: node B can serve `trf-linux-amd64-*` the moment it exists.** | 2–3 d |
 
 Roughly 1,500–2,000 lines of production code and a comparable amount of test
 code, across about 25 files. Sequenced so that 2a and 2b land on node A as
 ordinary releases before node B exists, and each of 2c and 2d is separately
 verifiable.
+
+### What CI covers of chunk 2d, and what it cannot
+
+Stated plainly, because the difference is the whole risk of shipping an executor
+for a machine that has not arrived.
+
+| Claim | Covered by | Where it runs |
+| --- | --- | --- |
+| Every verb's argument vector, every error classification, every re-observation after a failed command, the no-adoption rule, the `/dev/kvm` grant by name prefix | table-driven unit tests over a fake `executor.CommandRunner` | every machine, every commit |
+| The adapter is sufficient to provision and drain a whole runner through the real `ProvisionExecutor` and `DrainExecutor` | the executor-port conformance harness in `tests/contract`, which drives every shipped backend | every machine, every commit |
+| The wiring: a Linux node with an `executor` block gets Podman in all five constructors, and one without it stays observe-only | `internal/daemon/platform_test.go` | every machine, every commit |
+| A configured-but-absent runtime refuses to start the node | `internal/daemon` startup preflight test | every machine, every commit |
+| **That podman accepts these argument vectors, prints this JSON, reports these states, carries a secret in over `podman exec -i`, and honours `--device /dev/kvm`** | `scripts/podman-smoke.sh` driving `tests/integration/podman_live_test.go` | **nowhere automatically, today** |
+
+The last row is the gap. The fleet's own CI runs on its Linux scale sets, which
+are Tart guests whose image ships no container runtime, and installing one per
+job would add a package pull to every commit for a runtime the node under test
+does not otherwise need. So CI runs `scripts/podman-smoke.sh` in best-effort
+mode: it prints `SKIPPED` and exits 0 today, and becomes a real gate with no code
+change the day a runner image ships podman — which is itself a reasonable thing
+to do once node B builds the images.
+
+Until then the honest statement is: **the adapter has never been run against a
+real container runtime by an automated gate.** The bring-up checklist closes
+that with `TRF_PODMAN_SMOKE=required`, and no job may be routed to node B before
+it passes.
 
 Not required, and worth stating because the audit expected otherwise:
 `internal/scheduler` needs no generalization. Node B runs a single-platform
