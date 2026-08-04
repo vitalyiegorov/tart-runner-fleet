@@ -163,6 +163,70 @@ behind a reservation also keeps the throttled envelope even for aged candidates;
 they are bounded by their head's wait rather than by a quiet moment, which is a
 wait with an owner and an end.
 
+## A shared node needs a declared ceiling, not only a measured one
+
+This decision made the fleet polite. It did not make it bounded, and on a node
+the fleet does not own outright those are different requirements.
+
+Every bound above is *measured*: the physical machine, the idle residual, the
+pressure guardrails. Each is a fact about the host right now, and each narrows
+admission as the host's own tenant gets busy. None of them expresses a promise.
+On a machine somebody else also works on, the fleet is entitled to a share, and
+the share is a number the operator chose — not a number the kernel reports. A
+tenant who is quiet at this tick is not a tenant who has gone away, so a purely
+measured model lets the fleet take the entire machine every time the tenant
+steps out, and hands it back only once the tenant is already contending for it.
+That is the correct behavior for the Mac mini, which the fleet effectively owns.
+It is the wrong behavior for a remote Mac Studio the fleet is a guest on.
+
+`hostBudget: {cpu, memoryMb}` is that declared ceiling. It caps the TOTAL
+admission envelope of one node — every platform charged against it together —
+below physical capacity, and composes with every bound above by minimum. It can
+only narrow: a budget larger than the machine is a no-op, because the physical
+bound keeps binding first.
+
+Three properties make it a ceiling rather than a fourth throttle:
+
+1. **It applies to both capacity models.** The seam is `freeCapacity`, the one
+   function that produces an admission envelope, so the bound lands after the
+   static model and the elastic model alike. A ceiling that only bound under
+   `elasticHostEnvelope` would silently not bind on the nodes that have not
+   enabled it.
+2. **It binds aged work.** The section above lifts the advisory CPU-idle clamp
+   for a demand past the fairness age, because a host with an active tenant may
+   never produce a quiet moment and FIFO position is worthless without capacity.
+   That reasoning is about an *instantaneous measurement* being unfit as a hard
+   gate. It does not extend to a declared share: aged work escapes a throttle,
+   never a ceiling.
+3. **It is charged for every live instance regardless of platform**, exactly as
+   the physical total is. Under the elastic model `maxLinuxCpu` is a Linux-only
+   cap, so nothing else would stop a macOS VM and a Linux VM each spending the
+   full budget.
+
+The arithmetic is deliberately the same `physicalBound(configured, total, live)`
+used for the observed machine, and for the same reason: a budget is a physical
+total the operator asserts rather than one the probe measured, so an *undeclared*
+dimension imposes no bound exactly as an *unobserved* one does not.
+
+Validation splits by what is knowable where. That a profile can never fit the
+budget is knowable from the file, and is refused there — but only for profiles
+the node exposes to GitHub through a scale set, since a job routed to a shape
+this node can never admit queues forever rather than waiting its turn, while a
+profile no scale set names receives no jobs at all. That the budget fits the
+machine is not knowable from a file, because `fleet config validate` decodes a
+configuration and never probes a host; that check therefore lands at the probe,
+which reports the host observation unavailable with a reason naming both
+figures. It fails closed on purpose: on a node whose whole purpose is a promise
+to a co-tenant, an operator who believes the node offers capacity it does not
+have is a belief worth stopping for. A physical dimension the probe cannot read
+still imposes no bound, for the reason this decision already gives.
+
+Omitting the setting is this decision unchanged, byte-for-byte, and removing it
+is the entire rollback. Deterministic simulation carries the invariant: property
+(g)'s resource ceiling on a budgeted node is the budget rather than the machine,
+and the independent feasibility oracle behind properties (a) and (b) reads the
+same ceiling so a demand the budget correctly refuses is not counted as a wedge.
+
 ## Rollout
 
 The flag ships off. Enabling it on a host is an operational action requiring the

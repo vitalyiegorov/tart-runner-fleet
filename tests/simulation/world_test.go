@@ -160,6 +160,55 @@ func defaultWorld() worldConfig {
 	}
 }
 
+// budgetedWorld is issue #136's node: the shared Mac Studio, a machine much
+// larger than the share the fleet is allowed on it, serving maestro overflow
+// inside an explicit 4-vCPU / 10 GiB ceiling. It exists because the pressure
+// guardrails cannot express that promise -- they narrow admission as the host's
+// other tenant gets busy, and on a quiet host they let the fleet take everything.
+//
+// The shape is deliberately tight. One maestro (4 vCPU, 7 GiB) is exactly the
+// budget's CPU dimension, so a second can never coexist however idle the machine
+// is and however much work is queued; that makes every admission in this world a
+// statement about the budget rather than about supply.
+func budgetedWorld() worldConfig {
+	cfg := defaultWorld()
+	cfg.Name = "mac-studio-4x10-budget"
+	cfg.Scheduler.HostBudget = domain.Resources{CPU: 4, MemoryMB: 10_240}
+	profiles := map[domain.ProfileID]domain.Profile{"maestro": simProfiles()["maestro"]}
+	cfg.Scheduler.Profiles = profiles
+	cfg.Bindings = simBindings(profiles)
+	cfg.Profiles = sortedProfileIDs(profiles)
+	return cfg
+}
+
+// hostCeiling is the largest total the fleet may ever hold on this host, derived
+// from configured facts alone so the property oracles never borrow the
+// scheduler's own envelope arithmetic. It is the physical machine net of the
+// memory reserve, narrowed by an explicit host budget where one is configured.
+// An unset budget dimension imposes no bound, matching the production rule that
+// an unobserved or undeclared total is not a measurement of zero.
+func (c worldConfig) hostCeiling() domain.Resources {
+	ceiling := domain.Resources{CPU: int(c.PhysicalCPU),
+		MemoryMB: int(c.PhysicalMemoryMB - c.Guards.MinAvailableMemoryMB), Slots: c.Scheduler.LinuxCapacity.Slots}
+	if budget := c.Scheduler.HostBudget; budget.CPU > 0 {
+		ceiling.CPU = min(ceiling.CPU, budget.CPU)
+	}
+	if budget := c.Scheduler.HostBudget; budget.MemoryMB > 0 {
+		ceiling.MemoryMB = min(ceiling.MemoryMB, budget.MemoryMB)
+	}
+	return ceiling
+}
+
+// ceilingSource names what a conservation violation was measured against, so a
+// finding on a budgeted node reads as the broken promise it is rather than as an
+// impossible claim about the hardware.
+func (c worldConfig) ceilingSource() string {
+	if c.Scheduler.HostBudget == (domain.Resources{}) {
+		return "the physical host"
+	}
+	return "the configured host budget"
+}
+
 // ---------------------------------------------------------------------------
 // Simulated host
 // ---------------------------------------------------------------------------
@@ -433,7 +482,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		Inventory: app.ProductionInventory{
 			Store: simInstances{world: w}, Tart: simTart{world: w}, Host: simHost{world: w},
 			Recovery: simRecovery{world: w}, Capacity: cfg.Scheduler.LinuxCapacity, Guards: cfg.Guards,
-			ElasticHostEnvelope: cfg.Scheduler.ElasticHostEnvelope,
+			ElasticHostEnvelope: cfg.Scheduler.ElasticHostEnvelope, HostBudget: cfg.Scheduler.HostBudget,
 		},
 	}
 	w.checkers = defaultCheckers(cfg)

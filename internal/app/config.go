@@ -40,7 +40,8 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		MacOSExclusive:         cfg.MacOS.AdmissionPolicy == config.MacOSAdmissionExclusive,
 		MixedPlatformAdmission: cfg.MacOS.MixedPlatformAdmission,
 		MixedProfileCohorts:    cfg.MacOS.MixedProfileCohorts,
-		ElasticHostEnvelope:    cfg.Guards.ElasticHostEnvelope}
+		ElasticHostEnvelope:    cfg.Guards.ElasticHostEnvelope,
+		HostBudget:             domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB}}
 }
 
 // ValidateBindings runs the exact scheduler-config and binding construction the

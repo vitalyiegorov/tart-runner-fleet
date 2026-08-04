@@ -189,6 +189,22 @@ each scope exposes only the variants it wants. Every scale set also advertises
 `self-hosted` plus whatever grouping labels the operator adds
 (`linux-tiered`, `macOS`, `ARM64`, `linux-ci`, …).
 
+On a machine the fleet does not own outright, `hostBudget` caps this node's
+**total** admission envelope — every platform charged against it together —
+below physical capacity:
+
+```json
+"hostBudget": { "cpu": 4, "memoryMb": 10240 }
+```
+
+Omit it and the envelope stays the physical machine, which is today's behavior;
+removing it is the whole rollback. It composes with the host-pressure guardrails
+rather than replacing them: the guardrails narrow admission as a co-tenant gets
+busy, and the budget is the ceiling that holds while the co-tenant is quiet.
+`fleet config validate` rejects a budget no exposed profile could ever fit, and
+a budget larger than the machine is refused at the host probe. See
+[Capping a node below its hardware](USAGE.md#capping-a-node-below-its-hardware-hostbudget).
+
 ```yaml
 # Xcode / Gradle release builds: heaviest single job, so it takes the whole
 # macOS builder and runs alone (maxActive 1).

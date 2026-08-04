@@ -46,6 +46,17 @@ type Config struct {
 	// Default false keeps LinuxCapacity as the shared cross-platform envelope
 	// and preserves ADR 0012 behavior byte-for-byte.
 	ElasticHostEnvelope bool
+	// HostBudget is an explicit operator ceiling on the TOTAL admission envelope
+	// of this node, every platform charged against it together. It exists for a
+	// machine the fleet shares with work it does not own and cannot measure: the
+	// pressure guardrails narrow admission as a co-tenant gets busy, but nothing
+	// stops the fleet taking the whole machine while the co-tenant is quiet, and
+	// a co-tenant that is quiet now is not a co-tenant that has gone away.
+	//
+	// It composes with every other bound by minimum and can only ever narrow one.
+	// The zero vector is unset and imposes no bound, so an omitted setting is
+	// today's behavior byte-for-byte.
+	HostBudget domain.Resources
 }
 
 type State struct {
@@ -495,10 +506,36 @@ func linuxFreeAged(in Input) domain.Resources {
 // Taking the instances as a parameter lets callers ask the same question about a
 // hypothetical occupancy under whichever capacity model is configured, so the
 // static and elastic models can never drift apart.
+// A configured host budget applies last and to both models, because it is a
+// ceiling on the total rather than a term of either one: it must narrow the
+// elastic model's physical bound and the static model's configured constant
+// alike, and it must survive the aged CPU-idle lift below. Aged work escapes an
+// advisory throttle; it does not escape a declared ceiling.
 func freeCapacity(in Input, instances []domain.Instance, aged bool) domain.Resources {
+	live := liveResources(instances)
+	free := staticFree(in, instances)
 	if in.Config.ElasticHostEnvelope {
-		return elasticFree(in, instances, aged)
+		free = elasticFree(in, instances, live, aged)
 	}
+	return budgetBound(free, in.Config.HostBudget, live)
+}
+
+// budgetBound narrows an envelope by the operator's declared ceiling less what
+// live instances of every platform already hold. It reuses the physical-total
+// arithmetic deliberately: a budget is a physical total the operator asserts
+// instead of one the probe measured, so an unset dimension imposes no bound for
+// exactly the reason an unobserved one does not.
+func budgetBound(free, budget, live domain.Resources) domain.Resources {
+	return domain.Resources{
+		CPU:      physicalBound(free.CPU, budget.CPU, live.CPU),
+		MemoryMB: physicalBound(free.MemoryMB, budget.MemoryMB, live.MemoryMB),
+		Slots:    physicalBound(free.Slots, budget.Slots, live.Slots),
+	}
+}
+
+// staticFree is ADR 0012's envelope: one configured cross-platform constant that
+// every live instance is subtracted from, clamped by the measured residual.
+func staticFree(in Input, instances []domain.Instance) domain.Resources {
 	free := in.Config.LinuxCapacity
 	for _, instance := range instances {
 		if instance.ConsumesHostResources() {
@@ -512,6 +549,19 @@ func freeCapacity(in Input, instances []domain.Instance, aged bool) domain.Resou
 	return minResources(free, in.Host.Value.Available)
 }
 
+// liveResources totals what instances hold on the host right now, regardless of
+// platform. It is the term every total bound is charged against.
+func liveResources(instances []domain.Instance) domain.Resources {
+	live := domain.Resources{}
+	for _, instance := range instances {
+		if !instance.ConsumesHostResources() {
+			continue
+		}
+		live = live.Add(instance.Resources)
+	}
+	return live
+}
+
 // elasticFree bounds admission by the observed physical host instead of a static
 // configured constant, so the fleet can expand into an idle host and yield as the
 // host's own tenant gets busy. Three bounds apply together:
@@ -523,16 +573,10 @@ func freeCapacity(in Input, instances []domain.Instance, aged bool) domain.Resou
 //     the real machine even during a boot burst.
 //   - The measured residual (Host.Available) clamps the result. It is already net
 //     of everything running, so live instances are not charged against it twice.
-func elasticFree(in Input, instances []domain.Instance, aged bool) domain.Resources {
+func elasticFree(in Input, instances []domain.Instance, live domain.Resources, aged bool) domain.Resources {
 	free := in.Config.LinuxCapacity
-	live := domain.Resources{}
 	for _, instance := range instances {
-		if !instance.ConsumesHostResources() {
-			continue
-		}
-		live = domain.Resources{CPU: live.CPU + instance.Resources.CPU,
-			MemoryMB: live.MemoryMB + instance.Resources.MemoryMB, Slots: live.Slots + instance.Resources.Slots}
-		if instance.Platform != domain.PlatformLinux {
+		if !instance.ConsumesHostResources() || instance.Platform != domain.PlatformLinux {
 			continue
 		}
 		remaining, ok := free.Sub(instance.Resources)

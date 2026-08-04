@@ -5,6 +5,7 @@
   "maxLinuxWhenMacosIdle": 4,
   "maxLinuxCpu": 8,
   "maxLinuxMemoryMb": 16384,
+  "hostBudget": { "cpu": 10, "memoryMb": 23552 },
   "linuxReservationAgeSeconds": 300,
   "minFreeDiskGb": 60,
   "minAvailableMemoryMb": 1024,

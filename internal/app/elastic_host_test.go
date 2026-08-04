@@ -38,7 +38,7 @@ func configuredCapacity() domain.Resources {
 // carries the real machine so the scheduler can bound aggregate reservations by
 // it, and derives available CPU from measured idle instead of echoing config.
 func TestHostObservationReportsPhysicalCapacityWhenElastic(t *testing.T) {
-	observation := hostObservation(productionSnapshot(), configuredCapacity(), productionGuards(), true)
+	observation := hostObservation(productionSnapshot(), configuredCapacity(), productionGuards(), true, domain.Resources{})
 	if !observation.Usable() {
 		t.Fatalf("observation unusable: %#v", observation)
 	}
@@ -64,7 +64,7 @@ func TestHostObservationYieldsCPUAsHostGetsBusy(t *testing.T) {
 	for _, idle := range []float64{2, 15, 40, 80, 100} {
 		snapshot := productionSnapshot()
 		snapshot.CPUidlePercent = idle
-		available := hostObservation(snapshot, configuredCapacity(), productionGuards(), true).Value.Available.CPU
+		available := hostObservation(snapshot, configuredCapacity(), productionGuards(), true, domain.Resources{}).Value.Available.CPU
 		if available < previous {
 			t.Fatalf("idle %.0f%% advertised %d cores, fewer than %d on a busier host", idle, available, previous)
 		}
@@ -76,7 +76,7 @@ func TestHostObservationYieldsCPUAsHostGetsBusy(t *testing.T) {
 	// A saturated host must advertise no free cores at all.
 	saturated := productionSnapshot()
 	saturated.CPUidlePercent = 2
-	if got := hostObservation(saturated, configuredCapacity(), productionGuards(), true).Value.Available.CPU; got != 0 {
+	if got := hostObservation(saturated, configuredCapacity(), productionGuards(), true, domain.Resources{}).Value.Available.CPU; got != 0 {
 		t.Fatalf("a 2%%-idle host advertised %d free cores, want 0", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestHostObservationClampsNonsenseIdle(t *testing.T) {
 	} {
 		snapshot := productionSnapshot()
 		snapshot.CPUidlePercent = test.idle
-		got := hostObservation(snapshot, configuredCapacity(), productionGuards(), true).Value.Available.CPU
+		got := hostObservation(snapshot, configuredCapacity(), productionGuards(), true, domain.Resources{}).Value.Available.CPU
 		if got != test.want {
 			t.Fatalf("idle %.0f%% advertised %d cores, want %d", test.idle, got, test.want)
 		}
@@ -106,7 +106,7 @@ func TestHostObservationClampsNonsenseIdle(t *testing.T) {
 // byte-for-byte when the elastic envelope is off: CPU echoes configuration and
 // no physical capacity is advertised.
 func TestHostObservationLegacyModeUnchanged(t *testing.T) {
-	host := hostObservation(productionSnapshot(), configuredCapacity(), productionGuards(), false).Value
+	host := hostObservation(productionSnapshot(), configuredCapacity(), productionGuards(), false, domain.Resources{}).Value
 	if host.Available.CPU != configuredCapacity().CPU {
 		t.Fatalf("Available.CPU = %d, want the configured %d in legacy mode", host.Available.CPU, configuredCapacity().CPU)
 	}
@@ -123,7 +123,7 @@ func TestHostObservationUnobservedPhysicalFactsFallBack(t *testing.T) {
 	snapshot.PhysicalCPU = 0
 	snapshot.PhysicalMemoryMB = 0
 
-	host := hostObservation(snapshot, configuredCapacity(), productionGuards(), true).Value
+	host := hostObservation(snapshot, configuredCapacity(), productionGuards(), true, domain.Resources{}).Value
 	if host.Capacity.CPU != 0 || host.Capacity.MemoryMB != 0 {
 		t.Fatalf("Capacity = %+v, want unobserved dimensions left at zero", host.Capacity)
 	}
@@ -138,7 +138,7 @@ func TestHostObservationUnobservedPhysicalFactsFallBack(t *testing.T) {
 func TestHostObservationBlockedPressureStillFailsClosed(t *testing.T) {
 	snapshot := productionSnapshot()
 	snapshot.FreeDiskGB = 10 // below the 60 GiB reserve
-	observation := hostObservation(snapshot, configuredCapacity(), productionGuards(), true)
+	observation := hostObservation(snapshot, configuredCapacity(), productionGuards(), true, domain.Resources{})
 	if observation.Value.Available != (domain.Resources{}) {
 		t.Fatalf("Available = %+v, want empty while pressure blocks admission", observation.Value.Available)
 	}
