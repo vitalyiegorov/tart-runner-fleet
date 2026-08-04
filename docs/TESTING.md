@@ -56,6 +56,21 @@ event trace. `make unit` runs a small default seed range; the pull-request gate
 widens it to about a minute; `.github/workflows/nightly-simulation.yml` explores
 the rest.
 
+A refactor that claims **zero behaviour change** proves it against the same
+harness. `TestSimCorpus` reduces a whole seed sweep to counts — plans, applied
+plans, spawns, drains, distinct instances, findings — plus a digest folding every
+plan identity in tick order, and its own contract is that three sweeps of one arm
+reduce identically. Run it on the merge base and on the branch and compare:
+
+```sh
+go test ./tests/simulation -run TestSimCorpus -v \
+  -corpus-seeds=64 -corpus-ticks=200 -corpus-runs=3
+```
+
+A digest that survives a refactor is evidence no admission, no plan, and no
+lifecycle transition moved. A digest that changes is a behaviour change, whether
+or not it was intended.
+
 Every production incident must first become a failing replay. CI runs formatting,
 vet, shuffled tests, the race detector, and atomic coverage. Code generated from
 upstream schemas is excluded only if it is mechanically generated and separately

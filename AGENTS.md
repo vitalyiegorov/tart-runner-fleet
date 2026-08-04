@@ -36,6 +36,8 @@ all changes as safety critical.
 - `internal/domain`: immutable domain values and lifecycle rules.
 - `internal/scheduler`: pure deterministic policy.
 - `internal/adminapi`: versioned read-only DTOs, Unix socket, and bounded client.
+- `internal/executor`: the ports a node's execution technology and host probe
+  implement; no layer above them may name a backend adapter (ADR 0034).
 - `internal/adapters`: GitHub, SQLite, Tart, and host implementations.
 - `internal/operations`: durable operations, leases, retries, and workers.
 - `internal/discharge`: the one guarded operator mutation and its ordering rules.

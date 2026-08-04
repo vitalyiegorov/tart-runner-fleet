@@ -223,11 +223,11 @@ The audit found the coupling narrower than the package layout suggests.
 `internal/scheduler` needs no change either, because node B runs a
 single-platform configuration and takes the already-proven `planLinux` path.
 
-Four concrete leaks must close, all in `internal/lifecycle/executor.go` and
+Four concrete leaks had to close, all in `internal/lifecycle/executor.go` and
 `internal/app/inventory.go`:
 
 ```go
-// internal/lifecycle/executor.go:115-125 - today
+// internal/lifecycle/executor.go - before issue #137
 type VMControl interface {
 	Clone(context.Context, tart.Request) error   // adapter type in a port
 	Start(context.Context, string, operations.Ownership) error
@@ -236,18 +236,21 @@ type VMControl interface {
 	Running(context.Context, string) (bool, error)
 }
 
-// internal/app/inventory.go:18-20 - today
+// internal/app/inventory.go - before issue #137
 type TartInventory interface {
 	List(context.Context) ([]tart.VM, error)     // adapter type in a port
 }
 ```
 
-The proposed neutral ports. These are the interface definitions for Phase 2;
-the adapter behind them is not written in this document.
+**Built by issue #137.** The ports below are the code as it now stands, in
+`internal/executor`. One correction to the original proposal: they are not in
+`internal/domain`, because `internal/operations` imports `internal/domain` (so a
+port taking an `operations.Ownership` would be an import cycle) and
+`domain.Instance` already names the scheduler's live instance. Only the name
+grammar went to `domain`.
 
 ```go
-// internal/domain - the request a backend receives. Replaces tart.Request in
-// the port; the Tart adapter keeps its own translation of it.
+// internal/executor - the request a backend receives. Replaces tart.Request.
 type InstanceSpec struct {
 	Name      string             // validated by domain.ValidateInstanceName
 	Image     string             // Tart base VM name, or an OCI image reference
@@ -276,22 +279,44 @@ type Instance struct {
 	Source  string
 }
 
-// HostProbe lifts internal/adapters/macos's Snapshot/Guardrails contract out of
+// CommandRunner is one argument vector of a backend's CLI: the primitive both
+// CLI-shelling adapters share, and what the readiness probe is typed on.
+type CommandRunner interface {
+	Run(context.Context, ...string) ([]byte, error)
+}
+
+// HostProbe lifted internal/adapters/macos's Snapshot/Guardrails contract out of
 // the macOS package so a Linux probe reading /proc can satisfy it unchanged.
+// HostSnapshot, Guardrails, AdmissionRequest, AdmissionDecision, and
+// Guardrails.Evaluate moved with it, unchanged. It returns no error because the
+// snapshot carries its own Freshness and Cause: an unreadable machine is a
+// stale or unavailable observation, never a zero-resource one.
 type HostProbe interface {
-	Snapshot(context.Context) (HostSnapshot, error)
+	Snapshot(context.Context) HostSnapshot
 }
 ```
 
-`domain.ValidateInstanceName` takes over from `tart.ValidateName`, which is
-called from `executor.go:220, 645, 680` and `runtime.go:809` and is today the de
-facto global instance-ID grammar. Its regex,
-`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, is already a legal container name.
+`domain.ValidateInstanceName` took over from `tart.ValidateName`, which was the
+de facto global instance-ID grammar. Its regex,
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, is already a legal container name, and
+`tests/contract/executor_port_test.go` asserts exactly that against Podman's
+grammar.
 
-Wiring needs no new plumbing. `internal/daemon/runtime.go:234-251` already
-carries `newVM`, `newReaper`, `readiness`, `bootstrap`, and `inventory` as
-injectable constructors, and `executor.go:177` already has a
-`Bases map[domain.Platform]string` platform-keyed dispatch table to generalize.
+That contract file is what chunk 2d implements against. It pins the verb set and
+signatures, the field sets of `InstanceSpec` and `Instance`, one backend
+satisfying all three caller ports (`lifecycle.VMControl`, `app.ExecutorInventory`,
+`discharge.VM`), the name grammar, and it drives the real `ProvisionExecutor` and
+`DrainExecutor` through a whole runner lifecycle against an in-memory backend —
+so "does my adapter work" is a question the test suite answers before a container
+ever starts. A `depguard` rule denies `internal/adapters/{tart,macos}` to every
+layer above the port, and `internal/daemon` is the only package that names either.
+
+Wiring needs no new plumbing. `internal/daemon/runtime.go` already carries
+`newVM`, `newReaper`, `readiness`, `bootstrap`, and `inventory` as injectable
+constructors, the readiness probe is typed on `executor.CommandRunner` so a
+container command runner drops in without a second copy of the poll loop, and
+`ProvisionExecutor.Bases map[domain.Platform]string` is already a platform-keyed
+dispatch table.
 
 ## `hostBudget`
 
@@ -446,7 +471,7 @@ for an agent working with the existing test gates.
 | # | Chunk | Deliverable | Effort |
 | --- | --- | --- | ---: |
 | 2a | `hostBudget` | Node A gets an explicit ceiling; node C is unblocked. Ships as an ordinary release to node A alone. | 0.5 d |
-| 2b | Executor port extraction | `domain.InstanceSpec`, `domain.Backend`, `domain.Instance`, `domain.ValidateInstanceName`, `HostProbe` lifted out of `internal/adapters/macos`. **Refactor only, zero behaviour change**; all gates and the DST sweep green; ships as a no-op release. | 1 d |
+| 2b | Executor port extraction | **Done, issue #137.** `executor.InstanceSpec`, `executor.Backend`, `executor.Instance`, `executor.CommandRunner`, `domain.ValidateInstanceName`, and `executor.HostProbe` lifted out of `internal/adapters/macos`. Refactor only, zero behaviour change; all gates green and the DST corpus identical across three runs per arm; ships as a no-op release. | 1 d |
 | 2c | Linux/amd64 host support | `GOOS=linux` release artifact and updater asset name, `systemd --user` unit and renderer, XDG paths, file-based credentials replacing the Keychain, `launchctl`→`systemctl` in `internal/autoupdate/host.go`, a `/proc` host probe. **Deliverable: the daemon runs on any Linux box in observe mode.** | 2–3 d |
 | 2d | Container executor adapter | `internal/adapters/container` implementing `domain.Backend` over the Podman CLI, a container-mode bootstrap that does not need `systemd-run`, per-profile device grants for `/dev/kvm`, contract tests mirroring `internal/adapters/tart`'s. **Deliverable: node B serves `trf-linux-amd64-*`.** | 2–3 d |
 
