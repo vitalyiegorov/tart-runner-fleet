@@ -59,6 +59,8 @@ linters:
           deny:
             - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart
               desc: use the internal/executor port; a backend adapter is chosen only in internal/daemon
+            - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos
+              desc: use the internal/executor host probe port; a host adapter is chosen only in internal/daemon
     nolintlint:
       require-explanation: true
       require-specific: true

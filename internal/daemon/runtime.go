@@ -310,7 +310,7 @@ func defaultDependencies() dependencies {
 				Recovery:                   recovery,
 				RecoveryConfirmationMaxAge: deletionConfirmationMaxAge,
 				Capacity:                   domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
-				Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
+				Guards: executor.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,

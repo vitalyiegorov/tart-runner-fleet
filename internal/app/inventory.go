@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -22,9 +21,6 @@ type LiveInstanceStore interface {
 type ExecutorInventory interface {
 	List(context.Context) ([]executor.Instance, error)
 }
-type HostInventory interface {
-	Snapshot(context.Context) macos.Snapshot
-}
 type RecoveryObserver interface {
 	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
 	// JobActive reports whether the durable demand bound to a Running instance
@@ -36,11 +32,11 @@ type RecoveryObserver interface {
 type ProductionInventory struct {
 	Store                      LiveInstanceStore
 	Executor                   ExecutorInventory
-	Host                       HostInventory
+	Host                       executor.HostProbe
 	Recovery                   RecoveryObserver
 	RecoveryConfirmationMaxAge time.Duration
 	Capacity                   domain.Resources
-	Guards                     macos.Guardrails
+	Guards                     executor.Guardrails
 	// ElasticHostEnvelope reports the physical machine and measured idle CPU so
 	// the scheduler can size the fleet against the host it shares rather than a
 	// static constant. Default false preserves the configured-envelope model.
@@ -184,14 +180,14 @@ func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {
 // because it is the only place both halves of the claim exist: `fleet config
 // validate` decodes a file and never probes a machine, so a budget larger than
 // the host it runs on cannot be caught until the host is observed.
-func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails, elastic bool,
+func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, guards executor.Guardrails, elastic bool,
 	budget domain.Resources) domain.Observation[domain.Host] {
 	switch snapshot.Freshness {
-	case macos.Fresh:
+	case executor.Fresh:
 		// Continue with explicit guardrails below.
-	case macos.Stale:
+	case executor.Stale:
 		return domain.Stale(domain.Host{}, snapshot.ObservedAt, "host probe is stale")
-	case macos.Unavailable:
+	case executor.Unavailable:
 		return domain.Unavailable[domain.Host]("host probe unavailable")
 	default:
 		return domain.Unavailable[domain.Host]("host probe freshness is invalid")
@@ -199,7 +195,7 @@ func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards 
 	if reason := budgetExceedsHost(snapshot, guards, budget); reason != "" {
 		return domain.Unavailable[domain.Host](reason)
 	}
-	decision := guards.Evaluate(snapshot, macos.Request{})
+	decision := guards.Evaluate(snapshot, executor.AdmissionRequest{})
 	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
 		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts, CPUIdlePercent: snapshot.CPUidlePercent,
 		LoadAverage: snapshot.LoadAverage, AdmissionAllowed: decision.Allowed, AdmissionReason: decision.Reason}
@@ -235,7 +231,7 @@ func hostObservation(snapshot macos.Snapshot, capacity domain.Resources, guards 
 // A dimension the probe could not read imposes no bound, exactly as it does for
 // the physical total in ADR 0018: an unobserved fact must never masquerade as a
 // measurement of a zero-resource machine.
-func budgetExceedsHost(snapshot macos.Snapshot, guards macos.Guardrails, budget domain.Resources) string {
+func budgetExceedsHost(snapshot executor.HostSnapshot, guards executor.Guardrails, budget domain.Resources) string {
 	if budget == (domain.Resources{}) {
 		return ""
 	}
@@ -256,7 +252,7 @@ func budgetExceedsHost(snapshot macos.Snapshot, guards macos.Guardrails, budget 
 // not-observed and ignores, so an unreadable fact degrades to the configured
 // envelope instead of closing admission. Slots have no physical analogue and
 // stay configured.
-func physicalCapacity(snapshot macos.Snapshot, capacity domain.Resources, guards macos.Guardrails) domain.Resources {
+func physicalCapacity(snapshot executor.HostSnapshot, capacity domain.Resources, guards executor.Guardrails) domain.Resources {
 	physical := domain.Resources{Slots: capacity.Slots}
 	if snapshot.PhysicalCPU > 0 {
 		physical.CPU = int(snapshot.PhysicalCPU)
@@ -271,7 +267,7 @@ func physicalCapacity(snapshot macos.Snapshot, capacity domain.Resources, guards
 // partially busy core is never advertised as available. This is what makes the
 // fleet a second pilot: it claims only the share the host is demonstrably not
 // using, and drops to zero on a saturated machine.
-func idleCores(snapshot macos.Snapshot) int {
+func idleCores(snapshot executor.HostSnapshot) int {
 	idle := snapshot.CPUidlePercent
 	if idle <= 0 {
 		return 0

@@ -1050,7 +1050,7 @@ func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
-	want := macos.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
+	want := executor.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
 	if production.Guards != want {
 		t.Fatalf("wired guards = %+v, want %+v", production.Guards, want)
 	}

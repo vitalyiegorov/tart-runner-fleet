@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 )
 
 // TestProbeReportsPhysicalCapacity covers the facts second-pilot admission needs
@@ -18,7 +20,7 @@ func TestProbeReportsPhysicalCapacity(t *testing.T) {
 		Now: func() time.Time { return now }}
 
 	snapshot := probe.Snapshot(context.Background())
-	if snapshot.Freshness != Fresh {
+	if snapshot.Freshness != executor.Fresh {
 		t.Fatalf("freshness = %s, want fresh", snapshot.Freshness)
 	}
 	if snapshot.PhysicalCPU != 10 {
@@ -40,7 +42,7 @@ func TestProbePhysicalCapacityFailsSafe(t *testing.T) {
 	probe := &Probe{Runner: runner, Timeout: time.Second, Now: func() time.Time { return now }}
 
 	snapshot := probe.Snapshot(context.Background())
-	if snapshot.Freshness != Fresh {
+	if snapshot.Freshness != executor.Fresh {
 		t.Fatalf("freshness = %s: an unreadable physical core count must not degrade the observation", snapshot.Freshness)
 	}
 	if snapshot.PhysicalCPU != 0 {

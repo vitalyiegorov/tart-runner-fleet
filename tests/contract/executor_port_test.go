@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/discharge"
@@ -47,6 +48,7 @@ var (
 	_ app.ExecutorInventory  = executor.Backend(nil)
 	_ discharge.VM           = executor.Backend(nil)
 	_ executor.CommandRunner = tart.ExecRunner{}
+	_ executor.HostProbe     = (*macos.Probe)(nil)
 	_ executor.Backend       = (*memoryBackend)(nil)
 )
 
@@ -132,8 +134,9 @@ func TestInstanceNameGrammarIsLegalOnEveryBackend(t *testing.T) {
 // TestNoLayerAboveThePortNamesABackend is the architectural half of the
 // contract. The port is worth nothing if a caller can still reach around it, and
 // the leak this issue closed was exactly that: internal/lifecycle took a
-// tart.Request and internal/app read a tart.VM. Only internal/daemon, which
-// exists to choose implementations, may name a backend adapter.
+// tart.Request, internal/app read a tart.VM, and the whole scheduler's host
+// facts were a macOS type. Only internal/daemon, which exists to choose
+// implementations, may name a node's execution or host adapter.
 func TestNoLayerAboveThePortNamesABackend(t *testing.T) {
 	root := repositoryRoot(t)
 	for _, pkg := range []string{"internal/lifecycle", "internal/app", "internal/scheduler",
@@ -141,8 +144,8 @@ func TestNoLayerAboveThePortNamesABackend(t *testing.T) {
 		"internal/domain", "internal/executor", "internal/cli", "internal/adminapi"} {
 		for _, file := range packageImports(t, filepath.Join(root, pkg)) {
 			for _, path := range file.imports {
-				if strings.Contains(path, "internal/adapters/tart") {
-					t.Errorf("%s imports the Tart adapter; the executor port exists so it does not have to", file.name)
+				if strings.Contains(path, "internal/adapters/tart") || strings.Contains(path, "internal/adapters/macos") {
+					t.Errorf("%s imports %s; the executor port exists so it does not have to", file.name, path)
 				}
 			}
 		}

@@ -4,15 +4,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 )
 
 // productionSnapshot is the host reading fleetd actually reported during the
 // 2026-07-25 incident on the 10-core / 24 GiB Mac mini.
-func productionSnapshot() macos.Snapshot {
-	return macos.Snapshot{
-		Freshness:         macos.Fresh,
+func productionSnapshot() executor.HostSnapshot {
+	return executor.HostSnapshot{
+		Freshness:         executor.Fresh,
 		ObservedAt:        time.Unix(1000, 0).UTC(),
 		AvailableMemoryMB: 12_288,
 		FreeDiskGB:        152,
@@ -24,8 +24,8 @@ func productionSnapshot() macos.Snapshot {
 	}
 }
 
-func productionGuards() macos.Guardrails {
-	return macos.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 1024, MaxSwapUsedMB: 2048,
+func productionGuards() executor.Guardrails {
+	return executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 1024, MaxSwapUsedMB: 2048,
 		MaxLoadAverage: 9, MinCPUidlePercent: 5}
 }
 

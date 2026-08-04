@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -60,9 +59,9 @@ func secondPilotConfig(t *testing.T, elastic bool) config.Config {
 // 10-core / 24 GiB machine that is 62.4% idle with 12 GiB available.
 type incidentProbe struct{}
 
-func (incidentProbe) Snapshot(context.Context) macos.Snapshot {
-	return macos.Snapshot{
-		Freshness:         macos.Fresh,
+func (incidentProbe) Snapshot(context.Context) executor.HostSnapshot {
+	return executor.HostSnapshot{
+		Freshness:         executor.Fresh,
 		ObservedAt:        time.Unix(1000, 0).UTC(),
 		AvailableMemoryMB: 12_288,
 		FreeDiskGB:        152,
@@ -103,7 +102,7 @@ func TestSecondPilotEnvelopeUsesIdleHostEndToEnd(t *testing.T) {
 			Store: emptyStore{}, Executor: emptyTart{}, Host: incidentProbe{},
 			Capacity: domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB,
 				Slots: cfg.Linux.MaxInstances},
-			Guards: macos.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
+			Guards: executor.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
 				MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB),
 				MaxSwapUsedMB:        int64(cfg.Guards.MaxSwapUsedMiB),
 				MaxLoadAverage:       cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
