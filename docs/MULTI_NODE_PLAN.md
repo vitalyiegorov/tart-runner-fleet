@@ -42,8 +42,10 @@ written; the file is named for what it now describes.
 | Platforms | macOS only | Linux/amd64 only | macOS only |
 | Status | live | ordered | ordered |
 
-Node A and node B have disjoint capabilities. Node C overlaps node A and is
-partitioned by scope, per ADR 0034 §3.
+Node A and node B have disjoint capabilities. Node C overlaps node A, and since
+ADR 0034's *Amendment 2026-08-04b* that overlap is **not** partitioned: both
+nodes advertise the same `maestro` labels in the same scopes and GitHub
+distributes between them by advertised capacity. Spike 3 below is answered.
 
 ## Workload placement
 
@@ -61,7 +63,7 @@ Derived from seven days of real instance starts on node A (2026-07-28 to
 | new | 8×16 | — | Node B, one job takes a large slice | `trf-linux-amd64-8x16` |
 | new | 12×24 | — | Node B, whole-node jobs | `trf-linux-amd64-12x24` |
 | `builder` | 6×12 | Node A | **Node A only** | `trf-macos-arm64-6x12` |
-| `maestro` | 4×7 | Node A | Node A + **Node C** for named scopes | `trf-macos-arm64-4x7` |
+| `maestro` | 4×7 | Node A | Node A **and** Node C, same labels, GitHub splits by capacity | `trf-macos-arm64-4x7` |
 
 Node C cannot host `builder`: 6 vCPU and 12288 MiB both exceed its 4 vCPU /
 10240 MiB budget. `maestro` fits exactly.
@@ -568,22 +570,34 @@ Migrate one repository per pull request, in that order, most-broken first.
 - [ ] Render `config/nodes/rendered/mac-studio.json`:
       `hostBudget: {cpu: 4, memoryMb: 10240}`, `macosBurst.enabled: true` with
       `maestro` only and `builder` capped out of reach, no Linux scale sets.
-- [ ] Assign node C the `maestro` scale set of the `sudoku-repo` scope **only**
-      — the largest single `maestro` consumer at 109 starts in seven days.
-      Remove that one scale set from node A's configuration in the same change.
-      No new label, no consumer edit, no routing ambiguity.
+- [ ] Give node C **its own** `maestro` scale set in each scope it should serve,
+      with a distinct **name** (`trf-sudoku-maestro-studio`; GitHub rejects a
+      duplicate name with `400 RunnerScaleSetExistsException`) and the **same
+      labels** as node A's. Node A's configuration is **not** edited and nothing
+      is removed from it, so no scope is ever unserved. Start with
+      `sudoku-repo`, the largest single `maestro` consumer at 109 starts in
+      seven days. No consumer edit.
+- [ ] Set `canonicalJobInventory: true` for every scope whose label two nodes
+      advertise, so each node advertises its real capacity and GitHub's split is
+      truthful. This is a precondition, not an optimization — see ADR 0034
+      *Amendment 2026-08-04b*, "The two conditions this depends on".
+- [ ] Land the per-set attribution bound on REST-derived demand before enabling
+      the shared label, so the two nodes do not both claim the same queued job.
 - [ ] Verify the budget binds: with one `maestro` guest live (4 vCPU /
       7168 MiB), `fleet status` on node C must show no remaining envelope, even
       when the machine is otherwise idle.
 - [ ] Confirm outbound-only: no inbound port, no link to node A or B, operator
       access by SSH outside the fleet's contract.
-- [ ] Rollback: move the scale set back to node A's configuration and
-      re-provision. One file, one command.
+- [ ] Verify the split: with both nodes advertising the same `maestro` labels,
+      a burst of `maestro` jobs must appear in `fleet queues` on **both** nodes
+      in proportion to their advertised capacity (node A 2, node C 1).
+- [ ] Rollback: delete node C's scale sets. Node A was never edited, so there is
+      nothing to restore.
 
-An alias-based overflow lane — node C advertising `macos-maestro-overflow`
-across every scope — is the alternative, and it is deferred until Spike 3
-answers whether GitHub distributes across two scale sets that advertise one
-label. Scope ownership needs no such answer.
+A separate overflow label — node C advertising `macos-maestro-overflow` — is no
+longer needed. Spike 3 is answered: GitHub distributes across two scale sets
+advertising one label, so node C shares node A's labels and consumers change
+nothing.
 
 ## Observability
 
@@ -635,12 +649,16 @@ world-config sweep in chunk 2d; add nothing else.
 
 ## Open spikes
 
-| # | Question | Gates |
+Spikes 1 to 3 were run on 2026-08-04 against a throwaway repository and two
+throwaway scale sets. Full transcripts:
+[#144](https://github.com/vitalyiegorov/tart-runner-fleet/issues/144#issuecomment-5180794736).
+
+| # | Question | Answer |
 | --- | --- | --- |
-| 1 | Can a peer delete an inherited scale-set session and immediately create its own? | Carried over from issue #99. Not needed by this plan; needed by any future steward. |
-| 2 | Does GitHub accept a `maxCapacity` decrease while jobs are assigned? | Carried over from issue #99. Needed before any elastic cross-node capacity. |
-| 3 | Given two scale sets in one scope advertising the same label, does GitHub distribute jobs between them, or prefer one deterministically? | Gates the alias-based overflow lane for node C. Until answered, node C owns scale sets by scope. |
-| 4 | Does the `suuudokuuu` Maestro suite pass against an x86_64 emulator at the timings its challenge flows assume? | Gates the `suuudokuuu` Android migration in Phase 3. |
+| 1 | Can a peer delete an inherited scale-set session and immediately create its own? | **Yes.** `DELETE` from an independently minted admin connection returns `204`, and the successor's `POST` returns `200` under two seconds. But sessions are **not enumerable** (`GET .../sessions` → `404`), so the id must be handed over. Still not needed by this plan. |
+| 2 | Does GitHub accept a `maxCapacity` decrease while jobs are assigned? | **Yes, and the question is obsolete.** There is no persisted `maxCapacity`; it is the per-poll `X-ScaleSetMaxCapacity` header. Lowering it mid-flight is accepted and does not revoke assigned jobs; raising it pulls backlog on the next poll. |
+| 3 | Given two scale sets in one scope advertising the same label, does GitHub distribute jobs between them, or prefer one deterministically? | **It distributes**, server-side, filling each set to the capacity it last advertised. One set advertising 1 and another advertising 5 split a four-job dispatch 1 / 3. This answer is what ADR 0034 *Amendment 2026-08-04b* acts on. |
+| 4 | Does the `suuudokuuu` Maestro suite pass against an x86_64 emulator at the timings its challenge flows assume? | Open. Gates the `suuudokuuu` Android migration in Phase 3. |
 
 ## Working agreement
 
