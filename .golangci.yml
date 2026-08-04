@@ -44,11 +44,11 @@ linters:
           deny:
             - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite
               desc: the operator interface must reach daemon state only through the admin API
-        # ADR 0034 / issue #137: a node's execution technology is chosen once, in
-        # the wiring package. Every layer above it speaks internal/executor, so
-        # the container backend of issue #139 is a wiring change and not a
-        # rewrite. internal/daemon is deliberately absent: choosing the
-        # implementation is its job.
+        # ADR 0034 / issues #137 and #139: a node's execution technology is chosen
+        # once, in the wiring package. Every layer above it speaks
+        # internal/executor, which is what made the container backend of issue
+        # #139 a wiring change and not a rewrite. internal/daemon is deliberately
+        # absent: choosing the implementation is its job.
         lifecycle-never-names-a-backend:
           files:
             - "**/internal/lifecycle/*.go"
@@ -64,6 +64,8 @@ linters:
             - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/linux
               desc: use the internal/executor host probe port; a host adapter is chosen only in internal/daemon
             - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/noexecutor
+              desc: use the internal/executor port; a backend adapter is chosen only in internal/daemon
+            - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/podman
               desc: use the internal/executor port; a backend adapter is chosen only in internal/daemon
     nolintlint:
       require-explanation: true

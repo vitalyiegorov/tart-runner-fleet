@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -11,10 +12,12 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/linux"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/noexecutor"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/podman"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 )
@@ -26,10 +29,13 @@ import (
 // and executed by none.
 func TestAppleNodesRunTartAndTheMacosProbe(t *testing.T) {
 	node := platformFor("darwin")
-	if !node.executes {
+	cfg := config.Default()
+	if !node.executes(cfg) {
 		t.Fatal("an Apple node has an execution technology")
 	}
-	cfg := config.Default()
+	if node.linuxImage(cfg) != cfg.Linux.BaseVM {
+		t.Errorf("linux image = %q, want the Tart base VM", node.linuxImage(cfg))
+	}
 	if _, ok := node.host(cfg).(*macos.Probe); !ok {
 		t.Errorf("host probe = %T", node.host(cfg))
 	}
@@ -52,15 +58,21 @@ func TestAppleNodesRunTartAndTheMacosProbe(t *testing.T) {
 
 // TestNonAppleNodesObserveFromProcWithNoBackend is Phase 1 Part A of
 // docs/MULTI_NODE_PLAN.md expressed as wiring: a real daemon, measuring a real
-// machine from /proc, with nothing to provision onto until issue #139 lands the
-// container adapter.
+// machine from /proc, with nothing to provision onto because its configuration
+// names no container backend.
 func TestNonAppleNodesObserveFromProcWithNoBackend(t *testing.T) {
 	for _, goos := range []string{"linux", "freebsd"} {
 		node := platformFor(goos)
-		if node.executes {
+		cfg := config.Default()
+		if node.executes(cfg) {
 			t.Fatalf("%s claimed an execution technology it does not have", goos)
 		}
-		cfg := config.Default()
+		if err := node.preflight(context.Background(), cfg); err != nil {
+			t.Errorf("%s preflighted a backend it has none of: %v", goos, err)
+		}
+		if node.linuxImage(cfg) != cfg.Linux.BaseVM {
+			t.Errorf("%s linux image = %q", goos, node.linuxImage(cfg))
+		}
 		if _, ok := node.host(cfg).(*linux.Probe); !ok {
 			t.Errorf("%s host probe = %T", goos, node.host(cfg))
 		}
@@ -79,6 +91,85 @@ func TestNonAppleNodesObserveFromProcWithNoBackend(t *testing.T) {
 		if err := node.bootstrap(cfg).Bootstrap(context.Background(), "trf-small-1", nil); !errors.Is(err, noexecutor.ErrNoBackend) {
 			t.Errorf("%s bootstrap = %v", goos, err)
 		}
+	}
+}
+
+// containerNodeConfig is node B after Phase 2: the same Linux machine, with an
+// `executor` block naming the runtime it now has.
+func containerNodeConfig() config.Config {
+	cfg := config.Default()
+	cfg.Executor = config.Executor{Backend: config.ExecutorPodman,
+		Image: "ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08", Binary: "/usr/bin/podman",
+		KVMProfiles: []string{"large"}}
+	return cfg
+}
+
+// TestAConfiguredContainerNodeWiresPodmanEverywhere is issue #139's acceptance
+// criterion at the wiring level: the same Linux platform that observed in Part A
+// provisions in Part B, and every one of the five constructors changes together.
+// A backend wired into four of five places is the failure this pins.
+func TestAConfiguredContainerNodeWiresPodmanEverywhere(t *testing.T) {
+	node := platformFor("linux")
+	cfg := containerNodeConfig()
+	if !node.executes(cfg) {
+		t.Fatal("a node with a configured container runtime cannot execute")
+	}
+	if node.linuxImage(cfg) != cfg.Executor.Image {
+		t.Errorf("linux image = %q, want the configured OCI reference", node.linuxImage(cfg))
+	}
+	if _, ok := node.host(cfg).(*linux.Probe); !ok {
+		t.Errorf("host probe = %T; measuring the machine never depended on the backend", node.host(cfg))
+	}
+	if _, ok := node.executor(cfg).(*podman.Adapter); !ok {
+		t.Errorf("executor inventory = %T", node.executor(cfg))
+	}
+	if _, ok := node.newReaper(nil, cfg).(*podman.Adapter); !ok {
+		t.Errorf("reaper = %T", node.newReaper(nil, cfg))
+	}
+	if _, ok := node.readiness(cfg).(execReadiness); !ok {
+		t.Errorf("readiness = %T", node.readiness(cfg))
+	}
+	bootstrapper, ok := node.bootstrap(cfg).(lifecycle.StdinBootstrapper)
+	if !ok {
+		t.Fatalf("bootstrapper = %T", node.bootstrap(cfg))
+	}
+	if runner, isExec := bootstrapper.Runner.(lifecycle.ExecStdinRunner); !isExec || runner.Binary != "/usr/bin/podman" {
+		t.Errorf("JIT bootstrap runs %#v, want the configured podman binary", bootstrapper.Runner)
+	}
+
+	adapter, ok := node.newVM(nil, cfg, nil).(*podman.Adapter)
+	if !ok {
+		t.Fatalf("vm control = %T", node.newVM(nil, cfg, nil))
+	}
+	if adapter.Image != cfg.Executor.Image || adapter.CommandTimeout != cfg.Timeouts.Tart ||
+		adapter.StopTimeout != containerStopGrace || adapter.ConfirmationMaxAge != deletionConfirmationMaxAge {
+		t.Errorf("adapter = %#v", adapter)
+	}
+	// ADR 0034 grants /dev/kvm to the named profile alone, and the adapter reads
+	// the profile off the instance-name prefix the scheduler mints.
+	if !reflect.DeepEqual(adapter.KVMInstancePrefixes, []string{"trf-large-"}) {
+		t.Errorf("kvm prefixes = %v, want the configured profile only", adapter.KVMInstancePrefixes)
+	}
+}
+
+// TestAnUnusablePodmanRefusesToStartTheNode is the fail-closed half. The
+// preflight shells the real binary, so a node configured with one that cannot
+// exist must refuse rather than promise GitHub a runner.
+func TestAnUnusablePodmanRefusesToStartTheNode(t *testing.T) {
+	cfg := containerNodeConfig()
+	cfg.Executor.Binary = filepath.Join(t.TempDir(), "podman-that-is-not-installed")
+	if err := platformFor("linux").preflight(context.Background(), cfg); err == nil {
+		t.Fatal("a node with no container runtime preflighted successfully")
+	}
+}
+
+// TestPodmanBinaryFallsBackToThePath states the default an operator gets from a
+// distribution package.
+func TestPodmanBinaryFallsBackToThePath(t *testing.T) {
+	cfg := containerNodeConfig()
+	cfg.Executor.Binary = ""
+	if got := podmanBinary(cfg); got != "podman" {
+		t.Fatalf("podmanBinary() = %q", got)
 	}
 }
 
@@ -117,11 +208,12 @@ func TestObserveOnlyInventoryStillObservesTheMachine(t *testing.T) {
 // so the daemon refuses at startup rather than accumulating parked dead letters.
 func TestOnlyObserveModeStartsWithoutAnExecutionBackend(t *testing.T) {
 	d := testDependencies(t)
-	d.executes = false
+	d.executes = func(config.Config) bool { return false }
+	configPath := writeConfig(t, true)
 	refused := []options{
-		{Mode: reconcile.Shadow, ConfigPath: "unused"},
-		{Mode: reconcile.Authority, ConfigPath: "unused"},
-		{Mode: reconcile.Canary, CanaryScope: "fleet-repo", CanaryProfile: "small", ConfigPath: "unused"},
+		{Mode: reconcile.Shadow, ConfigPath: configPath},
+		{Mode: reconcile.Authority, ConfigPath: configPath},
+		{Mode: reconcile.Canary, CanaryScope: "fleet-repo", CanaryProfile: "small", ConfigPath: configPath},
 	}
 	for _, opts := range refused {
 		err := runWithDependencies(context.Background(), opts, d)
@@ -140,10 +232,42 @@ func TestOnlyObserveModeStartsWithoutAnExecutionBackend(t *testing.T) {
 	}
 }
 
+// TestAConfiguredBackendMustBeProvenPresentBeforeTheNodeStarts is the fail-closed
+// gate of issue #139 at the daemon boundary. A node whose configuration names a
+// container runtime, on a machine where that runtime is absent or unusable,
+// refuses to start in any mutating mode -- rather than starting, advertising
+// capacity to GitHub, and parking every job it is then handed.
+func TestAConfiguredBackendMustBeProvenPresentBeforeTheNodeStarts(t *testing.T) {
+	d := testDependencies(t)
+	d.executes = func(config.Config) bool { return true }
+	d.preflight = func(context.Context, config.Config) error { return errors.New("podman is not installed") }
+	configPath := writeConfig(t, true)
+
+	err := runWithDependencies(context.Background(), options{Mode: reconcile.Shadow, ConfigPath: configPath}, d)
+	if err == nil || !strings.Contains(err.Error(), "execution backend preflight") {
+		t.Fatalf("a node with an unusable backend started: %v", err)
+	}
+
+	// Observe mode never mutates anything, so it is not gated on the runtime
+	// being usable: a node whose podman broke must still be able to report what
+	// it can see.
+	observeErr := runWithDependencies(context.Background(), options{Mode: reconcile.Observe,
+		ConfigPath: filepath.Join(t.TempDir(), "absent.json")}, d)
+	if observeErr == nil || strings.Contains(observeErr.Error(), "preflight") {
+		t.Fatalf("observe was gated on a backend it never uses: %v", observeErr)
+	}
+}
+
 // TestDefaultDependenciesFollowTheRunningMachine ties the production entry point
 // to the platform table.
 func TestDefaultDependenciesFollowTheRunningMachine(t *testing.T) {
-	if executes := defaultDependencies().executes; executes != (runtime.GOOS == "darwin") {
+	if executes := defaultDependencies().executes(config.Default()); executes != (runtime.GOOS == "darwin") {
 		t.Fatalf("%s node executes = %v", runtime.GOOS, executes)
+	}
+	// A Linux machine that names a container runtime executes on any host, which
+	// is what makes the second node's wiring reachable from a macOS development
+	// machine and from the Linux CI runner alike.
+	if !defaultDependencies().executes(containerNodeConfig()) && runtime.GOOS != "darwin" {
+		t.Fatal("a configured container node did not execute")
 	}
 }

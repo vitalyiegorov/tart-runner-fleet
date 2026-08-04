@@ -72,6 +72,45 @@ type Linux struct {
 	NestedVirtualization bool
 }
 
+// ExecutorBackend names the execution technology of this node. It is empty on
+// every node whose backend its operating system already decides -- macOS is
+// Tart, and a Linux node that names none is ADR 0034's observe-only node with
+// nothing to provision onto -- and it is `podman` on the x86 Linux node of
+// issue #139.
+type ExecutorBackend string
+
+const (
+	ExecutorNone   ExecutorBackend = ""
+	ExecutorPodman ExecutorBackend = "podman"
+)
+
+// Executor is the container backend of a Linux node. It is absent from every
+// other node's file, and an absent block is a node that can observe and nothing
+// else -- which is exactly the state issue #138 left node B in.
+//
+// It is deliberately not part of the Linux block. `linux.baseVm` is a Tart base
+// VM name and `linux.vmPrefix` is a Tart naming convention; neither means
+// anything to a container runtime, and folding an OCI reference in beside them
+// would make one key mean two things depending on the machine reading it.
+type Executor struct {
+	Backend ExecutorBackend
+	// Image is the OCI reference every runner container is created from. On a
+	// container node it takes the place of `linux.baseVm`, which stays in the
+	// file because the schema requires it and means nothing there.
+	Image string
+	// Binary is the podman executable. Empty resolves `podman` through PATH,
+	// which is what a distribution package installs.
+	Binary string
+	// KVMProfiles are the profile IDs whose containers are granted
+	// `--device /dev/kvm`. ADR 0034 gives the device to the Android emulator
+	// profile and to no other, so this is a list an operator writes down rather
+	// than a fleet-wide switch.
+	KVMProfiles []string
+	// HoldCommand keeps a created container alive and idle so the JIT bootstrap
+	// can be executed inside it. Empty means the adapter's default.
+	HoldCommand []string
+}
+
 type MacOSAdmissionPolicy string
 
 const (
@@ -239,12 +278,21 @@ type Config struct {
 	// constant under the static model). Rollback is removing the setting.
 	HostBudget      Resources
 	Linux           Linux
+	Executor        Executor
 	MacOS           MacOS
 	GitHub          GitHub
 	Timeouts        Timeouts
 	Guards          Guards
 	SessionRecovery SessionRecovery
 	Targets         []Target
+}
+
+type wireExecutor struct {
+	Backend     ExecutorBackend `json:"backend"`
+	Image       string          `json:"image,omitempty"`
+	Binary      string          `json:"binary,omitempty"`
+	KVMProfiles []string        `json:"kvmProfiles,omitempty"`
+	HoldCommand []string        `json:"holdCommand,omitempty"`
 }
 
 type wireConfig struct {
@@ -257,21 +305,25 @@ type wireConfig struct {
 	// HostBudget is a pointer so an unset budget is absent from the encoded file
 	// rather than present as a zero object: a release older than this setting
 	// decodes with DisallowUnknownFields and would refuse the key outright.
-	HostBudget                *Resources `json:"hostBudget,omitempty"`
-	LinuxReservationAgeSecs   int        `json:"linuxReservationAgeSeconds"`
-	LinuxProfiles             []Profile  `json:"linuxProfiles"`
-	LinuxNestedVirtualization bool       `json:"linuxNestedVirtualization,omitempty"`
-	MinFreeDiskGiB            int        `json:"minFreeDiskGb"`
-	MinAvailableMemoryMiB     int        `json:"minAvailableMemoryMb,omitempty"`
-	MaxSwapUsedMiB            int        `json:"maxSwapUsedMb,omitempty"`
-	MaxLoadAverage            float64    `json:"maxLoadAverage,omitempty"`
-	MinCPUIdlePercent         float64    `json:"minCpuIdlePercent,omitempty"`
-	PressureMemoryAccounting  bool       `json:"pressureMemoryAccounting,omitempty"`
-	ElasticHostEnvelope       bool       `json:"elasticHostEnvelope,omitempty"`
-	GitHubTimeoutSeconds      int        `json:"githubTimeoutSeconds"`
-	TartControlTimeoutSeconds int        `json:"tartControlTimeoutSeconds"`
-	BootTimeoutSeconds        int        `json:"bootTimeoutSeconds"`
-	AssignedTimeoutSeconds    int        `json:"assignedTimeoutSeconds,omitempty"`
+	HostBudget              *Resources `json:"hostBudget,omitempty"`
+	LinuxReservationAgeSecs int        `json:"linuxReservationAgeSeconds"`
+	LinuxProfiles           []Profile  `json:"linuxProfiles"`
+	// Executor is a pointer so a node with no container backend encodes no key
+	// at all: a release older than issue #139 decodes with DisallowUnknownFields
+	// and would refuse the block outright.
+	Executor                  *wireExecutor `json:"executor,omitempty"`
+	LinuxNestedVirtualization bool          `json:"linuxNestedVirtualization,omitempty"`
+	MinFreeDiskGiB            int           `json:"minFreeDiskGb"`
+	MinAvailableMemoryMiB     int           `json:"minAvailableMemoryMb,omitempty"`
+	MaxSwapUsedMiB            int           `json:"maxSwapUsedMb,omitempty"`
+	MaxLoadAverage            float64       `json:"maxLoadAverage,omitempty"`
+	MinCPUIdlePercent         float64       `json:"minCpuIdlePercent,omitempty"`
+	PressureMemoryAccounting  bool          `json:"pressureMemoryAccounting,omitempty"`
+	ElasticHostEnvelope       bool          `json:"elasticHostEnvelope,omitempty"`
+	GitHubTimeoutSeconds      int           `json:"githubTimeoutSeconds"`
+	TartControlTimeoutSeconds int           `json:"tartControlTimeoutSeconds"`
+	BootTimeoutSeconds        int           `json:"bootTimeoutSeconds"`
+	AssignedTimeoutSeconds    int           `json:"assignedTimeoutSeconds,omitempty"`
 	// GitHubSessionMaxIngestFailures and GitHubSessionFailureWindowSeconds are
 	// omitted while they hold the shipped defaults so a rewritten file stays
 	// decodable by older strict releases.
@@ -308,6 +360,7 @@ func Decode(r io.Reader) (Config, error) {
 		PollInterval:   time.Duration(w.PollSeconds) * time.Second,
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		HostBudget:     hostBudget(w.HostBudget),
+		Executor:       decodeExecutor(w.Executor),
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
 			NestedVirtualization: w.LinuxNestedVirtualization},
@@ -390,6 +443,11 @@ func Encode(w io.Writer, cfg Config) error {
 	if cfg.HostBudget != (Resources{}) {
 		budget := cfg.HostBudget
 		wire.HostBudget = &budget
+	}
+	if cfg.Executor.Backend != ExecutorNone {
+		wire.Executor = &wireExecutor{Backend: cfg.Executor.Backend, Image: cfg.Executor.Image,
+			Binary: cfg.Executor.Binary, KVMProfiles: append([]string(nil), cfg.Executor.KVMProfiles...),
+			HoldCommand: append([]string(nil), cfg.Executor.HoldCommand...)}
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
@@ -518,6 +576,18 @@ func normalizeMacOSAdmissionPolicy(policy MacOSAdmissionPolicy) MacOSAdmissionPo
 	return policy
 }
 
+// decodeExecutor projects the optional wire block onto the runtime struct. An
+// absent block and a block naming no backend are the same node: one that cannot
+// bring an instance into existence.
+func decodeExecutor(w *wireExecutor) Executor {
+	if w == nil {
+		return Executor{}
+	}
+	return Executor{Backend: w.Backend, Image: w.Image, Binary: w.Binary,
+		KVMProfiles: append([]string(nil), w.KVMProfiles...),
+		HoldCommand: append([]string(nil), w.HoldCommand...)}
+}
+
 func Default() Config {
 	return Config{
 		PollInterval: 20 * time.Second, ReservationAge: 5 * time.Minute,
@@ -542,6 +612,8 @@ func Default() Config {
 
 func (c Config) Clone() Config {
 	out := c
+	out.Executor.KVMProfiles = append([]string(nil), c.Executor.KVMProfiles...)
+	out.Executor.HoldCommand = append([]string(nil), c.Executor.HoldCommand...)
 	out.Linux.Profiles = append([]Profile(nil), c.Linux.Profiles...)
 	for i := range out.Linux.Profiles {
 		out.Linux.Profiles[i].Aliases = append([]string(nil), c.Linux.Profiles[i].Aliases...)
@@ -657,6 +729,9 @@ func (c Config) Validate() error {
 	if err := c.validateHostBudget(); err != nil {
 		return err
 	}
+	if err := c.validateExecutor(); err != nil {
+		return err
+	}
 	// Label derivation runs last so a broken vector is reported as the vector
 	// error it is, not as the naming failure it also causes.
 	_, err := c.profileLabelSets()
@@ -711,6 +786,46 @@ func (c Config) budgetedProfiles() []Profile {
 
 // exposedProfiles is every profile GitHub can route a job to on this node: the
 // profile of each scale set, in the legacy flat list and in every scope.
+// validateExecutor checks the container backend the way a file can be checked:
+// the backend is one this build implements, an image is present and cannot be
+// read as a command-line option, and every profile granted /dev/kvm is a profile
+// this node actually declares.
+//
+// The last rule is the one worth having. ADR 0034 gives the device to the
+// Android emulator profile alone, and a typo in that list would silently grant
+// nothing -- a workflow that fails deep inside an emulator boot rather than at
+// the configuration that caused it.
+func (c Config) validateExecutor() error {
+	if c.Executor.Backend == ExecutorNone {
+		if c.Executor.Image != "" || c.Executor.Binary != "" ||
+			len(c.Executor.KVMProfiles) > 0 || len(c.Executor.HoldCommand) > 0 {
+			return errors.New("executor settings require an executor backend")
+		}
+		return nil
+	}
+	if c.Executor.Backend != ExecutorPodman {
+		return fmt.Errorf("unsupported executor backend %q", c.Executor.Backend)
+	}
+	if err := domain.ValidateImageReference(c.Executor.Image); err != nil {
+		return fmt.Errorf("executor image: %w", err)
+	}
+	declared := make(map[string]struct{}, len(c.Linux.Profiles))
+	for _, profile := range c.Linux.Profiles {
+		declared[profile.normalized().ID] = struct{}{}
+	}
+	for _, profile := range c.Executor.KVMProfiles {
+		if _, ok := declared[profile]; !ok {
+			return fmt.Errorf("executor grants /dev/kvm to undeclared profile %q", profile)
+		}
+	}
+	for _, argument := range c.Executor.HoldCommand {
+		if strings.TrimSpace(argument) == "" {
+			return errors.New("executor hold command contains an empty argument")
+		}
+	}
+	return nil
+}
+
 func (c Config) exposedProfiles() map[string]struct{} {
 	exposed := make(map[string]struct{}, len(c.GitHub.ScaleSets))
 	for _, scaleSet := range c.GitHub.ScaleSets {
