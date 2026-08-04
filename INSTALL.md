@@ -16,7 +16,9 @@ bring-up sequence: [`INSTALL-linux.md`](INSTALL-linux.md).
 - a GitHub App installed on every repository or organization the fleet serves;
 - one GitHub Actions runner scale set per profile variant each scope exposes;
 - immutable Linux and macOS Tart bases containing `$HOME/actions-runner/run.sh`
-  and the matching released `tart-runner-fleet-bootstrap` helper;
+  and the matching released `tart-runner-fleet-bootstrap` helper — to build a
+  macOS base from a pinned public image, follow
+  [`docs/BASE_IMAGE.md`](docs/BASE_IMAGE.md);
 - enough host capacity for the configured resource envelope and disk guard.
 
 Run the daemon as an unprivileged logged-in user. Do not use `sudo` for the
