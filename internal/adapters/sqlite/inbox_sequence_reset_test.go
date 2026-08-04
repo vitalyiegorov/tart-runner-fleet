@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -199,5 +200,37 @@ func TestRetiredGenerationsAreBoundedAndReadable(t *testing.T) {
 	}
 	if generations != 2 {
 		t.Fatalf("the ledger must retain the live generation and the one it retired, got %d", generations)
+	}
+}
+
+// TestSequenceResetIsAtomic proves adopting a generation is all-or-nothing. A
+// half-retired ledger would be worse than the defect it repairs: the message
+// would be neither deduped nor durable, and the binding would be back to
+// refusing evidence it had already been handed.
+func TestSequenceResetIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.ApplyDemandBatch(ctx, incidentScaleSet, 100000004, []operations.DemandEvent{julyEvent(7880094454290370576)}); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	store.injectFault = func(point string) error {
+		if point == "inbox.retire" {
+			return errors.New("injected")
+		}
+		return nil
+	}
+	result, err := store.ApplyDemandBatch(ctx, incidentScaleSet, 100000004, []operations.DemandEvent{augustEvent(6597795989104146686, 37)})
+	if err == nil || result.Applied {
+		t.Fatalf("a failed retirement must fail the whole commit: %#v %v", result, err)
+	}
+	store.injectFault = nil
+	var generations, rows int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT generation),COUNT(*) FROM scale_set_inbox WHERE scale_set_id=?`, incidentScaleSet).
+		Scan(&generations, &rows); err != nil || generations != 1 || rows != 1 {
+		t.Fatalf("partially adopted generation: %d generations, %d rows, %v", generations, rows, err)
+	}
+	// And the retry succeeds: nothing about the failure is sticky.
+	if retried, err := store.ApplyDemandBatch(ctx, incidentScaleSet, 100000004, []operations.DemandEvent{augustEvent(6597795989104146686, 37)}); err != nil || !retried.Reset.Detected {
+		t.Fatalf("retry after a failed retirement: %#v %v", retried, err)
 	}
 }

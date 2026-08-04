@@ -1366,3 +1366,35 @@ func TestIdempotentTransitionResultReadFailure(t *testing.T) {
 		t.Fatal("idempotent result read failure ignored")
 	}
 }
+
+// TestMigrationThirteenIsIdempotentOnAnAlreadyGenerationalLedger proves the
+// inbox rebuild is guarded by the schema it produces rather than by the version
+// row alone. A database that already carries the generation columns -- one
+// upgraded, then rolled back to an older binary, then upgraded again -- must not
+// have its ledger rebuilt a second time, because the rebuild is what would drop
+// the retired generation an operator is reading (issue #165).
+func TestMigrationThirteenIsIdempotentOnAnAlreadyGenerationalLedger(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if _, err := store.ApplyDemandBatch(ctx, 8077185082566234948, 100000004,
+		[]operations.DemandEvent{demandEvent(operations.DemandJobAvailable, 4)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE version>=13`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("re-running migration 13: %v", err)
+	}
+	var version, rows, columns int
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 13 {
+		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM scale_set_inbox`).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("ledger rows after re-migration=%d err=%v", rows, err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('scale_set_cursors') WHERE name='generation'`).
+		Scan(&columns); err != nil || columns != 1 {
+		t.Fatalf("cursor generation column=%d err=%v", columns, err)
+	}
+}
