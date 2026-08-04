@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -389,6 +390,30 @@ var instanceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 func ValidateInstanceName(name string) error {
 	if !instanceName.MatchString(name) || name == "." || name == ".." {
 		return errors.New("invalid instance name")
+	}
+	return nil
+}
+
+// ValidateImageReference is the neutral rule for what an instance may be made
+// from. It is deliberately weaker than ValidateInstanceName, because the two
+// backends disagree about what an image is: on node A it is a Tart base VM name,
+// which is an instance name, and on node B it is an OCI reference whose slashes,
+// colons, and digest `@` are exactly the characters an instance name forbids.
+//
+// So this checks only what is true of an image on every backend and knowable
+// without a registry: it exists, it is not padded, it carries no whitespace or
+// NUL, and it cannot be read as a command-line option. A backend narrows it
+// further -- internal/adapters/tart requires a full instance name -- and only a
+// registry or a hypervisor can say whether the image is really there.
+func ValidateImageReference(image string) error {
+	if image == "" || strings.TrimSpace(image) != image {
+		return errors.New("image reference is empty or padded")
+	}
+	if strings.HasPrefix(image, "-") {
+		return errors.New("image reference cannot be read as a command-line option")
+	}
+	if strings.ContainsAny(image, " \t\n\r\x00") {
+		return errors.New("image reference contains whitespace or NUL")
 	}
 	return nil
 }

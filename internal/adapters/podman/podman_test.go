@@ -1174,19 +1174,6 @@ func TestUnconfiguredAdapterDefaults(t *testing.T) {
 	}
 }
 
-func TestValidateImageRefusesAReferenceThatCannotSafelyBeAnArgument(t *testing.T) {
-	for _, image := range []string{"docker.io/library/ubuntu:24.04", "ghcr.io/o/r@sha256:abc", "localhost/runner"} {
-		if err := ValidateImage(image); err != nil {
-			t.Errorf("ValidateImage(%q) = %v", image, err)
-		}
-	}
-	for _, image := range []string{"", "   ", " padded ", "-rm", "two words", "line\nbreak", "null\x00byte"} {
-		if err := ValidateImage(image); err == nil {
-			t.Errorf("ValidateImage(%q) accepted", image)
-		}
-	}
-}
-
 func TestContainerStateReadsAsRunningOnlyWhenResourcesAreHeld(t *testing.T) {
 	for state, want := range map[string]bool{"running": true, "paused": true, "Running": true, " running ": true,
 		"created": false, "exited": false, "stopped": false, "removing": false, "dead": false, "": false} {

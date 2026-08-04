@@ -276,27 +276,6 @@ func validateName(name string) error {
 	return nil
 }
 
-// ValidateImage checks an OCI reference the way this adapter needs it checked:
-// not for registry correctness, which only a registry can answer, but for the
-// two properties that make a reference safe to put in an argument vector — it is
-// non-empty, and it cannot be read as an option.
-//
-// It is exported because `internal/config` validates a node's configured image
-// at decode time, so a typo is a refused configuration rather than a profile
-// that never provisions.
-func ValidateImage(image string) error {
-	if strings.TrimSpace(image) != image || image == "" {
-		return errors.New("container image reference is empty or padded")
-	}
-	if strings.HasPrefix(image, "-") {
-		return errors.New("container image reference cannot begin with a dash")
-	}
-	if strings.ContainsAny(image, " \t\n\r\x00") {
-		return errors.New("container image reference contains whitespace")
-	}
-	return nil
-}
-
 // Healthy is the fail-closed gate on a node whose execution technology may
 // simply not be installed. It asks podman to describe itself and requires two
 // answers: the command must succeed, and it must report a rootless runtime.
@@ -383,7 +362,7 @@ func (a *Adapter) Create(ctx context.Context, spec executor.InstanceSpec) error 
 	if err := validateName(spec.Name); err != nil {
 		return err
 	}
-	if err := ValidateImage(spec.Image); err != nil {
+	if err := domain.ValidateImageReference(spec.Image); err != nil {
 		return fmt.Errorf("%w: %s", operations.ErrInvalid, err)
 	}
 	if !spec.Ownership.Valid() || spec.CPU <= 0 || spec.MemoryMB <= 0 {

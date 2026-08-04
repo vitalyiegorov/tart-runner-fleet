@@ -220,7 +220,13 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 			return safeError(StagePersist)
 		case operations.StatePlanned:
 			image := e.Bases[instance.Platform]
-			if e.VM == nil || domain.ValidateInstanceName(image) != nil {
+			// The image is validated by the neutral rule, not by the instance-name
+			// grammar it used to share with Tart: on a container node it is an OCI
+			// reference, whose slashes and colons an instance name forbids. What a
+			// valid image *is* beyond that is the backend's own question, and
+			// internal/lifecycle is not allowed to have an opinion about it
+			// (ADR 0034, amendment for issue #139).
+			if e.VM == nil || domain.ValidateImageReference(image) != nil {
 				return e.fail(ctx, instance, StageClone)
 			}
 			if err := e.VM.Create(ctx, executor.InstanceSpec{

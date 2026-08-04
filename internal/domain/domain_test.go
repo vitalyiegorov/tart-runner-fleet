@@ -215,3 +215,24 @@ func TestInstanceNameGrammar(t *testing.T) {
 		}
 	}
 }
+
+// TestImageReferenceGrammarAcceptsBothBackendsImages pins the rule issue #139
+// moved out of internal/lifecycle. An OCI reference is not an instance name, and
+// a lifecycle that validated it as one could never provision a container node.
+func TestImageReferenceGrammarAcceptsBothBackendsImages(t *testing.T) {
+	for _, image := range []string{
+		"linux-runner-base", "macos-tartelet-base",
+		"docker.io/library/ubuntu:24.04", "ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08",
+		"ghcr.io/o/r@sha256:0123456789abcdef", "localhost/runner", "../relative-but-harmless",
+	} {
+		if err := ValidateImageReference(image); err != nil {
+			t.Errorf("ValidateImageReference(%q) = %v", image, err)
+		}
+	}
+	for _, image := range []string{"", "   ", " padded ", "padded ", "-rm", "--privileged",
+		"two words", "line\nbreak", "tab\there", "carriage\rreturn", "null\x00byte"} {
+		if err := ValidateImageReference(image); err == nil {
+			t.Errorf("ValidateImageReference(%q) accepted", image)
+		}
+	}
+}
