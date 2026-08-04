@@ -228,8 +228,11 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 				DeadLetters: deadLetters(snapshot.DeadLetters)},
 			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: snapshot.HostPressure.AvailableMemoryMiB,
 				FreeDiskGiB: snapshot.HostPressure.FreeDiskGiB, SwapUsedMiB: snapshot.HostPressure.SwapUsedMiB,
-				SwapOuts: snapshot.HostPressure.SwapOuts, CPUIdlePercent: snapshot.HostPressure.CPUIdlePercent,
-				LoadAverage: snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
+				SwapOuts:             snapshot.HostPressure.SwapOuts,
+				SwapOutRatePerSecond: snapshot.HostPressure.SwapOutRatePerSecond,
+				SwapOutRateObserved:  snapshot.HostPressure.SwapOutRateObserved,
+				CPUIdlePercent:       snapshot.HostPressure.CPUIdlePercent,
+				LoadAverage:          snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
 				AdmissionReason: snapshot.HostPressure.AdmissionReason},
 		}}
 }
@@ -396,16 +399,19 @@ func renderMetrics(snapshot Snapshot) string {
 	fmt.Fprintf(&output, "fleet_host_swap_used_mib %d\n", snapshot.HostPressure.SwapUsedMiB)
 	writeHelpType("fleet_host_swapouts_total", "Cumulative host swap-out page count.", "counter")
 	fmt.Fprintf(&output, "fleet_host_swapouts_total %d\n", snapshot.HostPressure.SwapOuts)
+	writeHelpType("fleet_host_swapout_rate_pages_per_second",
+		"Host swap-out page rate the swap guardrail decides on; meaningful only when fleet_host_swapout_rate_observed is 1.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_swapout_rate_pages_per_second %s\n",
+		strconv.FormatFloat(snapshot.HostPressure.SwapOutRatePerSecond, 'f', -1, 64))
+	writeHelpType("fleet_host_swapout_rate_observed",
+		"Whether the swap-out rate could be measured; 0 means the guardrail fell back to the swap level, never that the host is quiet.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_swapout_rate_observed %d\n", boolGauge(snapshot.HostPressure.SwapOutRateObserved))
 	writeHelpType("fleet_host_cpu_idle_percent", "Host CPU idle percentage at the latest admission snapshot.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_cpu_idle_percent %s\n", strconv.FormatFloat(snapshot.HostPressure.CPUIdlePercent, 'f', -1, 64))
 	writeHelpType("fleet_host_load_average", "Host one-minute load average at the latest admission snapshot.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_load_average %s\n", strconv.FormatFloat(snapshot.HostPressure.LoadAverage, 'f', -1, 64))
 	writeHelpType("fleet_host_admission_allowed", "Whether latest host pressure permits new VM admission.", "gauge")
-	allowed := 0
-	if snapshot.HostPressure.AdmissionAllowed {
-		allowed = 1
-	}
-	fmt.Fprintf(&output, "fleet_host_admission_allowed %d\n", allowed)
+	fmt.Fprintf(&output, "fleet_host_admission_allowed %d\n", boolGauge(snapshot.HostPressure.AdmissionAllowed))
 
 	writeHelpType("fleet_observation_fresh", "Whether a bounded critical observation is fresh.", "gauge")
 	writeHelpType("fleet_observation_age_seconds", "Age of a bounded critical observation.", "gauge")
@@ -456,6 +462,14 @@ func seconds(value time.Duration) string {
 
 func prometheusLabel(value string) string {
 	return strconv.Quote(value)
+}
+
+// boolGauge renders a boolean fact as the 0/1 gauge Prometheus expects.
+func boolGauge(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (s *Server) Serve(listener net.Listener) error {

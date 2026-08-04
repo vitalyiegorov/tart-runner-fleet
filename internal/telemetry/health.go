@@ -99,10 +99,16 @@ type HostPressureMetric struct {
 	FreeDiskGiB        int64
 	SwapUsedMiB        int64
 	SwapOuts           int64
-	CPUIdlePercent     float64
-	LoadAverage        float64
-	AdmissionAllowed   bool
-	AdmissionReason    string
+	// SwapOutRatePerSecond and SwapOutRateObserved are the swap guardrail's
+	// deciding signal: the level is refused only when the host is also paging
+	// out (ADR 0018). An unobserved rate is a fail-closed fallback to the level,
+	// not a measurement of a quiet host.
+	SwapOutRatePerSecond float64
+	SwapOutRateObserved  bool
+	CPUIdlePercent       float64
+	LoadAverage          float64
+	AdmissionAllowed     bool
+	AdmissionReason      string
 }
 
 // Snapshot is an immutable point-in-time copy suitable for rendering.
@@ -448,6 +454,8 @@ func (h *Health) SetOperations(retries, dead int) error {
 func (h *Health) SetHostPressure(metric HostPressureMetric) error {
 	if metric.AvailableMemoryMiB < 0 || metric.FreeDiskGiB < 0 || metric.SwapUsedMiB < 0 || metric.SwapOuts < 0 ||
 		metric.CPUIdlePercent < 0 || metric.CPUIdlePercent > 100 || metric.LoadAverage < 0 ||
+		metric.SwapOutRatePerSecond < 0 || math.IsNaN(metric.SwapOutRatePerSecond) ||
+		math.IsInf(metric.SwapOutRatePerSecond, 0) ||
 		math.IsNaN(metric.CPUIdlePercent) || math.IsInf(metric.CPUIdlePercent, 0) ||
 		math.IsNaN(metric.LoadAverage) || math.IsInf(metric.LoadAverage, 0) || !validAdmissionReason(metric.AdmissionReason) {
 		return errInvalidMetric

@@ -363,10 +363,23 @@ type HostPressure struct {
 	FreeDiskGB        int64
 	SwapUsedMB        int64
 	SwapOuts          int64
-	CPUIdlePercent    float64
-	LoadAverage       float64
-	AdmissionAllowed  bool
-	AdmissionReason   string
+	// SwapOutRatePerSecond and SwapOutRateObserved are the signal the swap
+	// guardrail decides on. ADR 0018 demoted SwapUsedMB from a gate to a
+	// necessary-but-insufficient condition, because macOS does not eagerly
+	// reclaim swap and the level is closer to a high-water mark than to current
+	// pressure; admission is refused only when the host is also paging out.
+	//
+	// Publishing the level without the rate is what made a correct decision
+	// unreadable on node C: swap 6.6x the ceiling beside "admission allowed",
+	// with the fact that reconciles them nowhere in the API. Observed=false is a
+	// rate that could not be measured, never a quiet host -- the guard fails
+	// closed on the level there -- so the two must travel together.
+	SwapOutRatePerSecond float64
+	SwapOutRateObserved  bool
+	CPUIdlePercent       float64
+	LoadAverage          float64
+	AdmissionAllowed     bool
+	AdmissionReason      string
 }
 
 type Reservation struct {

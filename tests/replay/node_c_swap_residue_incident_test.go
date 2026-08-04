@@ -126,6 +126,24 @@ func TestNodeCSwapResidueAdmitsBecauseTheHostIsNotPaging(t *testing.T) {
 	}
 }
 
+// TestNodeCSwapResidueIsDistinguishableFromAnUnmeasuredRate is the reporting
+// repair. The swap decision turns entirely on the page-out rate, so a host
+// carrying residue that is admitted and a host whose rate has never been
+// sampled must not publish identical evidence: the second is a fail-closed
+// deferral, and only the observed flag separates them.
+func TestNodeCSwapResidueIsDistinguishableFromAnUnmeasuredRate(t *testing.T) {
+	pressure := nodeCObservation(t).Value.Pressure
+	if !pressure.SwapOutRateObserved {
+		t.Fatal("two consecutive samples measured the rate; the observation must say so")
+	}
+	if pressure.SwapOutRatePerSecond != 0 {
+		t.Fatalf("SwapOutRatePerSecond = %v, want 0: the counter did not advance", pressure.SwapOutRatePerSecond)
+	}
+	if pressure.SwapOuts != 3_855_619 {
+		t.Fatalf("SwapOuts = %d, want the cumulative counter read from the host", pressure.SwapOuts)
+	}
+}
+
 // TestNodeCUnmeasuredRateStillFailsClosedOnTheLevel proves the reporting change
 // is not a policy change: the first observation after a daemon start has no
 // prior sample, so the level is the only evidence and node C's residue defers
@@ -140,6 +158,9 @@ func TestNodeCUnmeasuredRateStillFailsClosedOnTheLevel(t *testing.T) {
 	pressure := host.Value.Pressure
 	if pressure.AdmissionAllowed || pressure.AdmissionReason != "swap pressure" {
 		t.Fatalf("an unmeasured rate must block on the level alone: %#v", pressure)
+	}
+	if pressure.SwapOutRateObserved {
+		t.Fatal("the first observation has no prior sample and must report the rate as unmeasured")
 	}
 }
 
