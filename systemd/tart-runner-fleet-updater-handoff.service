@@ -1,0 +1,33 @@
+# The updater's own generation swap, performed by a process the updater is not.
+#
+# The macOS original exists because a loaded updater may be the very process
+# executing the commit, so asking the supervisor to reload it there terminates
+# the caller before it can start the replacement. The boundary is delegated to
+# this distinct, retrying one-shot unit, which refuses to act until the commit
+# is durably published — the same ordering holds on systemd and the same unit is
+# needed, which is why it is rendered here rather than invented at cutover.
+#
+# NOT ENABLED BY DEFAULT, for the reason in tart-runner-fleet-updater.service.
+[Unit]
+Description=tart-runner-fleet updater generation handoff
+Documentation=https://github.com/vitalyiegorov/tart-runner-fleet
+# The handoff retries until the commit it is waiting for is durable, so no start
+# rate limit may terminate it early.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart="__RELEASE_DIR__/fleet" update finish-updater-handoff "--repo" "__REPOSITORY__" "--root" "__ROOT__" "--state-dir" "__STATE_DIR__" "--launch-agents-dir" "__UNITS_DIR__" "--mode" "__MODE__" "--config" "__STATE_DIR__/fleet.json" "--endpoint" "__ENDPOINT__" "--domain" "user" "--release-dir" "__RELEASE_DIR__" "--interval" "__INTERVAL__" "--confirm" "automatic-updater-handoff"
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# KeepAlive{SuccessfulExit:false} with a ten-second throttle.
+Restart=on-failure
+RestartSec=10
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=append:__STATE_DIR__/update.stdout.log
+StandardError=append:__STATE_DIR__/update.stderr.log
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+RestrictSUIDSGID=yes

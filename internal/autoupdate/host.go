@@ -32,7 +32,25 @@ const (
 var (
 	ErrChecksum = errors.New("autoupdate: release checksum mismatch")
 	ErrBusy     = errors.New("autoupdate: fleet is not quiescent")
-	safeVersion = regexp.MustCompile(`^v[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$`)
+	// ErrUnsupervised is returned when this node's service manager is not one
+	// this transaction can drive. See launchdDomain.
+	ErrUnsupervised = errors.New("autoupdate: the release transaction is launchd-only, and this node names no launchd domain")
+	safeVersion     = regexp.MustCompile(`^v[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$`)
+	// launchdDomain is the set of per-user launchd targets a release transaction
+	// may address, and it doubles as this package's platform gate. Activation
+	// lints with `plutil` and swaps generations with `launchctl bootout` /
+	// `bootstrap` / `kickstart`, none of which exist on ADR 0034's Linux node,
+	// whose service manager is `systemd --user` and whose domain
+	// (hostpaths.Layout.ServiceDomain) is the bare word `user`.
+	//
+	// Matching the domain rather than testing runtime.GOOS keeps the gate a
+	// property of the target being addressed, which is what actually decides
+	// whether these commands can work, and keeps this package free of a
+	// platform switch its whole test suite would then have to fake. Issue #138
+	// renders the Linux node's systemd units from its release and documents the
+	// manual `systemctl --user` bridge; the systemd release transaction is the
+	// follow-up that retires this gate.
+	launchdDomain = regexp.MustCompile(`^(system|(gui|user|pid)/[0-9]+)$`)
 )
 
 type Command interface {
@@ -80,8 +98,11 @@ func (h *LocalHost) Adopt(ctx context.Context, candidate Generation) error {
 
 func NewLocalHost(cfg LocalHostConfig, command Command) (*LocalHost, error) {
 	if command == nil || !filepath.IsAbs(cfg.RootDir) || !filepath.IsAbs(cfg.StateDir) || !filepath.IsAbs(cfg.LaunchAgentsDir) ||
-		strings.TrimSpace(cfg.Domain) == "" || !safeRepository.MatchString(cfg.Repository) || cfg.ReadyAttempts <= 0 || cfg.ReadyDelay < 0 {
+		!safeRepository.MatchString(cfg.Repository) || cfg.ReadyAttempts <= 0 || cfg.ReadyDelay < 0 {
 		return nil, ErrInvalidGeneration
+	}
+	if !launchdDomain.MatchString(strings.TrimSpace(cfg.Domain)) {
+		return nil, fmt.Errorf("%w: %q", ErrUnsupervised, cfg.Domain)
 	}
 	if cfg.UpdateInterval == 0 {
 		cfg.UpdateInterval = 5 * time.Minute

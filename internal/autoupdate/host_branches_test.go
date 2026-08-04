@@ -27,6 +27,25 @@ func TestLocalHostConstructionAndCurrentFailClosed(t *testing.T) {
 			t.Fatalf("cfg=%+v error=%v", cfg, err)
 		}
 	}
+	// A node whose service manager is not launchd names no launchd domain, and
+	// the transaction refuses before it can half-apply a generation. `user` is
+	// exactly what hostpaths.Layout.ServiceDomain reports on ADR 0034's Linux
+	// node, so this is the message an operator there actually receives.
+	for _, domain := range []string{"", "  ", "user", "systemd", "gui/", "gui/abc", "session/1"} {
+		unsupervised := valid
+		unsupervised.Domain = domain
+		if _, err := NewLocalHost(unsupervised, &fakeCommand{}); !errors.Is(err, ErrUnsupervised) {
+			t.Fatalf("domain %q error=%v, want ErrUnsupervised", domain, err)
+		}
+	}
+	for _, domain := range []string{"system", "gui/501", "user/1000", "pid/42"} {
+		supervised := valid
+		supervised.Domain = domain
+		if _, err := NewLocalHost(supervised, &fakeCommand{}); err != nil {
+			t.Fatalf("launchd domain %q was rejected: %v", domain, err)
+		}
+	}
+
 	valid.UpdateInterval = time.Second
 	if _, err := NewLocalHost(valid, &fakeCommand{}); !errors.Is(err, ErrInvalidGeneration) {
 		t.Fatalf("short interval error=%v", err)

@@ -245,6 +245,115 @@ func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 	}
 }
 
+// TestVersionedSystemdModesRenderWithoutAdHocUnitEdits is the Linux twin of the
+// launchd assertion above. ADR 0034's second node boots from `systemd --user`,
+// and issue #138 requires its three services — the controller, the five-minute
+// updater with its timer, and the updater handoff — to come from the release
+// being installed rather than from a hand-written file.
+func TestVersionedSystemdModesRenderWithoutAdHocUnitEdits(t *testing.T) {
+	templates := map[string][]string{
+		"tart-runner-fleet.service":                 {`"--mode=observe"`, "/fleetd.sock", "Restart=on-failure", "KillMode=process", "TimeoutStopSec=30", "UMask=0077"},
+		"tart-runner-fleet-shadow.service":          {`"--mode=shadow"`, "fleet-shadow.db", "fleet-shadow.sock", "Restart=on-failure", "KillMode=process"},
+		"tart-runner-fleet-canary.service":          {`"--mode=canary"`, `"--canary-scope=__CANARY_SCOPE__"`, `"--canary-profile=__CANARY_PROFILE__"`, "fleet-canary.db", "fleet-canary.sock"},
+		"tart-runner-fleet-authority.service":       {`"--mode=authority"`, "Restart=on-failure", "KillMode=process", "TimeoutStopSec=30"},
+		"tart-runner-fleet-updater.service":         {"update apply-latest", "automatic-release-update", "Type=oneshot"},
+		"tart-runner-fleet-updater.timer":           {"OnUnitActiveSec=300", "OnActiveSec=0", "Unit=tart-runner-fleet-updater.service"},
+		"tart-runner-fleet-updater-handoff.service": {"update finish-updater-handoff", "automatic-updater-handoff", "Restart=on-failure", "RestartSec=10"},
+	}
+	for name, required := range templates {
+		data, err := os.ReadFile(filepath.Join("../../systemd", name)) // #nosec G304 -- fixed repository fixture assembled from a closed unit set.
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		body := string(data)
+		required = append(required, "[Unit]")
+		if strings.HasSuffix(name, ".service") {
+			// The host probe reads /proc, so a unit that hid it would turn every
+			// admission decision on the node into an unavailable observation.
+			required = append(required, `"__RELEASE_DIR__/fleet"`, "NoNewPrivileges=yes")
+			if strings.Contains(body, "ProcSubset=") || strings.Contains(body, "ProtectProc=") {
+				t.Errorf("%s hides /proc from the host probe", name)
+			}
+		}
+		for _, token := range required {
+			if !strings.Contains(body, token) {
+				t.Errorf("%s systemd template is missing %q", name, token)
+			}
+		}
+	}
+
+	rendered := t.TempDir()
+	command := exec.Command("../../systemd/render-systemd.sh", "canary", // #nosec G204 -- fixed test arguments.
+		"/opt/tart runner fleet/releases/v1", "/tmp/fleet state", rendered, "fleet-repo", "small")
+	command.Env = append(os.Environ(), "FLEET_UNITS_DIR=/home/fleet/.config/systemd/user")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("render systemd canary: %v: %s", err, output)
+	}
+	for _, name := range []string{"tart-runner-fleet-canary.service", "tart-runner-fleet-updater.service",
+		"tart-runner-fleet-updater.timer", "tart-runner-fleet-updater-handoff.service"} {
+		info, err := os.Stat(filepath.Join(rendered, name))
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("rendered %s permissions = %v, %v", name, info, err)
+		}
+	}
+	// Every argument is quoted because a release directory may contain spaces
+	// and systemd splits an unquoted ExecStart on whitespace. A bare path
+	// fragment cannot prove that, so match whole quoted arguments.
+	unit, err := os.ReadFile(filepath.Join(rendered, "tart-runner-fleet-canary.service")) // #nosec G304 -- test-owned path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`"/opt/tart runner fleet/releases/v1/fleet"`,
+		`"--config=/tmp/fleet state/fleet.json"`,
+		`"--mode=canary"`,
+		`"--canary-scope=fleet-repo"`,
+		`"--canary-profile=small"`,
+	} {
+		if !strings.Contains(string(unit), required) {
+			t.Errorf("rendered canary unit is missing %q", required)
+		}
+	}
+	if strings.Contains(string(unit), "__") {
+		t.Error("rendered canary unit retains a template placeholder")
+	}
+
+	// The immutable root is derived from the release path, so the updater is
+	// pointed at the tree the release actually lives in.
+	updater, err := os.ReadFile(filepath.Join(rendered, "tart-runner-fleet-updater.service")) // #nosec G304 -- test-owned path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		`"--root" "/opt/tart runner fleet"`,
+		`"--launch-agents-dir" "/home/fleet/.config/systemd/user"`,
+		`"--endpoint" "unix:///tmp/fleet state/fleet-canary.sock"`,
+		`"--mode" "canary"`,
+	} {
+		if !strings.Contains(string(updater), required) {
+			t.Errorf("rendered updater unit is missing %q", required)
+		}
+	}
+
+	refused := [][]string{
+		// A systemd specifier and a variable reference both expand inside
+		// ExecStart, so a path carrying either would escape the quoting.
+		{"authority", "/opt/%h/releases/v1", "/tmp/state", rendered},
+		{"authority", "/opt/$HOME/releases/v1", "/tmp/state", rendered},
+		{"authority", `/opt/"quoted"/releases/v1`, "/tmp/state", rendered},
+		// A release directory outside <root>/releases/<version> would silently
+		// point the updater at the wrong tree.
+		{"authority", "/opt/fleet/v1", "/tmp/state", rendered},
+		{"observe", "/opt/fleet/releases/v1", "/tmp/state", rendered, "extra", "arguments"},
+		{"nonsense", "/opt/fleet/releases/v1", "/tmp/state", rendered},
+	}
+	for _, args := range refused {
+		if err := exec.Command("../../systemd/render-systemd.sh", args...).Run(); err == nil { // #nosec G204 -- fixed injection regressions.
+			t.Errorf("systemd renderer accepted %v", args)
+		}
+	}
+}
+
 func TestAuthorityCanaryIsManualDedicatedAndBounded(t *testing.T) {
 	workflow, err := os.ReadFile("../../.github/workflows/fleet-canary.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
