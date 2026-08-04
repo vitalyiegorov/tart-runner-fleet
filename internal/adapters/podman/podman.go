@@ -363,7 +363,7 @@ func (a *Adapter) Create(ctx context.Context, spec executor.InstanceSpec) error 
 		return err
 	}
 	if err := domain.ValidateImageReference(spec.Image); err != nil {
-		return fmt.Errorf("%w: %s", operations.ErrInvalid, err)
+		return fmt.Errorf("%w: %w", operations.ErrInvalid, err)
 	}
 	if !spec.Ownership.Valid() || spec.CPU <= 0 || spec.MemoryMB <= 0 {
 		return operations.ErrInvalid

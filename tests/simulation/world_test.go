@@ -180,6 +180,45 @@ func budgetedWorld() worldConfig {
 	return cfg
 }
 
+// containerNodeWorld is issue #139's node: the x86 Linux machine of ADR 0034 §3,
+// serving every Linux profile and no macOS profile at all, on twelve cores and
+// 32 GiB.
+//
+// It is the "single-platform configuration" docs/MULTI_NODE_PLAN.md reserves for
+// chunk 2d, and it adds no dimension to the harness -- the world config already
+// expresses it. What it exercises is the arrangement the two-platform admission
+// logic of ADR 0012, 0014, 0024 and 0029 is simply not present for: with
+// `macosBurst.enabled: false` there is no cohort to drain and switch, no
+// reservation held for a platform that cannot run here, and every property the
+// oracles check must hold on the `planLinux` path alone.
+//
+// The executor is irrelevant to it, which is the point. ADR 0031 says the
+// simulated world is one node, and under ADR 0034 one node is one whole fleet;
+// whether that node's guests are Tart VMs or Podman containers is below the seam
+// the simulation models.
+func containerNodeWorld() worldConfig {
+	cfg := defaultWorld()
+	cfg.Name = "geekom-linux-amd64"
+	cfg.PhysicalCPU = 12
+	cfg.PhysicalMemoryMB = 32_768
+	cfg.Guards.MaxLoadAverage = 28
+	cfg.Scheduler.LinuxCapacity = domain.Resources{CPU: 12, MemoryMB: 32_768, Slots: 4}
+	// A node that cannot run a macOS guest declares none, so the mixed-platform
+	// and mixed-profile settings describe a case that can no longer occur.
+	cfg.Scheduler.MixedPlatformAdmission = false
+	cfg.Scheduler.MixedProfileCohorts = false
+	profiles := map[domain.ProfileID]domain.Profile{}
+	for id, profile := range simProfiles() {
+		if profile.Platform == domain.PlatformLinux {
+			profiles[id] = profile
+		}
+	}
+	cfg.Scheduler.Profiles = profiles
+	cfg.Bindings = simBindings(profiles)
+	cfg.Profiles = sortedProfileIDs(profiles)
+	return cfg
+}
+
 // hostCeiling is the largest total the fleet may ever hold on this host, derived
 // from configured facts alone so the property oracles never borrow the
 // scheduler's own envelope arithmetic. It is the physical machine net of the
