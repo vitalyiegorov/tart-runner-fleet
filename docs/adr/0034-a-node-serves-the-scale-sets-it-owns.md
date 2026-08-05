@@ -1,5 +1,16 @@
 # ADR 0034: A node serves the scale sets it owns, and no node knows another
 
+> **Naming note, added after the fact.** This record names the fleet's
+> machines node A, node B, and node C throughout, as they were provisionally
+> called when it was written. They have names now — **node A is mac-mini**,
+> **node B is geekom**, **node C is mac-studio** — and the operational docs
+> (`docs/MULTI_NODE_PLAN.md`, `docs/BASE_IMAGE.md`, `docs/LINUX_BASE_IMAGE.md`,
+> `docs/OPERATIONS.md`) use those names throughout. This record's own
+> Context, Decision, and amendment text is left exactly as originally
+> written — the letters are the historical record of what was known and said
+> at each point in time — so this note exists only so an old link, issue, or
+> commit that still says a letter stays legible.
+
 ## Status
 
 Accepted. Supersedes the unbuilt multi-host design staged in
