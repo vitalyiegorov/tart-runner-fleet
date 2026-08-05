@@ -247,8 +247,8 @@ func TestReservationSurvivesYoungerWorkEnteringTheQueue(t *testing.T) {
 	cfg := agedBandConfig()
 	cfg.LinuxCapacity = domain.Resources{CPU: 12, MemoryMB: 30_720, Slots: 4}
 	head := profileDemand(cfg, "a/repo", 7, 103*time.Minute+30*time.Second, "xl")
-	newcomer := profileDemand(cfg, "b/repo", 18, 110*time.Minute, "small")
-	newcomer.CreatedAt = testNow.Add(-90 * time.Minute)
+	// Aged, and younger than the head by thirteen minutes.
+	newcomer := profileDemand(cfg, "b/repo", 18, 90*time.Minute, "small")
 	in := agedBandInput(cfg, []domain.Demand{head, newcomer},
 		[]domain.Instance{liveInstance(cfg, "trf-xl-live", "b/repo", "xl")})
 	// The measured residual leaves five cores, so the reserved `xl` head does not
