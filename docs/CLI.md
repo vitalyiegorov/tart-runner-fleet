@@ -81,8 +81,11 @@ rejected.
 - JSON timestamps are UTC RFC3339 and all list fields are arrays, never `null`.
 - Human rows and JSON arrays are deterministically sorted by bounded profile or
   observation name.
-- Human status shows free disk, reclaimable memory, swap, CPU idle, load, and
-  the latest admission decision; JSON and Prometheus expose the same units.
+- Human status shows free disk, reclaimable memory, swap with the page-out rate
+  that qualifies it, CPU idle, load, and the latest admission decision; JSON and
+  Prometheus expose the same units. Swap reads `13593 MiB (paging 0/s)` — the
+  level alone never decides admission — or `(paging unmeasured)` when there is
+  no second sample yet and the level blocks on its own.
 - The JSON compatibility promise is identified by `apiVersion: fleet.v1`.
 - Tables use compact ages for reading; automation must use numeric age fields.
 - No token, private key, JIT configuration, operation payload, or unbounded
