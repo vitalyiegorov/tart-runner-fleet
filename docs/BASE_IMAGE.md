@@ -673,15 +673,23 @@ Stated so a future operator does not mistake inference for measurement.
   not `macos-maestro-base`. See
   [Wire it to the mac-studio configuration](#wire-it-to-the-mac-studio-configuration)
   — the config is the authoritative value, not the fragment above.
-- **mac-studio now declares `builder` alongside mac-mini, and this document
-  does not build a `builder`-capable image.** The recipe above is
-  Maestro-only by design — see
-  [What mac-studio does not need](#what-mac-studio-does-not-need) — and
-  mac-studio's revised `hostBudget` (6 vCPU / 16384 MiB) makes `builder`
-  admissible where the original 4 vCPU / 10240 MiB budget could not. Whether
-  a `builder` job that lands on mac-studio today succeeds or fails on missing
-  tooling has not been measured; ADR 0034's amendment 2026-08-04c's
-  capability-parity check would refuse the declaration once the render step
-  and rendered configuration exist, but until then this is an unaudited gap,
-  not a closed one. Building a `builder`-capable mac-studio image is future
-  work.
+- **mac-studio's image now carries the `builder` toolchain — measured, not
+  assumed.** This document's recipe is Maestro-only, but the image was
+  subsequently extended for parity with mac-mini (issue #202) and verified by
+  probing a clone of the sealed image on 2026-08-05:
+
+  ```
+  ANDROID_SDK_ROOT=/Users/admin/android-sdk        (exists)
+  ~/android-sdk/platform-tools/adb                 ADB_OK
+  /Applications/Xcode_26.4.1.app
+  /Library/LaunchDaemons/ci.limit.maxfiles.plist
+  /Library/LaunchDaemons/ci.limit.maxproc.plist
+  ```
+
+  The last two are the subtle ones: they come from budgie's
+  `prepare-macos-ci-guest.sh`, an image-build-time script no workflow invokes,
+  so nothing in CI would have reported their absence. mac-studio's revised
+  `hostBudget` (6 vCPU / 16384 MiB) admits `builder`, its scale sets are
+  unparked, and the capability declaration added in #204 now states these
+  requirements explicitly rather than leaving them to be discovered by a
+  failing job.
