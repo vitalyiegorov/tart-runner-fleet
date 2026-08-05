@@ -29,7 +29,7 @@ the build failed without them.
 - [Deviations from the legacy script](#deviations-from-the-legacy-script)
 - [Wire it to the node configuration](#wire-it-to-the-node-configuration)
 - [Size and time expectations](#size-and-time-expectations)
-- [Adapting this for node B (amd64, containers)](#adapting-this-for-node-b-amd64-containers)
+- [Adapting this for geekom (amd64, containers)](#adapting-this-for-geekom-amd64-containers)
 - [Known unknowns](#known-unknowns)
 
 ## Provenance: the legacy script and what it gets wrong
@@ -159,7 +159,7 @@ label lies for exactly the fraction of jobs that land on the leaner image.
 
 ### The failure
 
-Node C's Linux base was built from this document. Node A's incumbent base — the
+mac-studio's Linux base was built from this document. mac-mini's incumbent base — the
 one with unrecovered provenance recorded under
 [Known unknowns](#known-unknowns) — additionally carries a **prewarmed Redroid
 container**, which `vitalyiegorov/suuudokuuu` needs to run Maestro against
@@ -179,13 +179,13 @@ test -f "$manifest" || {
 }
 ```
 
-The result was a job that failed **deterministically on node C and passed
-deterministically on node A**, which presents as flakiness: same commit, same
+The result was a job that failed **deterministically on mac-studio and passed
+deterministically on mac-mini**, which presents as flakiness: same commit, same
 label, same workflow, different outcome, no visible cause. The consumer's guard
 is the only reason the cause was legible at all; without it the failure would
 have surfaced as a missing `docker` binary somewhere further down.
 
-The mitigation was to remove node C's `linux-xl` scale sets from its
+The mitigation was to remove mac-studio's `linux-xl` scale sets from its
 configuration, so the label was again advertised by one node. **That is a
 capacity loss taken to restore correctness**, and it is the right emergency
 action, but the durable fix is the image.
@@ -533,7 +533,7 @@ manifest="$HOME/.sudoku-ci/android-emulator.json"
 '
 ```
 
-Measured on node C, 2026-08-04: the whole step ran in under five minutes, of
+Measured on mac-studio, 2026-08-04: the whole step ran in under five minutes, of
 which the 694 MB image pull was most; `docker.io` resolves to server 29.1.3 on
 the `overlayfs` driver; the prewarmed volume is 32 MB; and the image grew from
 4.7 GB to 7.1 GB in-guest, 5 GB to 8 GB as Tart reports it.
@@ -725,7 +725,7 @@ adb kill-server; sudo docker rm -f redroid-verify
 '
 ```
 
-Measured on node C, 2026-08-04, on the rebooted image:
+Measured on mac-studio, 2026-08-04, on the rebooted image:
 
 ```
 REDROID_PREWARM_OK image=redroid/redroid:15.0.0_64only-latest dataDir=/home/admin/redroid-data
@@ -743,7 +743,7 @@ only about the packages being present; a first Android boot on a cold `/data`
 is minutes of the job's 45-minute budget, and it is paid once here instead of on
 every job. `arm64-v8a` is also the check that matters for the consumer, whose
 APK must ship that ABI — and it is the first thing that changes on x86_64, see
-[Adapting this for node B](#adapting-this-for-node-b-amd64-containers).
+[Adapting this for geekom](#adapting-this-for-geekom-amd64-containers).
 
 Booting Android here writes to the base's `$HOME/redroid-data`. That is
 acceptable and intended — it is the same second boot every ephemeral clone
@@ -819,7 +819,7 @@ place.
 
 ### Maintenance: rebuild, or extend the incumbent
 
-Adding the Redroid layer to node C used the second form, and it is worth naming
+Adding the Redroid layer to mac-studio used the second form, and it is worth naming
 because the recipe above reads as if there were only the first:
 
 - **Rebuild from the pinned ancestor.** Everything above, in order. Use it when
@@ -865,7 +865,7 @@ Docker nor Podman, and neither is in the source image.**
 That sentence used to end "a workflow that needs a container runtime inside the
 guest needs an explicit layer that does not exist yet", and it was wrong within
 the day — not about the script, but about the fleet. `suuudokuuu` already needed
-one, node A already had one, and this document did not know. Step 6 is that
+one, mac-mini already had one, and this document did not know. Step 6 is that
 layer, and the reason it is written as a mandatory step rather than an optional
 extra is
 [What the *label* requires of a Linux guest](#what-the-label-requires-of-a-linux-guest).
@@ -903,17 +903,20 @@ committed `baseVm` disagreed with the document's suggested name.
 
 Read it for a second reason as well, which the first version of this document
 did not: **the labels the node's scale sets advertise decide which optional
-steps are mandatory.** The deployed node C configuration has the full profile
+steps are mandatory.** The deployed mac-studio configuration has the full profile
 matrix — `linux-1x2`, `linux-2x4`, `linux-4x8`, `linux-6x12` — and its `6x12`
 scale sets advertise `[self-hosted, linux-tiered, linux-xl]`, the same labels
-node A's do. That is what made step 6 compulsory there.
+mac-mini's do. That is what made step 6 compulsory there.
 
-Note that [`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) assigns the Mac Studio
-macOS `maestro` work only, with "no Linux scale sets". The deployed
-configuration there has a full Linux profile matrix and this `baseVm`, so the
-plan and the node have diverged. That is an open question for the plan, not
-for this recipe: the image is correct for whatever the node's configuration
-asks for.
+An earlier version of this note recorded a divergence here: `MULTI_NODE_PLAN.md`
+once assigned the Mac Studio macOS `maestro` work only, with "no Linux scale
+sets", while the deployed configuration already carried a full Linux profile
+matrix. That plan document is now corrected to match what is actually
+deployed — mac-studio shares mac-mini's labels, Linux tiers included, for as
+long as geekom is not yet delivered — so the divergence this paragraph used to
+flag no longer exists. The general lesson still holds regardless: the image is
+correct for whatever the node's configuration asks for, not for what a plan
+document assumed it would ask for.
 
 ## Size and time expectations
 
@@ -946,9 +949,9 @@ disconnect: Broken pipe` and left a truncated `disk.img` that Tart still listed
 as a VM. A registry push has the same upload bound. Even at this size, pulling
 from a CDN and running `apt` beats pushing bytes uphill.
 
-## Adapting this for node B (amd64, containers)
+## Adapting this for geekom (amd64, containers)
 
-[`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) gives node B a **rootless Podman**
+[`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) gives geekom a **rootless Podman**
 executor, not Tart. The provisioning *content* below transfers; the delivery
 does not.
 
@@ -985,11 +988,11 @@ Changes for containers, which are the substantive ones:
 - The image is built with a `Containerfile` and pinned by digest in a registry,
   not by `tart clone` and rename.
 
-Node B additionally needs the Android SDK/NDK, the emulator, `platform-tools`,
+geekom additionally needs the Android SDK/NDK, the emulator, `platform-tools`,
 and Maestro, per `MULTI_NODE_PLAN.md`. None of that is in this recipe, because
 no arm64 Linux consumer uses it.
 
-### The Redroid layer does *not* transfer to node B unchanged
+### The Redroid layer does *not* transfer to geekom unchanged
 
 Step 6 is the part of this document most likely to be copied verbatim onto the
 GEEKOM and the part least entitled to be. Everything below is stated as
@@ -1010,15 +1013,15 @@ measured on x86_64, and the arm64 result is not evidence about it.
   arm64-v8a". On x86_64 the container reports an x86 ABI, so an APK carrying
   only `arm64-v8a` native libraries either refuses to install or crashes on the
   first native call — and the app is React Native, so there are always native
-  libraries. Node B therefore needs one of: an APK built with an x86_64 ABI
+  libraries. geekom therefore needs one of: an APK built with an x86_64 ABI
   split, a Redroid image variant that ships a native bridge (ARM translation),
   or the Google emulator path instead. **Which of those works is unmeasured.**
   It is also the one item here that changes a *consumer's build*, not just an
   image, so it is a conversation with the consumer before it is a provisioning
   step.
-- **Two Android paths exist on node B and must not be conflated.** Redroid is a
+- **Two Android paths exist on geekom and must not be conflated.** Redroid is a
   privileged container over `binder_linux` and wants no `/dev/kvm` at all. The
-  Google AVD path — which is why node B exists, since
+  Google AVD path — which is why geekom exists, since
   `reactivecircus/android-emulator-runner` with `arch: x86_64` is failing on the
   Mac mini today — needs `/dev/kvm`, and the podman adapter grants it per
   profile through `executor.kvmProfiles`. A profile can need both, one, or
@@ -1030,8 +1033,8 @@ measured on x86_64, and the arm64 result is not evidence about it.
   binder_linux` before anything else, because it is the cheapest possible
   disproof.
 - **Privileged containers inside a rootless runner container are the real
-  design problem.** On node A the runner is a VM, so `docker run --privileged`
-  inside it is ordinary. On node B the runner *is* a rootless container, and
+  design problem.** On mac-mini the runner is a VM, so `docker run --privileged`
+  inside it is ordinary. On geekom the runner *is* a rootless container, and
   `--privileged` nested inside it — with binderfs mounted and a port
   published — is not the same operation and may not be permitted at all. The
   plausible shapes are: run Redroid as a sibling on the node's own runtime and
@@ -1040,13 +1043,13 @@ measured on x86_64, and the arm64 result is not evidence about it.
   instead. This is design work with a security argument attached — the
   `MULTI_NODE_PLAN.md` rationale for rootless is that approved third-party code
   runs on this node — and it should not be settled by a provisioning script.
-- **The consumer's workflow hard-codes `sudo docker`.** Node B's runtime is
+- **The consumer's workflow hard-codes `sudo docker`.** geekom's runtime is
   podman, and rootless podman needs no `sudo`. Either the image provides a
   `docker` shim, or the workflow learns the runtime from the manifest that
   already exists at `$HOME/.sudoku-ci/android-emulator.json` — the manifest has
   a `type` field, and it is the natural place for the runtime to be named.
 
-Until every one of those is answered on the hardware, **node B must not
+Until every one of those is answered on the hardware, **geekom must not
 advertise `linux-xl`**, or it reproduces exactly the failure recorded in
 [What the *label* requires of a Linux guest](#what-the-label-requires-of-a-linux-guest)
 — on a third node, with a third set of symptoms. Advertise the canonical
@@ -1082,20 +1085,20 @@ Stated so a future operator does not mistake inference for measurement.
   first real job on this base is still the first real job.
 - **Build-time CPU and memory were not tuned.** 4 vCPU / 8192 MiB was chosen to
   stay well inside a shared host's headroom, not because it is optimal.
-- **Node A's Redroid layer was read, not rebuilt, and the two images are
+- **mac-mini's Redroid layer was read, not rebuilt, and the two images are
   equivalent only where they were compared.** The comparison was made against a
-  *running clone* of node A's base while it served a job — read-only, and the
+  *running clone* of mac-mini's base while it served a job — read-only, and the
   live base was never touched. What matched: the Redroid tag, the image digest
   `sha256:b51bde…90ee`, `/usr/bin/docker` and `/usr/bin/adb`,
   `/etc/modules-load.d/redroid.conf`, the runner user's `docker` group
   membership, and every field of `$HOME/.sudoku-ci/android-emulator.json`. What
-  differs: node A's base carries no `$HOME/.ci-base-manifest` at all, so its
+  differs: mac-mini's base carries no `$HOME/.ci-base-manifest` at all, so its
   package set, Node version, and runner version are still unverified against
-  node C's. **The two images are proved equivalent for the `linux-xl` Android
+  mac-studio's. **The two images are proved equivalent for the `linux-xl` Android
   capability and for nothing else.** That is exactly the gap the enforcement
   proposal exists to close.
-- **The prewarmed `/data` was 32 MB on node C and 155 MB on the node A clone
-  that was read.** The node A figure was taken from a guest that had already run
+- **The prewarmed `/data` was 32 MB on mac-studio and 155 MB on the mac-mini clone
+  that was read.** The mac-mini figure was taken from a guest that had already run
   a job, and job execution writes to `/data`, so the difference is expected and
   was not investigated further. It is recorded because a *base* whose `/data`
   is much larger than 32 MB would mean something was baked in that should not
@@ -1104,4 +1107,4 @@ Stated so a future operator does not mistake inference for measurement.
   clone.** The daemon resizes and boots a clone with the profile's own vector,
   and the verification here ran in the base at 4 vCPU / 8192 MiB while the
   profile is 6 vCPU / 12 GiB. More resources, same layer — but the first real
-  Android job on node C is still the first real Android job.
+  Android job on mac-studio is still the first real Android job.
