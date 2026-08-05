@@ -303,8 +303,8 @@ func TestBoundIngesterPublishesClosedVocabularyPerBinding(t *testing.T) {
 // never fails, so every observation above is attributable to the session path.
 type memoryDemandStore struct{}
 
-func (memoryDemandStore) ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (bool, error) {
-	return false, nil
+func (memoryDemandStore) ApplyDemandBatch(context.Context, int64, int64, []operations.DemandEvent) (operations.DemandBatchResult, error) {
+	return operations.DemandBatchResult{}, nil
 }
 
 func (memoryDemandStore) ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error) {

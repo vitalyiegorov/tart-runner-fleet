@@ -166,3 +166,34 @@ func TestBuildBindingsRejectsInvalidScopedScaleSet(t *testing.T) {
 		t.Fatal("scoped scale set without provisioned ID accepted")
 	}
 }
+
+// TestBuildBindingsCarriesTheSharedLabelDeclaration proves the one fact the REST
+// inventory lane cannot observe reaches it. A node is not aware of another node,
+// so "a peer advertises these labels in this scope" is configuration, and a
+// binding that lost it would silently claim the peer's queue (issue #153).
+func TestBuildBindingsCarriesTheSharedLabelDeclaration(t *testing.T) {
+	scoped := config.Default()
+	scoped.GitHub = config.GitHub{App: config.GitHubApp{ClientID: "client", KeychainService: "service", KeychainAccount: "account"},
+		SessionOwner: "host", CanonicalJobInventory: true,
+		Installations: []config.GitHubInstallation{{Name: "personal", InstallationID: 7}},
+		Scopes: []config.GitHubScope{{Name: "sudoku", Kind: config.ScopeRepository,
+			ConfigURL: "https://github.com/o/r", Installation: "personal", Targets: []string{"o/r"},
+			ScaleSets: []config.ScaleSet{
+				{Profile: "maestro", Name: "shared", ID: 21, MaxCapacity: 2, SharedLabels: true,
+					Labels: []string{"self-hosted", "macos-maestro"}},
+				{Profile: "builder", Name: "sole", ID: 22, MaxCapacity: 1,
+					Labels: []string{"self-hosted", "macos-builder"}},
+			}}}}
+	bindings, err := BuildBindings(scoped, BuildSchedulerConfig(scoped))
+	if err != nil || len(bindings) != 2 || !bindings[0].SharedLabels || bindings[1].SharedLabels {
+		t.Fatalf("scoped shared-label declaration = %#v, %v", bindings, err)
+	}
+
+	legacy := config.Default()
+	legacy.GitHub.ScaleSets = []config.ScaleSet{{Profile: "small", Name: "repo-small", ID: 1, MaxCapacity: 4,
+		SharedLabels: true, Labels: []string{"self-hosted", "linux-small"}}}
+	bindings, err = BuildBindings(legacy, BuildSchedulerConfig(legacy))
+	if err != nil || len(bindings) != 1 || !bindings[0].SharedLabels {
+		t.Fatalf("legacy shared-label declaration = %#v, %v", bindings, err)
+	}
+}

@@ -230,6 +230,24 @@ func (w *world) nextMessageID() int64 {
 	return w.nextMsgID
 }
 
+// restartSequence is GitHub restarting the broker's message-id sequence for this
+// scale set, which it did for scale set 8077185082566234948 at
+// 2026-08-01T18:32Z. Nothing else changes: the same jobs are advertised, on the
+// same cadence, under ids the fleet has already seen. The fleet's inbox is the
+// only party that believes those ids are unique forever (issue #165).
+func (w *world) restartSequence() {
+	if w.cfg.SequenceResetAt <= 0 || w.tick != w.cfg.SequenceResetAt {
+		return
+	}
+	w.nextMsgID = 0
+}
+
+// redeliverAfter is how long the broker waits before handing back a message the
+// fleet declined to commit. Production observed almost exactly five minutes,
+// which is ten simulated ticks; two keeps a bounded run informative while
+// preserving the shape -- an uncommitted message always comes back.
+const redeliverAfter = 2
+
 // pendingEvents is the difference between what the broker knows and what it has
 // already told this scale set.
 func (w *world) pendingEvents(binding int) []operations.DemandEvent {
@@ -314,9 +332,13 @@ func (w *world) statisticsFor(binding int) (available, assigned, running int) {
 }
 
 // deliverMessages hands every message whose delivery instant has arrived to the
-// real DemandCoordinator, in delivery order.
+// real DemandCoordinator, in delivery order. A batch the fleet declines to
+// commit is not lost: the broker keeps it and hands it back, which is the
+// at-least-once contract ADR 0009 and rule 6 are written about, and the loop
+// that turned one refused message into a three-day outage (issue #165).
 func (w *world) deliverMessages() {
 	ready := make(map[int][]githubscaleset.Demand, len(w.cfg.Bindings))
+	inFlight := make(map[int][]*simMessage, len(w.cfg.Bindings))
 	var remaining []*simMessage
 	for _, message := range w.outbound {
 		if message.deliverAt > w.tick {
@@ -327,6 +349,7 @@ func (w *world) deliverMessages() {
 			MessageID: int(message.messageID), Assigned: message.assigned, Running: message.running,
 			Statistics: w.statisticsMessage(message), Events: convertEvents(message.events),
 		})
+		inFlight[message.binding] = append(inFlight[message.binding], message)
 		w.delivered[message.binding] = message
 	}
 	w.outbound = remaining
@@ -334,10 +357,39 @@ func (w *world) deliverMessages() {
 		if len(ready[index]) == 0 {
 			continue
 		}
+		w.noteAdvertised(inFlight[index])
 		source := &simSource{messages: ready[index]}
 		if _, err := w.demand.IngestOnceResult(w.ctx, w.cfg.Bindings[index], source); err != nil {
 			w.noteIngestFailure(err)
+			w.redeliver(inFlight[index])
 		}
+	}
+}
+
+// noteAdvertised records the tick at which the broker actually handed a job's
+// availability to the fleet. Property (j) is measured from this instant and not
+// from the job's creation, so a delayed message is never mistaken for a binding
+// that refused what it was given.
+func (w *world) noteAdvertised(messages []*simMessage) {
+	for _, message := range messages {
+		for _, event := range message.events {
+			if event.Kind != operations.DemandJobAvailable {
+				continue
+			}
+			if job := w.jobByRequest(event.RunnerRequestID); job != nil && job.advertisedAt == 0 {
+				job.advertisedAt = w.tick
+			}
+		}
+	}
+}
+
+// redeliver returns an uncommitted batch to the broker's outbound queue. The
+// message keeps its id: a redelivery is the SAME message, which is exactly why
+// the inbox must recognize it and why recognizing it by id alone was unsound.
+func (w *world) redeliver(messages []*simMessage) {
+	for _, message := range messages {
+		message.deliverAt = w.tick + redeliverAfter
+		w.outbound = append(w.outbound, message)
 	}
 }
 
@@ -385,6 +437,11 @@ func (w *world) noteIngestFailure(err error) {
 func (w *world) captureSnapshot() {
 	snapshot := &simSnapshot{at: w.now, deliverAt: w.tick + w.restLag}
 	for _, job := range w.jobs {
+		switch job.status {
+		case jobQueued, jobAcquired, jobRunning:
+			snapshot.outstanding++
+		case jobDone, jobCancelled:
+		}
 		if job.status != jobQueued || job.silentCancel {
 			// A silently cancelled run is absent from REST while the broker still
 			// advertises it. That disagreement is the only evidence ADR 0026 accepts.
@@ -412,6 +469,10 @@ func (w *world) deliverSnapshots() {
 			remaining = append(remaining, snapshot)
 			continue
 		}
+		// The observation the fleet has just committed. In a federated scope
+		// EVERY one of its jobs matches BOTH scale sets, so it is also the
+		// observation two unbounded attributions would double (#153).
+		w.restCommitted = snapshot
 		if _, err := w.demand.ReconcileQueuedJobs(w.ctx, w.cfg.Bindings, simSnapshotView{snapshot: snapshot}); err != nil {
 			w.record(findingStoreError, fmt.Sprintf("reconcile REST snapshot: %v", err))
 		}
@@ -443,13 +504,41 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 	return job
 }
 
+// bindingFor is GitHub's placement decision, not the fleet's. A profile served
+// by one scale set has one answer. A profile served by two identically-labelled
+// sets in one scope has the answer the #144 spike measured: the job goes to the
+// set with the most room, so each set fills to the capacity it last advertised
+// and the remainder stays queued. Ties break on the lower index so a (seed,
+// world) pair still names one exact history.
 func (w *world) bindingFor(profile domain.ProfileID) int {
+	chosen, room := -1, 0
 	for index, binding := range w.cfg.Bindings {
-		if binding.Profile.ID == profile {
-			return index
+		if binding.Profile.ID != profile {
+			continue
+		}
+		free := w.cfg.Scheduler.Profiles[profile].MaxActive - w.outstandingJobs(index)
+		if chosen < 0 || free > room {
+			chosen, room = index, free
 		}
 	}
-	return -1
+	return chosen
+}
+
+// outstandingJobs is what one scale set is already holding: everything GitHub
+// has given it that has not finished.
+func (w *world) outstandingJobs(binding int) int {
+	held := 0
+	for _, job := range w.jobs {
+		if job.binding != binding {
+			continue
+		}
+		switch job.status {
+		case jobQueued, jobAcquired, jobRunning:
+			held++
+		case jobDone, jobCancelled:
+		}
+	}
+	return held
 }
 
 func splitRepo(repo string) (owner, name string) {

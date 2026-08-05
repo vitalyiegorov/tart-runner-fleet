@@ -113,7 +113,7 @@ func sortedFindings(known map[string]finding) []string {
 // this test prints.
 func TestSimCorpusIsIdenticalAcrossRuns(t *testing.T) {
 	t.Parallel()
-	for _, cfg := range []worldConfig{defaultWorld(), budgetedWorld(), containerNodeWorld()} {
+	for _, cfg := range []worldConfig{defaultWorld(), budgetedWorld(), containerNodeWorld(), federatedWorld(), sequenceResetWorld()} {
 		t.Run(cfg.Name, func(t *testing.T) {
 			t.Parallel()
 			var first corpusCounts

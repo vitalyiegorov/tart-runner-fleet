@@ -15,55 +15,124 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
-func (s *Store) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (bool, error) {
+// ApplyDemandBatch commits one broker message's events and records the message
+// in the inbox that makes redelivery idempotent.
+//
+// The idempotency key is (scale_set_id, generation, message_id), not the message
+// id alone. A message id is unique only within one broker sequence, and GitHub
+// restarts that sequence: on 2026-08-01T18:32Z it restarted the sequence for
+// scale set 8077185082566234948 at 100000001 while this ledger held
+// 100000004..100000086 from July, so every redelivered id collided with a row
+// whose content differed, the commit was refused, ScaleSet.Handle nacked, and
+// the binding never ingested another message until an operator deleted the rows
+// by hand three days later (issue #165).
+//
+// The evidence that a sequence restarted is one thing and it is unambiguous:
+// the ledger already holds this id, in this generation, under different content.
+// A redelivery of the same message is byte-identical by construction, so a
+// divergence cannot be one -- and it is the exact moment the old key started
+// refusing a job forever. The message is then applied under the next
+// generation. Nothing is dropped and nothing is refused: a delivered job is
+// fresh broker evidence, and refusing it forever is the failure this contract
+// exists to make impossible.
+//
+// A message id merely LOWER than the cursor is deliberately not evidence. Inside
+// one sequence a delayed message legitimately arrives below the high-water mark,
+// and treating that as a restart would rewind the cursor and retire a ledger
+// whose messages are still live -- weakening the dedupe that makes at-least-once
+// delivery safe, to detect a restart that the divergence check catches anyway on
+// the first message that could have done harm.
+//
+// Retiring a generation is bounded -- the live generation and the one it
+// replaced are kept, the rest are deleted -- so the ledger cannot grow without
+// limit across restarts while the evidence that diagnoses one stays readable.
+func (s *Store) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int64, events []operations.DemandEvent) (operations.DemandBatchResult, error) {
+	var result operations.DemandBatchResult
 	if scaleSetID <= 0 || messageID <= 0 {
-		return false, operations.ErrInvalid
+		return result, operations.ErrInvalid
 	}
 	for _, event := range events {
 		if !event.Valid() {
-			return false, operations.ErrInvalid
+			return result, operations.ErrInvalid
 		}
 	}
 	encoded, err := json.Marshal(events)
 	if err != nil {
-		return false, fmt.Errorf("encode demand batch: %w", err)
+		return result, fmt.Errorf("encode demand batch: %w", err)
 	}
 	digest := sha256.Sum256(encoded)
 	now := time.Now().UTC()
 	tx, err := s.beginTx(ctx, "inbox.begin")
 	if err != nil {
-		return false, fmt.Errorf("begin demand batch: %w", err)
+		return result, fmt.Errorf("begin demand batch: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var existing []byte
-	err = s.txRow(ctx, tx, "inbox.load", `SELECT digest FROM scale_set_inbox WHERE scale_set_id=? AND message_id=?`, scaleSetID, messageID).Scan(&existing)
-	if err == nil {
-		if string(existing) != string(digest[:]) {
-			return false, operations.ErrConflict
-		}
-		return false, nil
+	generation, reset, duplicate, err := s.inboxGeneration(ctx, tx, scaleSetID, messageID, digest[:])
+	if err != nil {
+		return result, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false, fmt.Errorf("load demand batch: %w", err)
+	if duplicate {
+		return result, nil
+	}
+	if reset.Detected {
+		if _, err := s.txExec(ctx, tx, "inbox.retire",
+			`DELETE FROM scale_set_inbox WHERE scale_set_id=? AND generation<?`, scaleSetID, generation-1); err != nil {
+			return result, fmt.Errorf("retire demand generations: %w", err)
+		}
 	}
 	for _, event := range events {
 		if err := s.applyDemandEvent(ctx, tx, scaleSetID, event, now); err != nil {
-			return false, err
+			return result, err
 		}
 	}
-	if _, err := s.txExec(ctx, tx, "inbox.record", `INSERT INTO scale_set_inbox(scale_set_id,message_id,digest,events,created_at) VALUES(?,?,?,?,?)`,
-		scaleSetID, messageID, digest[:], encoded, now.UnixNano()); err != nil {
-		return false, fmt.Errorf("record demand batch: %w", err)
+	if _, err := s.txExec(ctx, tx, "inbox.record", `INSERT INTO scale_set_inbox(scale_set_id,generation,message_id,digest,events,created_at) VALUES(?,?,?,?,?,?)`,
+		scaleSetID, generation, messageID, digest[:], encoded, now.UnixNano()); err != nil {
+		return result, fmt.Errorf("record demand batch: %w", err)
 	}
-	if _, err := s.txExec(ctx, tx, "inbox.cursor", `INSERT INTO scale_set_cursors(scale_set_id,message_id,updated_at) VALUES(?,?,?)
-		ON CONFLICT(scale_set_id) DO UPDATE SET message_id=MAX(message_id,excluded.message_id),updated_at=excluded.updated_at`,
-		scaleSetID, messageID, now.UnixNano()); err != nil {
-		return false, fmt.Errorf("advance demand cursor: %w", err)
+	// The cursor is the lastMessageId every future long poll opens with, so it
+	// must follow the live sequence. MAX is right inside one generation -- a
+	// delayed message must not rewind it -- and wrong across a restart, where the
+	// retired high-water mark asks the broker for ids the new sequence will not
+	// reach for thousands of jobs.
+	if _, err := s.txExec(ctx, tx, "inbox.cursor", `INSERT INTO scale_set_cursors(scale_set_id,generation,message_id,updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(scale_set_id) DO UPDATE SET
+		message_id=CASE WHEN excluded.generation>scale_set_cursors.generation THEN excluded.message_id ELSE MAX(scale_set_cursors.message_id,excluded.message_id) END,
+		generation=MAX(scale_set_cursors.generation,excluded.generation),updated_at=excluded.updated_at`,
+		scaleSetID, generation, messageID, now.UnixNano()); err != nil {
+		return result, fmt.Errorf("advance demand cursor: %w", err)
 	}
 	if err := s.commit(tx, "inbox.commit"); err != nil {
-		return false, fmt.Errorf("commit demand batch: %w", err)
+		return result, fmt.Errorf("commit demand batch: %w", err)
 	}
-	return true, nil
+	return operations.DemandBatchResult{Applied: true, Reset: reset}, nil
+}
+
+// inboxGeneration reports the generation this message must be recorded under,
+// the evidence if that generation is newly adopted, and whether the ledger has
+// already committed this exact message. It is a pure reading of durable state:
+// the same message against the same ledger always yields the same answer, so a
+// redelivery can never oscillate between generations.
+func (s *Store) inboxGeneration(ctx context.Context, tx *sql.Tx, scaleSetID, messageID int64, digest []byte) (int64, operations.DemandSequenceReset, bool, error) {
+	var generation, cursor int64
+	err := s.txRow(ctx, tx, "inbox.cursor.generation", `SELECT generation,message_id FROM scale_set_cursors WHERE scale_set_id=?`, scaleSetID).
+		Scan(&generation, &cursor)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, operations.DemandSequenceReset{}, false, fmt.Errorf("load demand generation: %w", err)
+	}
+	var existing []byte
+	err = s.txRow(ctx, tx, "inbox.load", `SELECT digest FROM scale_set_inbox WHERE scale_set_id=? AND generation=? AND message_id=?`,
+		scaleSetID, generation, messageID).Scan(&existing)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return generation, operations.DemandSequenceReset{}, false, nil
+	case err != nil:
+		return 0, operations.DemandSequenceReset{}, false, fmt.Errorf("load demand batch: %w", err)
+	case string(existing) == string(digest):
+		return generation, operations.DemandSequenceReset{}, true, nil
+	default:
+		return generation + 1, operations.DemandSequenceReset{Detected: true, Generation: generation + 1,
+			RetiredMessageID: cursor, AdoptedMessageID: messageID}, false, nil
+	}
 }
 
 func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int64, event operations.DemandEvent, now time.Time) error {
