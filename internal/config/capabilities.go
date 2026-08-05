@@ -197,6 +197,34 @@ func (b baseImage) check(scoped ScopedScaleSet, required map[string]struct{}) er
 	return nil
 }
 
+// ProfileRequiredCapabilities is what each profile's guest image must provide,
+// as the union of `requiresCapabilities` over every scale set routed to that
+// profile. The daemon threads it to the guest bootstrap helper, which compares
+// it against the image's own sealed manifest — the detection backstop of ADR
+// 0034's amendment, which is the only check that can catch a declaration that
+// went stale when an image was rebuilt. A profile no scale set exposes is absent
+// from the map, so nothing is required of a guest nobody routes work to.
+func (c Config) ProfileRequiredCapabilities() map[string][]string {
+	unions := map[string]map[string]struct{}{}
+	for _, scoped := range c.ScopedScaleSets() {
+		if len(scoped.ScaleSet.RequiresCapabilities) == 0 {
+			continue
+		}
+		profile := scoped.ScaleSet.Profile
+		if unions[profile] == nil {
+			unions[profile] = map[string]struct{}{}
+		}
+		for _, capability := range scoped.ScaleSet.RequiresCapabilities {
+			unions[profile][capability] = struct{}{}
+		}
+	}
+	required := make(map[string][]string, len(unions))
+	for profile, union := range unions {
+		required[profile] = sortedCapabilities(union)
+	}
+	return required
+}
+
 func sortedCapabilities(set map[string]struct{}) []string {
 	out := make([]string, 0, len(set))
 	for capability := range set {

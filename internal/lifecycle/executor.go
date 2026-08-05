@@ -65,7 +65,7 @@ func (e stageError) Error() string {
 // as githubscaleset.SessionFailure does for the ingest path. An unrecognized
 // reason is withheld rather than surfaced.
 func (e stageError) FailureReason() string {
-	if !githubscaleset.ValidRunnerFailureReason(e.reason) {
+	if !githubscaleset.ValidRunnerFailureReason(e.reason) && !ValidBootstrapFailureReason(e.reason) {
 		return ""
 	}
 	return e.reason
@@ -87,7 +87,7 @@ func FailureCode(persisted string) string {
 		if persisted == (stageError{stage: stage}).Error() {
 			return string(stage)
 		}
-		for _, reason := range githubscaleset.RunnerFailureReasons() {
+		for _, reason := range append(githubscaleset.RunnerFailureReasons(), BootstrapFailureReasons()...) {
 			if persisted == (stageError{stage: stage, reason: reason}).Error() {
 				return string(stage) + ":" + reason
 			}
@@ -137,8 +137,12 @@ type Registration interface {
 	AcquireAndGenerateJIT(context.Context, int64, string, string) (*githubscaleset.JITSecret, error)
 }
 
+// Bootstrapper starts the preinstalled runner inside one guest. The final
+// argument is what the assigned scale sets require of that guest's image; an
+// empty list is every guest that predates issue #202 and produces exactly the
+// argument vector it always did.
 type Bootstrapper interface {
-	Bootstrap(context.Context, string, *githubscaleset.JITSecret) error
+	Bootstrap(context.Context, string, *githubscaleset.JITSecret, []string) error
 }
 
 // DrainControl must derive both answers from fresh GitHub runner/job state.
@@ -172,13 +176,19 @@ type DrainControl interface {
 // operation remains incomplete until the runner is online; after a crash, the
 // durable instance state selects the first effect that still needs observing.
 type ProvisionExecutor struct {
-	State                    StateStore
-	VM                       VMControl
-	Ready                    Readiness
-	Registration             Registration
-	Bootstrap                Bootstrapper
-	Bases                    map[domain.Platform]string
-	DiskGiB                  map[domain.ProfileID]int
+	State        StateStore
+	VM           VMControl
+	Ready        Readiness
+	Registration Registration
+	Bootstrap    Bootstrapper
+	Bases        map[domain.Platform]string
+	DiskGiB      map[domain.ProfileID]int
+	// Capabilities is what each profile's scale sets require of the guest image.
+	// The instance carries its profile, not its scale set, and a profile may be
+	// exposed by more than one scope, so this is the union over every scale set
+	// routed to that profile — the conservative answer, and the only one derivable
+	// from what an instance records.
+	Capabilities             map[domain.ProfileID][]string
 	WorkFolder               string
 	RegistrationTimeout      time.Duration
 	RegistrationPollInterval time.Duration
@@ -275,14 +285,14 @@ func (e ProvisionExecutor) Execute(ctx context.Context, operation operations.Ope
 				}
 				return e.fail(ctx, instance, StageAcquire)
 			}
-			bootstrapErr := e.Bootstrap.Bootstrap(ctx, instance.ID, secret)
+			bootstrapErr := e.Bootstrap.Bootstrap(ctx, instance.ID, secret, e.Capabilities[instance.Profile])
 			secret.Destroy()
 			if bootstrapErr != nil {
 				// Best-effort immediate cleanup prevents the reservation created by
 				// GenerateJIT from masquerading as a live listener on retry. Even if
 				// cleanup fails, the next Reachable attempt retries it before acquire.
 				_ = e.Registration.ResetRegistration(ctx, instance.ID)
-				return e.fail(ctx, instance, StageBootstrap)
+				return bootstrapFailure(bootstrapErr)
 			}
 			instance, err = e.advance(ctx, instance, operations.StateRegistering)
 		case operations.StateRegistering:
@@ -362,6 +372,20 @@ func (e ProvisionExecutor) advance(ctx context.Context, instance operations.Inst
 
 func (e ProvisionExecutor) fail(_ context.Context, _ operations.Instance, stage Stage) error {
 	return safeError(stage)
+}
+
+// bootstrapFailure keeps the one bounded diagnostic a failed bootstrap can carry
+// and discards everything else. A guest that answered the capability question
+// with "no" produced a closed-vocabulary reason, which travels into the durable
+// operation row exactly as a runner-administration reason does; any other
+// failure stays the bare stage it has always been, because the helper's output
+// may reflect the JIT configuration it was given.
+func bootstrapFailure(cause error) error {
+	var staged stageError
+	if errors.As(cause, &staged) && ValidBootstrapFailureReason(staged.reason) {
+		return staged
+	}
+	return safeError(StageBootstrap)
 }
 
 // DrainExecutor completes GitHub deregistration and Tart destruction before
@@ -685,7 +709,8 @@ type StdinBootstrapper struct {
 	Timeout time.Duration
 }
 
-func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret) error {
+func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret,
+	capabilities []string) error {
 	if domain.ValidateInstanceName(name) != nil || secret == nil || b.Runner == nil {
 		return operations.ErrInvalid
 	}
@@ -694,15 +719,24 @@ func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *g
 	if encoded == "" || len(encoded) > maxJITBytes {
 		return operations.ErrInvalid
 	}
+	args, err := capabilityArguments([]string{"exec", "-i", name, bootstrapHelper}, capabilities)
+	if err != nil {
+		return operations.ErrInvalid
+	}
 	timeout := b.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if err := b.Runner.Run(commandCtx, strings.NewReader(encoded+"\n"), "exec", "-i", name, bootstrapHelper); err != nil {
+	if err := b.Runner.Run(commandCtx, strings.NewReader(encoded+"\n"), args...); err != nil {
 		if commandCtx.Err() != nil {
 			return commandCtx.Err()
+		}
+		// The guest's own account of a failed capability check, carried by exit
+		// status alone so no child output ever reaches a durable row.
+		if reason := guestCapabilityReason(err); reason != "" {
+			return stageError{stage: StageBootstrap, reason: reason}
 		}
 		return errors.New("runner bootstrap failed")
 	}

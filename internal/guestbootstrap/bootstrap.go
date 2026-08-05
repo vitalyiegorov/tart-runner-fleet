@@ -33,6 +33,23 @@ type Config struct {
 	WorkDir     string
 	LogPath     string
 	MaxJITBytes int
+	// RequiredCapabilities is what the daemon expected of this guest's image,
+	// taken from the `requiresCapabilities` of the scale sets routed to this
+	// instance's profile. Empty means no check and no manifest read, which is
+	// every guest that predates the feature.
+	RequiredCapabilities []string
+	// CapabilityManifestPath overrides where the guest's own declaration is read
+	// from. Empty is CapabilityManifestPath, which is the only value production
+	// ever uses; the field exists so the check is testable without writing to an
+	// absolute system path.
+	CapabilityManifestPath string
+}
+
+func (c Config) capabilityManifestPath() string {
+	if c.CapabilityManifestPath == "" {
+		return CapabilityManifestPath
+	}
+	return c.CapabilityManifestPath
 }
 
 type ProcessSpec struct {
@@ -57,6 +74,12 @@ func (b Bootstrap) Run(ctx context.Context, stdin io.Reader, config Config) erro
 	}
 	validated, err := validateConfig(config)
 	if err != nil {
+		return err
+	}
+	// Before a byte of standard input is read, so a capability failure provably
+	// cannot carry the JIT configuration and is therefore the one failure this
+	// helper is allowed to describe out loud.
+	if err := checkCapabilities(validated.capabilityManifestPath(), validated.RequiredCapabilities); err != nil {
 		return err
 	}
 	jit, err := readJIT(stdin, validated.MaxJITBytes)

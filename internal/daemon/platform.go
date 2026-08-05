@@ -220,6 +220,6 @@ func (unreachableGuest) Wait(context.Context, operations.Instance) error {
 	return noexecutor.ErrNoBackend
 }
 
-func (unreachableGuest) Bootstrap(context.Context, string, *githubscaleset.JITSecret) error {
+func (unreachableGuest) Bootstrap(context.Context, string, *githubscaleset.JITSecret, []string) error {
 	return noexecutor.ErrNoBackend
 }

@@ -2163,6 +2163,24 @@ func TestProfileDiskFloorsPreserveProfileIdentity(t *testing.T) {
 	}
 }
 
+// TestProfileCapabilitiesUnionEveryScopeThatRoutesToAProfile pins the key the
+// provision executor looks the requirement up under. An instance records its
+// profile and not the scale set it was spawned for, and two scopes may route to
+// one profile with different requirements, so the guest must satisfy both.
+func TestProfileCapabilitiesUnionEveryScopeThatRoutesToAProfile(t *testing.T) {
+	cfg := config.Default()
+	cfg.GitHub.ScaleSets = []config.ScaleSet{
+		{Profile: "large", Name: "a", RequiresCapabilities: []string{"redroid-android", "container-runtime"}},
+		{Profile: "large", Name: "b", RequiresCapabilities: []string{"container-runtime", "jdk"}},
+		{Profile: "small", Name: "c"},
+	}
+	got := profileCapabilities(cfg)
+	want := map[domain.ProfileID][]string{"large": {"container-runtime", "jdk", "redroid-android"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("profile capabilities = %#v, want %#v", got, want)
+	}
+}
+
 type lifecycleVM struct {
 	clone atomic.Int32
 	start atomic.Int32
@@ -2186,7 +2204,9 @@ func (readyProbe) Wait(context.Context, operations.Instance) error { return nil 
 
 type bootstrapProbe struct{}
 
-func (bootstrapProbe) Bootstrap(context.Context, string, *githubscaleset.JITSecret) error { return nil }
+func (bootstrapProbe) Bootstrap(context.Context, string, *githubscaleset.JITSecret, []string) error {
+	return nil
+}
 
 func TestRuntimeExecutorsDriveProvisionToAssigned(t *testing.T) {
 	d := testDependencies(t)

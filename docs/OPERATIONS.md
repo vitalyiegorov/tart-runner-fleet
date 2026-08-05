@@ -217,6 +217,30 @@ chain: runner exits, guest powers off, fresh inventory observes stopped, and
 the durable drain/deregister/delete operation completes before the base is
 selected for production.
 
+### The guest capability manifest, and the two ways it fails
+
+A base image also carries its own account of what it provides, sealed at
+`/usr/local/share/tart-runner-fleet/image-capabilities.json`:
+
+```json
+{"schemaVersion": 1, "image": "macos-tartelet-base", "sealedAt": "2026-08-05T04:00:00Z",
+ "capabilities": ["android-build-sdk", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime"]}
+```
+
+The daemon passes the capabilities the assigned scale sets require to the
+bootstrap helper, which compares them against that file before it reads the JIT
+configuration. A scale set that requires nothing produces exactly the invocation
+it always did and reads no manifest. This is detection, not prevention: by the
+time it fires, GitHub has already assigned the job. The prevention is the
+configuration gate — see `fleet config validate` in
+[`CLI.md`](CLI.md) — and this catches the one thing that gate cannot, which is a
+declaration that was true until someone rebuilt the image.
+
+| `code` | Meaning | Action |
+| --- | --- | --- |
+| `bootstrap:guest_capability_missing` | The image answered, and it does not provide something a scale set requires. | Rebuild the base through the seal step of [`BASE_IMAGE.md`](BASE_IMAGE.md) or [`LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md), or stop advertising the label. The guest names the missing capability on the helper's standard error inside the guest; the scale set's own `requiresCapabilities` names the candidate set. |
+| `bootstrap:guest_capability_unverifiable` | The image could not answer: the manifest is absent, unparsable, empty, or a schema this release does not read. | Re-seal the image with a manifest. An image that cannot answer is failed closed on purpose — treating silence as consent would catch nothing. |
+
 ### macOS VM quota exhaustion (`host_quota`)
 
 Apple's kernel caps concurrent macOS guests at 2 per host and, on macOS 26,

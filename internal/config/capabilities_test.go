@@ -194,3 +194,30 @@ func TestUnusedCapabilityFieldsEncodeByteForByte(t *testing.T) {
 		t.Fatalf("encoding a capability-free configuration changed:\n--- got\n%s\n--- want\n%s", encoded.String(), want)
 	}
 }
+
+// TestProfileRequiredCapabilitiesUnionEveryScaleSet is what the daemon threads
+// to the guest. An instance records its profile, not its scale set, so the guest
+// must satisfy every requirement routed to that profile.
+func TestProfileRequiredCapabilitiesUnionEveryScaleSet(t *testing.T) {
+	cfg := capabilityNode()
+	cfg.Linux.BaseImageCapabilities = []string{"container-runtime", "jdk", "redroid-android"}
+	cfg.MacOS.BaseImageCapabilities = []string{"maestro-cli"}
+	cfg.GitHub.ScaleSets = []ScaleSet{named(linuxScaleSet("redroid-android", "container-runtime"), "flat")}
+	cfg.GitHub.Scopes = []GitHubScope{
+		{Name: "sudoku", ScaleSets: []ScaleSet{named(linuxScaleSet("jdk", "container-runtime"), "scoped")}},
+		{Name: "budgie", ScaleSets: []ScaleSet{named(macosScaleSet("maestro-cli"), "mac"), named(macosScaleSet(), "none")}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	required := cfg.ProfileRequiredCapabilities()
+	if strings.Join(required["linux-6x12"], ",") != "container-runtime,jdk,redroid-android" {
+		t.Errorf("linux-6x12 requires %v", required["linux-6x12"])
+	}
+	if strings.Join(required["macos-4x7"], ",") != "maestro-cli" {
+		t.Errorf("macos-4x7 requires %v", required["macos-4x7"])
+	}
+	if len(required) != 2 {
+		t.Errorf("a profile no scale set requires anything of must be absent: %v", required)
+	}
+}

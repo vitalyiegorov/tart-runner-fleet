@@ -607,7 +607,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
 					Registration: control, Bootstrap: d.bootstrap(cfg), Bases: map[domain.Platform]string{
-						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB},
+						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
+					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
 			},
@@ -659,6 +660,20 @@ func profileDiskFloors(cfg config.Config) map[domain.ProfileID]int {
 		floors[domain.ProfileID(cfg.MacOS.Maestro.ID)] = cfg.MacOS.Maestro.DiskGiB
 	}
 	return floors
+}
+
+// profileCapabilities is what each profile's guest image must provide, keyed the
+// way an instance records itself. A durable instance carries its profile and not
+// the scale set it was spawned for, and a profile may be exposed by more than
+// one scope, so the union across every scale set routed to it is both the
+// conservative answer and the only one derivable at this point.
+func profileCapabilities(cfg config.Config) map[domain.ProfileID][]string {
+	required := cfg.ProfileRequiredCapabilities()
+	capabilities := make(map[domain.ProfileID][]string, len(required))
+	for profile, names := range required {
+		capabilities[domain.ProfileID(profile)] = names
+	}
+	return capabilities
 }
 
 func closeScaleSetSources(ctx context.Context, sources []scaleSetSource) error {
