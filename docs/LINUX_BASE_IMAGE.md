@@ -198,21 +198,73 @@ action, but the durable fix is the image.
 > flakiness.
 
 The invariant is stated in ADR 0034's amendment *"a shared label is a promise
-about the guest"*, together with a proposal for enforcing it rather than
-remembering it. Until that ships, the enforcement is this document: **any node
-that advertises `linux-xl` runs [step 6](#6-prewarm-redroid-on-any-node-that-advertises-linux-xl)**.
+about the guest"*. When this document was first written the enforcement was the
+document itself: **any node that advertises `linux-xl` runs
+[step 6](#6-prewarm-redroid-on-any-node-that-advertises-linux-xl)**. That rule
+still stands, and since issue #202 it is also mechanical — see
+[Which labels carry which extra capability, today](#which-labels-carry-which-extra-capability-today)
+for how it is written down and
+[Seal and verify](#seal-and-verify) for the manifest the image carries so it can
+be held to it.
+
+### The capability vocabulary
+
+A capability is a lowercase identifier matching
+`^[a-z0-9][a-z0-9-]*$` that does not end in a hyphen. It names something a base image provides that
+neither the profile's resource vector nor the canonical label can state. The
+vocabulary is not open: it is the result of an audit of the live fleet, and a
+name that is not in one of these two tables is a name no image has been audited
+for. Adding one means auditing an image, not inventing a word.
+
+| Linux capability | What it means |
+| --- | --- |
+| `container-runtime` | `docker` on the daemon runner PATH, with a working daemon |
+| `redroid-android` | the Redroid image present offline, a prewarmed `/data` volume, and `adb` — [step 6](#6-prewarm-redroid-on-any-node-that-advertises-linux-xl) |
+| `android-build-sdk` | an Android SDK and NDK a job can build an APK against |
+| `jdk` | a JDK on PATH, with `JAVA_HOME` resolvable |
+| `node-runtime` | `node`, `npm`, `npx`, `yarn`, and `corepack` on the daemon runner PATH |
+| `playwright-system-deps` | the stable system packages Playwright browsers link against |
+
+The macOS vocabulary is in [`BASE_IMAGE.md`](BASE_IMAGE.md); the two are
+separate because a node's two base images answer separate questions.
 
 ### Which labels carry which extra capability, today
 
-| Label | Extra capability | Consumer |
-| --- | --- | --- |
-| `linux-xl` (`trf-linux-arm64-6x12`) | Docker, the Redroid image, a prewarmed `/data`, and `adb` | `suuudokuuu` Android Maestro |
-| every other Linux label | none beyond the daemon contract | — |
+| Label | Extra capability | Declared as | Consumer |
+| --- | --- | --- | --- |
+| `linux-xl` (`trf-linux-arm64-6x12`) | Docker, the Redroid image, a prewarmed `/data`, and `adb` | `container-runtime`, `redroid-android` | `suuudokuuu` Android Maestro |
+| every other Linux label | none beyond the daemon contract | — | — |
 
 This table is a snapshot of a fact that lives in consumer repositories, not
 here. Re-derive it before adding a node: search the scopes in the node's
 `fleet.json` for workflows that assert something about the guest, which by
 convention is a guard in the first step of the job.
+
+The third column is what the node's configuration now says out loud. The image
+declares what it provides and the scale set declares what its labels require:
+
+```json
+"baseVm": "linux-runner-base-go",
+"baseImageCapabilities": ["container-runtime", "redroid-android"]
+```
+
+```json
+{ "profile": "linux-6x12", "name": "trf-sudoku-xl-studio",
+  "labels": ["self-hosted", "linux-tiered", "linux-xl"],
+  "requiresCapabilities": ["container-runtime", "redroid-android"] }
+```
+
+`fleet config validate` refuses the second without the first. Given more than
+one node's configuration it also compares them, which is the check that would
+have caught 2026-08-04 before a job ever ran:
+
+```sh
+fleet config validate config/nodes/*.json
+```
+
+See [`CLI.md`](CLI.md) and [`config/nodes/README.md`](../config/nodes/README.md).
+A declaration is still a claim an operator types; what makes the image
+answerable for it is the manifest below.
 
 ## Build the image
 
@@ -488,6 +540,41 @@ the `overlayfs` driver; the prewarmed volume is 32 MB; and the image grew from
 
 ## Seal and verify
 
+### Write the capability manifest first
+
+The last thing to go into an image is its own account of what is in it. The
+bootstrap helper reads this file in every ephemeral clone and compares it against
+what the daemon expected of the scale sets that routed the job here; a mismatch
+fails the instance at the `bootstrap` stage with a named reason instead of
+letting the job die inside a consumer's workflow (ADR 0034, amendment
+2026-08-04c §3; the reasons are in [`OPERATIONS.md`](OPERATIONS.md)).
+
+**List only what this image actually carries.** A manifest is worth exactly the
+audit behind it, and one that lists a capability the image lacks is worse than no
+manifest at all: it converts a caught failure into the flaky one this whole
+section exists to prevent. The list below is for an image that ran step 6; drop
+`redroid-android` and `container-runtime` from an image that did not.
+
+```sh
+"$TART" exec "$BUILD" bash -lc '
+set -euo pipefail
+sudo install -d -o root -g root -m 0755 /usr/local/share/tart-runner-fleet
+sudo tee /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null <<JSON
+{"schemaVersion": 1, "image": "linux-runner-base-go", "sealedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
+ "capabilities": ["container-runtime", "jdk", "node-runtime", "playwright-system-deps", "redroid-android"]}
+JSON
+sudo chmod 0644 /usr/local/share/tart-runner-fleet/image-capabilities.json
+python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
+'
+```
+
+The identifiers come from [the capability vocabulary](#the-capability-vocabulary)
+and must match the node's `baseImageCapabilities` exactly. They are compared for
+string equality across two machines' configuration files, so a spelling that
+differs is a capability that does not exist.
+
+### Then stop the guest
+
 `tart exec` runs with a `PATH` that has no `/sbin`, so `shutdown` must be
 called by absolute path, and the exit status of a command that kills its own
 transport is not evidence. Both hazards are the same ones
@@ -548,6 +635,8 @@ test ! -e "$HOME/actions-runner/.runner"
 test ! -e "$HOME/actions-runner/.credentials"
 test ! -e "$HOME/actions-runner/_work"
 test -x /usr/local/libexec/tart-runner-fleet-bootstrap
+test -r /usr/local/share/tart-runner-fleet/image-capabilities.json
+python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
 for path in /bin/sh /usr/bin/sudo /sbin/shutdown /usr/bin/systemd-run; do test -x "$path"; done
 sudo -n /sbin/shutdown --help >/dev/null
 systemd-run --scope --collect --quiet --unit=tart-runner-fleet-probe -- /bin/true
@@ -792,6 +881,7 @@ of truth — not this document. The node this was built on has:
 ```json
 {
   "baseVm": "linux-runner-base-go",
+  "baseImageCapabilities": ["container-runtime", "jdk", "node-runtime", "playwright-system-deps", "redroid-android"],
   "vmPrefix": "gha-linux",
   "hostBudget": { "cpu": 6, "memoryMb": 16384 },
   "linuxProfiles": [
@@ -800,6 +890,12 @@ of truth — not this document. The node this was built on has:
   ]
 }
 ```
+
+`baseImageCapabilities` must equal what the manifest inside the image says, for
+the same reason `baseVm` must equal the Tart name: one of them is checked against
+the machine and the other is checked against every other node, and a
+configuration that disagrees with its own image is the failure mode this whole
+section is about.
 
 Read the node's actual `fleet.json` before building and name the candidate to
 match. `BASE_IMAGE.md` records the same lesson from the macOS side, where the
