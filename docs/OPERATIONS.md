@@ -394,12 +394,13 @@ fleet doctor --output json
 
 Everything above is a `launchd` transaction: it lints a plist with `plutil` and
 swaps generations with `launchctl bootout` / `bootstrap` / `kickstart`. A Linux
-node (ADR 0034's node B) has none of those, and `fleet update apply-latest`
-refuses there rather than half-applying a generation — the refusal names the
-domain, because a `systemd --user` manager is not addressable as a launchd one.
-Automatic updates on that node arrive with the systemd release transaction; its
-units are already rendered by `render-systemd.sh` so the node will not need a
-hand-written file when it does.
+node (geekom, ADR 0034's node B — not yet delivered) has none of those, and
+`fleet update apply-latest` refuses there rather than half-applying a
+generation — the refusal names the domain, because a `systemd --user` manager
+is not addressable as a launchd one. Automatic updates on that node arrive
+with the systemd release transaction; its units are already rendered by
+`render-systemd.sh` so the node will not need a hand-written file when it
+does.
 
 Until then a Linux node adopts a generation by hand, and the ordering rule is
 the same one the macOS bridge has: the unit and the recorded generation move
