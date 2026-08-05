@@ -1317,13 +1317,9 @@ func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
 		return plan
 	}
 	augmented = chargeReservedHead(augmented, plan.Next.Reservation)
-	target, active := activeMacProfile(augmented.Instances.Value)
-	if active {
-		if !macProfileCanGrow(augmented, target) {
-			return plan
-		}
-	} else {
-		target = chosenMacProfile(in, macos)
+	target, admissible := remainderMacProfile(augmented, macos)
+	if !admissible {
+		return plan
 	}
 	profileDemands := demandsForProfile(macos, target)
 	if len(profileDemands) == 0 {
@@ -1334,6 +1330,45 @@ func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
 	plan.Operations = append(plan.Operations, sub.Operations...)
 	plan.Next.DRRCursor = savedCursor
 	return plan
+}
+
+// remainderMacProfile names the macOS profile a remainder pass may admit, or
+// reports that none may.
+//
+// Under the single-cohort rule the answer is the live cohort and nothing else:
+// profile identity is the veto there, so a queue of any other profile is
+// inadmissible however much room the Linux head left over.
+//
+// With `mixedProfileCohorts` the veto is the ENVELOPE, not identity — ADR 0024
+// states that as "growth loses only the identity veto" — and that is exactly
+// what this pass had wrong. It read the live cohort as the target whatever the
+// queue held, so a `builder` sitting at its own `maxActive` of one answered
+// "cannot grow" and the whole pass returned, with a queued `maestro` that fit the
+// free cores exactly and a configuration that explicitly permits the two to
+// coexist. ADR 0024 gave `planMacOS` coexistence-first admission and left the
+// complementary remainder pass on the old rule; that is the same asymmetry
+// between a first and a second admission pass that ADR 0029 repaired for the
+// reservation veto, and it wedged the fleet in issue #208, seed 210: twelve
+// consecutive ticks admitting nothing while four idle cores held an aged maestro.
+//
+// The target is therefore the highest-priority queued profile that still has
+// room, in the aged-FIFO order `priorityOrder` gives every other admission. A
+// profile at its `maxActive` ends its own turn rather than the pass, which is how
+// `appendMacSpawns` already treats an exhausted repository cap. It cannot admit
+// anything the envelope does not hold: `appendMacSpawns` charges every live
+// instance, this tick's planned spawns, and any reserved head before it selects.
+func remainderMacProfile(in Input, macos []domain.Demand) (domain.ProfileID, bool) {
+	if !in.Config.MixedProfileCohorts {
+		if active, live := activeMacProfile(in.Instances.Value); live {
+			return active, macProfileCanGrow(in, active)
+		}
+	}
+	for _, demand := range priorityOrder(in, macos) {
+		if macProfileCanGrow(in, demand.Profile) {
+			return demand.Profile, true
+		}
+	}
+	return "", false
 }
 
 // appendPlannedSpawns models this tick's planned spawn operations as live,
