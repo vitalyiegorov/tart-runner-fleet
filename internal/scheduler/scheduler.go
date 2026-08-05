@@ -432,7 +432,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 	agedFree.Slots = min(agedFree.Slots, 4)
 	baseCounts := activeRepoCounts(in.Instances.Value)
 
-	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok {
+	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok && reservationStillHeadsQueue(in, demands, reserved) {
 		profile := in.Config.Profiles[reserved.Profile]
 		// A reservation is only ever held by an aged head, so its feasibility is
 		// judged against the starvation envelope.
@@ -674,6 +674,44 @@ func reservedDemand(reservation *domain.Reservation, demands []domain.Demand) (d
 		}
 	}
 	return domain.Demand{}, false
+}
+
+// reservationStillHeadsQueue reports whether a held reservation still names the
+// aged global-FIFO head, which is the only demand a reservation may ever be for.
+//
+// A reservation is made for the oldest aged demand that does not fit, and it is
+// re-checked FIRST on every later tick so it wins the first vector large enough
+// for it (ADR 0017, ADR 0029). That contract protects the head from work that is
+// YOUNGER than it. It was never a licence to outrank work that is OLDER, and the
+// plannable queue is not frozen while a reservation is held: a demand a live
+// instance incarnates is absent from it by ADR 0027 and returns to it the instant
+// that instance dies -- carrying its GitHub queue time, which is what every aging
+// rule in this package measures from.
+//
+// So a recovery drain can put a demand back in front of the reserved head, and
+// before this check the head was admitted anyway: `planLinux` returned from the
+// reservation branch without ever consulting the queue it had just been handed,
+// even though `priorityOrder` had already ranked the returning demand first. That
+// is ADR 0004's rule 1 broken by the very mechanism that exists to keep it, and
+// the simulator found it as a repeating cycle -- an assignment that stalls, is
+// recovered, releases the oldest demand, and loses the freed vector to the
+// standing reservation, every deadline, forever (issue #208, seed 55 of the
+// container-node arm).
+//
+// When the reservation no longer heads the queue it is re-derived instead of
+// obeyed: the aged loop below admits the true head and reserves whatever it
+// cannot fit, so the demand that lost the reservation is first in line behind the
+// older work that displaced it. Nothing younger gains anything either way.
+func reservationStillHeadsQueue(in Input, demands []domain.Demand, reserved domain.Demand) bool {
+	for _, demand := range demands {
+		if demand.Key == reserved.Key || !demandAged(in.Now, in.Config.FairnessAge, demand) {
+			continue
+		}
+		if demandLess(demand, reserved) {
+			return false
+		}
+	}
+	return true
 }
 
 func copyReservation(reservation *domain.Reservation) *domain.Reservation {
