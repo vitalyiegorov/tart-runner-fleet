@@ -1330,11 +1330,12 @@ func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
 
 // fillMacRemainder admits a compatible macOS profile in the envelope left after
 // the Linux head has planned, turning "N Linux" into "N Linux AND a macOS
-// cohort" within MaxActive and the single-cohort invariant. It only grows the
-// already-active macOS profile (or, on a host with no live macOS, establishes
-// the head demand's profile). appendMacSpawns performs no drains, so no macOS
-// profile switch can be started as a side effect of a Linux tick; the Linux head
-// keeps ownership of the DRR fairness cursor.
+// cohort" within MaxActive and the single-cohort invariant. remainderMacProfile
+// names which profile that is: the live cohort under the single-cohort rule, and
+// otherwise the highest-priority queued profile that still has room.
+// appendMacSpawns performs no drains, so no macOS profile switch can be started
+// as a side effect of a Linux tick; the Linux head keeps ownership of the DRR
+// fairness cursor.
 //
 // A held Linux reservation constrains this pass instead of cancelling it. The
 // reserved head's whole vector is withheld (chargeReservedHead) and its
