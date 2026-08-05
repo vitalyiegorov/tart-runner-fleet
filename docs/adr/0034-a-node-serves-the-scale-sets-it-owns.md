@@ -456,6 +456,100 @@ seven verbs, the field sets, and the caller-side ports are byte-for-byte as
 issue #137 left them, which is what let the container adapter be written against
 a target that could not move.
 
+## Amendment 2026-08-04b: two nodes may advertise one label, because GitHub places
+
+§3 refused to let two nodes advertise the same label, on the stated ground that
+"this record does not rely on undocumented behaviour". The behaviour has now
+been measured, and the refusal costs more than it buys. This amendment removes
+it. **Nothing else in this record changes**: no control plane, no steward, no
+election, no cross-node RPC, no shared database, no registry, no heartbeat. Each
+node still owns its own scale sets, holds its own single session, and keeps its
+own SQLite. The only thing that changes is that two nodes' sets may carry the
+same labels, and GitHub decides which set each job goes to.
+
+### What was measured
+
+Two scale sets were created in one throwaway repository scope with byte-identical
+label lists, `[self-hosted, trf-spike-dup]`, and long-polled concurrently while a
+four-job workflow was dispatched repeatedly. Full request and response transcripts
+are in
+[issue #144](https://github.com/vitalyiegorov/tart-runner-fleet/issues/144#issuecomment-5180794736).
+
+1. **Identical labels are accepted.** Both `POST /_apis/runtime/runnerscalesets`
+   calls returned `200`. What GitHub rejects is a duplicate *name* — `400`,
+   `RunnerScaleSetExistsException`. Uniqueness is on the name, not on the labels.
+2. **GitHub distributes, server-side, before either listener sees the work.**
+   Every message was `JobAssigned`, never `JobAvailable` with a race to acquire.
+   Each set saw only its own share. The rule is not creation order, not
+   round-robin, and not first-acquire-wins: each set is filled to the capacity it
+   most recently advertised. With one set advertising `1` and the other `5`, a
+   four-job dispatch split exactly `1` and `3`. With both full, the remainder
+   stayed `queued`, and raising one set's advertised capacity pulled that backlog
+   onto it on the next poll.
+3. **Advertised capacity is not a stored property.** `maxCapacity` in a create or
+   `PATCH` body is accepted and ignored; `RunnerScaleSet` has no such field.
+   Capacity is the per-poll `X-ScaleSetMaxCapacity` header
+   (`github.com/actions/scaleset@v0.4.0/client.go:38-40`, `session_client.go:142`),
+   fed here from configured `maxCapacity` through `ScaleSetConfig.MaxCapacity`
+   (`internal/adapters/githubscaleset/scaleset.go:45, 89`). Lowering it while jobs
+   are assigned is accepted and does not revoke them.
+
+The consequence worth stating in one line: **the number this fleet already
+computes for ADR 0015's truthful-capacity invariant is the number GitHub uses to
+place work across nodes.** Node C's `hostBudget` of 4 vCPU / 10240 MiB yields a
+`maestro` capacity of 1 where node A yields 2, through `budgetedCapacity`
+(`internal/config/config.go:898-905`) — and that 1:2 is the split GitHub applies.
+Cross-node placement is not new machinery; it is an existing invariant read by a
+new consumer.
+
+### The two conditions this depends on
+
+**Advertised capacity must be truthful.** `canonicalJobInventory` is off in the
+live configuration, and while it is off `internal/config/config.go:776` *requires*
+`maxCapacity > runtime capacity` as queue lookahead. Two nodes both inflating
+would have GitHub split by fiction and hand a node work it must then queue while
+its peer idles — the stranding this record set out to avoid, relocated. A scope
+whose label is advertised by two nodes must therefore run with
+`canonicalJobInventory: true`, which is ADR 0015's model and is already
+implemented and validated.
+
+**REST-derived demand must be attributed per set.** Enabling
+`canonicalJobInventory` also enables the REST inventory lane, and that lane
+attributes *repository-wide queued jobs* to a binding by label match
+(`internal/app/demand.go:229-243`). Under a shared label both nodes would
+attribute the same queued job to their own set and both would spawn a guest for
+it; the loser would hold a runner against work GitHub never assigned it, and the
+ghost-demand reclaim of [ADR 0026](0026-queued-demand-expires-on-proven-absence.md)
+would have to clear it. The correction is bounded and the signal is already
+ingested: a binding's REST-derived demand is capped by that set's own
+`statistics.totalAssignedJobs`, which arrives on every message and is already
+carried as `Demand.Assigned`
+(`internal/adapters/githubscaleset/scaleset.go:97-103`). This is a precondition
+of the amendment, not a follow-up.
+
+### Why relying on undocumented behaviour is acceptable here, and only here
+
+The general rule §3 invoked is sound. It is overridden by the shape of the
+failure, not by the size of the prize. The API is preview and the placement rule
+is not contractual — but if it regresses to preferring one set, the fleet lands
+in *exactly the scope partition this record already specified*: one node busy,
+one node idle, no job lost, no runner orphaned, no state corrupted, no schema
+migrated. Every node keeps its own set, its own session, and its own database
+either way. The blast radius of being wrong is a utilisation regression, and the
+rollback is deleting one node's scale sets.
+
+That is the test this amendment asks to be held to: an undocumented behaviour may
+be depended on when its failure mode is the documented behaviour.
+
+### What this does not license
+
+Repository caps, `maxActive`, and aging stay per node, exactly as §9 says. GitHub
+distributes by capacity and knows nothing of this fleet's fairness policy, so a
+scope's work may be split in a way no single node would have chosen. That is
+accepted: it is the same trade this record already made when it made caps
+per-node. If a policy GitHub cannot express becomes necessary, that is the
+steward trigger in §8, and it is the only one left.
+
 ## Amendment 2026-08-04c: a shared label is a promise about the guest
 
 This amendment adds an invariant to the shared-label federation recorded in
