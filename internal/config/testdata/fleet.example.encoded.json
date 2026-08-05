@@ -1,0 +1,160 @@
+{
+  "baseVm": "linux-runner-base",
+  "vmPrefix": "gha-linux",
+  "pollSeconds": 20,
+  "maxLinuxWhenMacosIdle": 4,
+  "maxLinuxCpu": 8,
+  "maxLinuxMemoryMb": 16384,
+  "hostBudget": {
+    "cpu": 10,
+    "memoryMb": 23552
+  },
+  "linuxReservationAgeSeconds": 300,
+  "linuxProfiles": [
+    {
+      "id": "linux-1x2",
+      "label": "trf-linux-arm64-1x2",
+      "aliases": [
+        "linux-small"
+      ],
+      "cpu": 1,
+      "memoryMb": 2048,
+      "diskGb": 50
+    },
+    {
+      "id": "linux-2x4",
+      "label": "trf-linux-arm64-2x4",
+      "aliases": [
+        "linux-medium"
+      ],
+      "cpu": 2,
+      "memoryMb": 4096,
+      "diskGb": 50
+    },
+    {
+      "id": "linux-2x8",
+      "label": "trf-linux-arm64-2x8",
+      "cpu": 2,
+      "memoryMb": 8192,
+      "diskGb": 50
+    },
+    {
+      "id": "linux-4x8",
+      "label": "trf-linux-arm64-4x8",
+      "aliases": [
+        "linux-large"
+      ],
+      "cpu": 4,
+      "memoryMb": 8192,
+      "diskGb": 50
+    },
+    {
+      "id": "linux-6x12",
+      "label": "trf-linux-arm64-6x12",
+      "aliases": [
+        "linux-xl"
+      ],
+      "cpu": 6,
+      "memoryMb": 12288,
+      "diskGb": 50
+    },
+    {
+      "id": "linux-8x16",
+      "label": "trf-linux-arm64-8x16",
+      "cpu": 8,
+      "memoryMb": 16384,
+      "diskGb": 50
+    }
+  ],
+  "minFreeDiskGb": 60,
+  "minAvailableMemoryMb": 1024,
+  "maxSwapUsedMb": 2048,
+  "maxLoadAverage": 9,
+  "minCpuIdlePercent": 5,
+  "githubTimeoutSeconds": 15,
+  "tartControlTimeoutSeconds": 45,
+  "bootTimeoutSeconds": 180,
+  "assignedTimeoutSeconds": 900,
+  "macosBurst": {
+    "enabled": true,
+    "baseVm": "macos-tartelet-base",
+    "vmPrefix": "gha-macos",
+    "builder": {
+      "id": "macos-6x12",
+      "label": "trf-macos-arm64-6x12",
+      "aliases": [
+        "macos-builder"
+      ],
+      "cpu": 6,
+      "memoryMb": 12288,
+      "maxActive": 1
+    },
+    "maestro": {
+      "id": "macos-4x7",
+      "label": "trf-macos-arm64-4x7",
+      "aliases": [
+        "macos-maestro"
+      ],
+      "cpu": 4,
+      "memoryMb": 7168,
+      "maxActive": 2
+    },
+    "rootDiskOptions": "sync=none",
+    "sharedDirectoryPath": "/Users/runner/ci-shared"
+  },
+  "github": {
+    "configUrl": "",
+    "owner": "",
+    "clientId": "",
+    "installationId": 0,
+    "keychainService": "",
+    "keychainAccount": "",
+    "scaleSets": null,
+    "sessionOwner": "",
+    "app": {
+      "clientId": "",
+      "keychainService": "",
+      "keychainAccount": ""
+    },
+    "installations": null,
+    "scopes": null
+  },
+  "targets": [
+    {
+      "type": "repo",
+      "slug": "vitalyiegorov/tart-runner-fleet",
+      "maxActive": 3,
+      "schedulingClass": "control-plane"
+    },
+    {
+      "type": "repo",
+      "slug": "vitalyiegorov/knee-doctor",
+      "maxActive": 4,
+      "schedulingClass": "standard"
+    },
+    {
+      "type": "repo",
+      "slug": "budgie-at/budgie",
+      "maxActive": 4,
+      "schedulingClass": "standard",
+      "defaultLinuxProfile": "linux-4x8",
+      "runnerLabels": [
+        "self-hosted",
+        "linux-ci",
+        "linux-burst"
+      ]
+    },
+    {
+      "type": "repo",
+      "slug": "vitalyiegorov/hotel-provence",
+      "maxActive": 4,
+      "schedulingClass": "standard"
+    },
+    {
+      "type": "repo",
+      "slug": "vitalyiegorov/suuudokuuu",
+      "maxActive": 4,
+      "schedulingClass": "standard"
+    }
+  ]
+}

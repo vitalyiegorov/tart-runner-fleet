@@ -70,6 +70,16 @@ type Linux struct {
 	// hardware-accelerated VMs of their own (KVM for Android emulators).
 	// Apple's Virtualization framework only offers this to Linux guests.
 	NestedVirtualization bool
+	// BaseImageCapabilities declares what BaseVM provides beyond the guest
+	// contract this codebase already checks. ADR 0034 §4 says the canonical label
+	// cannot lie about CPU, memory, OS, and architecture because all four are
+	// derived; everything else in an image is invisible here, which is how two
+	// nodes came to advertise `linux-xl` while only one carried a prewarmed
+	// Redroid container (issue #202). It cannot be inferred — the daemon never
+	// opens the image and the consumer that needs the capability lives in another
+	// repository — so it is declared, exactly like the shared-label fact beside
+	// it. Absent is a byte-for-byte no-op.
+	BaseImageCapabilities []string
 }
 
 // ExecutorBackend names the execution technology of this node. It is empty on
@@ -137,6 +147,12 @@ type MacOS struct {
 	RootDiskOptions      string
 	SharedDirectoryPath  string
 	NestedVirtualization bool
+	// BaseImageCapabilities declares what the macOS BaseVM provides. A node has
+	// two base images, and each answers only for the scale sets whose profile it
+	// boots: `xcode` is a fact about the macOS image and says nothing about the
+	// Linux one. See Linux.BaseImageCapabilities for why it is declared rather
+	// than inferred.
+	BaseImageCapabilities []string
 }
 
 type Timeouts struct {
@@ -269,6 +285,13 @@ type ScaleSet struct {
 	// by construction — so it is declared, exactly like the inventory flag it
 	// requires.
 	SharedLabels bool `json:"sharedLabels,omitempty"`
+	// RequiresCapabilities declares what the labels below need from the guest
+	// image, beyond the resource vector the canonical label already states. It is
+	// the requiring half of Linux.BaseImageCapabilities and, like SharedLabels, it
+	// records a fact no artifact of this fleet can derive: the requirement lives
+	// in a consumer's workflow in another repository. Absent is a byte-for-byte
+	// no-op.
+	RequiresCapabilities []string `json:"requiresCapabilities,omitempty"`
 }
 
 type Config struct {
@@ -305,12 +328,16 @@ type wireExecutor struct {
 }
 
 type wireConfig struct {
-	BaseVM                string `json:"baseVm"`
-	VMPrefix              string `json:"vmPrefix"`
-	PollSeconds           int    `json:"pollSeconds"`
-	MaxLinuxWhenMacOSIdle int    `json:"maxLinuxWhenMacosIdle"`
-	MaxLinuxCPU           int    `json:"maxLinuxCpu"`
-	MaxLinuxMemoryMiB     int    `json:"maxLinuxMemoryMb"`
+	BaseVM string `json:"baseVm"`
+	// BaseImageCapabilities is omitted when empty so a node that declares none
+	// encodes no key at all, which is what keeps this feature a byte-for-byte
+	// no-op for a release older than it decoding with DisallowUnknownFields.
+	BaseImageCapabilities []string `json:"baseImageCapabilities,omitempty"`
+	VMPrefix              string   `json:"vmPrefix"`
+	PollSeconds           int      `json:"pollSeconds"`
+	MaxLinuxWhenMacOSIdle int      `json:"maxLinuxWhenMacosIdle"`
+	MaxLinuxCPU           int      `json:"maxLinuxCpu"`
+	MaxLinuxMemoryMiB     int      `json:"maxLinuxMemoryMb"`
 	// HostBudget is a pointer so an unset budget is absent from the encoded file
 	// rather than present as a zero object: a release older than this setting
 	// decodes with DisallowUnknownFields and would refuse the key outright.
@@ -344,6 +371,7 @@ type wireConfig struct {
 		MixedPlatformAdmission bool                 `json:"mixedPlatformAdmission,omitempty"`
 		MixedProfileCohorts    bool                 `json:"mixedProfileCohorts,omitempty"`
 		BaseVM                 string               `json:"baseVm"`
+		BaseImageCapabilities  []string             `json:"baseImageCapabilities,omitempty"`
 		VMPrefix               string               `json:"vmPrefix"`
 		Builder                Profile              `json:"builder"`
 		Maestro                Profile              `json:"maestro"`
@@ -372,13 +400,15 @@ func Decode(r io.Reader) (Config, error) {
 		Executor:       decodeExecutor(w.Executor),
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
-			NestedVirtualization: w.LinuxNestedVirtualization},
+			NestedVirtualization:  w.LinuxNestedVirtualization,
+			BaseImageCapabilities: append([]string(nil), w.BaseImageCapabilities...)},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
 			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
 			BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
-			NestedVirtualization: w.MacOSBurst.NestedVirtualization},
+			NestedVirtualization:  w.MacOSBurst.NestedVirtualization,
+			BaseImageCapabilities: append([]string(nil), w.MacOSBurst.BaseImageCapabilities...)},
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
@@ -433,6 +463,7 @@ func Encode(w io.Writer, cfg Config) error {
 		BaseVM: cfg.Linux.BaseVM, VMPrefix: cfg.Linux.VMPrefix,
 		PollSeconds: pollSeconds, MaxLinuxWhenMacOSIdle: cfg.Linux.MaxInstances,
 		MaxLinuxCPU: cfg.Linux.Capacity.CPU, MaxLinuxMemoryMiB: cfg.Linux.Capacity.MemoryMiB,
+		BaseImageCapabilities:   append([]string(nil), cfg.Linux.BaseImageCapabilities...),
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
@@ -465,6 +496,7 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.MixedPlatformAdmission = cfg.MacOS.MixedPlatformAdmission
 	wire.MacOSBurst.MixedProfileCohorts = cfg.MacOS.MixedProfileCohorts
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
+	wire.MacOSBurst.BaseImageCapabilities = append([]string(nil), cfg.MacOS.BaseImageCapabilities...)
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
@@ -627,11 +659,13 @@ func (c Config) Clone() Config {
 	for i := range out.Linux.Profiles {
 		out.Linux.Profiles[i].Aliases = append([]string(nil), c.Linux.Profiles[i].Aliases...)
 	}
+	out.Linux.BaseImageCapabilities = append([]string(nil), c.Linux.BaseImageCapabilities...)
+	out.MacOS.BaseImageCapabilities = append([]string(nil), c.MacOS.BaseImageCapabilities...)
 	out.MacOS.Builder.Aliases = append([]string(nil), c.MacOS.Builder.Aliases...)
 	out.MacOS.Maestro.Aliases = append([]string(nil), c.MacOS.Maestro.Aliases...)
 	out.GitHub.ScaleSets = append([]ScaleSet(nil), c.GitHub.ScaleSets...)
 	for i := range out.GitHub.ScaleSets {
-		out.GitHub.ScaleSets[i].Labels = append([]string(nil), c.GitHub.ScaleSets[i].Labels...)
+		out.GitHub.ScaleSets[i] = c.GitHub.ScaleSets[i].clone()
 	}
 	out.GitHub.Installations = append([]GitHubInstallation(nil), c.GitHub.Installations...)
 	out.GitHub.Scopes = append([]GitHubScope(nil), c.GitHub.Scopes...)
@@ -639,7 +673,7 @@ func (c Config) Clone() Config {
 		out.GitHub.Scopes[i].Targets = append([]string(nil), c.GitHub.Scopes[i].Targets...)
 		out.GitHub.Scopes[i].ScaleSets = append([]ScaleSet(nil), c.GitHub.Scopes[i].ScaleSets...)
 		for j := range out.GitHub.Scopes[i].ScaleSets {
-			out.GitHub.Scopes[i].ScaleSets[j].Labels = append([]string(nil), c.GitHub.Scopes[i].ScaleSets[j].Labels...)
+			out.GitHub.Scopes[i].ScaleSets[j] = c.GitHub.Scopes[i].ScaleSets[j].clone()
 		}
 	}
 	out.Targets = append([]Target(nil), c.Targets...)
@@ -739,6 +773,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateExecutor(); err != nil {
+		return err
+	}
+	if err := c.validateCapabilities(); err != nil {
 		return err
 	}
 	// Label derivation runs last so a broken vector is reported as the vector
