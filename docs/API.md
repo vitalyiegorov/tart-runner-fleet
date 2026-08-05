@@ -43,6 +43,8 @@ in-memory revision so future watch clients can use conditional polling.
       "freeDiskGiB": 203,
       "swapUsedMiB": 0,
       "swapOuts": 0,
+      "swapOutRatePerSecond": 0,
+      "swapOutRateObserved": true,
       "cpuIdlePercent": 54,
       "loadAverage": 3,
       "admissionAllowed": true,
@@ -72,6 +74,18 @@ in-memory revision so future watch clients can use conditional polling.
   "warnings": []
 }
 ```
+
+`hostPressure.swapOutRatePerSecond` and `hostPressure.swapOutRateObserved` are
+the swap guardrail's deciding signal. Admission is refused only when
+`swapUsedMiB` exceeds the configured ceiling **and** the host is measurably
+paging out, so `swapUsedMiB` alone cannot reproduce the decision, and `swapOuts`
+is cumulative and undifferenceable from a single document. `swapOutRateObserved:
+false` means the rate could not be measured — no prior sample, a non-advancing
+clock, or a counter reset by a reboot — and the guardrail fell back to the level
+alone; it never means a quiet host. Both fields are additive and are absent on
+daemons that published only the level. The same two facts are exported as
+`fleet_host_swapout_rate_pages_per_second` and
+`fleet_host_swapout_rate_observed`.
 
 `operations.failures` explains the counts. Each entry pairs an operation kind
 with one closed-vocabulary failure code — `<stage>` or `<stage>:<reason>`, for

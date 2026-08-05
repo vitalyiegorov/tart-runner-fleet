@@ -54,12 +54,38 @@ session, acquires no authority lease, and performs no GitHub/Tart mutation, so a
 canonical observe candidate may safely run beside the incumbent.
 
 Host admission uses two layers. Exact profile vectors enforce CPU, memory, and
-slot envelopes first. A fresh macOS probe then preserves `minFreeDiskGb` and
-`minAvailableMemoryMb`, defers while swap exceeds `maxSwapUsedMb`, and treats
-CPU as pressured only when both `maxLoadAverage` is exceeded and idle CPU falls
-below `minCpuIdlePercent`. Missing values decode to the safe defaults in
+slot envelopes first. A fresh host probe then preserves `minFreeDiskGb` and
+`minAvailableMemoryMb`, treats swap as pressured only when swap used exceeds
+`maxSwapUsedMb` **and** the host is measurably paging out, and treats CPU as
+pressured only when both `maxLoadAverage` is exceeded and idle CPU falls below
+`minCpuIdlePercent`. Missing values decode to the safe defaults in
 `config/fleet.example.json`. Inspect the evidence through `fleet status` or
 the bounded `fleet_host_*` metrics; do not infer pressure from queue age alone.
+
+Both of those guards are conjunctions, and the swap one surprises operators
+because the level is the visible half. macOS does not eagerly reclaim swap, so
+swap used is closer to a high-water mark than to current pressure: a host can
+sit far above its ceiling for days after the burst that filled it, while paging
+nothing. ADR 0018 therefore demoted the level to a necessary but insufficient
+condition and made the page-out rate — the swapout delta between consecutive
+observations — the deciding signal. **Swap used above `maxSwapUsedMb` with
+admission allowed is the designed behaviour of a host carrying residue, not an
+ignored guardrail.** `fleet status` prints the rate beside the level as
+`swap 13593 MiB (paging 0/s)`, and `fleet_host_swapout_rate_pages_per_second`
+carries the same figure.
+
+A rate needs two samples. When it cannot be established honestly — no prior
+observation, a non-advancing clock, or a counter reset by a reboot — it is
+reported as unmeasured (`paging unmeasured`,
+`fleet_host_swapout_rate_observed 0`) and the level blocks on its own. An
+unmeasured rate is never read as a quiet host.
+
+One consequence is worth checking before promoting a node: on a host whose
+steady-state residue sits far above `maxSwapUsedMb`, the level clause is
+permanently true and the guard degenerates into "did this host page out at all
+since the last tick", which flaps admission on an interactive machine. Size
+`maxSwapUsedMb` against the host you are deploying on rather than inheriting it
+from another node, so the conjunction keeps both of its halves.
 
 Pressure stops new admission, never an active job. Owned ephemeral runners
 still follow durable drain, deregistration, stop, and delete operations with

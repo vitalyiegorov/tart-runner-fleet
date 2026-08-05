@@ -197,8 +197,10 @@ func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, 
 	}
 	decision := guards.Evaluate(snapshot, executor.AdmissionRequest{})
 	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
-		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts, CPUIdlePercent: snapshot.CPUidlePercent,
-		LoadAverage: snapshot.LoadAverage, AdmissionAllowed: decision.Allowed, AdmissionReason: decision.Reason}
+		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts,
+		SwapOutRatePerSecond: snapshot.SwapOutRatePerSecond, SwapOutRateObserved: snapshot.SwapOutRateObserved,
+		CPUIdlePercent: snapshot.CPUidlePercent,
+		LoadAverage:    snapshot.LoadAverage, AdmissionAllowed: decision.Allowed, AdmissionReason: decision.Reason}
 	if !decision.Allowed {
 		observation := domain.Fresh(domain.Host{Pressure: pressure}, snapshot.ObservedAt)
 		observation.Reason = decision.Reason

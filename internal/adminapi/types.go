@@ -39,15 +39,25 @@ type Status struct {
 	HostPressure       HostPressure     `json:"hostPressure"`
 }
 
+// HostPressure is the host evidence behind the latest admission decision.
+// SwapOutRatePerSecond and SwapOutRateObserved are additive fleet.v1 fields:
+// the swap guardrail refuses admission only when SwapUsedMiB exceeds the
+// configured ceiling AND the host is measurably paging out, so the level alone
+// cannot reproduce the decision, and SwapOuts is cumulative and undifferenceable
+// from a single document. Observed=false means the rate could not be measured
+// (no prior sample, a non-advancing clock, or a counter reset by a reboot) and
+// the guard fell back to the level; it never means a quiet host.
 type HostPressure struct {
-	AvailableMemoryMiB int64   `json:"availableMemoryMiB"`
-	FreeDiskGiB        int64   `json:"freeDiskGiB"`
-	SwapUsedMiB        int64   `json:"swapUsedMiB"`
-	SwapOuts           int64   `json:"swapOuts"`
-	CPUIdlePercent     float64 `json:"cpuIdlePercent"`
-	LoadAverage        float64 `json:"loadAverage"`
-	AdmissionAllowed   bool    `json:"admissionAllowed"`
-	AdmissionReason    string  `json:"admissionReason"`
+	AvailableMemoryMiB   int64   `json:"availableMemoryMiB"`
+	FreeDiskGiB          int64   `json:"freeDiskGiB"`
+	SwapUsedMiB          int64   `json:"swapUsedMiB"`
+	SwapOuts             int64   `json:"swapOuts"`
+	SwapOutRatePerSecond float64 `json:"swapOutRatePerSecond"`
+	SwapOutRateObserved  bool    `json:"swapOutRateObserved"`
+	CPUIdlePercent       float64 `json:"cpuIdlePercent"`
+	LoadAverage          float64 `json:"loadAverage"`
+	AdmissionAllowed     bool    `json:"admissionAllowed"`
+	AdmissionReason      string  `json:"admissionReason"`
 }
 
 type Check struct {

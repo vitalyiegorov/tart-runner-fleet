@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -51,9 +52,9 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	}
 	fmt.Fprintln(output, "\nHOST PRESSURE")
 	pressure := status.Data.HostPressure
-	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
-		pressure.FreeDiskGiB, pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pressure.CPUIdlePercent,
-		pressure.LoadAverage, admissionState(pressure.AdmissionAllowed), pressure.AdmissionReason)
+	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
+		pressure.FreeDiskGiB, pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pagingState(pressure),
+		pressure.CPUIdlePercent, pressure.LoadAverage, admissionState(pressure.AdmissionAllowed), pressure.AdmissionReason)
 	fmt.Fprintln(output, "\nQUEUES")
 	renderQueues(output, status.Data.Queues)
 	fmt.Fprintln(output, "\nINSTANCES")
@@ -76,6 +77,23 @@ func admissionState(allowed bool) string {
 		return "allowed"
 	}
 	return "deferred"
+}
+
+// pagingState renders the swap guardrail's deciding signal beside the level it
+// qualifies. The level alone is a high-water mark -- macOS does not eagerly
+// reclaim swap -- so admission is refused only when the host is also paging out
+// (ADR 0018). Without this, a host far over its ceiling and a host at zero swap
+// print the same verdict with no fact that reconciles them, which is how a
+// correct decision on node C read as an ignored guardrail.
+//
+// An unmeasured rate is named, never printed as 0/s: it is the fail-closed case
+// where the level blocks on its own, and reading it as a quiet host is the one
+// mistake this line exists to prevent.
+func pagingState(pressure adminapi.HostPressure) string {
+	if !pressure.SwapOutRateObserved {
+		return "paging unmeasured"
+	}
+	return fmt.Sprintf("paging %s/s", strconv.FormatFloat(pressure.SwapOutRatePerSecond, 'f', -1, 64))
 }
 
 // renderOperations keeps the terse counts a healthy fleet shows and appends the

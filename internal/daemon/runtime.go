@@ -1473,6 +1473,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
 			FreeDiskGiB: pressure.FreeDiskGB, SwapUsedMiB: pressure.SwapUsedMB, SwapOuts: pressure.SwapOuts,
+			SwapOutRatePerSecond: pressure.SwapOutRatePerSecond, SwapOutRateObserved: pressure.SwapOutRateObserved,
 			CPUIdlePercent: pressure.CPUIdlePercent, LoadAverage: pressure.LoadAverage,
 			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason})
 	}
