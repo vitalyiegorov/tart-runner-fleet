@@ -242,3 +242,19 @@ func TestRemainderKeepsTheSingleCohortRuleWhenMixingIsOff(t *testing.T) {
 		t.Fatalf("the single-cohort rule must still veto by identity: %#v", plan.Operations)
 	}
 }
+
+// TestRemainderAdmitsNothingWhenNoQueuedProfileCanGrow is the third arm of the
+// same seam: with mixed cohorts on, the pass looks past a profile that cannot
+// grow, and when NO queued profile can grow it admits nothing at all. The
+// envelope is the veto and there is nothing here for it to permit -- the only
+// queued macOS work is a second `builder`, and `maxActive` is one.
+func TestRemainderAdmitsNothingWhenNoQueuedProfileCanGrow(t *testing.T) {
+	cfg := mixedProfileConfig()
+	head := profileDemand(cfg, "a/repo", 1, 10*time.Minute, "small")
+	builder := profileDemand(cfg, "mac-a", 2, 8*time.Minute, "builder")
+
+	plan := PlanTick(mixedProfileInput(cfg, []domain.Demand{head, builder}, []domain.Instance{busyBuilder()}))
+	if got := spawnedKeys(plan); len(got) != 1 || got[0] != head.Key {
+		t.Fatalf("only the Linux head may be admitted: %#v", got)
+	}
+}
