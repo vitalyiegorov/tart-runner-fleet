@@ -1,0 +1,65 @@
+{
+  "baseVm": "linux-runner-base-go",
+  "baseImageCapabilities": ["container-runtime", "jdk", "node-runtime", "playwright-system-deps"],
+  "vmPrefix": "gha-linux",
+  "pollSeconds": 20,
+  "maxLinuxWhenMacosIdle": 2,
+  "maxLinuxCpu": 12,
+  "maxLinuxMemoryMb": 24576,
+  "hostBudget": { "cpu": 12, "memoryMb": 32768 },
+  "linuxReservationAgeSeconds": 300,
+  "minFreeDiskGb": 60,
+  "githubTimeoutSeconds": 15,
+  "tartControlTimeoutSeconds": 45,
+  "bootTimeoutSeconds": 180,
+  "linuxProfiles": [
+    { "id": "linux-6x12", "label": "trf-linux-arm64-6x12", "aliases": ["linux-xl"], "cpu": 6, "memoryMb": 12288, "diskGb": 50 }
+  ],
+  "macosBurst": {
+    "enabled": true,
+    "admissionPolicy": "shared",
+    "baseVm": "macos-tartelet-base",
+    "baseImageCapabilities": ["android-build-sdk", "cocoapods", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
+    "vmPrefix": "gha-macos",
+    "builder": { "id": "macos-6x12", "label": "trf-macos-arm64-6x12", "aliases": ["macos-builder"], "cpu": 6, "memoryMb": 12288, "maxActive": 1 },
+    "maestro": { "id": "macos-4x7", "label": "trf-macos-arm64-4x7", "aliases": ["macos-maestro"], "cpu": 4, "memoryMb": 7168, "maxActive": 2 }
+  },
+  "github": {
+    "sessionOwner": "node-c",
+    "canonicalJobInventory": true,
+    "app": { "clientId": "", "keychainService": "", "keychainAccount": "" },
+    "installations": [{ "name": "personal", "installationId": 0 }],
+    "scopes": [
+      {
+        "name": "suuudokuuu",
+        "kind": "repository",
+        "configUrl": "https://github.com/vitalyiegorov/suuudokuuu",
+        "installation": "personal",
+        "targets": ["vitalyiegorov/suuudokuuu"],
+        "scaleSets": [
+          {
+            "profile": "linux-6x12",
+            "name": "trf-sudoku-xl-node-c",
+            "id": 201,
+            "maxCapacity": 2,
+            "labels": ["self-hosted", "linux-tiered", "linux-xl"],
+            "sharedLabels": true,
+            "requiresCapabilities": ["container-runtime"]
+          },
+          {
+            "profile": "macos-4x7",
+            "name": "trf-sudoku-maestro-node-c",
+            "id": 202,
+            "maxCapacity": 2,
+            "labels": ["self-hosted", "macos-maestro"],
+            "sharedLabels": true,
+            "requiresCapabilities": ["android-build-sdk", "jvm", "maestro-cli"]
+          }
+        ]
+      }
+    ]
+  },
+  "targets": [
+    { "type": "repo", "slug": "vitalyiegorov/suuudokuuu", "maxActive": 2 }
+  ]
+}

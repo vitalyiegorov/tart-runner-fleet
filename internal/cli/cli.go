@@ -681,14 +681,14 @@ func runVersion(args []string, stdout, stderr io.Writer, version string) int {
 
 func runConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "validate" {
-		fmt.Fprintln(stderr, "usage: fleet config validate [--mode observe|shadow|canary|authority] [--output table|json] <path>")
+		fmt.Fprintln(stderr, "usage: fleet config validate [--mode observe|shadow|canary|authority] [--output table|json] <path>...")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet config validate", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	mode := flags.String("mode", string(reconcile.Observe), "controller mode: observe, shadow, canary, or authority")
 	output := flags.String("output", "table", "output format: table or json")
-	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 1 || (*output != "table" && *output != "json") {
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() < 1 || (*output != "table" && *output != "json") {
 		return exitUsage
 	}
 	controllerMode := reconcile.Mode(*mode)
@@ -696,23 +696,48 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "invalid mode: use observe, shadow, canary, or authority")
 		return exitUsage
 	}
-	path := flags.Arg(0)
+	paths := flags.Args()
+	nodes := make([]config.NodeConfig, 0, len(paths))
+	for _, path := range paths {
+		cfg, code := validateOneConfig(path, controllerMode, stderr)
+		if code != exitSuccess {
+			return code
+		}
+		nodes = append(nodes, config.NodeConfig{Node: filepath.Base(path), Config: cfg})
+	}
+	// More than one path is the only place the fleet exists as a single artifact,
+	// so it is the only place ADR 0034's cross-node rules can be asserted: label
+	// capability parity, and one owner per (scope, scale-set name). One path is
+	// unchanged, because one node cannot disagree with itself.
+	if len(nodes) > 1 {
+		if err := config.CheckFleet(nodes).Err(); err != nil {
+			fmt.Fprintf(stderr, "invalid fleet:\n%v\n", err)
+			return exitFailure
+		}
+	}
+	renderConfigValidation(stdout, *output, paths)
+	return exitSuccess
+}
+
+// validateOneConfig applies to one path exactly the checks `fleet config
+// validate` has always applied, in the same order and with the same messages.
+func validateOneConfig(path string, controllerMode reconcile.Mode, stderr io.Writer) (config.Config, int) {
 	// #nosec G304 -- the operator explicitly selects the configuration file to validate.
 	file, err := os.Open(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "open config: %v\n", err)
-		return exitFailure
+		return config.Config{}, exitFailure
 	}
 	defer file.Close()
 	cfg, err := config.Decode(file)
 	if err != nil {
 		fmt.Fprintf(stderr, "invalid config: %v\n", err)
-		return exitFailure
+		return config.Config{}, exitFailure
 	}
 	if controllerMode != reconcile.Observe {
 		if err := cfg.ValidateAuthority(); err != nil {
 			fmt.Fprintf(stderr, "invalid config: %v\n", err)
-			return exitFailure
+			return config.Config{}, exitFailure
 		}
 	}
 	// Exercise the same binding construction fleetd runs at startup so a config
@@ -720,17 +745,37 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 	// invariants (unknown profile, non-positive durable ID, identity collision).
 	if err := app.ValidateBindings(cfg); err != nil {
 		fmt.Fprintf(stderr, "invalid config: %v\n", err)
-		return exitFailure
+		return config.Config{}, exitFailure
 	}
-	if *output == "json" {
+	return cfg, exitSuccess
+}
+
+// renderConfigValidation keeps the single-path result byte-identical to what it
+// has always been, so an agent or script that parses it is untouched, and adds a
+// plural shape only when more than one path was given.
+func renderConfigValidation(stdout io.Writer, output string, paths []string) {
+	if len(paths) == 1 {
+		if output == "json" {
+			_ = writeJSON(stdout, struct {
+				Valid bool   `json:"valid"`
+				Path  string `json:"path"`
+			}{true, paths[0]})
+			return
+		}
+		fmt.Fprintf(stdout, "configuration is valid: %s\n", paths[0])
+		return
+	}
+	if output == "json" {
 		_ = writeJSON(stdout, struct {
-			Valid bool   `json:"valid"`
-			Path  string `json:"path"`
-		}{true, path})
-	} else {
+			Valid bool     `json:"valid"`
+			Paths []string `json:"paths"`
+		}{true, paths})
+		return
+	}
+	for _, path := range paths {
 		fmt.Fprintf(stdout, "configuration is valid: %s\n", path)
 	}
-	return exitSuccess
+	fmt.Fprintf(stdout, "fleet cross-node rules pass across %d configurations\n", len(paths))
 }
 
 func remoteError(stderr io.Writer, err error) int {
@@ -757,7 +802,9 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleet queues|instances|operations|observations [--output table|json]
   fleet health|doctor [--output table|json]
   fleet metrics
-  fleet config validate [--mode observe|shadow|canary|authority] <path>
+  fleet config validate [--mode observe|shadow|canary|authority] <path>...
+    More than one path additionally checks the cross-node rules of ADR 0034:
+    guest-capability parity behind a shared label, and one owner per scale set.
   fleet version | api-version
 
 GUARDED BOOTSTRAP
