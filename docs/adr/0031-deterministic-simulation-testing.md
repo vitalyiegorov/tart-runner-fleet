@@ -140,8 +140,8 @@ refusal.
 
 | | Property | Oracle | Status |
 |---|---|---|---|
-| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. | Enforced |
-| b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Pass-over count per (demand, CAUSE) against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03, see [ADR 0004](0004-bounded-control-plane-priority.md) |
+| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; see [ADR 0024](0024-mixed-macos-profile-cohorts.md)) |
+| b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Pass-over count per (demand, CAUSE) against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03 and issue #208's stale reservation 2026-08-05, both in [ADR 0004](0004-bounded-control-plane-priority.md) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
 | e | **No double admission.** One demand is admitted once. | A demand spawned twice in a plan, or spawned while a live instance already incarnates it. | Enforced (finding 1 fixed 2026-08-03; see [ADR 0027](0027-one-tick-admits-a-demand-once.md)) |
@@ -201,6 +201,47 @@ scaffolding. `scripts/check-cpd.sh` likewise scans only `cmd` and `internal`.
 The default sweep is bounded so `make unit`, `make race`, and the coverage gate
 can run it unqualified on every pull request. The nightly workflow runs a much
 larger seed range with the race detector.
+
+#### Amendment 2026-08-05: what repetition is for, and what it costs
+
+`Nightly resilience` runs `./tests/...` ten times under the race detector,
+because repetition is how a flake surfaces in a suite with real timers,
+goroutines, and I/O. On 2026-08-05 that job reported
+
+    FAIL github.com/vitalyiegorov/tart-runner-fleet/tests/simulation 600.018s
+
+which is the go test default timeout rather than a property violation, and a
+timed-out package takes the rest of the job's report with it (issue #208).
+
+Repeating THIS package is not what repetition is for. A run here is a pure
+function of (trace, config): the clock is virtual, the world is single-writer
+and sequential, and every source of nondeterminism is a value drawn from the
+seed. Running it ten times cannot reach a state the first run did not. The
+harness already states that contract itself, far more cheaply and far more
+precisely than a repeat count can: `TestSimIsDeterministic` replays one trace
+twice and compares the history, and `TestSimCorpusIsIdenticalAcrossRuns` sweeps
+every arm three times and compares a digest folded over every plan identity and
+application outcome in tick order. So the nightly runs this package once, with
+an explicit budget of its own, and keeps `-count=10` for the four suites that
+genuinely need it. Volume for this harness has its own workflow, which explores
+500 seeds at 320 ticks.
+
+That is a re-partitioning, so the budget was also genuinely cut, because a
+budget re-partitioned and not reduced is a budget that grows back. Measured
+before: `go test -race -count=1 ./tests/simulation` was 392s, of which ONE test
+was 389s -- the federated sweep, at 24 seeds x 200 ticks in a single goroutine
+while the three fuzz arms ran concurrently with each other. Its seeds are
+independent by construction, so it now runs one parallel subtest per seed; and
+property (g) reads the durable ledger only when a repository is over its cap
+counted without the rebound set, which is sound because excluding a rebound
+instance can only lower a count, and which removes one SQLite query from every
+tick of every arm of every sweep.
+
+Measured after: 154s for the same command, with both of issue #208's pinned
+regressions added. The proportion is the point rather than the seconds. The four
+suites the nightly job exists to repeat cost 9.6s together at `-count=10` under
+the race detector, so a package that took 600s and failed was not one cost among
+several -- it was the whole report.
 
 ## Consequences
 
@@ -276,6 +317,12 @@ into a smoke test, so the required event vocabulary is asserted directly.
   minimal three-tick regression: the boot window plans nothing, and a terminal
   incarnation is still retried.
 - `tests/simulation/findings_test.go` -- characterizations of findings 2 to 5.
+- `tests/simulation/federation_test.go` -- the shared-scope conservation bound of
+  issue #153, swept one parallel subtest per seed.
+- `tests/simulation/regression208_test.go` -- the two nightly findings of issue
+  #208, pinned as the traces delta debugging reduced them to: the remainder-pass
+  wedge of property (a) in four events, and the stale-reservation pass-over of
+  property (b) in twenty-six.
 - `.github/workflows/nightly.yml` -- the long sweep.
 
 ## Not addressed here

@@ -28,7 +28,22 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # Repetition is how a flake surfaces in a suite with real timers,
+      # goroutines, and I/O.
       - name: Repeated replay, integration, contract, and chaos suites
-        run: go test -race -shuffle=on -count=10 ./tests/...
+        run: go test -race -shuffle=on -count=10 -timeout 20m ./tests/chaos ./tests/contract ./tests/integration ./tests/replay
+      # The simulation harness is deliberately run ONCE, and that is not a raised
+      # budget. ADR 0031 makes a run a pure function of (trace, config): virtual
+      # clock, single writer, every source of nondeterminism drawn from the seed.
+      # Ten runs cannot reach a state the first one did not, and the package
+      # states that contract itself far more cheaply -- TestSimIsDeterministic
+      # replays one trace twice, TestSimCorpusIsIdenticalAcrossRuns sweeps every
+      # arm three times and compares a digest of every plan. What -count=10
+      # bought instead was ten times the wall clock, which on 2026-08-05 reached
+      # the go test default timeout and took the four suites above out of this
+      # job's report with it (issue #208). Volume lives in
+      # nightly-simulation.yml, which explores 500 seeds at 320 ticks.
+      - name: Deterministic fleet simulation under the race detector
+        run: go test -race -shuffle=on -count=1 -timeout 15m ./tests/simulation
       - name: Bounded deterministic scheduler fuzzing
-        run: go test -fuzz=FuzzPlanTickDeterministicAndSafe -fuzztime=3m ./internal/scheduler
+        run: go test -fuzz=FuzzPlanTickDeterministicAndSafe -fuzztime=3m -timeout 10m ./internal/scheduler

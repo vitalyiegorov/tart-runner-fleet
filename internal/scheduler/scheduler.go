@@ -432,7 +432,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 	agedFree.Slots = min(agedFree.Slots, 4)
 	baseCounts := activeRepoCounts(in.Instances.Value)
 
-	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok {
+	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok && reservationStillHeadsQueue(in, demands, reserved) {
 		profile := in.Config.Profiles[reserved.Profile]
 		// A reservation is only ever held by an aged head, so its feasibility is
 		// judged against the starvation envelope.
@@ -674,6 +674,44 @@ func reservedDemand(reservation *domain.Reservation, demands []domain.Demand) (d
 		}
 	}
 	return domain.Demand{}, false
+}
+
+// reservationStillHeadsQueue reports whether a held reservation still names the
+// aged global-FIFO head, which is the only demand a reservation may ever be for.
+//
+// A reservation is made for the oldest aged demand that does not fit, and it is
+// re-checked FIRST on every later tick so it wins the first vector large enough
+// for it (ADR 0017, ADR 0029). That contract protects the head from work that is
+// YOUNGER than it. It was never a licence to outrank work that is OLDER, and the
+// plannable queue is not frozen while a reservation is held: a demand a live
+// instance incarnates is absent from it by ADR 0027 and returns to it the instant
+// that instance dies -- carrying its GitHub queue time, which is what every aging
+// rule in this package measures from.
+//
+// So a recovery drain can put a demand back in front of the reserved head, and
+// before this check the head was admitted anyway: `planLinux` returned from the
+// reservation branch without ever consulting the queue it had just been handed,
+// even though `priorityOrder` had already ranked the returning demand first. That
+// is ADR 0004's rule 1 broken by the very mechanism that exists to keep it, and
+// the simulator found it as a repeating cycle -- an assignment that stalls, is
+// recovered, releases the oldest demand, and loses the freed vector to the
+// standing reservation, every deadline, forever (issue #208, seed 55 of the
+// container-node arm).
+//
+// When the reservation no longer heads the queue it is re-derived instead of
+// obeyed: the aged loop below admits the true head and reserves whatever it
+// cannot fit, so the demand that lost the reservation is first in line behind the
+// older work that displaced it. Nothing younger gains anything either way.
+func reservationStillHeadsQueue(in Input, demands []domain.Demand, reserved domain.Demand) bool {
+	for _, demand := range demands {
+		if demand.Key == reserved.Key || !demandAged(in.Now, in.Config.FairnessAge, demand) {
+			continue
+		}
+		if demandLess(demand, reserved) {
+			return false
+		}
+	}
+	return true
 }
 
 func copyReservation(reservation *domain.Reservation) *domain.Reservation {
@@ -1292,11 +1330,12 @@ func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
 
 // fillMacRemainder admits a compatible macOS profile in the envelope left after
 // the Linux head has planned, turning "N Linux" into "N Linux AND a macOS
-// cohort" within MaxActive and the single-cohort invariant. It only grows the
-// already-active macOS profile (or, on a host with no live macOS, establishes
-// the head demand's profile). appendMacSpawns performs no drains, so no macOS
-// profile switch can be started as a side effect of a Linux tick; the Linux head
-// keeps ownership of the DRR fairness cursor.
+// cohort" within MaxActive and the single-cohort invariant. remainderMacProfile
+// names which profile that is: the live cohort under the single-cohort rule, and
+// otherwise the highest-priority queued profile that still has room.
+// appendMacSpawns performs no drains, so no macOS profile switch can be started
+// as a side effect of a Linux tick; the Linux head keeps ownership of the DRR
+// fairness cursor.
 //
 // A held Linux reservation constrains this pass instead of cancelling it. The
 // reserved head's whole vector is withheld (chargeReservedHead) and its
@@ -1317,13 +1356,9 @@ func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
 		return plan
 	}
 	augmented = chargeReservedHead(augmented, plan.Next.Reservation)
-	target, active := activeMacProfile(augmented.Instances.Value)
-	if active {
-		if !macProfileCanGrow(augmented, target) {
-			return plan
-		}
-	} else {
-		target = chosenMacProfile(in, macos)
+	target, admissible := remainderMacProfile(augmented, macos)
+	if !admissible {
+		return plan
 	}
 	profileDemands := demandsForProfile(macos, target)
 	if len(profileDemands) == 0 {
@@ -1334,6 +1369,45 @@ func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
 	plan.Operations = append(plan.Operations, sub.Operations...)
 	plan.Next.DRRCursor = savedCursor
 	return plan
+}
+
+// remainderMacProfile names the macOS profile a remainder pass may admit, or
+// reports that none may.
+//
+// Under the single-cohort rule the answer is the live cohort and nothing else:
+// profile identity is the veto there, so a queue of any other profile is
+// inadmissible however much room the Linux head left over.
+//
+// With `mixedProfileCohorts` the veto is the ENVELOPE, not identity — ADR 0024
+// states that as "growth loses only the identity veto" — and that is exactly
+// what this pass had wrong. It read the live cohort as the target whatever the
+// queue held, so a `builder` sitting at its own `maxActive` of one answered
+// "cannot grow" and the whole pass returned, with a queued `maestro` that fit the
+// free cores exactly and a configuration that explicitly permits the two to
+// coexist. ADR 0024 gave `planMacOS` coexistence-first admission and left the
+// complementary remainder pass on the old rule; that is the same asymmetry
+// between a first and a second admission pass that ADR 0029 repaired for the
+// reservation veto, and it wedged the fleet in issue #208, seed 210: twelve
+// consecutive ticks admitting nothing while four idle cores held an aged maestro.
+//
+// The target is therefore the highest-priority queued profile that still has
+// room, in the aged-FIFO order `priorityOrder` gives every other admission. A
+// profile at its `maxActive` ends its own turn rather than the pass, which is how
+// `appendMacSpawns` already treats an exhausted repository cap. It cannot admit
+// anything the envelope does not hold: `appendMacSpawns` charges every live
+// instance, this tick's planned spawns, and any reserved head before it selects.
+func remainderMacProfile(in Input, macos []domain.Demand) (domain.ProfileID, bool) {
+	if !in.Config.MixedProfileCohorts {
+		if active, live := activeMacProfile(in.Instances.Value); live {
+			return active, macProfileCanGrow(in, active)
+		}
+	}
+	for _, demand := range priorityOrder(in, macos) {
+		if macProfileCanGrow(in, demand.Profile) {
+			return demand.Profile, true
+		}
+	}
+	return "", false
 }
 
 // appendPlannedSpawns models this tick's planned spawn operations as live,

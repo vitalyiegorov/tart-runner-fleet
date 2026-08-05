@@ -516,10 +516,8 @@ func conservationChecker(cfg worldConfig) checker {
 	return func(w *world, observation tickObservation) []finding {
 		var findings []finding
 		total := domain.Resources{}
-		linuxRepos := map[string]int{}
-		macRepos := map[string]int{}
 		macProfiles := map[domain.ProfileID]int{}
-		rebound := w.reboundInstances()
+		var charged []domain.Instance
 		for _, instance := range observation.Instances {
 			if !instance.ConsumesHostResources() {
 				continue
@@ -533,24 +531,7 @@ func conservationChecker(cfg worldConfig) checker {
 			if instance.State == domain.InstanceOnlineIdle || instance.State.TearingDown() {
 				continue
 			}
-			// A repository cap bounds ADMISSION -- how many VMs the fleet will
-			// CREATE for a repository -- and it cannot bound which repository's job
-			// GitHub then dispatches to a runner that already exists. A rebound
-			// instance is one the broker moved (ADR 0033); it consumes no new
-			// capacity, and the physical envelope above still charges it in full.
-			// Charging it to a cap it was never admitted under would report GitHub's
-			// decision as a scheduler defect. Before the binding followed GitHub the
-			// same VM ran the same foreign job while the fleet mis-attributed it to
-			// the repository it was spawned for, so nothing about the machine
-			// changed here -- only what the fleet is willing to say about it.
-			if rebound[instance.ID] {
-				continue
-			}
-			if instance.Platform == domain.PlatformMacOS {
-				macRepos[instance.Repo]++
-			} else {
-				linuxRepos[instance.Repo]++
-			}
+			charged = append(charged, instance)
 		}
 		if total.CPU > ceiling.CPU {
 			findings = append(findings, finding{Kind: findingConservation, Tick: observation.Tick,
@@ -564,7 +545,7 @@ func conservationChecker(cfg worldConfig) checker {
 			findings = append(findings, finding{Kind: findingConservation, Tick: observation.Tick,
 				Detail: fmt.Sprintf("live instances hold %d slots above the %d-slot ceiling", total.Slots, ceiling.Slots)})
 		}
-		findings = append(findings, repositoryCapFindings(cfg, observation, linuxRepos, macRepos)...)
+		findings = append(findings, repositoryCapFindings(w, cfg, observation, charged)...)
 		for _, profile := range sortedProfiles(macProfiles) {
 			limit := max(cfg.Scheduler.Profiles[profile].MaxActive, 1)
 			if macProfiles[profile] > limit {
@@ -581,14 +562,30 @@ func conservationChecker(cfg worldConfig) checker {
 // macOS work carried it over, the finding carries FINDING 2's signature: that is
 // not an arithmetic slip in a shared allocator but a whole admission path that
 // never consults the cap at all.
-func repositoryCapFindings(cfg worldConfig, observation tickObservation, linuxRepos, macRepos map[string]int) []finding {
-	occupied := map[string]int{}
-	for repo, count := range linuxRepos {
-		occupied[repo] += count
+//
+// The rebound set costs a durable read, and it is taken only when some
+// repository is over its cap counted WITHOUT it. That is sound because excluding
+// a rebound instance can only lower a count, so a tick within cap on the full
+// count is within cap on either; and it matters because this oracle runs on
+// every tick of every arm of every sweep. Property (j) adopted the same
+// discipline in issue #165 -- read the ledger once, and only for something that
+// actually owes an answer -- after the package outgrew its budget and started
+// masking the rest of the nightly job.
+func repositoryCapFindings(w *world, cfg worldConfig, observation tickObservation, charged []domain.Instance) []finding {
+	if _, _, occupied := repositoryOccupancy(charged, nil); !anyRepositoryOverCap(cfg, occupied) {
+		return nil
 	}
-	for repo, count := range macRepos {
-		occupied[repo] += count
-	}
+	// A repository cap bounds ADMISSION -- how many VMs the fleet will CREATE for
+	// a repository -- and it cannot bound which repository's job GitHub then
+	// dispatches to a runner that already exists. A rebound instance is one the
+	// broker moved (ADR 0033); it consumes no new capacity, and the physical
+	// envelope above still charges it in full. Charging it to a cap it was never
+	// admitted under would report GitHub's decision as a scheduler defect. Before
+	// the binding followed GitHub the same VM ran the same foreign job while the
+	// fleet mis-attributed it to the repository it was spawned for, so nothing
+	// about the machine changed here -- only what the fleet is willing to say
+	// about it.
+	linuxRepos, macRepos, occupied := repositoryOccupancy(charged, w.reboundInstances())
 	var findings []finding
 	for _, repo := range sortedKeys(occupied) {
 		limit := repoCap(cfg, repo)
@@ -622,6 +619,33 @@ func (w *world) reboundInstances() map[string]bool {
 		}
 	}
 	return rebound
+}
+
+// repositoryOccupancy is the per-repository slot occupancy of the instances a
+// cap charges, split by platform so a finding can attribute the overflow.
+func repositoryOccupancy(charged []domain.Instance, rebound map[string]bool) (linuxRepos, macRepos, occupied map[string]int) {
+	linuxRepos, macRepos, occupied = map[string]int{}, map[string]int{}, map[string]int{}
+	for _, instance := range charged {
+		if rebound[instance.ID] {
+			continue
+		}
+		if instance.Platform == domain.PlatformMacOS {
+			macRepos[instance.Repo]++
+		} else {
+			linuxRepos[instance.Repo]++
+		}
+		occupied[instance.Repo]++
+	}
+	return linuxRepos, macRepos, occupied
+}
+
+func anyRepositoryOverCap(cfg worldConfig, occupied map[string]int) bool {
+	for repo, count := range occupied {
+		if count > repoCap(cfg, repo) {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedProfiles(counts map[domain.ProfileID]int) []domain.ProfileID {

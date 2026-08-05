@@ -67,6 +67,40 @@ Admission stays work-conserving: the order decides who is served first, never
 that capacity is held idle. Once the aged band has taken the vectors it can use,
 the young lanes still take whatever is left.
 
+### Amendment 2026-08-05: a reservation is not a priority over older work
+
+Rule 1 is a FIFO, so it binds the reservation mechanism as much as it binds
+`exactSelect`. A reservation is made for the oldest aged demand that does not
+fit, and [ADR 0017](0017-infeasible-reservation-residual-backfill.md) and
+[ADR 0029](0029-remainder-admission-behind-a-reservation.md) both promise it is
+re-checked first on every later tick so it wins the first vector large enough for
+it. That promise was written about work that is YOUNGER than the head, which is
+the only work those records contemplate arriving while it waits.
+
+The plannable queue is not frozen while a reservation is held.
+[ADR 0027](0027-one-tick-admits-a-demand-once.md)'s queue seam keeps a
+demand out of it for exactly as long as a live instance incarnates it, and a
+recovery drain puts that demand back — carrying its GitHub queue time, which is
+what `demandAged` and `demandLess` measure from. So the demand that re-enters the
+queue can be OLDER than the reserved head, and `planLinux` returned straight out
+of its reservation branch without consulting the queue it had just been handed,
+although `priorityOrder` had already ranked the returning demand first. Rule 2
+was never involved: a younger demand of the same class, repository, profile and
+size took the vector purely because it held the reservation.
+
+Deterministic simulation found it as a cycle rather than an unlucky tick (ADR
+0031; issue #208, seed 55 of the container-node arm): an assignment stalls, is
+recovered fifteen minutes later, releases the oldest demand on the very tick its
+vector frees, and loses it to the standing reservation — four times over one run,
+fifty ticks apart.
+
+A held reservation is therefore re-derived rather than obeyed whenever an aged
+demand older than it is plannable. The aged loop then admits the true head and
+reserves whatever it cannot fit, so the demand that lost the reservation is first
+in line behind the older work that displaced it, and nothing younger gains
+anything either way. The protection ADR 0017 and ADR 0029 describe is unchanged
+in the case they describe: younger work still may not take the head's turn.
+
 ## Consequences
 
 Fleet repairs receive the next available compatible quantum while young.

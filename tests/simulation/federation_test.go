@@ -1,6 +1,7 @@
 package simulation_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -37,26 +38,48 @@ import (
 // silent cancellation inside a shared scope.
 const federationSeeds = 24
 
+// TestFederatedScopeSharesOneQueueInsteadOfCountingItTwice sweeps the shared
+// scope, one parallel subtest per seed.
+//
+// The seeds are independent by construction -- ADR 0031 makes a run a pure
+// function of (trace, config), and every world owns its own `:memory:` store --
+// so running them concurrently is a scheduling decision and nothing else. It is
+// worth stating why it is made: swept serially this was 4800 ticks in one
+// goroutine, which under the race detector measured 389s of the package's 392s
+// on 2026-08-05 and was the single reason `Nightly resilience` reached the go
+// test timeout and stopped reporting the four suites that run beside it
+// (issue #208). The three fuzz arms were already parallel for the same reason.
 func TestFederatedScopeSharesOneQueueInsteadOfCountingItTwice(t *testing.T) {
 	t.Parallel()
 	cfg := federatedWorld()
 	if len(cfg.Bindings) != 2 || cfg.Bindings[0].Scope != cfg.Bindings[1].Scope {
 		t.Fatalf("the federated world must be two scale sets in one scope: %#v", cfg.Bindings)
 	}
-	contested := 0
-	for offset := range federationSeeds {
-		seed := int64(1 + offset)
-		world := newWorld(t, cfg, generateTrace(seed, 200, cfg))
-		contested += world.runFederated(t, seed)
-		world.close()
+	// One slot per seed, written only by that seed's own subtest, so the sweep
+	// stays a sum over independent runs rather than shared mutable state.
+	contested := make([]int, federationSeeds)
+	t.Run("seeds", func(t *testing.T) {
+		for offset := range federationSeeds {
+			seed := int64(1 + offset)
+			t.Run(fmt.Sprintf("seed-%03d", seed), func(t *testing.T) {
+				t.Parallel()
+				world := newWorld(t, cfg, generateTrace(seed, 200, cfg))
+				defer world.close()
+				contested[offset] = world.runFederated(t, seed)
+			})
+		}
+	})
+	total := 0
+	for _, count := range contested {
+		total += count
 	}
 	// The scenario has to have HAPPENED. A scope whose observations never held
 	// more than one job could not double-count anything, and would pass both
 	// invariants without exercising the bound at all.
-	if contested == 0 {
+	if total == 0 {
 		t.Fatal("no scope observation ever carried work two sets could both claim")
 	}
-	t.Logf("federated scope: %d observations carried contested work across %d seeds", contested, federationSeeds)
+	t.Logf("federated scope: %d observations carried contested work across %d seeds", total, federationSeeds)
 }
 
 // runFederated executes one history, asserting both invariants after every tick,
