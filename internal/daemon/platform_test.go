@@ -88,7 +88,7 @@ func TestNonAppleNodesObserveFromProcWithNoBackend(t *testing.T) {
 		if err := node.readiness(cfg).Wait(context.Background(), operations.Instance{}); !errors.Is(err, noexecutor.ErrNoBackend) {
 			t.Errorf("%s readiness = %v", goos, err)
 		}
-		if err := node.bootstrap(cfg).Bootstrap(context.Background(), "trf-small-1", nil); !errors.Is(err, noexecutor.ErrNoBackend) {
+		if err := node.bootstrap(cfg).Bootstrap(context.Background(), "trf-small-1", nil, nil); !errors.Is(err, noexecutor.ErrNoBackend) {
 			t.Errorf("%s bootstrap = %v", goos, err)
 		}
 	}

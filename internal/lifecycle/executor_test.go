@@ -127,9 +127,16 @@ type fakeBootstrap struct {
 	registration *fakeRegistration
 	err          error
 	failures     int
+	// capabilities records what the executor threaded through from the profile's
+	// scale sets, so a test can assert the guest was told what to check for.
+	capabilities *[]string
 }
 
-func (b fakeBootstrap) Bootstrap(_ context.Context, name string, secret *githubscaleset.JITSecret) error {
+func (b fakeBootstrap) Bootstrap(_ context.Context, name string, secret *githubscaleset.JITSecret,
+	capabilities []string) error {
+	if b.capabilities != nil {
+		*b.capabilities = append([]string(nil), capabilities...)
+	}
 	*b.calls = append(*b.calls, "bootstrap:"+name)
 	if secret == nil || secret.Reveal() == "" {
 		return operations.ErrInvalid
@@ -568,7 +575,7 @@ func TestStdinBootstrapperKeepsJITOutOfArgvAndDestroysIt(t *testing.T) {
 	runner := &captureStdin{}
 	secret := githubscaleset.NewJITSecret("jit-super-secret")
 	bootstrap := StdinBootstrapper{Runner: runner}
-	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", secret); err != nil {
+	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", secret, nil); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(runner.args, " "), "jit-super-secret") || runner.stdin != "jit-super-secret\n" {
@@ -583,7 +590,7 @@ func TestStdinBootstrapperKeepsJITOutOfArgvAndDestroysIt(t *testing.T) {
 	}
 	runner.err = errors.New("jit-super-secret from child")
 	secret = githubscaleset.NewJITSecret("jit-super-secret")
-	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", secret); err == nil || strings.Contains(err.Error(), "jit-super-secret") {
+	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", secret, nil); err == nil || strings.Contains(err.Error(), "jit-super-secret") {
 		t.Fatalf("child output leaked: %v", err)
 	}
 }

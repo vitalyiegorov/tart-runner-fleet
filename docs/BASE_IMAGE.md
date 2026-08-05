@@ -384,6 +384,67 @@ brew cleanup
 
 ## Seal and verify
 
+### Write the capability manifest first
+
+The last thing to go into an image is its own account of what is in it. The
+bootstrap helper reads this file in every ephemeral clone and compares it against
+what the daemon expected of the scale sets that routed the job here; a mismatch
+fails the instance at the `bootstrap` stage with a named reason instead of
+letting the job die inside a consumer's workflow (ADR 0034, amendment
+2026-08-04c §3; the reasons are in [`OPERATIONS.md`](OPERATIONS.md)).
+
+**List only what this image actually carries.** A manifest is worth exactly the
+audit behind it, and one that lists a capability the image lacks is worse than no
+manifest at all: it converts a caught failure into a flaky one. The list below is
+the node C image this document builds, and every entry corresponds to a step
+above.
+
+```sh
+tart exec "$BASE" bash -lc '
+set -euo pipefail
+sudo install -d -o root -g wheel -m 0755 /usr/local/share/tart-runner-fleet
+sudo tee /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null <<JSON
+{"schemaVersion": 1, "image": "macos-tartelet-base", "sealedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
+ "capabilities": ["android-build-sdk", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime"]}
+JSON
+sudo chmod 0644 /usr/local/share/tart-runner-fleet/image-capabilities.json
+python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
+'
+```
+
+### The macOS capability vocabulary
+
+A capability is a lowercase identifier matching
+`^[a-z0-9][a-z0-9-]*$` that does not end in a hyphen. It names something a base image provides that
+neither the profile's resource vector nor the canonical label can state. The
+vocabulary is not open: it is the result of an audit of the live fleet, and a
+name that is not in this table — or in the Linux one in
+[`LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md) — is a name no image has been
+audited for.
+
+| macOS capability | What it means |
+| --- | --- |
+| `xcode` | Xcode installed, first-launch complete, and a GPU the guest can see |
+| `ios-simulator-prewarmed` | the simulator runtimes of [step 4](#4-prewarm-the-simulators) already booted once |
+| `android-build-sdk` | an Android SDK and NDK a job can build an APK against |
+| `jvm` | a JDK registered where the Maestro launcher finds it |
+| `maestro-cli` | the pinned `maestro` CLI of [step 3](#3-provision), with its jars |
+| `node-runtime` | `node` resolvable on the exact daemon runner PATH |
+| `cocoapods` | a working `pod` for a workflow that installs pods in the job |
+
+The two vocabularies are separate because a node's two base images answer
+separate questions: `xcode` is a fact about the macOS image and says nothing
+about the Linux one.
+
+The identifiers must match the node's `macosBurst.baseImageCapabilities`
+exactly. They are compared for string equality across two machines'
+configuration files, so a spelling that differs is a capability that does not
+exist. `fleet config validate` given more than one node's configuration compares
+them; see [`CLI.md`](CLI.md) and
+[`config/nodes/README.md`](../config/nodes/README.md).
+
+### Then stop the guest
+
 **This step has exactly one way to fail silently, and it produces a corrupt
 base with no error anywhere.** `tart exec` runs commands with PATH
 `/bin:/usr/bin:/usr/sbin:/usr/local/bin:/opt/homebrew/bin` — there is no
@@ -428,6 +489,8 @@ xcodebuild -version
 test -x "$HOME/actions-runner/run.sh"
 test ! -e "$HOME/actions-runner/.runner"
 test -x /usr/local/libexec/tart-runner-fleet-bootstrap
+test -r /usr/local/share/tart-runner-fleet/image-capabilities.json
+python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
 command -v node && node --version
 command -v python3
 java -version
@@ -478,6 +541,7 @@ every layer was renamed rather than overwritten.
   "macosBurst": {
     "enabled": true,
     "baseVm": "macos-maestro-base",
+    "baseImageCapabilities": ["ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
     "vmPrefix": "trf-macos",
     "maestro": { "id": "maestro", "label": "trf-macos-arm64-4x7",
                  "cpu": 4, "memoryMb": 7168, "maxActive": 2,
@@ -501,6 +565,14 @@ node C's actual config and reconcile the two: either name the built image
 distinct name and build under that instead. Whatever the config says is what
 the daemon clones on the first job; a recipe followed under the wrong
 assumption produces a base nothing points at.
+
+`macosBurst.baseImageCapabilities` must equal what the manifest inside the image
+says, for the same reason `baseVm` must equal the Tart name: one of them is
+checked against the machine and the other against every other node that
+advertises the same label. The list above omits `android-build-sdk` and
+`cocoapods` deliberately — this recipe is Maestro-only and installs neither, and
+a node C that advertises `macos-maestro` beside node A must therefore either
+carry them or share only labels whose consumers do not need them.
 
 `builder` is still required by config validation, so configure it out of reach
 of the 4 vCPU / 10240 MiB budget as `MULTI_NODE_PLAN.md` specifies, and confirm

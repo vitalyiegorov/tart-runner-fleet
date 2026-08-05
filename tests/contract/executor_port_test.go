@@ -590,7 +590,9 @@ func (r *portRegistration) AcquireAndGenerateJIT(context.Context, int64, string,
 
 type portBootstrap struct{}
 
-func (portBootstrap) Bootstrap(context.Context, string, *githubscaleset.JITSecret) error { return nil }
+func (portBootstrap) Bootstrap(context.Context, string, *githubscaleset.JITSecret, []string) error {
+	return nil
+}
 
 type portControl struct{}
 

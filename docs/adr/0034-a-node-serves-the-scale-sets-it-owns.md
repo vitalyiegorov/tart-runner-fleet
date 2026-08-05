@@ -22,7 +22,10 @@ the simulated world stays one node, because a node is still one fleet.
 Amended 2026-08-04 (**c**): nodes that advertise the same label must provide
 equivalent guest capabilities. Recorded after a production failure caused by two
 images behind one label; adds an invariant and a proposal, and changes no
-mechanism.
+mechanism. Amended again 2026-08-05 (issue #202): the proposal is built. The
+invariant is now expressible in configuration, checked across nodes wherever more
+than one is in hand, and answerable by the image itself; the enforcement section
+below records what shipped, what did not, and against what.
 
 ## Context
 
@@ -500,23 +503,27 @@ Two consequences worth stating plainly:
   and hope.** Removing node C's `linux-xl` scale sets restored correctness at
   the cost of capacity, and that is the correct trade every time.
 
-### Proposed enforcement, not implemented here
+### Enforcement, as built (issue #202)
 
-Recorded so the next node does not rediscover this by outage. Ordered by what
-each catches and what it costs. **None of it is built**; the work is filed as an
-issue labelled `three-node`.
+Three pieces were proposed here when this amendment was written. Two shipped as
+proposed, one shipped narrower than proposed, and the piece this record called
+"the recommended core" shipped against a placeholder rather than against the
+artifact it was designed for. Each is recorded with what it does and does not
+reach.
 
-**1. Declare the capability, in the two places that already exist.** A
-capability is a lowercase identifier — `redroid-android`, `container-runtime` —
-and it appears twice. A node declares what its base image provides:
+**1. The capability is declarable, in the two places that already existed.** A
+capability is a lowercase identifier matching
+`^[a-z0-9][a-z0-9-]*$` that does not end in a hyphen — `redroid-android`, `container-runtime` — and
+it appears twice. This record's sketch elided one thing: a node has *two* base
+images, not one, so there are two declarations, each answering only for the
+scale sets whose profile it boots.
 
 ```json
 "baseVm": "linux-runner-base-go",
-"baseImageCapabilities": ["container-runtime", "redroid-android"]
+"baseImageCapabilities": ["container-runtime", "redroid-android"],
+"macosBurst": { "baseVm": "macos-tartelet-base",
+                "baseImageCapabilities": ["xcode", "maestro-cli"] }
 ```
-
-A scale set declares what its label requires, beside the labels it already
-carries:
 
 ```json
 { "profile": "linux-6x12", "name": "trf-sudoku-xl-studio",
@@ -524,49 +531,85 @@ carries:
   "requiresCapabilities": ["redroid-android"] }
 ```
 
-`Config.Validate` then refuses a scale set requiring a capability the node does
-not declare. This is a few lines in `internal/config/config.go` beside the
-existing profile/scale-set cross-checks, it costs nothing at runtime, it is
-covered by `fleet config validate` before the daemon starts, and — being a
-configuration error — it is caught by the same gate that already catches a scale
-set naming an unknown profile.
+`Config.Validate` refuses a scale set requiring a capability the image for that
+scale set's platform does not declare, in the scoped model and in the legacy
+flat list alike, and the message names the scope, the scale set, the capability,
+the labels that scale set advertises, and which of the two images was consulted.
+Asking the Linux image whether it carries `xcode` would not be a stricter check;
+it would be the wrong question. Both keys absent encodes to the same bytes it
+encoded to before the feature existed, which a golden file in
+`internal/config/testdata` pins, so a release older than this one still decodes
+a file that does not use it.
 
-**2. Compare the declarations across nodes, where the fleet exists as a whole.**
-§5 of this record renders each node's configuration from shared definitions and
-tests that the rendering is current. That contract test is the only place where
-all nodes are visible at once — no node may look at another, and this does not
-change that, because the check runs in CI on the configuration repository, not
-in the daemon. The rule: **for any label advertised by more than one node, the
-union of required capabilities must be declared by every node that advertises
-it.** That is the actual parity invariant, and it is enforceable exactly where
-the fleet is a single artifact. This is the recommended core of the work; §1 is
-what makes it expressible.
+**2. The declarations are compared across nodes — against `config/nodes/`, which
+§5's render step does not yet write.** `config.CheckFleet` takes every node's
+decoded configuration and reports the parity rule stated above: for any label
+advertised by more than one node, the union of `requiresCapabilities` behind it
+must be declared by every node that advertises it, applied per platform and
+against the labels a scale set actually publishes rather than only those written
+in the file. While every node is in hand it also asserts §2's ownership
+invariant, which nothing had checked either. `fleet config validate` accepts more
+than one path and runs both; a contract test runs them over every `*.json` in
+`config/nodes/`.
 
-**3. Make the declaration answerable by the image.** A declaration an operator
-types is a claim. The image should be able to confirm it: bake
-`/usr/local/share/tart-runner-fleet/image-capabilities.json` at seal time (node
-C's base already carries the informal ancestor of this, appended to
-`$HOME/.ci-base-manifest`), and have the bootstrap helper read it and compare it
-against the capabilities the daemon expected. A mismatch fails the instance at
-the `bootstrap` stage with a named reason, which
-[ADR 0020](0020-diagnosable-drain-failures.md) already knows how to surface, and
-which is a categorically better failure than a job dying inside a consumer's
-workflow. It is detection, not prevention — the job has already been assigned by
-then — so it ranks below §2 and is worth having anyway, because it is the only
-check that can catch a *stale* declaration after an image is rebuilt.
+Two things about it are worth stating rather than discovering:
 
-**4. What is deliberately not proposed.** No probing of another node, no
-capability gossip, no registry, no runtime capability negotiation with GitHub,
-and no dynamic label computation. Every one of those reintroduces the
-cross-node coupling §9 forbids, and none is needed: the failure is a
-configuration mistake, and configuration is where it should be caught.
+- **`self-hosted` is excluded.** `validateScaleSetLabels` requires it of every
+  scale set, so every node carries it by construction. Comparing parity through
+  it would not be a stricter rule but a different one — "every node declares
+  every capability in the fleet, per platform" — which contradicts §3's
+  deliberately heterogeneous partition, where node B is an x86 machine that will
+  never carry what an Apple-silicon image carries. The residual limit is that a
+  workflow naming nothing but `self-hosted` is not protected, and nothing on the
+  configuration side can protect it: such a job has expressed no requirement to
+  compare against.
+- **The render step of §5 is still not built**, so the directory holds two
+  hand-written examples instead of rendered files. The gate is therefore live
+  against a placeholder. It was written to need no edit when §5 lands: it reads
+  whatever the directory holds.
 
-The honest limit of all four: a capability list is only as good as the audit
-that produced it, and consumer requirements live in consumer repositories that
-this fleet does not read. §1 and §2 make an operator's knowledge *mechanically
-enforced*; they do not make it *complete*. The recurring operator task — read
-the consumers of every label a node advertises, before advertising it — remains,
-and `docs/LINUX_BASE_IMAGE.md` now carries it.
+**3. The image answers for the declaration.** The seal step of
+`docs/BASE_IMAGE.md` and `docs/LINUX_BASE_IMAGE.md` writes
+`/usr/local/share/tart-runner-fleet/image-capabilities.json`, and the bootstrap
+helper reads it and compares it against what the daemon expected. The comparison
+runs before the JIT configuration is read, which is what makes its message safe
+to print. A failure fails the instance at the `bootstrap` stage with one of two
+closed-vocabulary reasons in the sense of [ADR 0020](0020-diagnosable-drain-failures.md)
+— `guest_capability_missing` and `guest_capability_unverifiable` — carried to the
+durable operation row by exit status alone, because the helper's output may
+reflect the secret it was handed and an exit code cannot.
+
+It is fail-closed in both directions. An image that cannot answer fails: a
+manifest that is absent, unparsable, empty, or of a schema this release does not
+read is the *stale declaration* case, which is the only thing §3 catches that §1
+and §2 cannot, and treating silence as consent would catch nothing at all. A
+scale set that requires nothing reads no manifest and produces exactly the
+argument vector every guest has always been invoked with, which is what keeps
+every image in the fleet working on the day this ships.
+
+**4. Nothing in the "deliberately not proposed" list was built.** No probing of
+another node, no capability gossip, no registry, no runtime negotiation with
+GitHub, no dynamic label computation. §2 runs on configuration in CI or under an
+operator's hand, never in a daemon, so no node has become aware of another.
+
+**What is still only a claim.** A capability list is only as good as the audit
+that produced it, and consumer requirements live in consumer repositories this
+fleet does not read. §1 and §2 make an operator's knowledge *mechanically
+enforced*; they do not make it *complete*. §3 narrows the gap by one step — it
+catches an image that stopped matching its own declaration — and it cannot catch
+a capability nobody ever wrote down. The recurring operator task, read the
+consumers of every label a node advertises before advertising it, remains, and
+`docs/LINUX_BASE_IMAGE.md` carries it.
+
+**Simulation was not extended.** `tests/simulation` models one node, which under
+this record is one whole fleet, so the cross-node rule of §2 has nothing to
+express there. The per-guest check of §3 has no representation either: the world
+model reaches the bootstrap edge as a state transition and holds no notion of a
+guest image, and its only fault injections are a slow boot and a wedged drain.
+Adding an image and a bootstrap-failure fault to model a check whose entire
+content is "an operation fails at a stage" would test the harness rather than the
+fleet.
+
 
 ## Not addressed here
 

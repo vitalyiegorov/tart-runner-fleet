@@ -25,7 +25,8 @@ func TestExecuteIsQuietOnSuccessAndSanitizesFailure(t *testing.T) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}
 	stderr.Reset()
-	if code := execute([]string{"unexpected"}, strings.NewReader("jit"), &stderr, run); code != 2 || !strings.Contains(stderr.String(), "takes no arguments") {
+	if code := execute([]string{"unexpected"}, strings.NewReader("jit"), &stderr, run); code != 2 ||
+		!strings.Contains(stderr.String(), "usage: tart-runner-fleet-bootstrap ["+guestbootstrap.CapabilityFlag+"=") {
 		t.Fatalf("usage code=%d stderr=%q", code, stderr.String())
 	}
 }

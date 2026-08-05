@@ -19,7 +19,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `health` | Liveness and readiness probes |
 | `doctor` | Deterministic API, liveness, readiness, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
-| `config validate PATH` | Decode and validate a configuration without starting the daemon |
+| `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
 | `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
 | `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
@@ -27,6 +27,40 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `api-version` | Machine API compatibility version |
 
 The old `validate-config PATH` spelling remains a compatibility alias.
+
+### Validating more than one node at once
+
+`config validate` accepts several paths. Each is decoded and validated exactly as
+a single path is — same checks, same messages, same exit codes — and then two
+rules that are knowable only when every node is in hand are applied across the
+set ([ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md)):
+
+- **Guest-capability parity.** For any label advertised by more than one node,
+  every capability a scale set requires behind that label must be declared by
+  every node that advertises it, on the base image for that label's platform. A
+  node that advertises a label without carrying what someone else requires behind
+  it is the 2026-08-04 incident: a job that fails deterministically on one node
+  and passes deterministically on another, which presents as flakiness in a
+  repository this fleet does not own.
+- **One owner per scale set.** A `(scope, scale-set name)` pair may appear in
+  exactly one node's configuration. GitHub enforces the same thing with a `409`,
+  but only after two daemons have started evicting each other.
+
+`self-hosted` is excluded from the parity rule: this codebase requires it of
+every scale set, so it carries no routing information and comparing through it
+would demand that every node in a deliberately heterogeneous fleet declare every
+capability in it.
+
+```sh
+fleet config validate config/nodes/mac-mini.json config/nodes/mac-studio.json
+fleet config validate --output json config/nodes/*.json
+```
+
+A single path prints `configuration is valid: PATH` and the JSON object
+`{"valid": true, "path": "PATH"}`, exactly as before. Several paths print one
+line per configuration plus a summary, and the JSON object carries `paths`
+instead of `path`. Cross-node failures are written to stderr, one per line, and
+exit `1`.
 
 ## Common flags
 

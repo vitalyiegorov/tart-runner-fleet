@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 )
 
 // docsIngestReason matches the leading `| \`reason\` |` cell of one row of the
@@ -81,4 +82,39 @@ func ingestDetailTable(t *testing.T, body string) string {
 		section = section[:end]
 	}
 	return section
+}
+
+// docsFailureCode matches the leading `| `stage:reason` |` cell of one row of the
+// guest-capability table in docs/OPERATIONS.md.
+var docsFailureCode = regexp.MustCompile("(?m)^\\| `([a-z_]+:[a-z_]+)` \\|")
+
+// TestGuestCapabilityVocabularyIsDocumented binds the bootstrap-stage vocabulary
+// of issue #202 to the table an operator reads, for the reason ADR 0020 gives:
+// the reason is the only part of the failure that reaches a human, and the two
+// reasons here call for opposite repairs — rebuild the image, or correct a
+// declaration that went stale when it was last rebuilt. A reason nobody can look
+// up cannot distinguish them.
+func TestGuestCapabilityVocabularyIsDocumented(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join(documentationRoot(t), "docs", "OPERATIONS.md"))
+	if err != nil {
+		t.Fatalf("read operations guide: %v", err)
+	}
+	documented := map[string]bool{}
+	for _, match := range docsFailureCode.FindAllStringSubmatch(string(body), -1) {
+		documented[match[1]] = true
+	}
+	for _, reason := range lifecycle.BootstrapFailureReasons() {
+		if !lifecycle.ValidBootstrapFailureReason(reason) {
+			t.Errorf("reason %q is listed but not in the closed vocabulary it is listed under", reason)
+		}
+		// The persisted string is the contract, so the test asserts the code an
+		// operator actually reads rather than the bare reason.
+		code := lifecycle.FailureCode("runner lifecycle failed at bootstrap (" + reason + ")")
+		if code != "bootstrap:"+reason {
+			t.Errorf("FailureCode for %q = %q; it must reduce to exactly one closed code", reason, code)
+		}
+		if !documented[code] {
+			t.Errorf("failure code %q reaches operators but docs/OPERATIONS.md does not explain it", code)
+		}
+	}
 }

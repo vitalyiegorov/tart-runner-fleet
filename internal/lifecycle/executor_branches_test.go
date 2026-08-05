@@ -351,7 +351,7 @@ func TestBootstrapAndExecRunnerFailureBranches(t *testing.T) {
 		t.Fatal("missing binary succeeded")
 	}
 	valid := githubscaleset.NewJITSecret("jit")
-	if err := (StdinBootstrapper{}).Bootstrap(context.Background(), "vm", valid); !errors.Is(err, operations.ErrInvalid) {
+	if err := (StdinBootstrapper{}).Bootstrap(context.Background(), "vm", valid, nil); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("nil runner error=%v", err)
 	}
 	for _, test := range []struct {
@@ -363,17 +363,17 @@ func TestBootstrapAndExecRunnerFailureBranches(t *testing.T) {
 		{"large", githubscaleset.NewJITSecret(strings.Repeat("x", maxJITBytes+1))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := (StdinBootstrapper{Runner: &captureStdin{}}).Bootstrap(context.Background(), "vm", test.secret)
+			err := (StdinBootstrapper{Runner: &captureStdin{}}).Bootstrap(context.Background(), "vm", test.secret, nil)
 			if !errors.Is(err, operations.ErrInvalid) {
 				t.Fatalf("error=%v", err)
 			}
 		})
 	}
-	if err := (StdinBootstrapper{Runner: &captureStdin{}}).Bootstrap(context.Background(), "../vm", githubscaleset.NewJITSecret("jit")); !errors.Is(err, operations.ErrInvalid) {
+	if err := (StdinBootstrapper{Runner: &captureStdin{}}).Bootstrap(context.Background(), "../vm", githubscaleset.NewJITSecret("jit"), nil); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("bad name error=%v", err)
 	}
 	secret := githubscaleset.NewJITSecret("jit")
-	err := (StdinBootstrapper{Runner: blockingStdin{}, Timeout: time.Millisecond}).Bootstrap(context.Background(), "vm", secret)
+	err := (StdinBootstrapper{Runner: blockingStdin{}, Timeout: time.Millisecond}).Bootstrap(context.Background(), "vm", secret, nil)
 	if !errors.Is(err, context.DeadlineExceeded) || secret.Reveal() != "" {
 		t.Fatalf("timeout error=%v secret=%q", err, secret.Reveal())
 	}
