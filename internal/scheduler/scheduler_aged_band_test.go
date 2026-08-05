@@ -196,3 +196,72 @@ func TestReservedHeadSurvivesAgedBackfill(t *testing.T) {
 		t.Fatalf("the aged head lost its reservation: %#v", plan.Next.Reservation)
 	}
 }
+
+// TestReservationYieldsToOlderWorkThatReentersTheQueue is issue #208's
+// bounded-starvation violation, seed 55 of the simulator's container-node arm,
+// reduced to one tick.
+//
+// A reservation is held for the oldest aged demand that does not fit, and ADR
+// 0017 and ADR 0029 both promise it is re-checked FIRST on every later tick so it
+// wins the first vector large enough for it. That promise is made against work
+// that is YOUNGER than the head. The plannable queue, however, is not frozen
+// while the reservation is held: ADR 0027 keeps a demand out of it for as long as
+// a live instance incarnates it, and a recovery drain puts that demand back --
+// with the GitHub queue time every aging rule here measures from.
+//
+// The tick below is that moment. The oldest demand's own runner has just been
+// reaped for a stalled assignment, so it re-enters the queue ahead of the reserved
+// head, and only one `xl` fits in what the reaped VM released. `planLinux`
+// returned straight out of its reservation branch without consulting the queue it
+// had been handed, so the YOUNGER demand took the vector -- ADR 0004's rule 1
+// broken by the mechanism that exists to keep it. In the simulator that repeated
+// on every recovery deadline: four pass-overs of the same demand, fifty ticks
+// apart, for as long as the run lasted.
+func TestReservationYieldsToOlderWorkThatReentersTheQueue(t *testing.T) {
+	cfg := agedBandConfig()
+	cfg.LinuxCapacity = domain.Resources{CPU: 12, MemoryMB: 30_720, Slots: 4}
+	older := profileDemand(cfg, "a/repo", 7, 103*time.Minute+30*time.Second, "xl")
+	younger := profileDemand(cfg, "a/repo", 18, 70*time.Minute+30*time.Second, "xl")
+	in := agedBandInput(cfg, []domain.Demand{older, younger},
+		[]domain.Instance{liveInstance(cfg, "trf-small-live", "a/repo", "small")})
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 11, MemoryMB: 28_672, Slots: 4}}, testNow)
+	in.Prior = State{Reservation: &domain.Reservation{Demand: younger.Key, Profile: "xl",
+		Resources: cfg.Profiles["xl"].Resources, Since: testNow.Add(-18 * time.Minute)}}
+
+	plan := PlanTick(in)
+	if want := []domain.DemandKey{older.Key}; !reflect.DeepEqual(spawnedKeys(plan), want) {
+		t.Fatalf("spawns = %v, want the older aged demand %v", spawnedKeys(plan), want)
+	}
+	// The demand that lost the reservation is first in line behind the work that
+	// displaced it, which is what makes this a re-derivation rather than a loss.
+	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != younger.Key {
+		t.Fatalf("the displaced head must hold the next reservation: %#v", plan.Next.Reservation)
+	}
+}
+
+// TestReservationSurvivesYoungerWorkEnteringTheQueue is the guard on the same
+// seam: the reservation is re-derived only against work that outranks it. A
+// demand that enters the queue YOUNGER than the reserved head -- however feasible
+// -- must not displace it, or the reservation would protect nothing at all.
+func TestReservationSurvivesYoungerWorkEnteringTheQueue(t *testing.T) {
+	cfg := agedBandConfig()
+	cfg.LinuxCapacity = domain.Resources{CPU: 12, MemoryMB: 30_720, Slots: 4}
+	head := profileDemand(cfg, "a/repo", 7, 103*time.Minute+30*time.Second, "xl")
+	// Aged, and younger than the head by thirteen minutes.
+	newcomer := profileDemand(cfg, "b/repo", 18, 90*time.Minute, "small")
+	in := agedBandInput(cfg, []domain.Demand{head, newcomer},
+		[]domain.Instance{liveInstance(cfg, "trf-xl-live", "b/repo", "xl")})
+	// The measured residual leaves five cores, so the reserved `xl` head does not
+	// fit and the newcomer does.
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 5, MemoryMB: 18_432, Slots: 4}}, testNow)
+	in.Prior = State{Reservation: &domain.Reservation{Demand: head.Key, Profile: "xl",
+		Resources: cfg.Profiles["xl"].Resources, Since: testNow.Add(-18 * time.Minute)}}
+
+	plan := PlanTick(in)
+	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+		t.Fatalf("younger work displaced a held reservation: %#v", plan.Next.Reservation)
+	}
+	if len(spawnedKeys(plan)) != 1 || spawnedKeys(plan)[0] != newcomer.Key {
+		t.Fatalf("the head does not fit; backfill must serve the newcomer alone: %#v", plan.Operations)
+	}
+}
