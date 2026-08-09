@@ -84,6 +84,58 @@ With `mixedProfileCohorts` off the live cohort is still the only admissible
 target and identity still vetoes, so the default remains this record's
 "byte-for-byte" promise.
 
+### Amendment 2026-08-09: a target the residual cannot hold ends its own turn
+
+The amendment above moved the target from the live cohort to the queue and made
+a profile at its `maxActive` end its own turn rather than the pass. It named the
+target on `maxActive` **alone**, and rule 3 above says the veto is the
+**envelope**. So the seam kept one more instance of its own bug: a profile with
+`maxActive` room but a vector larger than the residual won the pass's single
+target, `appendMacSpawns` refused it on the envelope, and `fillMacRemainder`
+returned having offered the queue nothing else.
+
+It reached production on 2026-08-09 at ~18:10Z on the Mac mini (Mac16,10: 10
+cores, 24 GiB), running v0.1.394+main.d9c8ed23f842 — the build that shipped the
+amendment above:
+
+- a live Linux `xl` (6 CPU / 12288 MB) from `rnw-community/rnw-community` was
+  busy, leaving four cores and ~11 GiB free;
+- the aged global-FIFO head was a second `xl` from that same repository,
+  infeasible beside it, so `planLinux` held its reservation and
+  [ADR 0029](0029-remainder-admission-behind-a-reservation.md)'s vector
+  condition correctly released the residual;
+- that repository's cap is 4 with one instance live, so
+  [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)'s slack
+  (`4 - 1 - 1 = 2`) let its own macOS work bid;
+- three `maestro` demands (4 CPU / 7168 MB) from it, queued 29 minutes, fit
+  those four cores **exactly**;
+- an older macOS `builder` (6 CPU / 12288 MB), queued 38 minutes with no sibling
+  live, took the target and could not fit.
+
+Every documented condition was satisfied and the maestros were refused on every
+tick anyway. The cost has the units ADR 0029 stated: 4 cores and 7168 MB idle
+for the duration of the blocking job, on a host reporting 58% CPU idle, with the
+queue SLO breached.
+
+The target is therefore the highest-priority queued demand the pass can
+**actually admit**, judged by every veto `appendMacSpawns` will apply, read
+against the same inputs it reads: profile `maxActive`, the aged-or-throttled
+envelope for that demand, and the repository cap over live instances plus this
+tick's planned spawns. A candidate failing any of them ends its own turn; only
+an empty candidate list ends the pass.
+
+Skipping such a candidate does not invert the aged FIFO of
+[ADR 0004](0004-bounded-control-plane-priority.md). A demand the residual cannot
+hold is not waiting on this pass — it is waiting on the live instances holding
+what it needs. That is
+[ADR 0017](0017-infeasible-reservation-residual-backfill.md)'s rule, and the
+same reason an infeasible reserved head lends its vector rather than stranding
+it. Where the older candidate *does* fit the residual, it still takes it, and
+that direction is pinned by test.
+
+Nothing about admission itself changes here either, and the single-cohort
+default is untouched: it returns before this ordering is reached.
+
 ## Consequences
 
 On the production topology, builders and maestros pipeline instead of
@@ -108,3 +160,17 @@ drains anything, and the fallback drains only idle instances, as it always has.
   fallback intact with its dependency edges.
 - `internal/config`: flag decode, encode, and round-trip with default-off
   omitted so older strict releases still accept legacy configs.
+- `internal/scheduler/scheduler_mixed_profile_test.go`, for the 2026-08-09
+  amendment: `TestRemainderLooksPastAProfileTheResidualCannotHold` (the incident
+  topology — the oldest maestro admitted past an oversized builder, the
+  reservation intact, no drain), `TestRemainderKeepsAgedOrderWhenTheOlderProfileFits`
+  (the guard: an older profile the residual *can* hold still takes it, so this is
+  not a FIFO inversion), and
+  `TestRemainderLooksPastAProfileWhoseRepositoryIsCapped` (the same rule on the
+  third axis `appendMacSpawns` already skips by).
+- `tests/replay/oversized_remainder_target_incident_test.go`: the incident over
+  12 ticks — a control arm where only the oversized builder is queued and
+  admitting nothing is correct, the free vector then put to work exactly once,
+  the reservation surviving every later tick with no drain planned, and the
+  reserved head taking the released vector FIRST ahead of everything still
+  queued.
