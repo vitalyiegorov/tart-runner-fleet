@@ -110,6 +110,17 @@ type Profile struct {
 	Route     Route
 	Resources Resources
 	MaxActive int
+	// OccupancyBudget is the wall-clock ceiling on how long ONE instance of this
+	// profile may hold its resource vector, measured from the moment the instance
+	// began occupying it. It is a property of the profile because it is a
+	// statement about the work that profile runs: a macOS builder legitimately
+	// spends forty minutes on an App Store archive, and a one-core Linux job that
+	// has been running for an hour is not doing the work it was spawned for.
+	//
+	// Zero means no ceiling, and that is the fail-open default on purpose: a
+	// destructive bound is never inferred from a configuration that does not
+	// state one.
+	OccupancyBudget time.Duration
 }
 
 type Event string
@@ -224,8 +235,16 @@ type Instance struct {
 	// candidate regardless of age. Fail-closed default false when the demand
 	// evidence cannot be read.
 	JobInactive bool
-	Attempts    int
-	RetryAt     time.Time
+	// OccupiedSince is when the instance began holding its resource vector: the
+	// instant its durable row was created, because a planned instance already
+	// charges the host envelope (see ConsumesHostResources) whether or not its VM
+	// has booted yet. It is deliberately NOT reset by a state change — the host
+	// does not get its cores back when a runner moves from Assigned to Running —
+	// which is what distinguishes it from AssignedSince and RunningSince. Zero
+	// means unknown, treated fail-closed as "no measurable occupancy".
+	OccupiedSince time.Time
+	Attempts      int
+	RetryAt       time.Time
 }
 
 type InstancePower string
@@ -296,6 +315,20 @@ func (i Instance) ConsumesHostResources() bool {
 		return true
 	}
 	return !i.State.TearingDown()
+}
+
+// Occupancy reports how long the instance has been holding its resource vector,
+// and whether that is a measurable fact at all. It is false — never a zero
+// duration passed off as a measurement — when the instance is not charging the
+// host, when the start of the occupancy was never recorded, or when the
+// recorded start is ahead of the given instant, which is a clock the caller may
+// not reason about. Every judgement about an over-long hold reads this one
+// answer so none of them can disagree about when occupancy began.
+func (i Instance) Occupancy(now time.Time) (time.Duration, bool) {
+	if !i.ConsumesHostResources() || i.OccupiedSince.IsZero() || now.Before(i.OccupiedSince) {
+		return 0, false
+	}
+	return now.Sub(i.OccupiedSince), true
 }
 
 func (i Instance) CanRetry(now time.Time, maxAttempts int) bool {

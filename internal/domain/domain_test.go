@@ -236,3 +236,39 @@ func TestImageReferenceGrammarAcceptsBothBackendsImages(t *testing.T) {
 		}
 	}
 }
+
+// Occupancy is the one per-instance age that must survive a state change: the
+// host does not get its cores back when a runner moves from Assigned to
+// Running. It answers with a measured flag rather than a zero duration so no
+// caller can mistake "not measurable" for "just started" (ADR 0036).
+func TestOccupancyIsMeasuredOnlyWhenTheVectorIsProvablyHeld(t *testing.T) {
+	now := time.Date(2026, 8, 9, 19, 22, 50, 0, time.UTC)
+	held := Instance{ID: "trf-xl-05bbe1c83f21fcd6", State: InstanceRunning, Power: InstancePowerRunning,
+		OccupiedSince: now.Add(-75 * time.Minute)}
+
+	if age, measured := held.Occupancy(now); !measured || age != 75*time.Minute {
+		t.Fatalf("a held vector must report its age; got %s, measured=%t", age, measured)
+	}
+	// The state change that ends the occupancy is release, not promotion.
+	promoted := held
+	promoted.State = InstanceAssigned
+	if age, measured := promoted.Occupancy(now); !measured || age != 75*time.Minute {
+		t.Fatalf("a state change must not restart the occupancy clock; got %s, measured=%t", age, measured)
+	}
+
+	for _, test := range []struct {
+		name     string
+		instance Instance
+	}{
+		{name: "released", instance: Instance{State: InstanceDeleted, OccupiedSince: now.Add(-time.Hour)}},
+		{name: "tearing down and proven idle", instance: Instance{State: InstanceStopping,
+			Power: InstancePowerStopped, OccupiedSince: now.Add(-time.Hour)}},
+		{name: "start never recorded", instance: Instance{State: InstanceRunning, Power: InstancePowerRunning}},
+		{name: "start ahead of the instant", instance: Instance{State: InstanceRunning,
+			Power: InstancePowerRunning, OccupiedSince: now.Add(time.Second)}},
+	} {
+		if age, measured := test.instance.Occupancy(now); measured || age != 0 {
+			t.Fatalf("%s must not report a measured occupancy; got %s, measured=%t", test.name, age, measured)
+		}
+	}
+}

@@ -118,6 +118,11 @@ type Operation struct {
 	ConfirmedInactive bool `json:"confirmedInactive,omitempty"`
 	StalledAssignment bool `json:"stalledAssignment,omitempty"`
 	LingeringRunner   bool `json:"lingeringRunner,omitempty"`
+	// OccupancyExceeded marks the one reclaim whose premise is not that the
+	// runner is idle but that it has held its profile's vector too long. It is
+	// part of the content address like every other cause, so a budget reap and a
+	// lingering-runner reap of one instance are distinct attempts (ADR 0028).
+	OccupancyExceeded bool `json:"occupancyExceeded,omitempty"`
 }
 
 type PlanStatus string
@@ -151,7 +156,7 @@ func PlanTick(in Input) Plan {
 
 	demands := normalizedDemands(in)
 	plan := Plan{Status: PlanReady, Next: in.Prior}
-	if recoveries := assignmentRecoveries(in.Now, in.Config.AssignedTimeout, in.Instances.Value); len(recoveries) > 0 {
+	if recoveries := assignmentRecoveries(in.Now, in.Config, in.Instances.Value); len(recoveries) > 0 {
 		plan.Operations = recoveries
 		return finish(plan)
 	}
@@ -318,25 +323,40 @@ func hasConsumingPlatform(instances []domain.Instance, platform domain.Platform)
 	return false
 }
 
-func assignmentRecoveries(now time.Time, assignedTimeout time.Duration, instances []domain.Instance) []Operation {
+func assignmentRecoveries(now time.Time, config Config, instances []domain.Instance) []Operation {
 	var recoveries []Operation
 	for _, instance := range sortedInstances(instances) {
 		if instance.State != domain.InstanceAssigned && instance.State != domain.InstanceRunning {
 			continue
 		}
 		confirmedInactive := instance.Power == domain.InstancePowerRunning && instance.RecoveryReady
-		stalled := stalledAssignment(now, assignedTimeout, instance)
-		lingering := lingeringRunner(now, assignedTimeout, instance)
+		stalled := stalledAssignment(now, config.AssignedTimeout, instance)
+		lingering := lingeringRunner(now, config.AssignedTimeout, instance)
+		overBudget := occupancyExceeded(now, config.Profiles, instance)
 		// The stopped gate is an exact power comparison, not domain.ProvenIdle: an
 		// owned VM merely missing from a Tart enumeration must never plan a kill.
 		// Absence cannot even reach here for an assigned or running instance — that
 		// observation is still host-wide unavailable (internal/app/inventory.go) — and
 		// if it ever could, no destructive operation may be derived from it.
-		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled && !lingering {
+		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled && !lingering && !overBudget {
 			continue
 		}
+		// The causes are mutually exclusive in the durable phase they select, and
+		// the occupancy budget is deliberately last: every other cause is evidence
+		// that no work is happening, and each re-verifies that at execution time.
+		// A budget breach claims only that the hold is too long, so whenever a
+		// safer cause also applies it is the one that should act.
+		overBudget = overBudget && !confirmedInactive && !stalled && !lingering &&
+			instance.Power != domain.InstancePowerStopped
 		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
-			Recovery: true, ConfirmedInactive: confirmedInactive, StalledAssignment: stalled, LingeringRunner: lingering}
+			Recovery: true, ConfirmedInactive: confirmedInactive, StalledAssignment: stalled, LingeringRunner: lingering,
+			OccupancyExceeded: overBudget}
+		if overBudget {
+			// A budget reap ends a job that GitHub still believes is running, so the
+			// durable operation must name that job. Every other drain cause implies
+			// there is no job left to name (ADR 0036).
+			operation.Demand = instance.Demand
+		}
 		operation.ID = stableID("op", operation)
 		recoveries = append(recoveries, operation)
 	}
@@ -375,6 +395,103 @@ func lingeringRunner(now time.Time, idleTimeout time.Duration, instance domain.I
 	return instance.State == domain.InstanceRunning && instance.Power == domain.InstancePowerRunning &&
 		!instance.RecoveryReady && instance.JobInactive && idleTimeout > 0 && !instance.RunningSince.IsZero() &&
 		now.Sub(instance.RunningSince) >= idleTimeout
+}
+
+// OccupancyWarnFraction is the share of a profile's occupancy budget at which a
+// hold becomes worth saying out loud. It exists so the condition is visible
+// while it is happening rather than in the post-mortem that produced ADR 0036:
+// three quarters of the budget leaves an operator a quarter of it to look, and
+// is late enough that an ordinary long job does not cry wolf on every tick.
+const OccupancyWarnFraction = 0.75
+
+// occupancyExceeded reports whether an instance has held its profile's resource
+// vector past that profile's wall-clock ceiling. Unlike stalledAssignment and
+// lingeringRunner it does NOT claim the runner is idle — the incident it exists
+// for was a genuinely executing job — so it is deliberately narrow: it needs a
+// configured ceiling, a powered-on VM, and a measurable occupancy, and it stays
+// fail-closed on every one of them. An unconfigured ceiling is no ceiling, never
+// a zero one.
+func occupancyExceeded(now time.Time, profiles map[domain.ProfileID]domain.Profile, instance domain.Instance) bool {
+	profile, known := profiles[instance.Profile]
+	if !known || profile.OccupancyBudget <= 0 || instance.Power != domain.InstancePowerRunning {
+		return false
+	}
+	age, measured := instance.Occupancy(now)
+	return measured && age >= profile.OccupancyBudget
+}
+
+// Occupancy is one instance's hold on the resource vector its profile reserves,
+// with everything an operator needs to judge it: how long, against what ceiling,
+// and whether work is waiting that the held vector would fit. It is a pure
+// projection of the same inputs the scheduler plans from, so the warning, the
+// metric, the doctor finding, and the reap can never disagree about a hold.
+type Occupancy struct {
+	Instance  string
+	Profile   domain.ProfileID
+	Repo      string
+	Demand    domain.DemandKey
+	Resources domain.Resources
+	Age       time.Duration
+	// Budget is the profile's ceiling, or zero when the profile sets none. Warned
+	// and OverBudget are always false in that case: an unbounded hold cannot be
+	// past a bound.
+	Budget     time.Duration
+	Warned     bool
+	OverBudget bool
+	// StarvesQueuedDemand reports that at least one demand the fleet has queued
+	// and not yet incarnated would fit inside this instance's vector. It is what
+	// separates a slow job from a fleet incident, and it is the condition
+	// `fleet doctor` names.
+	StarvesQueuedDemand bool
+}
+
+// Occupancies reports every live instance that is holding a vector, ordered by
+// instance identity so a rendering, a metric, and a log line are stable.
+func Occupancies(now time.Time, config Config, instances []domain.Instance, demands []domain.Demand) []Occupancy {
+	waiting := queuedVectors(config, instances, demands)
+	reports := make([]Occupancy, 0, len(instances))
+	for _, instance := range sortedInstances(instances) {
+		age, measured := instance.Occupancy(now)
+		if !measured {
+			continue
+		}
+		report := Occupancy{Instance: instance.ID, Profile: instance.Profile, Repo: instance.Repo,
+			Demand: instance.Demand, Resources: instance.Resources, Age: age,
+			Budget: config.Profiles[instance.Profile].OccupancyBudget}
+		if report.Budget > 0 {
+			report.Warned = age >= time.Duration(float64(report.Budget)*OccupancyWarnFraction)
+			report.OverBudget = age >= report.Budget
+		}
+		for _, required := range waiting {
+			if instance.Resources.CanFit(required) {
+				report.StarvesQueuedDemand = true
+				break
+			}
+		}
+		reports = append(reports, report)
+	}
+	return reports
+}
+
+// queuedVectors is the resource vector of every demand that is waiting: queued,
+// configured, and not already incarnated by a live instance. A demand whose own
+// instance exists is not waiting on anybody's vector.
+func queuedVectors(config Config, instances []domain.Instance, demands []domain.Demand) []domain.Resources {
+	incarnated := make(map[domain.DemandKey]bool, len(instances))
+	for _, instance := range instances {
+		if instance.IncarnatesDemand() {
+			incarnated[instance.Demand] = true
+		}
+	}
+	vectors := make([]domain.Resources, 0, len(demands))
+	for _, demand := range demands {
+		profile, known := config.Profiles[demand.Profile]
+		if !known || incarnated[demand.Key] {
+			continue
+		}
+		vectors = append(vectors, profile.Resources)
+	}
+	return vectors
 }
 
 func normalizedDemands(in Input) []domain.Demand {

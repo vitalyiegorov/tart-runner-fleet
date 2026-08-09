@@ -180,6 +180,15 @@ const (
 	// absence after deregistration, so reclaim never blocks on a completion
 	// event that will never arrive.
 	DrainPhaseLingeringRunner = 5
+	// DrainPhaseOccupancyBudget reclaims an instance that has held its profile's
+	// resource vector past the wall-clock ceiling configured for that profile.
+	// It is the only drain phase whose premise is not "no work is happening": the
+	// job it ends is executing, GitHub calls it in_progress, and it is precisely
+	// the work that has overstayed. Its premise is therefore re-verified against
+	// a fact no fresh observation can disprove — the occupancy is still past the
+	// budget — and it never aborts on busy evidence, because busy evidence is
+	// what it acts on (ADR 0036).
+	DrainPhaseOccupancyBudget = 6
 )
 
 type Lease struct {

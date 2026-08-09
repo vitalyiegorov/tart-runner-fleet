@@ -177,3 +177,37 @@ func TestOccupancyReportsNameTheHoldAndTheStarvation(t *testing.T) {
 		t.Fatalf("a young instance must be reported quietly; got %#v", report)
 	}
 }
+
+// Starvation is what turns an over-long hold into an incident, so the oracle for
+// it must be exact in both directions: a demand nobody can place does not count,
+// and neither does one whose own instance already exists. Only work that is
+// genuinely waiting on somebody else's vector does.
+func TestOccupancyReportsCountOnlyDemandThatIsGenuinelyWaiting(t *testing.T) {
+	const budget = 45 * time.Minute
+	profiles := occupancyProfiles(budget)
+	held := occupant("xl", profiles, 75*time.Minute)
+	// Its own demand is incarnated by itself; a demand for a profile the fleet no
+	// longer configures cannot be placed anywhere.
+	own := domain.Demand{Key: held.Demand, CreatedAt: testNow.Add(-time.Hour), Profile: "xl",
+		Route: profiles["xl"].Route, Platform: domain.PlatformLinux, Event: domain.EventPullRequest}
+	retired := demand("b/repo", 9, time.Hour, "medium")
+	retired.Profile = "retired-profile"
+
+	in := occupancyInput([]domain.Instance{held}, []domain.Demand{own, retired}, budget)
+	reports := Occupancies(in.Now, in.Config, in.Instances.Value, in.Demands.Value)
+
+	if len(reports) != 1 || reports[0].StarvesQueuedDemand {
+		t.Fatalf("neither an instance's own demand nor an unplaceable one is starved by it; got %#v", reports)
+	}
+
+	// An instance that has released its vector is not holding anything, so it has
+	// no occupancy to report at all.
+	released := held
+	released.ID, released.State, released.Power = "trf-xl-released", domain.InstanceDeleted, domain.InstancePowerAbsent
+	unclocked := held
+	unclocked.ID, unclocked.OccupiedSince = "trf-xl-unclocked", time.Time{}
+	in = occupancyInput([]domain.Instance{released, unclocked}, nil, budget)
+	if reports := Occupancies(in.Now, in.Config, in.Instances.Value, in.Demands.Value); len(reports) != 0 {
+		t.Fatalf("an unmeasurable hold must not be reported at all; got %#v", reports)
+	}
+}
