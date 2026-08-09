@@ -189,22 +189,18 @@ func escalationChecker(cfg worldConfig) checker {
 		for _, demand := range observation.Demands {
 			key := demand.Key.String()
 			tier := effectiveTierOf(cfg, observation.Now, demand)
-			if previous, seen := highest[key]; seen && tier < previous {
+			previous, known := highest[key]
+			if known && tier < previous {
 				findings = append(findings, finding{Kind: findingEscalationRegression, Tick: observation.Tick,
 					Detail: fmt.Sprintf("%s fell from tier %d to tier %d after waiting %s",
 						demand.Key, previous, tier, observation.Now.Sub(demand.CreatedAt))})
 			}
-			if tier > highest[key] || !seen(highest, key) {
+			if !known || tier > previous {
 				highest[key] = tier
 			}
 		}
 		return findings
 	}
-}
-
-func seen(tiers map[string]int, key string) bool {
-	_, ok := tiers[key]
-	return ok
 }
 
 // ---------------------------------------------------------------------------

@@ -115,3 +115,12 @@ func TestPatternWildcardsSpanSeparators(t *testing.T) {
 		t.Fatal("a policy with tiers must report itself as declared")
 	}
 }
+
+func TestTheDefaultTierHasAName(t *testing.T) {
+	if got := PriorityTierName(Priority{}); got != DefaultPriorityTier {
+		t.Fatalf("default tier name = %q, want %q", got, DefaultPriorityTier)
+	}
+	if got := PriorityTierName(Priority{Tier: "release", Rank: 1}); got != "release" {
+		t.Fatalf("declared tier name = %q, want release", got)
+	}
+}
