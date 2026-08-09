@@ -140,7 +140,7 @@ refusal.
 
 | | Property | Oracle | Status |
 |---|---|---|---|
-| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; see [ADR 0024](0024-mixed-macos-profile-cohorts.md)) |
+| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. On a tick whose plan holds a reservation for a head that FITS the oracle's own free envelope, every other demand is judged against `free - reservation`. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; the reserved-vector refinement 2026-08-09, issue #216) |
 | b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Pass-over count per (demand, CAUSE) against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03 and issue #208's stale reservation 2026-08-05, both in [ADR 0004](0004-bounded-control-plane-priority.md) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
@@ -168,8 +168,9 @@ change shape, and its fix PR arrives with a test that already describes it.
 
 An unsignatured violation of any property fails the build.
 
-Two oracle refinements were needed to keep that promise honest, both made with
-[ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md):
+Three oracle refinements were needed to keep that promise honest. The first two
+were made with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md);
+the third is the amendment of 2026-08-09 below.
 
 - Property (b) counts pass-overs per (demand, CAUSE) rather than per demand.
   This is finding 6 of issue #130. A demand passed over once by each of several
@@ -243,6 +244,65 @@ suites the nightly job exists to repeat cost 9.6s together at `-count=10` under
 the race detector, so a package that took 600s and failed was not one cost among
 several -- it was the whole report.
 
+#### Amendment 2026-08-09: a held reservation is part of the feasibility question
+
+Issue #216. Property (a) reported a wedge on a tick that was correctly holding a
+vector for the oldest aged demand, and the fix belongs to this record because the
+plan was right and the oracle was wrong.
+
+`feasibleDemands` measured a free envelope and called every demand that fit it
+"definitely admissible". A tick that holds a reservation does not have a free
+envelope. ADR 0029 condition 1 withholds the reserved head's whole vector and
+`safeBackfill` plans inside `free - reservation`, so a demand that fits only
+INSIDE that vector is refused by a WRITTEN rule -- the aged-FIFO guarantee of
+ADR 0004 -- rather than by an arithmetic slip. On seed 92 of the container-node
+arm six cores were free, two `xl` demands each needed all six, and the reserved
+head was six minutes older. Calling the younger one feasible and then reporting
+twelve ticks of "no admission" reports the guarantee as the defect. The nightly
+sweep failed on that signature three nights running.
+
+The oracle now applies ADR 0017's own distinction, with its own arithmetic:
+
+- **The head does not fit the free envelope.** Nothing is charged and admission
+  proceeds in the full residual, because such a head is blocked by live
+  instances rather than by this tick's admission. Work that fits and is refused
+  here **is** a wedge, and property (a) is untouched. That is the 2026-07-25
+  incident, issue #125, and the whole reason the property exists.
+- **The head does fit.** Its whole vector is withheld by design, and every other
+  demand is judged against `free - reservation`. The head itself is always
+  judged against the whole envelope, so a reservation held for a head the oracle
+  can admit, admitting nothing, is still reported.
+
+The refinement is deliberately narrow in both directions. Exempting "a
+reservation is held" wholesale would blind the property to the exact class it was
+built for; both incidents behind it are ticks with a reservation held. And
+ADR 0030's repository slot -- a reserved head also holds one slot of its own
+repository's cap -- is deliberately NOT modelled. Charging it would narrow the
+oracle further, and narrowing is the direction that blinds a property; leaving it
+out can only produce a report the scheduler must then justify.
+
+**Independence.** The rule below the property set says the feasibility oracle
+reads physical facts and configured caps and never the scheduler's envelope
+arithmetic. It still holds, and the two inputs here are why. The reservation is
+read from the plan's own published next state -- a DECISION the plan announces,
+which property (b) has always read through `holdsReservation` -- and not from any
+envelope computation. The vector subtracted is the head's CONFIGURED profile
+vector from `worldConfig`, never the `Resources` the scheduler stamped on the
+reservation and never its free, aged, or remainder envelopes. An envelope defect
+therefore cannot reach the oracle; only a reservation the scheduler admits to
+holding can.
+
+**Evidence that nothing was blinded.** `tests/simulation/oracle_reservation_test
+.go` pins all four directions of the question directly against the oracle rather
+than against the scheduler, because a scheduler test cannot tell an oracle that
+is right from one that agrees with the code it checks. Beyond that, the
+refinement was measured against broken schedulers. With ADR 0017's
+infeasible-head branch mutated back to issue #125's behaviour, the corpus over
+40 seeds x 320 ticks reports the same 10 and 3 violated seeds on the two Linux
+arms under the new oracle as under the old one, and the pull-request sweep still
+fails on its first seed. With `internal/scheduler` reverted to the commit before
+issue #208's repair, both of that issue's pinned regressions still fire.
+
 ## Consequences
 
 The harness found four previously unknown defects while it was being written,
@@ -293,8 +353,19 @@ apply. The executor mirrors `lifecycle`'s state machine edge for edge and every
 transition is validated by the real durable store, so a modelling error usually
 surfaces as a refused transition rather than as a false property violation. And
 the feasibility oracle that properties (a) and (b) rest on is derived from
-physical facts and configured caps only -- never from the scheduler's own
-envelope arithmetic -- so it cannot inherit the defect it exists to catch.
+physical facts, configured caps, and the reservation the plan publishes -- never
+from the scheduler's own envelope arithmetic -- so it cannot inherit the defect
+it exists to catch.
+
+The cost of that independence has its own shape, and issues #129 and #216 are
+both instances of it: an oracle written from the rules rather than from the code
+can be INCOMPLETE about a rule, and an incomplete oracle reports a correct plan
+as a defect. Each such imprecision is repaired here with the rigour of a
+scheduling fix -- red first, both directions pinned, and measured against a
+deliberately broken scheduler to prove nothing was blinded -- and never by
+tolerating a signature. Signatures name defects this repository documents as open
+in the SCHEDULER; filing a harness imprecision under one would move a harness bug
+into the scheduler's ledger.
 
 `TestGeneratedTraceExercisesTheWholeWorld` guards the other rot: a generator
 that quietly stops delaying messages or wedging drains turns the whole suite
@@ -317,6 +388,9 @@ into a smoke test, so the required event vocabulary is asserted directly.
   minimal three-tick regression: the boot window plans nothing, and a terminal
   incarnation is still retried.
 - `tests/simulation/findings_test.go` -- characterizations of findings 2 to 5.
+- `tests/simulation/oracle_reservation_test.go` -- the feasibility oracle asked
+  directly about a held reservation: the tick of issue #216 it must stop
+  reporting, and the three it must go on reporting.
 - `tests/simulation/federation_test.go` -- the shared-scope conservation bound of
   issue #153, swept one parallel subtest per seed.
 - `tests/simulation/regression208_test.go` -- the two nightly findings of issue
