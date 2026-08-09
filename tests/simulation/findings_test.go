@@ -211,3 +211,37 @@ func TestFindingCrossPlatformResidualArbitration(t *testing.T) {
 		t.Fatalf("finding changed shape; admitted %v", admitted)
 	}
 }
+
+// FINDING 7: a wedge behind a reserved head that a REPOSITORY CAP, not the host,
+// is holding. Seed 67 of the container-node arm stalls admission for more than
+// LivenessK ticks while `a/repo`'s `large` is feasible: c/repo sits at its cap of
+// two, the aged reserved head is a c/repo `xl` whose vector the host could hand
+// over immediately, and the demand waiting behind it belongs to a repository with
+// no live instance at all.
+//
+// It is pinned by its trace rather than by a hand-built tick, and deliberately
+// so. A direct PlanTick over the same instances and demands ADMITS the waiting
+// work, so the wedge is not a property of one tick's inputs: it needs the
+// specific envelope, elastic-observation, and reservation history this arm
+// reaches, which is exactly the cross-tick composition ADR 0031 says a
+// per-function test cannot express. Reducing it to a tick would pin a defect
+// that is not this one.
+//
+// It is a characterization, not a repair. Per ADR 0031 a defect the simulator
+// finds is not fixed in the pull request that finds it; this asserts that the
+// finding keeps its documented shape — a SIGNED wedge, never an unsignatured
+// one — until its own fix lands, at which point knownFinding loses the signature
+// and this test flips to asserting the admission.
+func TestFinding7AReservedHeadHeldByARepositoryCapWedgesTheResidual(t *testing.T) {
+	t.Parallel()
+	cfg := containerNodeWorld()
+	w := newWorld(t, cfg, generateTrace(67, 200, cfg))
+	defer w.close()
+
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("FINDING 7 must stay a documented signature, never an unsignatured violation: %s", findings[0])
+	}
+	if _, met := w.known[sigReservedHeadHeldByARepositoryCap+string(findingWedge)]; !met {
+		t.Fatal("FINDING 7 has changed shape: seed 67 of the container-node arm no longer wedges behind a cap-blocked reserved head")
+	}
+}

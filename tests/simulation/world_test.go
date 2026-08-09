@@ -91,20 +91,41 @@ type worldConfig struct {
 	// synchronous with delivery, so anything beyond one tick of slack means the
 	// binding refused evidence it was handed (issue #165).
 	HearingH int
+	// OccupancyGraceTicks bounds property (k): an instance that has reached its
+	// profile's occupancy budget may go on holding its vector for at most this
+	// many further ticks. It is a RECLAIM budget, not a tolerance — the breach has
+	// to be observed, the plan has to commit, and the drain has to reach the guest
+	// stop that actually releases the vector, and each of those is a tick the
+	// fleet cannot skip.
+	OccupancyGraceTicks int
 	// SequenceResetAt is the tick at which GitHub restarts the broker's
 	// message-id sequence, as it did for scale set 8077185082566234948 on
 	// 2026-08-01T18:32Z. Zero means the sequence is never restarted.
 	SequenceResetAt int
 }
 
+// simOccupancyBudget is the per-profile ceiling on how long ONE instance may
+// hold its resource vector (issue #223). Every simulated profile declares the
+// same one, and it is deliberately far above anything a HEALTHY job can reach:
+// a job runs simJobTicks (6) plus at most eventLongJob's 6*6, so the longest
+// legitimate job in this world is 42 ticks -- 21 virtual minutes -- and a boot
+// adds five more. Sixty virtual minutes is 120 ticks, nearly three times that,
+// so no long suite, slow boot, or delayed message can ever reach the ceiling.
+//
+// Only eventOverrunJob can, by construction: it adds a whole budget per Count.
+// That is the harness equivalent of the guard test -- the budget must be
+// unreachable by anything except the condition it exists to reclaim, or a green
+// sweep would prove only that the ceiling is loose.
+const simOccupancyBudget = 60 * time.Minute
+
 func simProfiles() map[domain.ProfileID]domain.Profile {
 	return map[domain.ProfileID]domain.Profile{
-		"small":   {ID: "small", Platform: domain.PlatformLinux, Route: "linux-small", Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}},
-		"medium":  {ID: "medium", Platform: domain.PlatformLinux, Route: "linux-medium", Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}},
-		"large":   {ID: "large", Platform: domain.PlatformLinux, Route: "linux-large", Resources: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}},
-		"xl":      {ID: "xl", Platform: domain.PlatformLinux, Route: "linux-xl", Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}},
-		"builder": {ID: "builder", Platform: domain.PlatformMacOS, Route: "macos-builder", Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}, MaxActive: 1},
-		"maestro": {ID: "maestro", Platform: domain.PlatformMacOS, Route: "macos-maestro", Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, MaxActive: 2},
+		"small":   {ID: "small", Platform: domain.PlatformLinux, Route: "linux-small", Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}, OccupancyBudget: simOccupancyBudget},
+		"medium":  {ID: "medium", Platform: domain.PlatformLinux, Route: "linux-medium", Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}, OccupancyBudget: simOccupancyBudget},
+		"large":   {ID: "large", Platform: domain.PlatformLinux, Route: "linux-large", Resources: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}, OccupancyBudget: simOccupancyBudget},
+		"xl":      {ID: "xl", Platform: domain.PlatformLinux, Route: "linux-xl", Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}, OccupancyBudget: simOccupancyBudget},
+		"builder": {ID: "builder", Platform: domain.PlatformMacOS, Route: "macos-builder", Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}, MaxActive: 1, OccupancyBudget: simOccupancyBudget},
+		"maestro": {ID: "maestro", Platform: domain.PlatformMacOS, Route: "macos-maestro", Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, MaxActive: 2, OccupancyBudget: simOccupancyBudget},
 	}
 }
 
@@ -158,15 +179,16 @@ func defaultWorld() worldConfig {
 			MixedProfileCohorts:    true,
 			ElasticHostEnvelope:    true,
 		},
-		Bindings:    simBindings(profiles),
-		Repos:       []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
-		Profiles:    sortedProfileIDs(profiles),
-		LivenessK:   12,
-		StarvationN: 3,
-		QuiesceQ:    40,
-		StrandedG:   10,
-		DrainChurnN: 1,
-		HearingH:    2,
+		Bindings:            simBindings(profiles),
+		Repos:               []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
+		Profiles:            sortedProfileIDs(profiles),
+		LivenessK:           12,
+		StarvationN:         3,
+		QuiesceQ:            40,
+		StrandedG:           10,
+		DrainChurnN:         1,
+		HearingH:            2,
+		OccupancyGraceTicks: 12,
 	}
 }
 
@@ -364,14 +386,39 @@ func (r simRecovery) JobActive(_ context.Context, instance operations.Instance) 
 	return job != nil && job.status == jobRunning, nil
 }
 
-// simInstances is the durable instance reader with one substitution: UpdatedAt
-// is rewritten to the VIRTUAL instant the row entered its current state.
+// simInstances is the durable instance reader with two substitutions, and they
+// are the ONLY places this harness rewrites a durable fact (ADR 0031).
 //
-// The store stamps updated_at from the process wall clock, and
+// UpdatedAt is rewritten to the VIRTUAL instant the row entered its current
+// state. The store stamps updated_at from the process wall clock, and
 // app.ProductionInventory derives AssignedSince and RunningSince from it. Under
 // a virtual clock every row would therefore look newborn and no assignment or
 // idle-runner deadline could ever be reached, hiding exactly the recovery paths
-// ADR 0028 was written about. Nothing else about the row is touched.
+// ADR 0028 was written about.
+//
+// CreatedAt is rewritten to the VIRTUAL instant the world first held the row.
+// app.ProductionInventory derives OccupiedSince from created_at — the one
+// per-instance age that must survive a state change (ADR 0036) — so the
+// occupancy clock is the third durable timestamp this harness's virtual clock
+// has to be able to move.
+//
+// It is worth being exact about why, because the reason is NOT the same as
+// UpdatedAt's. sqlite.Advance stamps updated_at from time.Now, so without the
+// first substitution no deadline could ever be reached. created_at is stamped by
+// sqlite.ApplyPlan from plan.CreatedAt, which reconcile.Controller takes from the
+// injected clock, so today it is already virtual and the budget would fire
+// without this line. That is an implementation detail of one INSERT, not a
+// contract: the sibling write in the same file reaches for the wall clock, and
+// if created_at ever followed it the occupancy budget would become unreachable
+// in simulation, property (k) would go permanently green, and nothing in this
+// package would say so. Stating the harness's own clock here makes the property
+// independent of that choice.
+//
+// It also makes the harness's ground truth and the production derivation the
+// SAME number, which matters because property (k) deliberately measures
+// occupancy from w.createdAt rather than from OccupiedSince: the oracle and the
+// scheduler must be able to disagree about the CONCLUSION without disagreeing
+// about the clock. Nothing else about either row is touched.
 type simInstances struct{ world *world }
 
 func (s simInstances) LiveInstances(ctx context.Context) ([]operations.Instance, error) {
@@ -380,15 +427,29 @@ func (s simInstances) LiveInstances(ctx context.Context) ([]operations.Instance,
 		return nil, err
 	}
 	for index := range instances {
+		s.world.noteCreated(instances[index].ID)
 		if since, ok := s.world.enteredAt[stateKey(instances[index])]; ok {
 			instances[index].UpdatedAt = since
 		}
+		instances[index].CreatedAt = s.world.createdAt[instances[index].ID]
 	}
 	return instances, nil
 }
 
 func stateKey(instance operations.Instance) string {
 	return instance.ID + "\x00" + string(instance.State)
+}
+
+// noteCreated records the virtual instant an instance row came into existence,
+// the first time the world sees it. Two callers race to be first and both are
+// legitimate: executeOperations claims the provisioning operation on the very
+// tick the plan created the row, and the inventory read observes it on the tick
+// after. The earliest sighting wins, so the recorded instant is the tick the
+// vector actually started being held.
+func (w *world) noteCreated(id string) {
+	if _, known := w.createdAt[id]; !known {
+		w.createdAt[id] = w.now
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -435,20 +496,29 @@ type world struct {
 	vms map[string]bool
 	// enteredAt records the virtual instant each instance entered each state.
 	enteredAt map[string]time.Time
+	// createdAt records the virtual instant each instance row was created, which
+	// is when it began holding its profile's vector. It is the harness's own
+	// ground truth for occupancy: property (k) measures from it, and simInstances
+	// substitutes it for the store's wall-clock created_at.
+	createdAt map[string]time.Time
 	// claimed maps an in-flight durable operation to the executor's progress.
 	claimed map[string]*simOperation
 
 	// Fault state, all set by trace events and decayed each tick.
-	tenantCPU        int
-	tenantMemoryMB   int
-	statisticsGap    int
-	restLag          int
-	hostProbeStale   int
-	tartUnavailable  int
-	messageDelay     int
-	delayWindow      int
-	slowBootNext     int
-	longJobNext      int
+	tenantCPU       int
+	tenantMemoryMB  int
+	statisticsGap   int
+	restLag         int
+	hostProbeStale  int
+	tartUnavailable int
+	messageDelay    int
+	delayWindow     int
+	slowBootNext    int
+	longJobNext     int
+	// overrunJobNext arms the issue #223 shape: the next job to start holds its
+	// runner for whole profile budgets rather than for a long suite's worth of
+	// work, so nothing but the occupancy reclaim can end it.
+	overrunJobNext   int
 	wedgeNextDrain   int
 	reassignSiblings bool
 	// substituteSiblings arms the issue #123 handoff: the broker gives a
@@ -574,8 +644,9 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 	w := &world{
 		ctx: ctx, cfg: cfg, trace: trace, store: store, now: simEpoch,
 		nextRunID: 1_000, nextReq: 500_000, nextMsgID: 1,
-		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, claimed: map[string]*simOperation{},
-		delivered: map[int]*simMessage{}, stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
+		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, createdAt: map[string]time.Time{},
+		claimed: map[string]*simOperation{}, delivered: map[int]*simMessage{},
+		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
 		drainAborts: map[string]int{}, known: map[string]finding{},
 	}
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
@@ -723,6 +794,9 @@ func (w *world) executeOperations() {
 				w.wedgedDrain[operation.ResourceID], w.wedgeNextDrain = w.wedgeNextDrain, 0
 			}
 		}
+		// The provisioning operation is claimed on the very tick the plan created
+		// its instance row, which is the earliest the world can see it exist.
+		w.noteCreated(operation.ResourceID)
 		w.claimed[operation.ID] = &simOperation{operation: operation, instance: operation.ResourceID, remaining: delay}
 	}
 	for _, id := range sortedOperationIDs(w.claimed) {
@@ -802,6 +876,15 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		// operation is finished either way.
 		return "", true
 	case operations.StateDraining:
+		if instance.DrainPhase == operations.DrainPhaseOccupancyBudget {
+			// executor.go's occupancy branch stops the guest BEFORE it deregisters,
+			// because GitHub will go on calling this runner busy for as long as the
+			// hung job runs and deregistering first could only retry until the
+			// operation dead-lettered with the vector still held. The mirror must be
+			// honest about the order: the stop happens here, ahead of the refusal
+			// gate below, and it is what ends the job.
+			w.stopOccupyingGuest(instance.ID)
+		}
 		if w.wedgedDrain[instance.ID] > 0 {
 			return "", false
 		}
@@ -888,6 +971,13 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 		}
 	case operations.DrainPhaseStoppedRecovery, operations.DrainPhaseInactiveRecovery:
 		return false
+	case operations.DrainPhaseOccupancyBudget:
+		// The one phase with nothing to re-verify. Every other cause claims that no
+		// work is happening and aborts when work turns out to be happening; here the
+		// work IS the premise, so an abort on busy evidence would make the budget
+		// unenforceable by construction (executor.go's occupancy branch, and its
+		// exemption from the deregister-refusal abort below it).
+		return false
 	}
 	// verifyRunnerIdle for an event drain, and the deregister refusal for a
 	// recovery drain, ask the same runner-keyed question of the same durable
@@ -932,6 +1022,31 @@ func (w *world) releaseRunner(name string) {
 			job.announced = map[operations.DemandEventKind]bool{operations.DemandJobAvailable: true}
 		case jobQueued, jobDone, jobCancelled:
 		}
+	}
+}
+
+// stopOccupyingGuest is the guest stop an occupancy-budget reclaim performs
+// before it deregisters: the ephemeral VM is asked to power down, and whatever
+// it was executing ends with it.
+//
+// GitHub's own answer to that is a lost-communication failure, so the job is
+// retired rather than re-queued -- which is the difference between this and
+// releaseRunner, where a runner that disappears hands its unstarted work back to
+// the queue. A hung job that came back queued would be spawned for again and
+// hang again, and the budget would have bought nothing.
+func (w *world) stopOccupyingGuest(name string) {
+	for _, job := range w.jobs {
+		if job.runner != name {
+			continue
+		}
+		switch job.status {
+		case jobAcquired, jobRunning:
+			job.status, job.finishedAt = jobCancelled, w.now
+		case jobQueued, jobDone, jobCancelled:
+		}
+	}
+	if _, exists := w.vms[name]; exists {
+		w.vms[name] = false
 	}
 }
 
