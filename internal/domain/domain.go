@@ -147,6 +147,10 @@ type Demand struct {
 	Platform  Platform
 	Event     Event
 	RunStatus RunStatus
+	// Priority is the tier this demand was classified into when it entered the
+	// queue (issue #224). The zero value is the default tier, so a fleet that
+	// declares no tiers plans exactly the aged FIFO it always did.
+	Priority Priority
 }
 
 type InstanceState string
