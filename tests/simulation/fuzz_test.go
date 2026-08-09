@@ -87,8 +87,7 @@ func sweep(t *testing.T, name string, cfg worldConfig) {
 // is reported by name rather than as an anonymous refusal.
 func knownFinding(item finding) bool {
 	switch item.Signature {
-	case sigCrossPlatformResidualArbitration, sigCountMaximizationOvertakesAgedWork,
-		sigReservedHeadHeldByARepositoryCap:
+	case sigCrossPlatformResidualArbitration, sigCountMaximizationOvertakesAgedWork:
 		return true
 	}
 	return false

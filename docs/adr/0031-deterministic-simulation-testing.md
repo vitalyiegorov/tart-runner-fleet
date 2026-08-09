@@ -170,20 +170,14 @@ change shape, and its fix PR arrives with a test that already describes it.
 
 An unsignatured violation of any property fails the build.
 
-Finding 7 was found this way by the sweep that added property (k) and issue
-#223's `overrun_job`, and it is a SCHEDULING defect rather than an occupancy one:
-it reproduces unchanged with every simulated profile's budget set to zero, which
-makes `occupancyExceeded` constantly false and `assignmentRecoveries`
-byte-identical to the code before that change. A reservation held by a head that
-a REPOSITORY CAP is blocking -- resource-feasible, cap-infeasible -- sterilizes
-the residual, and an unrelated repository's feasible work waits for as long as
-the cap holder runs. It is tracked in issue #226. The wedge lasts exactly as long
-as that holder runs, which is why no earlier sweep reached it: the longest
-healthy simulated job is forty-two ticks and `LivenessK` is twelve, so until a
-job could outlive its expectation no cap holder ran long enough to breach it.
-This is the second time the harness has produced a finding as a side effect of
-being extended, and it is the intended shape -- a generator that can reach a new
-state finds what lives there.
+Finding 7 -- a wedge behind a reserved head a REPOSITORY CAP, not the host, was
+holding -- is RETIRED PENDING issue #226, never fixed: no seed reproduces it
+since the third oracle refinement below, but that refinement judges a withheld
+reservation on the vector axis and not on the repository-cap axis, so the
+suspicion is that the oracle stopped being able to SEE the wedge rather than that
+the wedge stopped happening. A pin no seed reaches cannot be maintained; the
+question of whether the oracle is blind stays open in #226, and if it is, the
+signature and its characterization test come back.
 
 Three oracle refinements were needed to keep that promise honest. The first two
 were made with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md);

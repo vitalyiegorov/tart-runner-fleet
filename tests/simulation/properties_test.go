@@ -131,39 +131,6 @@ const sigCrossPlatformResidualArbitration = "cross_platform_residual_arbitration
 // outranks one aged large one.
 const sigCountMaximizationOvertakesAgedWork = "count_maximization_overtakes_aged_work"
 
-// sigReservedHeadHeldByARepositoryCap is FINDING 7, found by the sweep that
-// added property (k) and issue #223's overrun_job, and it is a SCHEDULING defect
-// rather than an occupancy one -- it reproduces unchanged with every profile's
-// occupancy budget set to zero, which makes occupancyExceeded constantly false
-// and assignmentRecoveries byte-identical to the code before that change.
-//
-// The observed condition is precise. Seed 67 of the container-node arm stalls
-// admission for more than LivenessK ticks in this state: c/repo is at its cap of
-// two with a `large` and a `medium` instance; the aged head holding the
-// reservation is a c/repo `xl` needing six vCPU, and the host has exactly six
-// free. The head is therefore RESOURCE-feasible and CAP-infeasible -- no amount
-// of freed CPU can admit it -- while `a/repo`'s four-vCPU `large`, from a
-// repository with no live instance at all, waits behind it.
-//
-// [ADR 0017](../../docs/adr/0017-infeasible-reservation-residual-backfill.md)
-// decided that a reservation whose head cannot be admitted must not sterilize
-// the host, and this is a state where it does. The exact mechanism is NOT
-// reduced here, and the signature deliberately does not claim one: a direct
-// PlanTick over the same instances, demands, and reservation admits the waiting
-// work, so this is not a property of one tick's inputs but of the cross-tick
-// composition that arm reaches. Naming a mechanism the reduction contradicts
-// would be worse than naming none.
-//
-// overrun_job is why the sweep reaches it now: the wedge lasts as long as the
-// cap holder runs, and until a job could outlive its expectation no cap holder
-// ran long enough to breach LivenessK.
-//
-// Per ADR 0031 this is not fixed in the pull request that found it: a harness
-// change and a scheduling change in one diff is how a harness becomes a place to
-// hide behaviour. It is tracked in issue #226 and tolerated only under this
-// exact signature.
-const sigReservedHeadHeldByARepositoryCap = "reserved_head_held_by_a_repository_cap"
-
 // tickObservation is the simulator's complete observable state for one tick. It
 // is the only thing property oracles read, so a property is a pure function of
 // observations rather than of harness internals.
@@ -1071,41 +1038,10 @@ func livenessChecker(cfg worldConfig) checker {
 			return nil
 		}
 		stalled = 0
-		return []finding{{Kind: findingWedge, Signature: wedgeSignature(cfg, observation),
-			Tick: observation.Tick,
+		return []finding{{Kind: findingWedge, Tick: observation.Tick,
 			Detail: fmt.Sprintf("no admission for %d ticks while %s was feasible\n%s",
 				cfg.LivenessK, since, w.dumpPlan(observation))}}
 	}
-}
-
-// wedgeSignature names the documented defect that explains a wedge, or the empty
-// string when none does — which is what makes an unexplained wedge fail the
-// build while an open finding does not. It is derived from configured caps and
-// observed instances only, never from the scheduler's reservation arithmetic, so
-// it cannot excuse a wedge by inheriting the reasoning that caused it.
-func wedgeSignature(cfg worldConfig, observation tickObservation) string {
-	reservation := observation.Plan.Next.Reservation
-	if reservation == nil {
-		return ""
-	}
-	// The head is held by a repository slot rather than by resources: its own
-	// repository is at its cap, while the vector it reserves is one the host
-	// could hand over right now. Freeing CPU cannot admit it, so reserving CPU
-	// for it starves everybody else for nothing.
-	repos := map[string]int{}
-	for _, instance := range observation.Instances {
-		if instance.ConsumesHostResources() && !instance.State.TearingDown() &&
-			instance.State != domain.InstanceOnlineIdle {
-			repos[instance.Repo]++
-		}
-	}
-	if repos[reservation.Demand.Repo] < repoCap(cfg, reservation.Demand.Repo) {
-		return ""
-	}
-	if !observation.Host.Available.CanFit(reservation.Resources) {
-		return ""
-	}
-	return sigReservedHeadHeldByARepositoryCap
 }
 
 // tearingDown reports whether any instance is already in the cleanup chain, or a
