@@ -11,7 +11,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | Command | Purpose |
 | --- | --- |
 | `status` | Complete controller, host pressure/admission, queue, instance, observation, and operation summary |
-| `queues` | Jobs and oldest age by bounded profile |
+| `queues` | Jobs and oldest age by bounded profile, by scope, and by priority tier when one is declared |
 | `instances` | VM count, vCPU, and memory by bounded profile |
 | `operations` | Retrying and dead durable-operation counts, the bounded failure code and worst attempt count for anything not progressing, and the identity of each parked dead letter |
 | `operations discharge` | Close one dead-lettered cleanup an operator has established can never complete; optionally retire the phantom instance row and its stopped VM |

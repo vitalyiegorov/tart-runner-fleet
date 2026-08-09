@@ -87,6 +87,13 @@ daemons that published only the level. The same two facts are exported as
 `fleet_host_swapout_rate_pages_per_second` and
 `fleet_host_swapout_rate_observed`.
 
+`scopeQueues[].tiers` is the priority-tier breakdown of one scope's queue: the
+tier each waiting demand was classified into, its depth, and its oldest enqueue
+time, ordered highest tier first. `default` is the tier every unmatched demand
+lands in. The array is additive and is absent both on daemons older than the
+feature and on a fleet that declares no tier, so an absent key means "no policy
+declared", never "no demand" (ADR 0037).
+
 `operations.failures` explains the counts. Each entry pairs an operation kind
 with one closed-vocabulary failure code — `<stage>` or `<stage>:<reason>`, for
 example `deregister:runner_busy`, `deregister:runner_forbidden`,

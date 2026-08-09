@@ -126,7 +126,7 @@ safe: they take a coherent snapshot over the admin socket and never open SQLite.
 | Read-only command | Purpose |
 | --- | --- |
 | `fleet status [--require-ready]` | Controller, host pressure, queues, instances, observations, operations |
-| `fleet queues` | Queued jobs and oldest age, per profile and per scope |
+| `fleet queues` | Queued jobs and oldest age, per profile, per scope, and per priority tier |
 | `fleet instances` | Live VM count, vCPU, and memory by profile |
 | `fleet operations` | Retrying and dead durable operations, plus each parked dead letter |
 | `fleet observations` | Freshness and age of every scheduler observation |
@@ -209,6 +209,29 @@ busy, and the budget is the ceiling that holds while the co-tenant is quiet.
 `fleet config validate` rejects a budget no exposed profile could ever fit, and
 a budget larger than the machine is refused at the host probe. See
 [Capping a node below its hardware](USAGE.md#capping-a-node-below-its-hardware-hostbudget).
+
+When one class of work has to outrank another -- a store release ahead of a pull
+request's E2E build -- declare it once instead of cancelling queued runs by hand:
+
+```json
+"priority": {
+  "escalateAfterSeconds": 1800,
+  "tiers": [
+    { "name": "release",
+      "match": [ { "workflowRef": "*/.github/workflows/release*.yml@*" } ] }
+  ]
+}
+```
+
+Tiers are ordered highest first and are matched against the repository,
+workflow ref, and job name the scale-set message already carries; anything
+unmatched lands in the default tier. `escalateAfterSeconds` is mandatory and is
+the bound: a waiting demand climbs one tier per threshold, so a declared tier
+costs everything below it at most rank x threshold of extra waiting and can
+never starve it. Aging still comes first, nothing is preempted, and `fleet
+queues` names the tier each waiting demand landed in. Omit the block and the
+fleet plans the aged FIFO it always did. See
+[ADR 0037](docs/adr/0037-a-declared-tier-orders-a-band-escalation-bounds-it.md).
 
 ```yaml
 # Xcode / Gradle release builds: heaviest single job, so it takes the whole
