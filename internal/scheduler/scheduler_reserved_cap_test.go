@@ -151,6 +151,78 @@ func TestCapHeldReservedHeadRefusesAPeerThatCouldTakeItsVector(t *testing.T) {
 	}
 }
 
+// TestTakesTheReservedVectorIsTheNoJumpRuleItself holds ADR 0017's guarantee at
+// the level of the predicate, so it survives whatever a future change decides a
+// reservation should lend.
+//
+// The vector-axis rows are the ones worth reading. They are the proof that
+// applying this filter on the axis where it can never bind costs nothing: a head
+// that does not fit `free` overflows it in some dimension, so a candidate inside
+// `free` is strictly smaller there and cannot contain the head's vector. Keeping
+// the filter on both axes is what turns "by construction" into "by rule".
+func TestTakesTheReservedVectorIsTheNoJumpRuleItself(t *testing.T) {
+	cfg := capHeldConfig()
+	reservation := &domain.Reservation{Demand: domain.DemandKey{Repo: "c/repo"}, Profile: "xl",
+		Resources: cfg.Profiles["xl"].Resources}
+
+	for _, test := range []struct {
+		profile domain.ProfileID
+		takes   bool
+		why     string
+	}{
+		{"xl", true, "an equal vector is exactly the job ADR 0017 forbids from jumping the queue"},
+		{"large", false, "4 CPU cannot hold a 6 CPU head"},
+		{"medium", false, "2 CPU cannot hold a 6 CPU head"},
+		{"small", false, "1 CPU cannot hold a 6 CPU head"},
+		{"builder", true, "8 CPU / 12288 MB contains the head's 6 CPU / 12288 MB whole"},
+		{"maestro", false, "4 CPU / 7168 MB is short on both terms"},
+	} {
+		demand := capHeldDemand(cfg, "a/repo", 1, time.Minute, test.profile)
+		if got := takesTheReservedVector(cfg, reservation, demand); got != test.takes {
+			t.Fatalf("%s (%v) takes the reserved %v = %v, want %v: %s", test.profile,
+				cfg.Profiles[test.profile].Resources, reservation.Resources, got, test.takes, test.why)
+		}
+	}
+}
+
+// TestReservedHeadAtRepositoryCapReadsTheSameOccupancyFeasibleWill pins the
+// other predicate against the one it must never disagree with. If this count
+// ever diverged from `feasible`'s, the scheduler could lend a vector on the
+// grounds that the cap holds the head while `feasible` was about to admit it.
+func TestReservedHeadAtRepositoryCapReadsTheSameOccupancyFeasibleWill(t *testing.T) {
+	cfg := capHeldConfig()
+	reservation := &domain.Reservation{Demand: domain.DemandKey{Repo: "c/repo"}, Profile: "xl",
+		Resources: cfg.Profiles["xl"].Resources}
+	unconfigured := &domain.Reservation{Demand: domain.DemandKey{Repo: "z/repo"}, Profile: "xl",
+		Resources: cfg.Profiles["xl"].Resources}
+
+	for _, test := range []struct {
+		name        string
+		reservation *domain.Reservation
+		occupied    map[string]int
+		want        bool
+	}{
+		{"under cap", reservation, map[string]int{"c/repo": 1}, false},
+		{"at cap", reservation, map[string]int{"c/repo": 2}, true},
+		{"no live instance at all", reservation, map[string]int{}, false},
+		// An unconfigured repository caps at one, exactly as `feasible` reads it
+		// through the same `repoCapLimit`, so a single live instance holds it.
+		{"an unconfigured repository caps at one", unconfigured, map[string]int{"z/repo": 1}, true},
+	} {
+		got := reservedHeadAtRepositoryCap(cfg, test.occupied, test.reservation)
+		if got != test.want {
+			t.Fatalf("%s: reservedHeadAtRepositoryCap = %v, want %v", test.name, got, test.want)
+		}
+		// The predicate is the head's own half of `feasible`: whenever it says
+		// the cap holds the head, `feasible` must refuse the head on that term.
+		admissible := feasible(test.reservation.Resources, cfg.LinuxCapacity,
+			test.reservation.Demand.Repo, test.occupied, nil, cfg.RepoCaps)
+		if got && admissible {
+			t.Fatalf("%s: the cap predicate and feasible() disagree about the same occupancy", test.name)
+		}
+	}
+}
+
 // containsDemandKey reports whether a spawn list names one demand.
 func containsDemandKey(keys []domain.DemandKey, want domain.DemandKey) bool {
 	for _, key := range keys {

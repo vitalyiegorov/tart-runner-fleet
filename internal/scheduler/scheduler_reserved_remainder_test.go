@@ -185,16 +185,28 @@ func TestBoundedHandoffWaveHonoursTheReservation(t *testing.T) {
 		name        string
 		headProfile domain.ProfileID
 		headRepoCap int
+		mac         domain.ProfileID
 		wantMac     bool
 	}{
-		{name: "an infeasible head lends the stranded residual", headProfile: "xl", headRepoCap: 4, wantMac: true},
-		{name: "a feasible head keeps its vector", headProfile: "large", headRepoCap: 1, wantMac: false},
+		{name: "an infeasible head lends the stranded residual",
+			headProfile: "xl", headRepoCap: 4, mac: "maestro", wantMac: true},
+		// ADR 0038: a head its repository cap holds out cannot use the vector it
+		// reserves, so it lends it to work it outranks. A `maestro`
+		// (4 CPU / 7168 MB) cannot take a `large`'s (4 CPU / 8192 MB) vector.
+		{name: "a cap-held head lends its vector to work it outranks",
+			headProfile: "large", headRepoCap: 1, mac: "maestro", wantMac: true},
+		// ...and never to work that could take the vector whole. A `builder`
+		// (6 CPU / 12288 MB) is exactly an `xl`, so admitting it would let a
+		// younger demand jump the oldest one — ADR 0017's no-jump guarantee,
+		// which is a RULE here rather than a by-product of the subtraction.
+		{name: "a cap-held head still refuses a peer that could take its vector",
+			headProfile: "xl", headRepoCap: 1, mac: "builder", wantMac: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := reservedRemainderConfig()
 			cfg.RepoCaps["b/repo"] = test.headRepoCap
 			head := profileDemand(cfg, "b/repo", 1, 65*time.Minute, test.headProfile)
-			mac := profileDemand(cfg, "mac-a", 2, 60*time.Minute, "maestro")
+			mac := profileDemand(cfg, "mac-a", 2, 60*time.Minute, test.mac)
 			// A busy maestro makes the host mixed, so the Linux head goes through
 			// planLinuxWithCoexistence; a live small in the head's repository is
 			// what blocks a head that would otherwise fit.
@@ -206,8 +218,8 @@ func TestBoundedHandoffWaveHonoursTheReservation(t *testing.T) {
 			if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
 				t.Fatalf("the aged head must hold its reservation, got %#v", plan.Next.Reservation)
 			}
-			if got := spawnsProfile(plan, "maestro"); got != test.wantMac {
-				t.Fatalf("bounded wave admitted maestro = %v, want %v: %#v", got, test.wantMac, plan.Operations)
+			if got := spawnsProfile(plan, test.mac); got != test.wantMac {
+				t.Fatalf("bounded wave admitted %s = %v, want %v: %#v", test.mac, got, test.wantMac, plan.Operations)
 			}
 			// The latch is written only by planLinuxHandoff's wave, so it proves
 			// WHICH pass decided — the remainder pass cannot set it.

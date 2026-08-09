@@ -178,21 +178,33 @@ func TestMixedLinuxHeadSkipsIncompatibleMacProfile(t *testing.T) {
 // the Linux planner reserves a vector for an aged repo-capped head, no macOS is
 // admitted into the reserved remainder.
 func TestMixedFillMacSkippedWhileReservationHeld(t *testing.T) {
-	reservedHead := demand("blocked", 1, 12*time.Minute, "large")
+	// The head is a `medium` (2 CPU / 4096 MB) its own repository's cap holds
+	// out, so ADR 0038 lends its vector rather than withholding it. What keeps
+	// the maestro (4 CPU / 7168 MB) out is therefore ADR 0017's no-jump rule and
+	// nothing else: a maestro could take the head's whole vector, so admitting it
+	// would let a younger demand jump the oldest one.
+	reservedHead := demand("blocked", 1, 12*time.Minute, "medium")
 	backfill := demand("a/repo", 2, time.Minute, "small")
 	maestro := demand("mac-a", 3, time.Minute, "maestro")
 	liveLarge := domain.Instance{ID: "large-1", Repo: "blocked", Platform: domain.PlatformLinux, Profile: "large",
 		Route: "legacy", Resources: mixedConfig().Profiles["large"].Resources, State: domain.InstanceRunning}
 	in := mixedInput(t, []domain.Demand{reservedHead, backfill, maestro}, []domain.Instance{liveLarge}, State{})
-	in.Config.RepoCaps["blocked"] = 1 // the aged large head is blocked by cap, so it reserves its vector
+	in.Config.RepoCaps["blocked"] = 1 // the aged head is blocked by cap, so it reserves its vector
 	plan := PlanTick(in)
 	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != reservedHead.Key {
 		t.Fatalf("expected a held reservation for the aged head: %#v", plan.Next.Reservation)
 	}
 	for _, op := range plan.Operations {
 		if op.Kind == OperationSpawn && op.Profile == "maestro" {
-			t.Fatalf("macOS admitted into a held Linux reservation remainder: %#v", plan.Operations)
+			t.Fatalf("macOS that could take the reserved head's whole vector admitted into the "+
+				"remainder: %#v", plan.Operations)
 		}
+	}
+	// The refusal above has to be the no-jump rule rather than an exhausted
+	// envelope, or this test proves nothing: the Linux `small` the head outranks
+	// is admitted on the very same tick, out of the very same lent vector.
+	if !containsDemandKey(spawnedKeys(plan), backfill.Key) {
+		t.Fatalf("a cap-held head lends its vector to work it outranks: %#v", plan.Operations)
 	}
 }
 

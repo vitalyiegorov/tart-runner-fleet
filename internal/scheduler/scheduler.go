@@ -885,9 +885,40 @@ func copyReservation(reservation *domain.Reservation) *domain.Reservation {
 // reservation contract is preserved by ordering, not by idleness: the reserved
 // head is re-checked FIRST on every later tick (see planLinux's reservedDemand
 // branch), so it wins the first vector large enough for it.
+//
+// A head its own REPOSITORY CAP holds out lends the same way, and for the same
+// reason (issue #226, ADR 0038). `feasible` folds two terms and `planLinux`
+// holds the reservation when either one refuses the head; the vector term has
+// had this release rule since 2026-07-25 and the cap term never did, although
+// ADR 0017's rationale transfers word for word — a head at its repository's cap
+// cannot start until one of that repository's own instances exits, whatever
+// backfill does. It is not waiting on backfill to stop either, and withholding
+// costs an idle vector the size of the starved profile for the entire runtime of
+// the blocking job (ADR 0029's units).
+//
+// On today's envelope arithmetic the two terms are exhaustive, which is worth
+// stating because it sizes the change. The head is judged in the starvation
+// envelope and backfill plans in the throttled one, and the first always
+// contains the second, so a head refused on the VECTOR can never satisfy
+// `free.Sub` here. The withheld branch was therefore only ever reachable for a
+// CAP-held head: issue #226 is not a corner of this function, it is the whole of
+// its remainder path.
+//
+// What is lent is bounded by ADR 0017's own promise that "no equal-or-larger job
+// can jump the queue". That promise is automatic while the lent capacity belongs
+// to a head that does not FIT it — a candidate inside `free` must be strictly
+// smaller than a head that overflows `free`. A cap-held head fits, so the
+// promise becomes `takesTheReservedVector` and is applied to every candidate
+// whenever anything beyond the remainder is lent: provably a no-op on the vector
+// axis, load-bearing on the cap axis.
 func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, baseCounts map[string]int, reservation *domain.Reservation, alreadySelected []domain.Demand) []Operation {
-	backfillCapacity, ok := free.Sub(reservation.Resources)
-	if !ok {
+	counts := cloneCounts(baseCounts)
+	for _, demand := range alreadySelected {
+		counts[demand.Key.Repo]++
+	}
+	backfillCapacity, fits := free.Sub(reservation.Resources)
+	lends := !fits || reservedHeadAtRepositoryCap(in.Config, counts, reservation)
+	if lends {
 		backfillCapacity = free
 	}
 	excluded := map[domain.DemandKey]bool{reservation.Demand: true}
@@ -896,23 +927,63 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 	}
 	var candidates []domain.Demand
 	for _, demand := range demands {
-		if !excluded[demand.Key] {
-			candidates = append(candidates, demand)
+		if excluded[demand.Key] {
+			continue
 		}
+		// Whatever is lent beyond `free - reservation` is lent only to work the
+		// head outranks. ADR 0017's queue-position guarantee is a rule here, not
+		// a by-product of the subtraction that used to imply it.
+		if lends && takesTheReservedVector(in.Config, reservation, demand) {
+			continue
+		}
+		candidates = append(candidates, demand)
 	}
 	// The backfill lane ranks its own candidates by the one order this package
 	// has: aged band first, priority tier inside each band.
 	ordered := priorityOrder(in, candidates)
-	counts := cloneCounts(baseCounts)
-	for _, demand := range alreadySelected {
-		counts[demand.Key.Repo]++
-	}
 	selected := exactSelect(in.Now, ordered, backfillCapacity, counts, in.Config)
 	operations := make([]Operation, 0, len(selected))
 	for _, demand := range selected {
 		operations = append(operations, spawnOperation(demand, nil))
 	}
 	return operations
+}
+
+// reservedHeadAtRepositoryCap reports whether the reserved head's OWN repository
+// cap is what holds it out of admission, rather than the resource envelope.
+//
+// This is the axis ADR 0017 never covered and ADR 0038 adds. The occupancy read
+// here is exactly the one `feasible` reads on the tick the head's cap slot
+// frees — live instances plus everything this plan already admits — so the two
+// predicates can never disagree about which axis is holding the head.
+func reservedHeadAtRepositoryCap(config Config, occupied map[string]int, reservation *domain.Reservation) bool {
+	return occupied[reservation.Demand.Repo] >= repoCapLimit(config.RepoCaps, reservation.Demand.Repo)
+}
+
+// takesTheReservedVector reports whether one candidate is equal to or larger
+// than the reserved head's vector, which is the job ADR 0017 promises can never
+// jump the queue:
+//
+//	Because anything admitted in this path is by construction too small to fit
+//	the reserved vector, no equal-or-larger job can jump the queue.
+//
+// "By construction" is exact, and it is a construction of the FIT TEST rather
+// than a rule anybody wrote down. It holds automatically while the only capacity
+// ever lent belongs to a head that does not fit `free`: such a head overflows
+// `free` in some dimension, and a candidate bounded by `free` is strictly
+// smaller there, so it cannot contain the head's vector. The moment a head that
+// DOES fit lends its vector — which is what a cap-held head does under ADR 0038
+// — the construction ends, because `free` now holds the head's whole vector and
+// an equal-or-larger peer could take it and invert the aged FIFO the reservation
+// exists to protect.
+//
+// So the construction becomes a predicate, applied wherever capacity beyond
+// `free - reservation` is lent, on BOTH axes. On the vector axis it is provably
+// a no-op, and keeping it there is the point: the guarantee is now stated in one
+// place and tested directly instead of being re-derived from arithmetic every
+// time somebody changes what a reservation lends.
+func takesTheReservedVector(config Config, reservation *domain.Reservation, demand domain.Demand) bool {
+	return config.Profiles[demand.Profile].Resources.CanFit(reservation.Resources)
 }
 
 // demandAged reports whether one demand has crossed the fairness age, using the
@@ -1488,6 +1559,19 @@ func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []do
 	if reservation == nil {
 		return demands
 	}
+	// When the head lends its vector instead of withholding it, the arithmetic
+	// that used to keep an equal-or-larger peer out is gone, and ADR 0017's
+	// no-jump rule takes its place explicitly: nothing that could take the head's
+	// vector whole may bid for it.
+	if reservedHeadLendsItsVector(in, reservation) {
+		kept := make([]domain.Demand, 0, len(demands))
+		for _, demand := range demands {
+			if !takesTheReservedVector(in.Config, reservation, demand) {
+				kept = append(kept, demand)
+			}
+		}
+		demands = kept
+	}
 	var sameRepo []domain.Demand
 	for _, demand := range demands {
 		if demand.Key.Repo == reservation.Demand.Repo {
@@ -1528,12 +1612,19 @@ func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []do
 // the head is re-checked first on every later tick, so it wins the first vector
 // large enough for it.
 //
+// A head its own REPOSITORY CAP holds out is charged nothing either, by the same
+// rule and for the same reason (ADR 0038): freeing the vector cannot admit such
+// a head, so withholding the vector protects nothing. What replaces the charge
+// is not nothing — reservedRemainderDemands drops any candidate that could take
+// the head's vector whole, which is ADR 0017's no-jump construction stated
+// rather than inherited.
+//
 // Feasibility is judged against the starvation-guard envelope, the same one
 // planLinux judges the head in, because only an aged head ever holds a
 // reservation. Judging a head as fitting is the fail-safe answer here: it
 // withholds the head's vector.
 func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
-	if reservation == nil || !linuxFreeAged(in).CanFit(reservation.Resources) {
+	if reservation == nil || reservedHeadLendsItsVector(in, reservation) {
 		return in
 	}
 	profile := in.Config.Profiles[reservation.Profile]
@@ -1545,6 +1636,20 @@ func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
 	})
 	in.Instances = domain.Fresh(charged, in.Instances.ObservedAt)
 	return in
+}
+
+// reservedHeadLendsItsVector reports whether a held reservation lends the vector
+// it names to a complementary pass instead of withholding it, on either of the
+// two axes that can hold a head out of admission.
+//
+// It is the single predicate chargeReservedHead and reservedRemainderDemands
+// both read, so the charge and the no-jump filter can never disagree about which
+// world they are in: whenever the vector is not charged, the filter is on.
+func reservedHeadLendsItsVector(in Input, reservation *domain.Reservation) bool {
+	if !linuxFreeAged(in).CanFit(reservation.Resources) {
+		return true
+	}
+	return reservedHeadAtRepositoryCap(in.Config, activeRepoCounts(in.Instances.Value), reservation)
 }
 
 // fillLinuxRemainder admits Linux work in the envelope left after the macOS head

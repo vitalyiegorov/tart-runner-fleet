@@ -1328,7 +1328,11 @@ func TestPersistentReservationBackfillRotatesAcrossRepos(t *testing.T) {
 	c1 := demand("c/repo", 3, time.Minute, "small")
 	live := []domain.Instance{{ID: "a-running", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "small", Route: "tiered", Resources: testConfig().Profiles["small"].Resources, State: domain.InstanceRunning}}
 	in := input([]domain.Demand{reserved, b1, c1}, live, State{})
-	in.Config.LinuxCapacity = domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 3}
+	// Two slots, one of them already live, so exactly one backfill fits per tick
+	// and the round-robin cursor is what decides which. Before ADR 0038 the
+	// remainder subtraction did that bounding, but a cap-held head lends its
+	// vector now, so the envelope has to state the bound itself.
+	in.Config.LinuxCapacity = domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 2}
 	in.Config.RepoCaps["a/repo"] = 1
 	in.Host = domain.Fresh(domain.Host{Available: in.Config.LinuxCapacity}, testNow)
 	first := PlanTick(in)
