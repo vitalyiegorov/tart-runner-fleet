@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,6 +26,53 @@ func TestStatusEnvelopeJSONContract(t *testing.T) {
 	for _, key := range []string{"apiVersion", "kind", "generatedAt", "revision", "data", "warnings"} {
 		if _, ok := decoded[key]; !ok {
 			t.Fatalf("missing %s: %s", key, encoded)
+		}
+	}
+}
+
+// TestEffectiveOccupancySupportsFleetV1Handoff pins the compatibility rule
+// EffectiveOccupancy documents. An older daemon never measured occupancy, so it
+// omits the field; a CLI that rendered that absence as a failing check would
+// report an incident on every fleet that has not been upgraded yet. Absence is
+// an unspecified check — OK with no reasons — while a daemon that did measure is
+// reported verbatim, including the reasons that name the starving hold.
+func TestEffectiveOccupancySupportsFleetV1Handoff(t *testing.T) {
+	got := (Status{}).EffectiveOccupancy()
+	if !got.OK || got.Reasons == nil || len(got.Reasons) != 0 {
+		t.Fatalf("omitted occupancy check = %#v, want an empty non-nil reason list", got)
+	}
+	want := Check{Reasons: []string{"instance trf-xl-05bbe1c83f21fcd6 of profile xl has held 6 cpu"}}
+	if got := (Status{OccupancyCheck: &want}).EffectiveOccupancy(); got.OK || len(got.Reasons) != 1 ||
+		got.Reasons[0] != want.Reasons[0] {
+		t.Fatalf("reported occupancy check = %#v", got)
+	}
+}
+
+// TestOccupancyRowsTravelAsAnAdditiveField proves the new per-instance rows are
+// additive: a fleet holding nothing omits them entirely, so an older fleetctl
+// parses byte-identically to what it always saw, while a fleet holding a vector
+// publishes every field an operator judges the hold by.
+func TestOccupancyRowsTravelAsAnAdditiveField(t *testing.T) {
+	var empty Status
+	encoded, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "occupancy") {
+		t.Fatalf("a fleet holding nothing named occupancy: %s", encoded)
+	}
+	held := Status{Occupancy: []Occupancy{{Instance: "trf-xl-05bbe1c83f21fcd6", Profile: "xl",
+		Repo: "rnw-community/rnw-community", CPU: 6, MemoryMiB: 12_288, AgeSeconds: 4500, BudgetSeconds: 2700,
+		Warned: true, OverBudget: true, StarvesQueuedDemand: true}}}
+	encoded, err = json.Marshal(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{`"instance":"trf-xl-05bbe1c83f21fcd6"`, `"profile":"xl"`,
+		`"repo":"rnw-community/rnw-community"`, `"cpu":6`, `"memoryMiB":12288`, `"ageSeconds":4500`,
+		`"budgetSeconds":2700`, `"warned":true`, `"overBudget":true`, `"starvesQueuedDemand":true`} {
+		if !strings.Contains(string(encoded), fragment) {
+			t.Fatalf("occupancy row missing %s: %s", fragment, encoded)
 		}
 	}
 }

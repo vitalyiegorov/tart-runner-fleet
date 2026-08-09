@@ -5,6 +5,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -86,6 +87,28 @@ type InstanceMetrics struct {
 	MemoryMiB int
 }
 
+// OccupancyMetric is one instance's hold on the resource vector its profile
+// reserves. It is deliberately per-instance rather than per-profile: the
+// condition it exists to make visible is a SINGLE instance holding a vector too
+// long (issue #223), and a per-profile aggregate averages that away. The set is
+// bounded by maxOccupancy for the same reason the dead-letter set is.
+type OccupancyMetric struct {
+	Instance   string
+	Profile    string
+	Repo       string
+	CPU        int
+	MemoryMiB  int
+	Age        time.Duration
+	Budget     time.Duration
+	Warned     bool
+	OverBudget bool
+	// StarvesQueuedDemand reports that queued work would fit inside the vector
+	// this instance is holding. An over-budget hold with nothing waiting is a
+	// slow job; an over-budget hold with work that fits behind it is the fleet
+	// incident, and only the second is worth waking anyone for.
+	StarvesQueuedDemand bool
+}
+
 type ObservationMetric struct {
 	Freshness  ObservationFreshness
 	ObservedAt time.Time
@@ -127,6 +150,7 @@ type Snapshot struct {
 	OperationFailures  []OperationFailure
 	ComponentFailures  []ComponentFailure
 	DeadLetters        []DeadLetter
+	Occupancy          []OccupancyMetric
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
@@ -164,6 +188,7 @@ type Health struct {
 	operationFailures  []OperationFailure
 	componentFailures  map[componentFailureKey]int
 	deadLetters        []DeadLetter
+	occupancy          []OccupancyMetric
 	hostPressure       HostPressureMetric
 	revision           uint64
 }
@@ -439,6 +464,60 @@ func (h *Health) SetDeadLetters(letters []DeadLetter) error {
 	return nil
 }
 
+// maxOccupancy bounds the published set. The fleet's physical envelope cannot
+// hold this many instances at once on any node it runs on, so an over-long set
+// is a producer fault rather than a busy host.
+const maxOccupancy = 32
+
+// SetOccupancy publishes how long each live instance has held its vector. It
+// replaces the whole set rather than merging, because an instance that released
+// its vector must disappear from the document; a merged map would keep
+// reporting a hold that has ended. An over-long or ungrammatical set is rejected
+// outright rather than truncated, so a rejected observation can never
+// masquerade as "nothing is holding anything for too long".
+func (h *Health) SetOccupancy(occupancy []OccupancyMetric) error {
+	if len(occupancy) > maxOccupancy {
+		return errInvalidMetric
+	}
+	recorded := make([]OccupancyMetric, 0, len(occupancy))
+	for _, metric := range occupancy {
+		if metric.Age < 0 || metric.Budget < 0 || metric.CPU < 0 || metric.MemoryMiB < 0 ||
+			!boundedResourceID.MatchString(metric.Instance) {
+			return errInvalidMetric
+		}
+		if _, ok := h.profiles[metric.Profile]; !ok {
+			return errUnknownProfile
+		}
+		recorded = append(recorded, metric)
+	}
+	h.mu.Lock()
+	h.revision++
+	h.occupancy = recorded
+	h.mu.Unlock()
+	return nil
+}
+
+// Occupancy reports whether any instance is holding its vector past its
+// profile's budget WHILE queued work that would fit it waits. Either half alone
+// is not a fault: a long job is allowed to be long, and a queue is allowed to be
+// deep. Together they are the 2026-08-09 incident, and they are what `fleet
+// doctor` must name while it is happening rather than afterwards (ADR 0036).
+func (h *Health) Occupancy() HealthResult {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	reasons := []string{}
+	for _, metric := range h.occupancy {
+		if !metric.OverBudget || !metric.StarvesQueuedDemand {
+			continue
+		}
+		reasons = append(reasons, "instance "+metric.Instance+" of profile "+metric.Profile+
+			" has held "+strconv.Itoa(metric.CPU)+" cpu / "+strconv.Itoa(metric.MemoryMiB)+
+			" MiB for "+metric.Age.Round(time.Second).String()+" against a "+
+			metric.Budget.Round(time.Second).String()+" budget, and queued work fits it")
+	}
+	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
+}
+
 func (h *Health) SetOperations(retries, dead int) error {
 	if retries < 0 || dead < 0 {
 		return errInvalidMetric
@@ -499,6 +578,7 @@ func (h *Health) Snapshot() Snapshot {
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
 		ComponentFailures: h.sortedComponentFailures(),
 		DeadLetters:       append([]DeadLetter(nil), h.deadLetters...),
+		Occupancy:         append([]OccupancyMetric(nil), h.occupancy...),
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }

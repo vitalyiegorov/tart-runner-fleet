@@ -123,7 +123,7 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 			return
 		}
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth())
+		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth(), health.Occupancy())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
@@ -178,7 +178,7 @@ func writeRefusal(response http.ResponseWriter, code string) {
 	}{adminapi.APIVersion, adminapi.RefusalKind, code})
 }
 
-func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready, queueSLO HealthResult) adminapi.StatusEnvelope {
+func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready, queueSLO, occupancy HealthResult) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
 		metric := snapshot.Queues[profile]
@@ -215,14 +215,16 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			ObservedAt: metric.ObservedAt, AgeSeconds: age.Seconds(), Detail: metric.Detail})
 	}
 	queueCheck := adminapi.Check{OK: queueSLO.OK, Reasons: nonNilStrings(queueSLO.Reasons)}
+	occupancyCheck := adminapi.Check{OK: occupancy.OK, Reasons: nonNilStrings(occupancy.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
 			LastLoopTick: snapshot.LastLoopTick, LastSuccessfulTick: snapshot.LastSuccessfulTick,
-			Live:     adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
-			Ready:    adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
-			QueueSLO: &queueCheck,
-			Queues:   queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
+			Live:      adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
+			Ready:     adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
+			QueueSLO:  &queueCheck,
+			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
+			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
 				DeadLetters: deadLetters(snapshot.DeadLetters)},
@@ -235,6 +237,23 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 				LoadAverage:          snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
 				AdmissionReason: snapshot.HostPressure.AdmissionReason},
 		}}
+}
+
+// occupancyRows projects each live instance's hold into the versioned DTO. Nil
+// stays nil so a fleet holding nothing emits exactly the document older clients
+// already saw.
+func occupancyRows(snapshot Snapshot) []adminapi.Occupancy {
+	if len(snapshot.Occupancy) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.Occupancy, 0, len(snapshot.Occupancy))
+	for _, metric := range snapshot.Occupancy {
+		rows = append(rows, adminapi.Occupancy{Instance: metric.Instance, Profile: metric.Profile, Repo: metric.Repo,
+			CPU: metric.CPU, MemoryMiB: metric.MemoryMiB, AgeSeconds: metric.Age.Seconds(),
+			BudgetSeconds: metric.Budget.Seconds(), Warned: metric.Warned, OverBudget: metric.OverBudget,
+			StarvesQueuedDemand: metric.StarvesQueuedDemand})
+	}
+	return rows
 }
 
 // operationFailures projects the bounded failure aggregate into the versioned
@@ -362,6 +381,34 @@ func renderMetrics(snapshot Snapshot) string {
 		}
 	}
 	fmt.Fprintf(&output, "fleet_operations_parked %d\n", parked)
+	if len(snapshot.Occupancy) > 0 {
+		// Per-instance rather than per-profile: the fault this exists for is ONE
+		// instance holding a vector too long (issue #223), and an aggregate averages
+		// exactly that away. Cardinality is bounded by maxOccupancy and by the
+		// physical envelope — an instance is a VM, not a request.
+		writeHelpType("fleet_instance_occupancy_seconds", "How long a live instance has held its profile's resource vector.", "gauge")
+		for _, metric := range snapshot.Occupancy {
+			fmt.Fprintf(&output, "fleet_instance_occupancy_seconds{profile=%s,instance=%s} %s\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), seconds(metric.Age))
+		}
+		// Publishing the budget beside the age is what makes the age readable: a
+		// forty-minute hold is healthy on a macOS builder and a leak on a small
+		// Linux profile, and an alert cannot tell them apart from the age alone.
+		// Zero is a profile with no ceiling, never a ceiling of zero.
+		writeHelpType("fleet_instance_occupancy_budget_seconds", "The occupancy ceiling of the instance's profile; 0 means no ceiling.", "gauge")
+		for _, metric := range snapshot.Occupancy {
+			fmt.Fprintf(&output, "fleet_instance_occupancy_budget_seconds{profile=%s,instance=%s} %s\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), seconds(metric.Budget))
+		}
+		// The alertable conjunction: over budget AND queued work would fit the held
+		// vector. Either half alone is ordinary; together they are the incident.
+		writeHelpType("fleet_instance_occupancy_starving", "1 when an over-budget instance holds a vector that queued demand would fit.", "gauge")
+		for _, metric := range snapshot.Occupancy {
+			fmt.Fprintf(&output, "fleet_instance_occupancy_starving{profile=%s,instance=%s} %d\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance),
+				boolGauge(metric.OverBudget && metric.StarvesQueuedDemand))
+		}
+	}
 	if len(snapshot.OperationFailures) > 0 {
 		// The failure code is closed vocabulary, so label cardinality is bounded and
 		// an alert can name the cause: a cleanup stuck on a busy-runner refusal reads

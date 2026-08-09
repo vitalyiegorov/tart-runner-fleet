@@ -35,10 +35,11 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 
 func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	queueSLO := status.Data.EffectiveQueueSLO()
+	occupancy := status.Data.EffectiveOccupancy()
 	state := "READY"
 	if !status.Data.Ready.OK {
 		state = "NOT READY"
-	} else if !queueSLO.OK {
+	} else if !queueSLO.OK || !occupancy.OK {
 		state = "DEGRADED"
 	}
 	fmt.Fprintf(output, "TART RUNNER FLEET — %s\n", state)
@@ -50,6 +51,9 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	if !queueSLO.OK {
 		fmt.Fprintf(output, "queue SLO: %s\n", joinReasons(queueSLO))
 	}
+	if !occupancy.OK {
+		fmt.Fprintf(output, "occupancy: %s\n", joinReasons(occupancy))
+	}
 	fmt.Fprintln(output, "\nHOST PRESSURE")
 	pressure := status.Data.HostPressure
 	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
@@ -59,6 +63,10 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	renderQueues(output, status.Data.Queues)
 	fmt.Fprintln(output, "\nINSTANCES")
 	renderInstances(output, status.Data.Instances)
+	if len(status.Data.Occupancy) > 0 {
+		fmt.Fprintln(output, "\nOCCUPANCY")
+		renderOccupancy(output, status.Data.Occupancy)
+	}
 	fmt.Fprintln(output, "\nOPERATIONS")
 	fmt.Fprintf(output, "retrying %d  dead %d\n", status.Data.Operations.Retrying, status.Data.Operations.Dead)
 	for _, failure := range status.Data.Operations.Failures {
@@ -157,6 +165,47 @@ func renderInstances(output io.Writer, instances []adminapi.Instance) {
 		fmt.Fprintf(table, "%s\t%d\t%d\t%d\n", instance.Profile, instance.Count, instance.CPU, instance.MemoryMiB)
 	}
 	_ = table.Flush()
+}
+
+// renderOccupancy prints how long each instance has held its vector against the
+// ceiling for its profile. STATE is the operator's whole judgement in one
+// column: ok, warn (past the warning fraction), over (past the ceiling), and
+// STARVING — the only one worth acting on immediately, because queued work
+// would fit the vector being held (ADR 0036).
+func renderOccupancy(output io.Writer, rows []adminapi.Occupancy) {
+	table := tabwriter.NewWriter(output, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(table, "INSTANCE\tPROFILE\tCPU\tMEMORY MiB\tHELD\tBUDGET\tSTATE")
+	for _, row := range rows {
+		fmt.Fprintf(table, "%s\t%s\t%d\t%d\t%s\t%s\t%s\n", row.Instance, row.Profile, row.CPU, row.MemoryMiB,
+			renderSeconds(row.AgeSeconds), renderBudget(row.BudgetSeconds), occupancyState(row))
+	}
+	_ = table.Flush()
+}
+
+func occupancyState(row adminapi.Occupancy) string {
+	switch {
+	case row.OverBudget && row.StarvesQueuedDemand:
+		return "STARVING"
+	case row.OverBudget:
+		return "over"
+	case row.Warned:
+		return "warn"
+	default:
+		return "ok"
+	}
+}
+
+func renderSeconds(value float64) string {
+	return (time.Duration(value) * time.Second).String()
+}
+
+// renderBudget prints an unbounded profile as a dash rather than as "0s", which
+// reads as a ceiling of zero — the opposite of what it means.
+func renderBudget(value float64) string {
+	if value <= 0 {
+		return "-"
+	}
+	return renderSeconds(value)
 }
 
 func renderObservations(output io.Writer, observations []adminapi.Observation) {
