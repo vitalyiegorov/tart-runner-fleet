@@ -258,3 +258,132 @@ func TestRemainderAdmitsNothingWhenNoQueuedProfileCanGrow(t *testing.T) {
 		t.Fatalf("only the Linux head may be admitted: %#v", got)
 	}
 }
+
+// oversizedRemainderConfig is the 2026-08-09 production shape: ten cores and
+// 24 GiB shared, a Linux `xl` and a macOS `builder` both 6 CPU / 12288 MB, and
+// a macOS `maestro` at 4 CPU / 7168 MB — the vector that fits the residual a
+// live `xl` leaves.
+func oversizedRemainderConfig() Config {
+	cfg := mixedProfileConfig()
+	cfg.LinuxCapacity = domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4}
+	cfg.RepoCaps = map[string]int{"a/repo": 4, "rnw/rnw": 4, "budgie/budgie": 4, "mac-a": 3}
+	cfg.Profiles["xl"] = domain.Profile{ID: "xl", Platform: domain.PlatformLinux, Route: "tiered",
+		Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}}
+	return cfg
+}
+
+// oversizedRemainderInput is a ten-core host holding one live six-core `xl`:
+// four cores and ~11 GiB measured free, the admission gate green.
+func oversizedRemainderInput(cfg Config, demands []domain.Demand, instances []domain.Instance) Input {
+	in := input(demands, instances, State{})
+	in.Config = cfg
+	in.Host = domain.Fresh(domain.Host{Capacity: domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+		Available: domain.Resources{CPU: 4, MemoryMB: 11_264, Slots: 4},
+		Pressure: domain.HostPressure{AvailableMemoryMB: 15_800, FreeDiskGB: 148, SwapUsedMB: 612,
+			CPUIdlePercent: 58.2, LoadAverage: 4.11, AdmissionAllowed: true, AdmissionReason: "capacity available"}},
+		testNow)
+	return in
+}
+
+// TestRemainderLooksPastAProfileTheResidualCannotHold is the 2026-08-09
+// production topology, and the third veto of the same seam.
+//
+// ADR 0024's amendment made the remainder pass name its target from the QUEUE
+// rather than from the live cohort, and made a profile at its `maxActive` end
+// its own turn rather than the pass. It did not do the same for the ENVELOPE,
+// which rule 3 of that record calls the veto: `remainderMacProfile` returns the
+// highest-priority queued profile with `maxActive` room whatever its vector, and
+// `fillMacRemainder` then offers `appendMacSpawns` that profile's demands and no
+// others. A `builder` that cannot fit the residual at all therefore consumes the
+// pass's single target and everything behind it waits.
+//
+// On the production Mac mini at ~18:10Z: a live Linux `xl` (6 CPU), an aged
+// Linux `xl` head holding the reservation, four free cores, an aged `builder`
+// (6 CPU) queued 38 minutes, and three `maestro` demands (4 CPU / 7168 MB)
+// queued 29 minutes that fit those four cores exactly. The builder won the
+// target, could not be admitted, and the maestros were refused every tick.
+//
+// A demand the residual cannot hold is not waiting on this pass — it is waiting
+// on the live instances holding what it needs, which is ADR 0017's rule. So it
+// ends its own turn, exactly as `maxActive` and an exhausted repository cap
+// already do, and the next profile takes the vector.
+func TestRemainderLooksPastAProfileTheResidualCannotHold(t *testing.T) {
+	cfg := oversizedRemainderConfig()
+	live := domain.Instance{ID: "trf-xl-live", Repo: "rnw/rnw", Platform: domain.PlatformLinux,
+		Profile: "xl", Route: "tiered", Resources: cfg.Profiles["xl"].Resources,
+		State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+	head := profileDemand(cfg, "rnw/rnw", 1, 74*time.Minute, "xl")
+	builder := profileDemand(cfg, "budgie/budgie", 2, 38*time.Minute, "builder")
+	maestros := []domain.Demand{
+		profileDemand(cfg, "rnw/rnw", 3, 30*time.Minute, "maestro"),
+		profileDemand(cfg, "rnw/rnw", 4, 30*time.Minute, "maestro"),
+		profileDemand(cfg, "rnw/rnw", 5, 29*time.Minute, "maestro"),
+	}
+	queue := append([]domain.Demand{head, builder}, maestros...)
+
+	plan := PlanTick(oversizedRemainderInput(cfg, queue, []domain.Instance{live}))
+	if got := spawnedKeys(plan); len(got) != 1 || got[0] != maestros[0].Key {
+		t.Fatalf("spawns = %#v, want exactly the oldest maestro: four free cores held three "+
+			"aged maestros behind a builder that cannot fit them", got)
+	}
+	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+		t.Fatalf("the aged Linux head lost its reservation: %#v", plan.Next.Reservation)
+	}
+	for _, operation := range plan.Operations {
+		if operation.Kind == OperationDrain {
+			t.Fatalf("the remainder pass must never drain: %#v", plan.Operations)
+		}
+	}
+}
+
+// TestRemainderKeepsAgedOrderWhenTheOlderProfileFits is the guard: looking past
+// a profile is permitted only when the residual cannot hold it. Give the same
+// topology a residual the older `builder` DOES fit and aged FIFO must stand —
+// the builder takes the vector and the younger maestros wait.
+func TestRemainderKeepsAgedOrderWhenTheOlderProfileFits(t *testing.T) {
+	cfg := oversizedRemainderConfig()
+	head := profileDemand(cfg, "rnw/rnw", 1, 74*time.Minute, "large")
+	builder := profileDemand(cfg, "budgie/budgie", 2, 38*time.Minute, "builder")
+	maestro := profileDemand(cfg, "rnw/rnw", 3, 30*time.Minute, "maestro")
+
+	in := oversizedRemainderInput(cfg, []domain.Demand{head, builder, maestro}, nil)
+	in.Host = domain.Fresh(domain.Host{Capacity: domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+		Available: domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+		Pressure: domain.HostPressure{AvailableMemoryMB: 15_800, FreeDiskGB: 148, SwapUsedMB: 612,
+			CPUIdlePercent: 58.2, LoadAverage: 4.11, AdmissionAllowed: true, AdmissionReason: "capacity available"}},
+		testNow)
+
+	plan := PlanTick(in)
+	if !spawnsProfile(plan, "builder") {
+		t.Fatalf("the older builder fits the residual and must take it: %#v", plan.Operations)
+	}
+	if spawnsProfile(plan, "maestro") {
+		t.Fatalf("a younger maestro must not overtake a builder the residual can hold: %#v", plan.Operations)
+	}
+}
+
+// TestRemainderLooksPastAProfileWhoseRepositoryIsCapped is the same rule on the
+// third axis `appendMacSpawns` already skips by: a target whose every queued
+// demand sits in a repository at its cap admits nothing, so it must end its own
+// turn rather than the pass.
+func TestRemainderLooksPastAProfileWhoseRepositoryIsCapped(t *testing.T) {
+	cfg := oversizedRemainderConfig()
+	cfg.RepoCaps["budgie/budgie"] = 1
+	live := domain.Instance{ID: "trf-medium-budgie", Repo: "budgie/budgie", Platform: domain.PlatformLinux,
+		Profile: "medium", Route: "tiered", Resources: cfg.Profiles["medium"].Resources,
+		State: domain.InstanceRunning, Power: domain.InstancePowerRunning}
+	head := profileDemand(cfg, "rnw/rnw", 1, 74*time.Minute, "small")
+	builder := profileDemand(cfg, "budgie/budgie", 2, 38*time.Minute, "builder")
+	maestro := profileDemand(cfg, "rnw/rnw", 3, 30*time.Minute, "maestro")
+
+	in := oversizedRemainderInput(cfg, []domain.Demand{head, builder, maestro}, []domain.Instance{live})
+	in.Host = domain.Fresh(domain.Host{Capacity: domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+		Available: domain.Resources{CPU: 8, MemoryMB: 20_480, Slots: 4},
+		Pressure: domain.HostPressure{AvailableMemoryMB: 15_800, FreeDiskGB: 148, SwapUsedMB: 612,
+			CPUIdlePercent: 58.2, LoadAverage: 4.11, AdmissionAllowed: true, AdmissionReason: "capacity available"}},
+		testNow)
+
+	if !spawnsProfile(PlanTick(in), "maestro") {
+		t.Fatalf("a capped repository must end its profile's turn, not the pass: %#v", PlanTick(in).Operations)
+	}
+}
