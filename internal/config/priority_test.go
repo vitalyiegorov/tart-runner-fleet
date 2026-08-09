@@ -79,6 +79,7 @@ func TestPriorityValidationRefusesUnsafeDeclarations(t *testing.T) {
 			{Name: "release", Match: []domain.PriorityMatch{{Scope: "a/b"}}},
 			{Name: "release", Match: []domain.PriorityMatch{{Scope: "c/d"}}},
 		}}, "duplicate"},
+		{"reserved tier name", Priority{EscalateAfter: time.Hour, Tiers: []domain.PriorityTier{{Name: "default", Match: []domain.PriorityMatch{{Scope: "a/b"}}}}}, "reserved"},
 		{"tier with no rule", Priority{EscalateAfter: time.Hour, Tiers: []domain.PriorityTier{{Name: "release"}}}, "at least one match rule"},
 		{"rule with no facet", Priority{EscalateAfter: time.Hour, Tiers: []domain.PriorityTier{{Name: "release", Match: []domain.PriorityMatch{{}}}}}, "declares none of scope"},
 		{"pattern too long", Priority{EscalateAfter: time.Hour, Tiers: []domain.PriorityTier{{Name: "release", Match: []domain.PriorityMatch{{Scope: long}}}}}, "too long"},

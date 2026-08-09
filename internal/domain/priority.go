@@ -69,6 +69,21 @@ type Priority struct {
 	Rank int
 }
 
+// DefaultPriorityTier is what the tier nobody declares is called on an operator
+// surface. The value carried in domain.Priority is empty, because the absence of
+// a classification IS the default tier; a renderer needs a word for it, and one
+// reserved word is better than each renderer inventing its own. Configuration
+// refuses a declared tier of this name so the vocabulary stays closed.
+const DefaultPriorityTier = "default"
+
+// PriorityTierName is the tier's name on an operator surface.
+func PriorityTierName(priority Priority) string {
+	if priority.Tier == "" {
+		return DefaultPriorityTier
+	}
+	return priority.Tier
+}
+
 // Declared reports whether an operator wrote any tier down at all.
 func (p PriorityPolicy) Declared() bool { return len(p.Tiers) > 0 }
 

@@ -178,6 +178,24 @@ func writeRefusal(response http.ResponseWriter, code string) {
 	}{adminapi.APIVersion, adminapi.RefusalKind, code})
 }
 
+// queueTiers projects the per-tier breakdown, ages computed against the same
+// snapshot instant as every other age in the document.
+func queueTiers(snapshot Snapshot, rows []QueueTierMetrics) []adminapi.QueueTier {
+	if len(rows) == 0 {
+		return nil
+	}
+	tiers := make([]adminapi.QueueTier, 0, len(rows))
+	for _, row := range rows {
+		age := time.Duration(0)
+		if !row.OldestEnqueuedAt.IsZero() && snapshot.Now.After(row.OldestEnqueuedAt) {
+			age = snapshot.Now.Sub(row.OldestEnqueuedAt)
+		}
+		tiers = append(tiers, adminapi.QueueTier{Tier: row.Tier, Jobs: row.Count,
+			OldestEnqueuedAt: row.OldestEnqueuedAt, OldestAgeSeconds: age.Seconds()})
+	}
+	return tiers
+}
+
 func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready, queueSLO, occupancy HealthResult) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
@@ -197,7 +215,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 		}
 		scopeQueues = append(scopeQueues, adminapi.ScopeQueue{Scope: row.Scope, Profile: row.Profile,
 			ScaleSetID: row.ScaleSetID, Jobs: row.Count, OldestEnqueuedAt: row.OldestEnqueuedAt,
-			OldestAgeSeconds: age.Seconds()})
+			OldestAgeSeconds: age.Seconds(), Tiers: queueTiers(snapshot, row.Tiers)})
 	}
 	instances := make([]adminapi.Instance, 0, len(snapshot.Instances))
 	for _, profile := range sortedKeys(snapshot.Instances) {

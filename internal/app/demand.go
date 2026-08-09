@@ -189,6 +189,22 @@ var ErrDemandStatisticsUnavailable = fmt.Errorf("demand statistics unavailable: 
 type QueueSummary struct {
 	Count  int
 	Oldest time.Time
+	// Tiers breaks the same queue down by the priority tier each waiting demand
+	// was classified into (issue #224). It is empty for a fleet that declares no
+	// tier, so an operator surface that never had this column keeps not having
+	// it. Counts are per tier by the same rule the whole summary uses: the
+	// broker's delivered demand and REST's complete view, whichever is larger.
+	Tiers []QueueTier
+}
+
+// QueueTier is one priority tier's share of one queue. Rank travels with the
+// name so every renderer can order tiers the way the operator declared them --
+// highest first -- without knowing the configuration.
+type QueueTier struct {
+	Tier   string
+	Rank   int
+	Count  int
+	Oldest time.Time
 }
 
 // ScopeQueue is one binding's queue depth attributed to the scope and scale set
@@ -200,6 +216,7 @@ type ScopeQueue struct {
 	ScaleSetID int64
 	Count      int
 	Oldest     time.Time
+	Tiers      []QueueTier
 }
 
 func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, executable []domain.Demand) (QueueSummary, error) {
@@ -211,6 +228,7 @@ func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, ex
 	}
 	store, ok := c.Store.(GitHubJobStore)
 	if !ok {
+		summary.Tiers = c.queueTiers(executable, nil)
 		return summary, nil
 	}
 	jobs, err := store.QueuedGitHubJobs(ctx, binding.durableKey())
@@ -225,7 +243,88 @@ func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, ex
 			summary.Oldest = job.CreatedAt
 		}
 	}
+	summary.Tiers = c.queueTiers(executable, jobs)
 	return summary, nil
+}
+
+// tierTally accumulates one lane's view of one tier.
+type tierTally struct {
+	rank   int
+	count  int
+	oldest time.Time
+}
+
+func (t *tierTally) observe(rank int, createdAt time.Time, exact bool) {
+	t.rank = rank
+	t.count++
+	if exact && !createdAt.IsZero() && (t.oldest.IsZero() || createdAt.Before(t.oldest)) {
+		t.oldest = createdAt
+	}
+}
+
+// queueTiers decomposes a queue by priority tier. A fleet that declares no tier
+// gets nothing: there is exactly one tier then, and a column that always reads
+// "default" is noise in the one view an operator reads during an incident.
+//
+// The two lanes are merged the way the aggregate merges them. The broker
+// delivers demand the fleet owns; REST observes the whole queue including jobs
+// no message has arrived for yet. Neither is a superset of the other in every
+// state, so a tier's depth is the larger count and its oldest is the earlier
+// exactly-known enqueue time.
+func (c DemandCoordinator) queueTiers(executable []domain.Demand, jobs []operations.GitHubJobObservation) []QueueTier {
+	if !c.Priority.Declared() {
+		return nil
+	}
+	delivered := make(map[string]*tierTally, len(c.Priority.Tiers)+1)
+	observed := make(map[string]*tierTally, len(c.Priority.Tiers)+1)
+	for _, demand := range executable {
+		tally(delivered, demand.Priority).observe(demand.Priority.Rank, demand.CreatedAt, true)
+	}
+	for _, job := range jobs {
+		priority := c.Priority.Classify(domain.DemandFacts{Repo: job.Owner + "/" + job.Repository,
+			WorkflowRef: job.WorkflowRef, JobName: job.DisplayName})
+		tally(observed, priority).observe(priority.Rank, job.CreatedAt, job.QueueTimeExact)
+	}
+	tiers := make([]QueueTier, 0, len(delivered)+len(observed))
+	for name, lane := range delivered {
+		tiers = append(tiers, mergeTier(name, lane, observed[name]))
+	}
+	for name, lane := range observed {
+		if delivered[name] == nil {
+			tiers = append(tiers, mergeTier(name, lane, nil))
+		}
+	}
+	// Highest tier first, then by name, so the order is the operator's and never
+	// a map iteration's.
+	sort.Slice(tiers, func(i, j int) bool {
+		if tiers[i].Rank != tiers[j].Rank {
+			return tiers[i].Rank > tiers[j].Rank
+		}
+		return tiers[i].Tier < tiers[j].Tier
+	})
+	return tiers
+}
+
+func tally(lanes map[string]*tierTally, priority domain.Priority) *tierTally {
+	name := domain.PriorityTierName(priority)
+	if lanes[name] == nil {
+		lanes[name] = &tierTally{}
+	}
+	return lanes[name]
+}
+
+func mergeTier(name string, delivered, observed *tierTally) QueueTier {
+	tier := QueueTier{Tier: name, Rank: delivered.rank, Count: delivered.count, Oldest: delivered.oldest}
+	if observed == nil {
+		return tier
+	}
+	if observed.count > tier.Count {
+		tier.Count = observed.count
+	}
+	if !observed.oldest.IsZero() && (tier.Oldest.IsZero() || observed.oldest.Before(tier.Oldest)) {
+		tier.Oldest = observed.oldest
+	}
+	return tier
 }
 
 // ReconcileQueuedJobs adds REST's complete queue view without granting it

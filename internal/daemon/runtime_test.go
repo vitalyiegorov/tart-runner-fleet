@@ -2328,3 +2328,30 @@ type recordingFailureCounter struct{ calls []failureCall }
 func (r *recordingFailureCounter) RecordComponentFailure(component, reason string) {
 	r.calls = append(r.calls, failureCall{component: component, reason: reason})
 }
+
+// TestEngineTickerPublishesThePriorityTierBreakdown proves the classification
+// reaches the operator surface: a scope queue row carries the tiers its waiting
+// demand landed in (issue #224).
+func TestEngineTickerPublishesThePriorityTierBreakdown(t *testing.T) {
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}, CriticalObservations: []string{"scheduler"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	ticker := engineTicker{health: health, profiles: []string{"builder"}}
+	ticker.recordMetrics(app.TickResult{HostMode: domain.HostMacOS, ScopeQueues: []app.ScopeQueue{
+		{Scope: "vitalyiegorov", Profile: "builder", ScaleSetID: 7, Count: 3, Oldest: now.Add(-time.Hour),
+			Tiers: []app.QueueTier{
+				{Tier: "release", Rank: 1, Count: 1, Oldest: now.Add(-time.Hour)},
+				{Tier: "default", Count: 2, Oldest: now.Add(-30 * time.Minute)},
+			}},
+	}})
+
+	rows := health.Snapshot().ScopeQueues
+	if len(rows) != 1 || len(rows[0].Tiers) != 2 {
+		t.Fatalf("published rows = %#v", rows)
+	}
+	if rows[0].Tiers[0].Tier != "release" || rows[0].Tiers[0].Rank != 1 || rows[0].Tiers[1].Count != 2 {
+		t.Fatalf("published tiers = %#v", rows[0].Tiers)
+	}
+}

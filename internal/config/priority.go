@@ -67,6 +67,9 @@ func (p Priority) validate() error {
 		if !priorityTierGrammar.MatchString(tier.Name) {
 			return fmt.Errorf("invalid priority tier name %q; a tier name is lower-case letters, digits, and dashes", tier.Name)
 		}
+		if tier.Name == domain.DefaultPriorityTier {
+			return fmt.Errorf("priority tier %q is reserved for the tier every unmatched demand lands in", domain.DefaultPriorityTier)
+		}
 		if seen[tier.Name] {
 			return fmt.Errorf("duplicate priority tier %q", tier.Name)
 		}
