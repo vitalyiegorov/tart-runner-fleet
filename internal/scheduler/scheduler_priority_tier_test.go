@@ -115,17 +115,77 @@ func TestEscalationIsInertWithoutAThreshold(t *testing.T) {
 	}
 }
 
-// TestEscalationLetsADefaultTierDemandOvertakeAStreamOfReleases is the
-// starvation guard stated as an ordering fact: once the waiter is older than the
-// release by the tier gap times the threshold, it is planned first.
-func TestEscalationLetsADefaultTierDemandOvertakeAStreamOfReleases(t *testing.T) {
+// TestEscalationLetsADefaultTierDemandOvertakeABacklogOfReleases is the
+// starvation guard stated as an ordering fact. Both demands are aged, so the
+// aged band cannot separate them and only the tier can; the waiter wins because
+// ninety-five minutes of escalation have lifted it to the release's own rank,
+// where being older decides.
+func TestEscalationLetsADefaultTierDemandOvertakeABacklogOfReleases(t *testing.T) {
 	waiter := demand("a/repo", 1, 95*time.Minute, "builder")
-	release := tiered(demand("b/repo", 2, time.Minute, "builder"), "release", 3)
+	release := tiered(demand("b/repo", 2, 6*time.Minute, "builder"), "release", 3)
 	in := input([]domain.Demand{release, waiter}, nil, State{})
 	in.Config.PriorityEscalation = 30 * time.Minute
 
 	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{waiter.Key}) {
 		t.Fatalf("escalated order = %#v, want the starved demand %#v", got, waiter.Key)
+	}
+	// Without escalation the same queue hands the slot to the release forever.
+	in.Config.PriorityEscalation = 0
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{release.Key}) {
+		t.Fatalf("unescalated order = %#v, want the release %#v", got, release.Key)
+	}
+}
+
+// TestAgingRemainsTheOutermostKey pins the band structure a tier lives inside.
+// ADR 0004 calls aging the absolute starvation guard, and a declared tier
+// decides between demands that have waited comparably -- not between a fresh job
+// and one that is already past the fairness age.
+func TestAgingRemainsTheOutermostKey(t *testing.T) {
+	freshRelease := tiered(demand("a/repo", 1, time.Minute, "builder"), "release", 2)
+	agedStandard := demand("b/repo", 2, 10*time.Minute, "builder")
+	in := input([]domain.Demand{freshRelease, agedStandard}, nil, State{})
+	in.Config.PriorityEscalation = time.Hour
+
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{agedStandard.Key}) {
+		t.Fatalf("band order = %#v, want the aged demand %#v", got, agedStandard.Key)
+	}
+}
+
+// TestAReservationYieldsToATierThatEscalatedAboveIt is the defect the simulator
+// found on the tiered arm's seed 1. A reservation is derived from the aged
+// band's head, so the test that decides whether it still heads the queue has to
+// be the aged band's own rule. Comparing ages alone kept obeying a reservation
+// the tier order had already overtaken -- the 2026-08-09 incident returning
+// through the mechanism that exists to protect the head.
+func TestAReservationYieldsToATierThatEscalatedAboveIt(t *testing.T) {
+	reserved := demand("c/repo", 1, 8*time.Minute, "large")
+	release := tiered(demand("a/repo", 2, 6*time.Minute, "large"), "release", 1)
+	prior := State{Reservation: &domain.Reservation{Demand: reserved.Key, Profile: reserved.Profile,
+		Resources: testConfig().Profiles["large"].Resources, Since: testNow.Add(-time.Minute)}}
+	in := input([]domain.Demand{reserved, release}, nil, prior)
+	in.Config.PriorityEscalation = 5 * time.Minute
+	in.Config.LinuxCapacity = domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}
+	in.Host = domain.Fresh(domain.Host{Available: in.Config.LinuxCapacity}, testNow)
+
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{release.Key}) {
+		t.Fatalf("reserved head = %#v, want the escalated release %#v", got, release.Key)
+	}
+}
+
+// TestAReservationSurvivesEqualTierWork keeps the ADR 0017 contract intact where
+// no tier separates the two: the older reserved head still wins its vector.
+func TestAReservationSurvivesEqualTierWork(t *testing.T) {
+	reserved := demand("c/repo", 1, 8*time.Minute, "large")
+	other := demand("a/repo", 2, 6*time.Minute, "large")
+	prior := State{Reservation: &domain.Reservation{Demand: reserved.Key, Profile: reserved.Profile,
+		Resources: testConfig().Profiles["large"].Resources, Since: testNow.Add(-time.Minute)}}
+	in := input([]domain.Demand{reserved, other}, nil, prior)
+	in.Config.PriorityEscalation = 5 * time.Minute
+	in.Config.LinuxCapacity = domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}
+	in.Host = domain.Fresh(domain.Host{Available: in.Config.LinuxCapacity}, testNow)
+
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{reserved.Key}) {
+		t.Fatalf("reserved head = %#v, want %#v", got, reserved.Key)
 	}
 }
 
