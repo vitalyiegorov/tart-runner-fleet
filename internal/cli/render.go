@@ -22,6 +22,7 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 	case "queues":
 		renderQueues(output, status.Data.Queues)
 		renderScopeQueues(output, status.Data.ScopeQueues)
+		renderQueueTiers(output, status.Data.ScopeQueues)
 	case "instances":
 		renderInstances(output, status.Data.Instances)
 	case "operations":
@@ -156,6 +157,28 @@ func renderScopeQueues(output io.Writer, rows []adminapi.ScopeQueue) {
 			formatAge(row.OldestAgeSeconds))
 	}
 	_ = table.Flush()
+}
+
+// renderQueueTiers prints which priority tier the waiting demand of each scope
+// landed in. It is a third table because it answers a third question -- "why is
+// this one behind that one" -- and it is printed only when a policy is actually
+// declared, so a fleet with no tiers renders exactly what it always did.
+func renderQueueTiers(output io.Writer, rows []adminapi.ScopeQueue) {
+	printed := false
+	table := tabwriter.NewWriter(output, 0, 2, 2, ' ', 0)
+	for _, row := range rows {
+		for _, tier := range row.Tiers {
+			if !printed {
+				fmt.Fprintln(table, "SCOPE\tPROFILE\tTIER\tJOBS\tOLDEST")
+				printed = true
+			}
+			fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%s\n", row.Scope, row.Profile, tier.Tier, tier.Jobs,
+				formatAge(tier.OldestAgeSeconds))
+		}
+	}
+	if printed {
+		_ = table.Flush()
+	}
 }
 
 func renderInstances(output io.Writer, instances []adminapi.Instance) {

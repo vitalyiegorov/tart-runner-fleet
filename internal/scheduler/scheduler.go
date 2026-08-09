@@ -57,6 +57,18 @@ type Config struct {
 	// The zero vector is unset and imposes no bound, so an omitted setting is
 	// today's behavior byte-for-byte.
 	HostBudget domain.Resources
+	// PriorityEscalation is how long a demand waits before it climbs one
+	// priority tier (issue #224). It is the mandatory other half of tiers: a
+	// declared tier is a way for one class of work to overtake another, and
+	// without escalation a stream of high-tier arrivals would starve the default
+	// tier forever. With it, a waiting demand outranks anything of tier rank N
+	// once it is N*PriorityEscalation older, so the extra wait a tier can impose
+	// is bounded by configuration rather than by luck.
+	//
+	// Zero disables escalation, which is only ever correct when no tier is
+	// declared -- every demand is then rank zero and the order is aged FIFO.
+	// `fleet config validate` refuses tiers without a threshold.
+	PriorityEscalation time.Duration
 }
 
 type State struct {
@@ -594,7 +606,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		return plan
 	}
 
-	ordered := youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)
+	ordered := youngPriorityOrder(in, young, in.Prior.DRRCursor, in.Config)
 	selected := exactSelect(in.Now, ordered, free, baseCounts, in.Config)
 	for _, candidate := range selected {
 		plan.Operations = append(plan.Operations, spawnOperation(candidate, nil))
@@ -824,11 +836,27 @@ func reservationStillHeadsQueue(in Input, demands []domain.Demand, reserved doma
 		if demand.Key == reserved.Key || !demandAged(in.Now, in.Config.FairnessAge, demand) {
 			continue
 		}
-		if demandLess(demand, reserved) {
+		if outranksReservation(in, demand, reserved) {
 			return false
 		}
 	}
 	return true
+}
+
+// outranksReservation asks the aged band's own question of two aged demands:
+// higher priority tier first, then older first. It must be the aged band's rule
+// and not age alone, or a reservation made before a tier escalated would keep
+// being obeyed after priorityOrder stopped agreeing with it -- which is the
+// 2026-08-09 incident reappearing through the mechanism that exists to protect
+// the head (issue #224). With no tier declared the tiers are equal and this is
+// demandLess, exactly as it was.
+func outranksReservation(in Input, candidate, reserved domain.Demand) bool {
+	candidateTier := effectiveTier(in.Now, candidate, in.Config)
+	reservedTier := effectiveTier(in.Now, reserved, in.Config)
+	if candidateTier != reservedTier {
+		return candidateTier > reservedTier
+	}
+	return demandLess(candidate, reserved)
 }
 
 func copyReservation(reservation *domain.Reservation) *domain.Reservation {
@@ -872,8 +900,9 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 			candidates = append(candidates, demand)
 		}
 	}
-	aged, young := splitAged(in.Now, in.Config.FairnessAge, candidates)
-	ordered := append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)...)
+	// The backfill lane ranks its own candidates by the one order this package
+	// has: aged band first, priority tier inside each band.
+	ordered := priorityOrder(in, candidates)
 	counts := cloneCounts(baseCounts)
 	for _, demand := range alreadySelected {
 		counts[demand.Key.Repo]++
@@ -903,15 +932,75 @@ func splitAged(now time.Time, age time.Duration, demands []domain.Demand) (aged,
 	return aged, young
 }
 
+// effectiveTier is a demand's priority tier after aging escalation: the tier
+// configuration classified it into, plus one rank for every whole
+// PriorityEscalation it has waited.
+//
+// Escalation is what makes tiers safe. A tier alone is a licence for one class
+// of work to overtake another indefinitely; escalation converts that into a
+// bounded overtaking window, because a waiting demand outranks anything of rank
+// N once it is N*PriorityEscalation older. It is monotonic by construction --
+// floor(wait / threshold) never falls -- so a demand can never lose ground it
+// has already gained, and two demands of one tier stay in age order because they
+// escalate together.
+//
+// A demand with no creation time cannot be aged; it keeps the rank it was
+// classified with, exactly as demandAged refuses to age it.
+func effectiveTier(now time.Time, demand domain.Demand, config Config) int {
+	if config.PriorityEscalation <= 0 || demand.CreatedAt.IsZero() {
+		return demand.Priority.Rank
+	}
+	waited := now.Sub(demand.CreatedAt)
+	if waited <= 0 {
+		return demand.Priority.Rank
+	}
+	return demand.Priority.Rank + int(waited/config.PriorityEscalation)
+}
+
+// priorityOrder sorts by (tier, age) INSIDE each of ADR 0004's bands. The band
+// structure is untouched -- aged global FIFO, then young control-plane, then
+// young standard -- and the priority tier is the first key within a band, with
+// age the second.
+//
+// Aging stays the outermost key deliberately. ADR 0004 calls aging the absolute
+// starvation guard and this change does not demote it: a declared tier decides
+// between demands that have waited comparably, not between a fresh job and one
+// that has been queued past the fairness age. That is also what keeps the
+// allocators honest -- planLinux re-derives this same aged/young split from the
+// list priorityOrder hands it, so a tier that reordered the bands themselves
+// would be silently discarded there (the simulator found exactly that, as a
+// tier_inversion on the tiered arm's seed 1).
+//
+// Within the aged band a tier is still decisive, which is the 2026-08-09
+// incident: both the release and the pull request's E2E build had waited over an
+// hour, so both were aged, and only the tier could tell them apart.
+//
+// With no tier declared every demand has effective tier zero, every band has one
+// group, and this is byte-for-byte the order this function produced before
+// issue #224.
 func priorityOrder(in Input, demands []domain.Demand) []domain.Demand {
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
-	return append(aged, youngPriorityOrder(young, in.Prior.DRRCursor, in.Config)...)
+	return append(byTier(in, aged), youngPriorityOrder(in, young, in.Prior.DRRCursor, in.Config)...)
+}
+
+// byTier orders one band by effective priority tier, highest first. The sort is
+// stable, so demands of one tier keep the order the band already had -- which is
+// age for the aged band and the throughput lane's own order for a young one.
+func byTier(in Input, demands []domain.Demand) []domain.Demand {
+	if len(demands) < 2 {
+		return demands
+	}
+	ordered := append([]domain.Demand(nil), demands...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return effectiveTier(in.Now, ordered[i], in.Config) > effectiveTier(in.Now, ordered[j], in.Config)
+	})
+	return ordered
 }
 
 // youngPriorityOrder implements two bounded lanes. Control-plane work can
 // bypass only young standard work; aged global FIFO is assembled by
 // priorityOrder before either lane and therefore remains absolute.
-func youngPriorityOrder(demands []domain.Demand, cursor string, config Config) []domain.Demand {
+func youngPriorityOrder(in Input, demands []domain.Demand, cursor string, config Config) []domain.Demand {
 	controlPlane := make([]domain.Demand, 0, len(demands))
 	standard := make([]domain.Demand, 0, len(demands))
 	for _, demand := range demands {
@@ -921,7 +1010,8 @@ func youngPriorityOrder(demands []domain.Demand, cursor string, config Config) [
 			standard = append(standard, demand)
 		}
 	}
-	return append(throughputOrder(controlPlane, cursor, config), throughputOrder(standard, cursor, config)...)
+	return append(byTier(in, throughputOrder(controlPlane, cursor, config)),
+		byTier(in, throughputOrder(standard, cursor, config))...)
 }
 
 type throughputBucket struct {
@@ -1046,12 +1136,11 @@ func exactSelect(now time.Time, candidates []domain.Demand, free domain.Resource
 	// higher priority. Count maximization is a throughput optimization that
 	// must apply only WITHIN a band; it must never admit a larger count of
 	// lower-priority work while a feasible higher-priority demand is deferred.
-	bands := make([]int, len(candidates))
+	bands := admissionBands(now, candidates, config)
 	numBands := 0
-	for i := range candidates {
-		bands[i] = schedulingBand(now, candidates[i], config)
-		if bands[i]+1 > numBands {
-			numBands = bands[i] + 1
+	for _, band := range bands {
+		if band+1 > numBands {
+			numBands = band + 1
 		}
 	}
 	var best []int
@@ -1100,6 +1189,39 @@ func exactSelect(now time.Time, candidates []domain.Demand, free domain.Resource
 //
 // priorityOrder builds exactly these three groups in exactly this order, so a
 // candidate list and its band vector now say the same thing.
+// admissionBands is the band vector priorityOrder's ordering implies: ADR 0004's
+// three bands are the major key and the priority tier is the minor one, which is
+// exactly the composition priorityOrder makes -- split by age, order each band by
+// tier.
+//
+// Tiers are compressed to the ranks actually present before they are folded in,
+// so the band space stays proportional to the queue rather than to how long its
+// oldest demand has been escalating. With one tier present every band index is
+// schedulingBand's own, which is what keeps an undeclared policy from moving a
+// single admission.
+func admissionBands(now time.Time, candidates []domain.Demand, config Config) []int {
+	tiers := make([]int, len(candidates))
+	present := make([]int, 0, len(candidates))
+	seen := make(map[int]bool, len(candidates))
+	for i := range candidates {
+		tiers[i] = effectiveTier(now, candidates[i], config)
+		if !seen[tiers[i]] {
+			seen[tiers[i]] = true
+			present = append(present, tiers[i])
+		}
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(present)))
+	rank := make(map[int]int, len(present))
+	for index, tier := range present {
+		rank[tier] = index
+	}
+	bands := make([]int, len(candidates))
+	for i := range candidates {
+		bands[i] = schedulingBand(now, candidates[i], config)*len(present) + rank[tiers[i]]
+	}
+	return bands
+}
+
 func schedulingBand(now time.Time, demand domain.Demand, config Config) int {
 	if demandAged(now, config.FairnessAge, demand) {
 		return 0

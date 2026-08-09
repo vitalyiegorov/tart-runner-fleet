@@ -382,6 +382,10 @@ type Config struct {
 	Guards          Guards
 	SessionRecovery SessionRecovery
 	Targets         []Target
+	// Priority declares which demand outranks which and how fast a waiting
+	// demand escalates (issue #224). An absent block is the fleet this code
+	// always was: one default tier and aged FIFO.
+	Priority Priority
 }
 
 type wireExecutor struct {
@@ -446,6 +450,10 @@ type wireConfig struct {
 	} `json:"macosBurst"`
 	GitHub  GitHub   `json:"github"`
 	Targets []Target `json:"targets"`
+	// Priority is a pointer so a fleet that declares no tier encodes no key at
+	// all: a release older than issue #224 decodes with DisallowUnknownFields
+	// and would refuse the block outright.
+	Priority *wirePriority `json:"priority,omitempty"`
 }
 
 func Decode(r io.Reader) (Config, error) {
@@ -478,6 +486,7 @@ func Decode(r io.Reader) (Config, error) {
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
 		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), Targets: normalizeTargets(w.Targets),
+		Priority: decodePriority(w.Priority),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -523,6 +532,10 @@ func Encode(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	priority, err := encodePriority(cfg.Priority)
+	if err != nil {
+		return err
+	}
 
 	wire := wireConfig{
 		BaseVM: cfg.Linux.BaseVM, VMPrefix: cfg.Linux.VMPrefix,
@@ -536,7 +549,7 @@ func Encode(w io.Writer, cfg Config) error {
 		ElasticHostEnvelope:       cfg.Guards.ElasticHostEnvelope,
 		GitHubTimeoutSeconds:      githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
-		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets),
+		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets), Priority: priority,
 	}
 	// Only non-default recovery bounds are emitted; see wireConfig.
 	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
@@ -748,6 +761,7 @@ func (c Config) Clone() Config {
 	for i := range out.Targets {
 		out.Targets[i].RunnerLabels = append([]string(nil), c.Targets[i].RunnerLabels...)
 	}
+	out.Priority = c.Priority.clone()
 	return out
 }
 
@@ -764,6 +778,9 @@ func cloneBudget(seconds *int) *int {
 func (c Config) Validate() error {
 	if c.PollInterval <= 0 || c.ReservationAge <= 0 {
 		return errors.New("intervals must be positive")
+	}
+	if err := c.Priority.validate(); err != nil {
+		return err
 	}
 	if c.Timeouts.GitHub <= 0 || c.Timeouts.Tart <= 0 || c.Timeouts.Boot <= 0 {
 		return errors.New("timeouts must be positive")

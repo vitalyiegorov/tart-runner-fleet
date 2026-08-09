@@ -151,6 +151,9 @@ refusal.
 | i | **No drain churn.** A recovery drain the executor aborts does not repeat. | Per-instance count of drains disproven at execution time, against N. | Enforced (added with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md)) |
 | j | **Nothing goes unheard.** A job whose `JobAvailable` the broker actually delivered reaches the durable demand ledger. | Per-job ticks between delivery and the ledger, against H. It is a delivery budget, not a scheduling one. | Enforced (added with [ADR 0035](0035-a-broker-message-id-is-unique-only-within-its-sequence.md)) |
 | k | **Bounded occupancy.** No instance holds its profile's resource vector beyond that profile's occupancy budget. | Per-instance age from the harness's own virtual creation instant, against the budget plus a bounded reclaim grace. Scoped to instances that consume host resources and are not already tearing down. | Enforced (added with [ADR 0036](0036-an-instance-may-not-hold-its-vector-forever.md)) |
+| l | **No tier inversion.** Two feasible demands of one platform, one resource vector, and one ADR 0004 lane are admitted in priority-tier order. | Effective tier of each not-admitted feasible demand against each admitted one that shares its vector and lane, excluding the reserved head and any repository this plan has already filled to its cap. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md); inert on every world that declares no tier) |
+| m | **Monotonic escalation.** A waiting demand's effective priority tier never falls. | Per-demand high-water mark of the effective tier, recomputed by the harness from the demand and the clock. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
+| n | **No tier starvation.** Escalation ends every tier-based pass-over within T ticks. | Per-demand count of ticks passed over by an aged overtaker of strictly higher effective tier, against T = declared tiers x escalation ticks + K. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the
@@ -390,8 +393,12 @@ into a smoke test, so the required event vocabulary is asserted directly.
   acquisition, crossed sibling assignment, and REST snapshots.
 - `tests/simulation/trace_test.go` -- the event vocabulary, the generator, trace
   execution, and delta-debugging.
-- `tests/simulation/properties_test.go` -- the seven property oracles and the
+- `tests/simulation/properties_test.go` -- the property oracles and the
   independent feasibility oracle.
+- `tests/simulation/priority_test.go` -- the tiered arm of
+  [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md),
+  properties (l), (m), and (n), and the escalation bound stated deterministically
+  against a rolling backlog of higher-tier work.
 - `tests/simulation/fuzz_test.go` -- `TestSimFuzz`, the determinism contract, and
   the generator-coverage guard.
 - `tests/simulation/incidents_test.go` -- 2026-08-01 (ADR 0026), 2026-08-02 (ADR

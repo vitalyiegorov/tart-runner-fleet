@@ -492,7 +492,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	reporter := newFailureReporter(os.Stderr, d.now)
 	reporter.counter = health
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
-		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset}
+		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
+		Priority: cfg.Priority.Policy()}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
@@ -1480,6 +1481,20 @@ func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.
 	return letters, nil
 }
 
+// queueTierMetrics carries the per-tier breakdown to telemetry. An empty
+// breakdown is a fleet that declares no priority tier, and it publishes nothing.
+func queueTierMetrics(tiers []app.QueueTier) []telemetry.QueueTierMetrics {
+	if len(tiers) == 0 {
+		return nil
+	}
+	rows := make([]telemetry.QueueTierMetrics, 0, len(tiers))
+	for _, tier := range tiers {
+		rows = append(rows, telemetry.QueueTierMetrics{Tier: tier.Tier, Rank: tier.Rank,
+			Count: tier.Count, OldestEnqueuedAt: tier.Oldest})
+	}
+	return rows
+}
+
 func (e engineTicker) recordMetrics(result app.TickResult) {
 	queues := make(map[string]struct {
 		count  int
@@ -1513,7 +1528,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	for _, row := range result.ScopeQueues {
 		scopeRows = append(scopeRows, telemetry.ScopeQueueMetrics{Scope: row.Scope,
 			Profile: string(row.Profile), ScaleSetID: row.ScaleSetID, Count: row.Count,
-			OldestEnqueuedAt: row.Oldest})
+			OldestEnqueuedAt: row.Oldest, Tiers: queueTierMetrics(row.Tiers)})
 	}
 	_ = e.health.SetScopeQueues(scopeRows)
 	for _, instance := range result.Instances {

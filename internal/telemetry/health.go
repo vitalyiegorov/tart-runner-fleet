@@ -79,6 +79,20 @@ type ScopeQueueMetrics struct {
 	ScaleSetID       int64
 	Count            int
 	OldestEnqueuedAt time.Time
+	// Tiers is the same depth broken down by the priority tier each waiting
+	// demand was classified into (issue #224). It is empty for a fleet that
+	// declares no tier.
+	Tiers []QueueTierMetrics
+}
+
+// QueueTierMetrics is one priority tier's share of one scope's queue. Rank
+// travels with the name so a renderer orders tiers as the operator declared
+// them without reading the configuration.
+type QueueTierMetrics struct {
+	Tier             string
+	Rank             int
+	Count            int
+	OldestEnqueuedAt time.Time
 }
 
 type InstanceMetrics struct {
@@ -334,10 +348,26 @@ func (h *Health) SetScopeQueues(rows []ScopeQueueMetrics) error {
 		if row.Scope == "" || row.Profile == "" || row.Count < 0 {
 			return errInvalidMetric
 		}
+		for _, tier := range row.Tiers {
+			if tier.Tier == "" || tier.Count < 0 {
+				return errInvalidMetric
+			}
+		}
 	}
-	h.scopeQueues = append([]ScopeQueueMetrics(nil), rows...)
+	h.scopeQueues = cloneScopeQueues(rows)
 	h.revision++
 	return nil
+}
+
+// cloneScopeQueues copies the rows AND the tier slice inside each one. A
+// shallow copy would publish storage the caller still owns, which is exactly the
+// data race a snapshot exists to prevent.
+func cloneScopeQueues(rows []ScopeQueueMetrics) []ScopeQueueMetrics {
+	out := append([]ScopeQueueMetrics(nil), rows...)
+	for i := range out {
+		out[i].Tiers = append([]QueueTierMetrics(nil), rows[i].Tiers...)
+	}
+	return out
 }
 
 func (h *Health) SetInstances(profile string, count, cpu, memoryMiB int) error {
@@ -572,7 +602,7 @@ func (h *Health) Snapshot() Snapshot {
 	defer h.mu.RUnlock()
 	return Snapshot{
 		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
-		Mode: h.mode, Queues: cloneMap(h.queues), ScopeQueues: append([]ScopeQueueMetrics(nil), h.scopeQueues...),
+		Mode: h.mode, Queues: cloneMap(h.queues), ScopeQueues: cloneScopeQueues(h.scopeQueues),
 		Instances:    cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),

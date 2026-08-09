@@ -130,6 +130,20 @@ type ScopeQueue struct {
 	Jobs             int       `json:"jobs"`
 	OldestEnqueuedAt time.Time `json:"oldestEnqueuedAt"`
 	OldestAgeSeconds float64   `json:"ageSeconds"`
+	// Tiers is the same queue broken down by the priority tier each waiting
+	// demand was classified into (issue #224). It is additive and absent both on
+	// daemons older than the feature and on a fleet that declares no tier, so a
+	// consumer must treat its absence as "no policy", never as "no demand".
+	Tiers []QueueTier `json:"tiers,omitempty"`
+}
+
+// QueueTier is one priority tier's share of a scope queue. `tier` is the
+// declared tier name, or `default` for the tier every unmatched demand lands in.
+type QueueTier struct {
+	Tier             string    `json:"tier"`
+	Jobs             int       `json:"jobs"`
+	OldestEnqueuedAt time.Time `json:"oldestEnqueuedAt"`
+	OldestAgeSeconds float64   `json:"ageSeconds"`
 }
 
 type Instance struct {

@@ -51,6 +51,22 @@ busy one sharing its profile. `--output json` returns `{profiles, scopes}` when 
 breakdown is present and the bare profile array when it is not, so older
 consumers keep parsing.
 
+A fleet that declares priority tiers gets a third table naming the tier each
+scope's waiting demand landed in, and the same breakdown appears as an additive
+`tiers` array on every scope row of `--output json`:
+
+```
+SCOPE          PROFILE  TIER     JOBS  OLDEST
+vitalyiegorov  builder  release  2     1h5m
+budgie-at      builder  default  3     1h21m
+```
+
+`default` is the tier every unmatched demand lands in. The section and the JSON
+key are absent when no tier is declared, so a fleet with no policy renders and
+publishes exactly what it always did. See
+[ADR 0037](docs/adr/0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)
+for what a tier does and does not change about admission.
+
 ## Operational objective
 
 Operate for maximum **useful** utilization: the highest sustainable completion
@@ -267,13 +283,18 @@ continues to block new Linux admission until its instances become idle.
    manager can build its successor.
 4. Within each young scheduling lane, lower dominant-resource-share profiles
    are considered first and exact packing maximizes admitted job count.
-5. Compatible small Linux work may use one durable backfill budget while a
+5. A declared priority tier orders demand INSIDE each of those bands, never
+   across them: an aged demand still precedes a fresh one of any tier, and a
+   waiting demand climbs one tier per configured escalation threshold, so a tier
+   costs everything below it at most rank x threshold of extra waiting
+   (ADR 0037). A fleet that declares no tier is unaffected.
+6. Compatible small Linux work may use one durable backfill budget while a
    macOS handoff is draining; it cannot postpone the handoff indefinitely.
    This bounded backfill applies only to the default shared policy; exclusive
    macOS cohorts do not admit Linux backfill.
-6. A single deterministic state machine owns each instance from planned clone
+7. A single deterministic state machine owns each instance from planned clone
    through registration, assignment, drain, deregistration, stop, and deletion.
-7. External effects are durable, leased, idempotent, and retried with bounded
+8. External effects are durable, leased, idempotent, and retried with bounded
    backoff; restart resumes state instead of guessing from process presence.
 
 ## Automatic updates

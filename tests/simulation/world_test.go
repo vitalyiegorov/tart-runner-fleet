@@ -98,6 +98,14 @@ type worldConfig struct {
 	// stop that actually releases the vector, and each of those is a tick the
 	// fleet cannot skip.
 	OccupancyGraceTicks int
+	// Priority is the demand priority policy this world declares (issue #224).
+	// The zero policy is every world that predates it: one default tier and aged
+	// FIFO, with every tier oracle inert.
+	Priority domain.PriorityPolicy
+	// TierStarvationT bounds property (n): a feasible demand may be passed over
+	// on priority-tier grounds for at most this many ticks, because escalation
+	// must end the exemption a declared tier earns from property (b).
+	TierStarvationT int
 	// SequenceResetAt is the tick at which GitHub restarts the broker's
 	// message-id sequence, as it did for scale set 8077185082566234948 on
 	// 2026-08-01T18:32Z. Zero means the sequence is never restarted.
@@ -650,7 +658,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		drainAborts: map[string]int{}, known: map[string]finding{},
 	}
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
-		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute}
+		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority}
 	w.engine = app.Engine{
 		Store: store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,
 		ControllerID: simOwner, Mode: reconcile.Authority, Now: func() time.Time { return w.now },
