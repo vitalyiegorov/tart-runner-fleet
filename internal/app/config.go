@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -45,7 +46,20 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		MixedPlatformAdmission: cfg.MacOS.MixedPlatformAdmission,
 		MixedProfileCohorts:    cfg.MacOS.MixedProfileCohorts,
 		ElasticHostEnvelope:    cfg.Guards.ElasticHostEnvelope,
+		PriorityEscalation:     priorityEscalation(cfg),
 		HostBudget:             domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB}}
+}
+
+// priorityEscalation is the escalation threshold the planner reads. It is
+// carried only when a tier is actually declared: escalation with no tier would
+// still group demand by age band, and a fleet that declared no policy must plan
+// the aged FIFO it always did (issue #224). Config.Validate refuses the
+// combination outright; this is the second lock on the same door.
+func priorityEscalation(cfg config.Config) time.Duration {
+	if !cfg.Priority.Policy().Declared() {
+		return 0
+	}
+	return cfg.Priority.EscalateAfter
 }
 
 // ValidateBindings runs the exact scheduler-config and binding construction the

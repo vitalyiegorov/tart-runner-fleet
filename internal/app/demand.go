@@ -131,6 +131,10 @@ type DemandCoordinator struct {
 	StatisticsMaxAge time.Duration
 	GhostAbsence     time.Duration
 	StrictJobRouting bool
+	// Priority classifies a demand into the tier configuration declared for it
+	// (issue #224). The zero policy leaves every demand in the default tier,
+	// which is what keeps a fleet that declares no tier on pure aged FIFO.
+	Priority domain.PriorityPolicy
 	// OnSequenceReset reports that a broker restarted its message-id sequence and
 	// the fleet adopted a new inbox generation for this binding. The store heals
 	// itself, but a rare durable event that repairs a three-day outage class must
@@ -621,14 +625,14 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 	statistics, statisticsErr := statisticsStore.DemandStatistics(ctx, binding.durableKey())
 	if statisticsErr != nil {
 		if errors.Is(statisticsErr, operations.ErrNotFound) {
-			return convertDemandRecords(binding, selected), fmt.Errorf("scale-set statistics not observed: %w", ErrDemandStatisticsUnavailable)
+			return c.convertDemandRecords(binding, selected), fmt.Errorf("scale-set statistics not observed: %w", ErrDemandStatisticsUnavailable)
 		}
 		return nil, statisticsErr
 	}
 	now := c.now()
 	if !statistics.Valid() || statistics.ObservedAt.IsZero() || statistics.ObservedAt.After(now) ||
 		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
-		return convertDemandRecords(binding, selected), fmt.Errorf("scale-set statistics are stale or invalid: %w", ErrDemandStatisticsUnavailable)
+		return c.convertDemandRecords(binding, selected), fmt.Errorf("scale-set statistics are stale or invalid: %w", ErrDemandStatisticsUnavailable)
 	}
 	normalLimit := statistics.Available
 	preassignedLimit := statistics.Assigned - statistics.Running
@@ -650,10 +654,10 @@ func (c DemandCoordinator) QueuedDemands(ctx context.Context, binding Binding) (
 		}
 		bounded = append(bounded, record)
 	}
-	return convertDemandRecords(binding, bounded), nil
+	return c.convertDemandRecords(binding, bounded), nil
 }
 
-func convertDemandRecords(binding Binding, records []operations.DemandRecord) []domain.Demand {
+func (c DemandCoordinator) convertDemandRecords(binding Binding, records []operations.DemandRecord) []domain.Demand {
 	result := make([]domain.Demand, 0, len(records))
 	for _, record := range records {
 		createdAt := record.FirstQueueTime
@@ -668,6 +672,10 @@ func convertDemandRecords(binding Binding, records []operations.DemandRecord) []
 			Key:       record.DemandKey(),
 			CreatedAt: createdAt.UTC(), Profile: binding.Profile.ID, Route: binding.Profile.Route, Platform: binding.Profile.Platform,
 			Event: event(record.EventName), RunStatus: domain.RunQueued,
+			// Classification happens exactly once, where a durable row becomes a
+			// schedulable demand, from facts the scale-set message already carried.
+			Priority: c.Priority.Classify(domain.DemandFacts{Repo: record.Repo(),
+				WorkflowRef: record.WorkflowRef, JobName: record.DisplayName}),
 		})
 	}
 	return result

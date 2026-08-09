@@ -492,7 +492,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	reporter := newFailureReporter(os.Stderr, d.now)
 	reporter.counter = health
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
-		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset}
+		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
+		Priority: cfg.Priority.Policy()}
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
