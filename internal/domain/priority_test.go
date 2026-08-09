@@ -32,7 +32,7 @@ func TestDeclarationOrderRanksTiersAboveTheDefault(t *testing.T) {
 	if release.Tier != "release" || main.Tier != "main" || unmatched.Tier != "" {
 		t.Fatalf("tiers = %q/%q/%q, want release/main/default", release.Tier, main.Tier, unmatched.Tier)
 	}
-	if !(release.Rank > main.Rank && main.Rank > unmatched.Rank) {
+	if release.Rank <= main.Rank || main.Rank <= unmatched.Rank {
 		t.Fatalf("ranks = %d/%d/%d, want strictly descending by declaration order", release.Rank, main.Rank, unmatched.Rank)
 	}
 	if unmatched.Rank != 0 {
