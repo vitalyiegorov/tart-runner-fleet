@@ -282,6 +282,7 @@ func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
 	}{
 		{flag: func(o *scheduler.Operation) { o.StalledAssignment = true }, state: operations.StateAssigned, phase: operations.DrainPhaseStalledAssignment},
 		{flag: func(o *scheduler.Operation) { o.LingeringRunner = true }, state: operations.StateRunning, phase: operations.DrainPhaseLingeringRunner},
+		{flag: func(o *scheduler.Operation) { o.OccupancyExceeded = true }, state: operations.StateRunning, phase: operations.DrainPhaseOccupancyBudget},
 	} {
 		store.applied = nil
 		instance.State = deadline.state

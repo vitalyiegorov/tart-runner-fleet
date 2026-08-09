@@ -16,6 +16,12 @@ import (
 // job never trips a recovery.
 const simJobTicks = 6
 
+// simOverrunTicks is one whole profile occupancy budget expressed in ticks. It
+// is what eventOverrunJob adds per Count, so the shortest overrun the generator
+// can draw already outlives the ceiling every simulated profile declares and no
+// deadline shorter than the occupancy reclaim can end it (issue #223).
+const simOverrunTicks = int(simOccupancyBudget / simTick)
+
 // simSnapshotEvery is the REST scope poll interval in ticks. Production polls at
 // most every thirty seconds; one tick is thirty virtual seconds.
 const simSnapshotEvery = 2
@@ -189,8 +195,11 @@ func (w *world) progressJobs() {
 			// outlive a recovery deadline, which made the whole abort class of
 			// ADR 0028 unreachable and hid the churn of issue #123. A long job is
 			// the ordinary case for the maestro suites this fleet runs.
-			job.remaining = simJobTicks + w.longJobNext
-			w.longJobNext = 0
+			// An overrun adds a whole profile budget on top, because the job it
+			// models is not long -- it has stopped making progress and will hold the
+			// runner until the occupancy reclaim takes it away (issue #223).
+			job.remaining = simJobTicks + w.longJobNext + w.overrunJobNext
+			w.longJobNext, w.overrunJobNext = 0, 0
 		case jobRunning:
 			job.remaining--
 			if job.remaining <= 0 {

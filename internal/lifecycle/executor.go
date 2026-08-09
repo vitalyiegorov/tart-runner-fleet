@@ -497,6 +497,30 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				if active {
 					return e.abort(ctx, instance)
 				}
+			case operations.DrainPhaseOccupancyBudget:
+				// The occupancy budget planned this reclaim from a fact no fresh
+				// evidence can disprove: the instance has held its profile's vector
+				// past the ceiling configured for it. Every other phase re-verifies a
+				// claim that no work is happening and aborts when work turns out to be
+				// happening; here the work IS the premise, so an abort on busy evidence
+				// would make the budget unenforceable by construction.
+				//
+				// That is also why the guest is powered off BEFORE deregistration
+				// rather than after it. GitHub refuses to remove a runner it considers
+				// to be executing a job, and it will go on considering this one busy
+				// for as long as the hung job runs, so deregistering first can only
+				// retry until the operation dead-letters with the vector still held.
+				// Stopping the ephemeral guest is the same graceful `stop` every drain
+				// already performs — no signal is sent to anything, the VM is asked to
+				// power down — and it is what ends the job. GitHub then reports the
+				// job as a lost-communication failure, which is what an operator sees
+				// and what the drain's own operation record explains.
+				if e.VM == nil {
+					return e.fail(ctx, instance, StageStop)
+				}
+				if err := e.VM.Stop(ctx, instance.ID, instance.Ownership); err != nil {
+					return e.fail(ctx, instance, StageStop)
+				}
 			default:
 				// An event drain is issued when the demand this VM was spawned for
 				// reaches JobCompleted. Because GitHub's scale-set brokering is
@@ -524,8 +548,15 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// recovery phases do. Without busy evidence the refusal stays a
 				// retryable deregister-stage failure. This is what bounds the incident's
 				// 60+ attempt kill loop for every drain phase, not just the event drain.
-				if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
-					return e.abort(ctx, instance)
+				//
+				// An occupancy-budget reclaim is the one exception, for the reason its
+				// phase exists: a busy runner does not disprove that premise, it is the
+				// premise. Aborting here would return the instance to Running with its
+				// vector still held and the next tick would plan the same reap forever.
+				if instance.DrainPhase != operations.DrainPhaseOccupancyBudget {
+					if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
+						return e.abort(ctx, instance)
+					}
 				}
 				// ADR 0007 keeps owned cleanup retrying through a refusal rather than
 				// abandoning an owned VM, so this failure may repeat for hours. It must

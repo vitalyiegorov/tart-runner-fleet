@@ -66,7 +66,23 @@ const (
 	eventSlowBoot        eventKind = "slow_boot"
 	// eventLongJob makes the next workflow job to start run for longer than a
 	// recovery deadline, which is what a real test suite does.
-	eventLongJob         eventKind = "long_job"
+	eventLongJob eventKind = "long_job"
+	// eventOverrunJob is issue #223: the next workflow job to start never ends.
+	//
+	// It is deliberately a SECOND job-duration event rather than a larger long_job,
+	// because the two model different worlds. A long_job is a legitimately long
+	// suite: it is doing work, it will finish, and every deadline it outlives is a
+	// deadline that must not reap it. An overrun_job has stopped making progress
+	// and will hold its runner until something takes it away -- the 2026-08-09
+	// incident, where an `if: always()` cleanup step waited on `adb` for
+	// seventy-three minutes on a builder nobody else could use.
+	//
+	// Its duration is scaled to the PROFILE BUDGET rather than to a recovery
+	// deadline, so even Count 1 runs past every simulated profile's ceiling and
+	// nothing smaller than the occupancy reclaim can end it. That is the whole
+	// point: before the budget existed no generated job could outlive any sane
+	// ceiling, which is exactly why this defect class was invisible to the sweep.
+	eventOverrunJob      eventKind = "overrun_job"
 	eventStalledRunner   eventKind = "stalled_runner"
 	eventWedgedDrain     eventKind = "wedged_drain"
 	eventSiblingReassign eventKind = "sibling_reassign"
@@ -137,7 +153,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	}
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
-		eventSlowBoot, eventLongJob, eventStalledRunner, eventWedgedDrain, eventSiblingReassign,
+		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventSiblingReassign,
 		eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
@@ -207,6 +223,11 @@ func (w *world) applyTraceEvent(event simEvent) {
 		// Scaled to deadlines: Count of 6 is roughly one assignment deadline, so
 		// the generator reaches jobs that outlive one and jobs that do not.
 		w.longJobNext = event.Count * 6
+	case eventOverrunJob:
+		// Scaled to the profile budget, not to a deadline: one whole budget per
+		// Count, so the smallest overrun the generator can draw still holds its
+		// vector past the ceiling and only the reclaim can end it.
+		w.overrunJobNext = event.Count * simOverrunTicks
 	case eventStalledRunner:
 		w.stallRunner(event.Count)
 	case eventWedgedDrain:

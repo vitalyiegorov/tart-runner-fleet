@@ -27,6 +27,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
@@ -597,7 +598,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
-		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters}
+		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters, reporter: reporter}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1287,6 +1288,60 @@ func (r *failureReporter) reportSequenceReset(binding app.Binding, reset operati
 		"adoptedMessageId", reset.AdoptedMessageID)
 }
 
+// reportOccupancy says out loud that an instance is approaching or has passed
+// the ceiling on how long it may hold its vector. It exists because the
+// 2026-08-09 leak was found by an owner asking why a release was slow, three
+// quarters of an hour after the fleet could first have said so (ADR 0036).
+//
+// It is rate limited per instance and per state, so a hold that crosses the
+// warning fraction and later the budget produces two lines rather than one per
+// tick for an hour, while a genuine escalation is never suppressed by the
+// warning that preceded it. The lines carry the vector, the duration, the
+// ceiling and the job — everything needed to tell a reaped job apart from a
+// flake without opening the daemon log a second time.
+func (r *failureReporter) reportOccupancy(occupancy []scheduler.Occupancy) {
+	for _, hold := range occupancy {
+		if !hold.Warned {
+			continue
+		}
+		state := "approaching"
+		if hold.OverBudget {
+			state = "exceeded"
+		}
+		if !r.admit("occupancy\x00" + hold.Instance + "\x00" + state) {
+			continue
+		}
+		r.logger.Warn("instance occupancy budget "+state, "instance", hold.Instance,
+			"profile", string(hold.Profile), "repo", hold.Repo, "cpu", hold.Resources.CPU,
+			"memoryMb", hold.Resources.MemoryMB, "held", hold.Age.Round(time.Second).String(),
+			"budget", hold.Budget.Round(time.Second).String(),
+			"runId", hold.Demand.RunID, "jobId", hold.Demand.JobID,
+			"queuedDemandFits", hold.StarvesQueuedDemand)
+	}
+}
+
+// reportOccupancyReclaim names a job the fleet is about to end. A reaped job
+// fails on GitHub with a lost-communication error, which is indistinguishable
+// from a flake unless something says which job was cut and how long it had held
+// the host. It is never rate limited: each reclaim is a distinct destructive
+// decision, and suppressing the second would hide it.
+func (r *failureReporter) reportOccupancyReclaim(operation scheduler.Operation, occupancy []scheduler.Occupancy) {
+	if !operation.OccupancyExceeded {
+		return
+	}
+	held, budget := time.Duration(0), time.Duration(0)
+	for _, hold := range occupancy {
+		if hold.Instance == operation.Instance {
+			held, budget = hold.Age, hold.Budget
+		}
+	}
+	r.logger.Warn("instance reclaimed for exceeding its occupancy budget", "instance", operation.Instance,
+		"profile", string(operation.Profile), "repo", operation.Demand.Repo,
+		"runId", operation.Demand.RunID, "jobId", operation.Demand.JobID, "attempt", operation.Demand.Attempt,
+		"held", held.Round(time.Second).String(), "budget", budget.Round(time.Second).String(),
+		"outcome", "the job ends as a lost-communication failure on GitHub")
+}
+
 // admit is the shared rate-limit gate: one line per key per window.
 func (r *failureReporter) admit(key string) bool {
 	r.mu.Lock()
@@ -1306,6 +1361,9 @@ type engineTicker struct {
 	operationCounts   func(context.Context) (int, int, error)
 	operationFailures func(context.Context) ([]operations.OperationFailure, error)
 	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
+	// reporter carries the occupancy warning. A nil reporter publishes the metric
+	// and says nothing, which is what an observe-mode harness wants.
+	reporter *failureReporter
 }
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
@@ -1484,6 +1542,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 		mode = telemetry.ModeMixed
 	}
 	_ = e.health.SetMode(mode)
+	e.recordOccupancy(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
@@ -1491,6 +1550,30 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 			SwapOutRatePerSecond: pressure.SwapOutRatePerSecond, SwapOutRateObserved: pressure.SwapOutRateObserved,
 			CPUIdlePercent: pressure.CPUIdlePercent, LoadAverage: pressure.LoadAverage,
 			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason})
+	}
+}
+
+// recordOccupancy publishes how long each instance has held its vector and says
+// out loud when one is approaching or past its ceiling. Both readings come from
+// scheduler.Occupancies — the same pure projection the reap itself is planned
+// from — so the metric, the warning, the doctor finding and the drain can never
+// disagree about a hold.
+func (e engineTicker) recordOccupancy(result app.TickResult) {
+	occupancy := scheduler.Occupancies(result.At, e.engine.Config, result.Instances, result.Demands)
+	metrics := make([]telemetry.OccupancyMetric, 0, len(occupancy))
+	for _, hold := range occupancy {
+		metrics = append(metrics, telemetry.OccupancyMetric{Instance: hold.Instance, Profile: string(hold.Profile),
+			Repo: hold.Repo, CPU: hold.Resources.CPU, MemoryMiB: hold.Resources.MemoryMB, Age: hold.Age,
+			Budget: hold.Budget, Warned: hold.Warned, OverBudget: hold.OverBudget,
+			StarvesQueuedDemand: hold.StarvesQueuedDemand})
+	}
+	_ = e.health.SetOccupancy(metrics)
+	if e.reporter == nil {
+		return
+	}
+	e.reporter.reportOccupancy(occupancy)
+	for _, operation := range result.Plan.Operations {
+		e.reporter.reportOccupancyReclaim(operation, occupancy)
 	}
 }
 

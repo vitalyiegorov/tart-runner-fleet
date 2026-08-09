@@ -278,3 +278,31 @@ func TestPlannedInstanceMayPrecedeTartCloneAndValidation(t *testing.T) {
 		t.Fatalf("nil adapters=%#v", got)
 	}
 }
+
+// The occupancy clock is the durable row's creation instant, and it must survive
+// the state change that resets every other per-instance deadline. Reading
+// UpdatedAt here is what made the 2026-08-09 leak unmeasurable: an instance that
+// had held six cores for seventy-five minutes looked one state change old
+// (issue #223).
+func TestInventoryCarriesTheOccupancyClockFromRowCreation(t *testing.T) {
+	now := time.Now().UTC()
+	stored := inventoryInstance(operations.StateRunning)
+	stored.CreatedAt = now.Add(-75 * time.Minute)
+	stored.UpdatedAt = now.Add(-90 * time.Second)
+	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{stored}},
+		Executor: fakeTart{values: []executor.Instance{{Name: stored.ID, Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+
+	instances, _ := inv.Observe(context.Background())
+
+	observed := instances.Value[0]
+	if !observed.OccupiedSince.Equal(stored.CreatedAt) {
+		t.Fatalf("occupancy must start at row creation; got %s, want %s", observed.OccupiedSince, stored.CreatedAt)
+	}
+	if !observed.RunningSince.Equal(stored.UpdatedAt) {
+		t.Fatalf("the idle-runner deadline must still read the last state change; got %s", observed.RunningSince)
+	}
+	if age, measured := observed.Occupancy(now); !measured || age < 75*time.Minute {
+		t.Fatalf("occupancy = %s, measured=%t", age, measured)
+	}
+}

@@ -23,20 +23,26 @@ type StatusEnvelope struct {
 }
 
 type Status struct {
-	ControllerVersion  string           `json:"controllerVersion"`
-	ControllerMode     string           `json:"controllerMode"`
-	HostMode           string           `json:"hostMode"`
-	LastLoopTick       time.Time        `json:"lastLoopTick"`
-	LastSuccessfulTick time.Time        `json:"lastSuccessfulTick"`
-	Live               Check            `json:"live"`
-	Ready              Check            `json:"ready"`
-	QueueSLO           *Check           `json:"queueSlo,omitempty"`
-	Queues             []Queue          `json:"queues"`
-	Instances          []Instance       `json:"instances"`
-	ScopeQueues        []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations       []Observation    `json:"observations"`
-	Operations         OperationSummary `json:"operations"`
-	HostPressure       HostPressure     `json:"hostPressure"`
+	ControllerVersion  string    `json:"controllerVersion"`
+	ControllerMode     string    `json:"controllerMode"`
+	HostMode           string    `json:"hostMode"`
+	LastLoopTick       time.Time `json:"lastLoopTick"`
+	LastSuccessfulTick time.Time `json:"lastSuccessfulTick"`
+	Live               Check     `json:"live"`
+	Ready              Check     `json:"ready"`
+	QueueSLO           *Check    `json:"queueSlo,omitempty"`
+	// Occupancy is an additive fleet.v1 field: how long each live instance has
+	// held its profile's resource vector, and whether that hold is past the
+	// profile's ceiling while work that would fit it waits. An older daemon
+	// omitted it entirely, which is why EffectiveOccupancy exists.
+	Occupancy      []Occupancy      `json:"occupancy,omitempty"`
+	OccupancyCheck *Check           `json:"occupancyCheck,omitempty"`
+	Queues         []Queue          `json:"queues"`
+	Instances      []Instance       `json:"instances"`
+	ScopeQueues    []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations   []Observation    `json:"observations"`
+	Operations     OperationSummary `json:"operations"`
+	HostPressure   HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.
@@ -65,6 +71,25 @@ type Check struct {
 	Reasons []string `json:"reasons"`
 }
 
+// Occupancy is one instance's hold on the vector its profile reserves. It is the
+// only per-instance row in the status document besides a dead letter, and it is
+// per-instance for the reason ADR 0036 gives: the fault is one instance holding
+// one vector too long, which no per-profile aggregate can express.
+type Occupancy struct {
+	Instance   string  `json:"instance"`
+	Profile    string  `json:"profile"`
+	Repo       string  `json:"repo,omitempty"`
+	CPU        int     `json:"cpu"`
+	MemoryMiB  int     `json:"memoryMiB"`
+	AgeSeconds float64 `json:"ageSeconds"`
+	// BudgetSeconds is zero for a profile with no ceiling. OverBudget and Warned
+	// are then always false: an unbounded hold cannot be past a bound.
+	BudgetSeconds       float64 `json:"budgetSeconds"`
+	Warned              bool    `json:"warned"`
+	OverBudget          bool    `json:"overBudget"`
+	StarvesQueuedDemand bool    `json:"starvesQueuedDemand"`
+}
+
 // EffectiveQueueSLO keeps a new fleetctl compatible with an older fleet.v1
 // daemon during atomic handoff. Older daemons did not emit queueSlo; their
 // existing ready and queue fields remain authoritative until the new daemon is
@@ -74,6 +99,18 @@ func (s Status) EffectiveQueueSLO() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.QueueSLO
+}
+
+// EffectiveOccupancy keeps a new fleet CLI compatible with an older fleet.v1
+// daemon during atomic handoff, exactly as EffectiveQueueSLO does. An older
+// daemon measured no occupancy at all, and a daemon that cannot see a condition
+// must never be rendered as having found none: absence is reported as an
+// unspecified check rather than as a pass.
+func (s Status) EffectiveOccupancy() Check {
+	if s.OccupancyCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.OccupancyCheck
 }
 
 type Queue struct {

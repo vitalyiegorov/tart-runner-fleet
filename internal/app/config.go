@@ -16,13 +16,17 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 	for _, profile := range cfg.Linux.Profiles {
 		id := domain.ProfileID(profile.ID)
 		profiles[id] = domain.Profile{ID: id, Platform: domain.PlatformLinux, Route: domain.Route(profile.Label),
-			Resources: domain.Resources{CPU: profile.Resources.CPU, MemoryMB: profile.Resources.MemoryMiB, Slots: 1}, MaxActive: profile.MaxActive}
+			Resources:       domain.Resources{CPU: profile.Resources.CPU, MemoryMB: profile.Resources.MemoryMiB, Slots: 1},
+			MaxActive:       profile.MaxActive,
+			OccupancyBudget: profile.OccupancyBudget(domain.PlatformLinux)}
 	}
 	if cfg.MacOS.Enabled {
 		for _, profile := range []config.Profile{cfg.MacOS.Builder, cfg.MacOS.Maestro} {
 			id := domain.ProfileID(profile.ID)
 			profiles[id] = domain.Profile{ID: id, Platform: domain.PlatformMacOS, Route: domain.Route(profile.Label),
-				Resources: domain.Resources{CPU: profile.Resources.CPU, MemoryMB: profile.Resources.MemoryMiB, Slots: 1}, MaxActive: profile.MaxActive}
+				Resources:       domain.Resources{CPU: profile.Resources.CPU, MemoryMB: profile.Resources.MemoryMiB, Slots: 1},
+				MaxActive:       profile.MaxActive,
+				OccupancyBudget: profile.OccupancyBudget(domain.PlatformMacOS)}
 		}
 	}
 	caps := make(map[string]int, len(cfg.Targets))

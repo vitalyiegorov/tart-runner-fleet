@@ -234,6 +234,23 @@ instance is never touched; the idle drain-and-switch fallback remains for
 profiles that do not fit side by side). See
 [`ADR 0024`](docs/adr/0024-mixed-macos-profile-cohorts.md).
 
+### Bounding how long one instance may hold the host
+
+Every profile carries `occupancyBudgetSeconds`: a wall-clock ceiling on how long
+ONE instance of that profile may hold its resource vector. Omit it and the
+platform default applies -- two hours on macOS, one hour on Linux, both sized
+above the longest healthy run measured on this fleet and well inside GitHub's
+six-hour job maximum. Set it to `0` to exempt a profile entirely; any other
+value must be between 300 and 21600 seconds.
+
+An instance past its ceiling is reclaimed through the ordinary graceful drain:
+the ephemeral guest is asked to power down and its runner is deregistered, and
+the job ends on GitHub as a lost-communication failure. Nothing is killed. Long
+before that, `fleet status` shows the hold in an `OCCUPANCY` table, the daemon
+warns at three quarters of the ceiling, and `fleet doctor` fails when an
+over-budget instance holds a vector that queued work would fit. See
+[`ADR 0036`](docs/adr/0036-an-instance-may-not-hold-its-vector-forever.md).
+
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
 it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
 experiment that must fill one macOS profile cohort without admitting new Linux

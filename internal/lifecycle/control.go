@@ -185,11 +185,15 @@ func (r ControlRouter) ConfirmDeletion(ctx context.Context, name string) (operat
 		return operations.DeletionConfirmation{}, err
 	}
 	if instance.DrainPhase == operations.DrainPhaseStoppedRecovery || instance.DrainPhase == operations.DrainPhaseStalledAssignment ||
-		instance.DrainPhase == operations.DrainPhaseLingeringRunner {
+		instance.DrainPhase == operations.DrainPhaseLingeringRunner || instance.DrainPhase == operations.DrainPhaseOccupancyBudget {
 		// Once the runner is deregistered the stalled/lingering runner is gone;
 		// there is no fresh JobCompleted event to wait for (the job never started,
 		// or its completion already passed without draining the instance). Derive
 		// job inactivity from runner absence, exactly as stopped recovery does.
+		// A budget reclaim joins them for the same reason from the other side: the
+		// job it cut ends as a lost-communication failure GitHub reports against a
+		// runner that no longer exists, so waiting for its completion event would
+		// wait forever.
 		return operations.DeletionConfirmation{Fresh: true, RunnerInactive: !registered,
 			JobsInactive: !registered, ObservedAt: r.now()}, nil
 	}

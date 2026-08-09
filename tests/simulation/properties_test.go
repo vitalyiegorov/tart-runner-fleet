@@ -50,6 +50,14 @@ const (
 	// binding stayed deaf for three days in issue #165 while `fleet queues` read
 	// zero and `fleet doctor` read PASS.
 	findingUnheardDemand findingKind = "unheard_demand"
+	// findingOverOccupied is property (k): no instance occupies its profile's
+	// resource vector beyond that profile's occupancy budget. It is the issue #223
+	// oracle. Every other reclaim in this fleet is premised on the runner being
+	// idle and re-verifies that at execution time; a job that has stopped making
+	// progress satisfies none of them, so before the budget existed one hung
+	// `if: always()` cleanup step held a builder for seventy-three minutes and no
+	// deadline in the system could take it back.
+	findingOverOccupied findingKind = "occupancy_budget"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -192,6 +200,14 @@ func defaultCheckers(cfg worldConfig) []checker {
 		identityUniquenessChecker(),
 		planAlwaysAppliesChecker(),
 		conservationChecker(cfg),
+		// (k) sits here for the same causal reason (h) and (i) do, one layer up: an
+		// instance holding a vector past its ceiling is a CAUSE of the wedge, the
+		// pass-over, and the queue that will not drain, and reporting one of those
+		// instead would send an operator to the scheduler for a hung job. It follows
+		// conservation and identity because those answer a stronger question -- the
+		// machine is oversubscribed, two rows claim one identity -- which no reading
+		// of an occupancy clock can explain away.
+		occupancyBudgetChecker(cfg),
 		// (h) and (i) precede the liveness and starvation oracles deliberately: a
 		// demand nobody can serve and a drain that will not stay dead are the CAUSE
 		// of the queue that never drains, and reporting the symptom would send an
@@ -668,6 +684,98 @@ func sortedKeys(counts map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ---------------------------------------------------------------------------
+// (k) No instance occupies its vector beyond its profile budget.
+// ---------------------------------------------------------------------------
+
+// occupancyBudgetChecker is the issue #223 oracle: every live instance whose
+// profile declares an occupancy budget must stop holding its resource vector
+// within OccupancyGraceTicks of reaching that budget.
+//
+// The age is measured from the harness's OWN virtual ground truth -- w.createdAt,
+// the tick the world first held the row -- and never from domain.Instance
+// .OccupiedSince or scheduler.Occupancies. That is the same discipline
+// feasibleDemands follows for the envelope: an oracle derived from the arithmetic
+// it is checking cannot fail when that arithmetic is wrong, and the defect this
+// property exists for is precisely a hold nothing in the fleet was measuring.
+//
+// The grace is what separates a reclaim from a leak, and every tick in it is a
+// tick the fleet cannot skip: the breach must be observed (the inventory read at
+// the head of the tick), the plan must commit, the drain operation must be
+// claimed from the outbox, and the executor must reach the guest stop that
+// releases the vector. A healthy reclaim costs ONE tick of over-budget occupancy
+// -- the tick the breach is first visible -- because the stop happens inside
+// that same tick's execution and the instance leaves this oracle's scope on the
+// next one.
+//
+// Twelve is measured, not guessed. Over the three sweep arms at 80 seeds and 200
+// ticks the whole observed distribution of over-budget ticks is
+// {1: 10, 2: 3, 3: 3, 4: 2, 8: 1}: one tick is the mode, and the single 8-tick
+// tail is a budgeted-host maestro whose observation was blinded while the breach
+// was accruing. Twelve is half again the worst case the generator has produced,
+// which is enough slack for the delays it can stack -- a stale host probe or an
+// unavailable Tart blinds the observation for up to six ticks, a wedged drain
+// holds the deregistration for up to six more -- and still an order of magnitude
+// below the leak it exists to catch, which is unbounded.
+//
+// Scope is two clauses, and both are the property's meaning rather than
+// convenience. An instance is judged only while it CONSUMES host resources,
+// which is the same fact the budget is about and the same set the conservation
+// oracle charges: once the guest is off, the vector is back on the host whatever
+// the durable row still says. And an instance already TEARING DOWN is excluded,
+// because the fleet is by then doing the very thing this property demands -- a
+// durable drain is in flight and the vector is on its way back. Whether that
+// drain finishes is the drain's own contract (ADR 0007's owned-cleanup retry and
+// ADR 0020's diagnosable failures), not the budget's, and the budget could not
+// act on it in any case: scheduler.assignmentRecoveries only ever considers an
+// Assigned or Running instance. Judging teardown here would report a stuck drain
+// as an unreclaimed hold and send an operator to the occupancy ceiling for a
+// deregistration that GitHub refused.
+func occupancyBudgetChecker(cfg worldConfig) checker {
+	reported := map[string]bool{}
+	return func(w *world, observation tickObservation) []finding {
+		grace := time.Duration(cfg.OccupancyGraceTicks) * simTick
+		// Keyed by instance so the report is stable, valued by how many ticks the
+		// hold has lasted so the finding says how far past the ceiling it went.
+		overBudget := map[string]int{}
+		budgets := map[string]time.Duration{}
+		for _, instance := range observation.Instances {
+			budget := cfg.Scheduler.Profiles[instance.Profile].OccupancyBudget
+			since, known := w.createdAt[instance.ID]
+			if budget <= 0 || !known || reported[instance.ID] ||
+				!instance.ConsumesHostResources() || instance.State.TearingDown() {
+				continue
+			}
+			age := observation.Now.Sub(since)
+			if age <= budget+grace {
+				continue
+			}
+			overBudget[instance.ID] = int(age / simTick)
+			budgets[instance.ID] = budget
+		}
+		var findings []finding
+		for _, id := range sortedKeys(overBudget) {
+			reported[id] = true
+			findings = append(findings, finding{Kind: findingOverOccupied, Tick: observation.Tick,
+				Detail: fmt.Sprintf("%s has held %+v for %d ticks, past its %s budget plus %d ticks of reclaim grace; its runner is executing %s\n%s",
+					id, occupiedVector(observation, id), overBudget[id], budgets[id], cfg.OccupancyGraceTicks,
+					w.runnerJobName(id), w.dumpPlan(observation))})
+		}
+		return findings
+	}
+}
+
+// occupiedVector is the resource vector an over-budget instance is holding,
+// which is what the queue behind it is waiting for.
+func occupiedVector(observation tickObservation, id string) domain.Resources {
+	for _, instance := range observation.Instances {
+		if instance.ID == id {
+			return instance.Resources
+		}
+	}
+	return domain.Resources{}
 }
 
 // ---------------------------------------------------------------------------

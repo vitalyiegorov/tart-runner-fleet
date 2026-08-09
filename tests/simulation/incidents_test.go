@@ -380,6 +380,98 @@ func (w *world) queueCarried(requestID int64, queuedAt time.Time) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Incident 2026-08-09 -- ADR 0036, the vector one hung job held forever (#223)
+// ---------------------------------------------------------------------------
+
+// TestOccupancyBudgetReclaimsAHungBuilder drives the 2026-08-09 incident end to
+// end: a job that stopped making progress -- an `if: always()` cleanup step
+// waiting on `adb` -- held a builder's whole vector for seventy-three minutes
+// while the next job of the same repository sat queued behind it.
+//
+// The trace is four literal events, and it is pinned rather than drawn from a
+// seed because the shape is the point. `builder` declares MaxActive 1, so the
+// second arrival is admissible only when the first instance gives its vector
+// back; and the first job overruns by a whole profile budget, so nothing in the
+// fleet except the occupancy reclaim can make that happen.
+//
+// Before the budget existed this ran forever. Every other recovery this fleet
+// has is premised on the runner being IDLE and re-verifies that premise at
+// execution time: the assignment deadline sees a job that started, the
+// idle-runner deadline sees a job that is active, and GitHub refuses to
+// deregister a runner it considers busy. A hung job satisfies none of them --
+// it is genuinely executing -- so the queue behind it was unserved for as long
+// as the fleet stayed up.
+func TestOccupancyBudgetReclaimsAHungBuilder(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	trace := simTrace{Seed: 20_260_809, Ticks: 200, Config: cfg.Name, Events: []simEvent{
+		// One whole profile budget on top of the base duration: the job will not
+		// end on its own inside this run, or any run.
+		{Tick: 1, Kind: eventOverrunJob, Count: 1},
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		// The work queued behind it. MaxActive 1 means it cannot start until the
+		// hung builder's vector comes back.
+		{Tick: 3, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 4, Kind: eventStopArrivals},
+	}}
+	w := newWorld(t, cfg, trace)
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("the hung-builder incident must no longer violate a property: %s", findings[0])
+	}
+	// The harness really did reach the incident state. A green run over a trace
+	// whose job finished on its own would prove nothing at all.
+	hung, queued := w.jobs[0], w.jobs[1]
+	if hung.status != jobCancelled {
+		t.Fatalf("the hung job was never ended by a reclaim: status %s", hung.status)
+	}
+	// It was the occupancy budget that ended it, and not some other recovery that
+	// happened to fire -- the reclaim is only correct because its premise is the
+	// hold, and every other premise is provably false here.
+	reclaimed := w.occupancyReclaims()
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected exactly one occupancy reclaim, got %v", reclaimed)
+	}
+	// The hold really did reach the ceiling, measured the way the harness measures
+	// it: from the virtual instant the instance row began holding the vector.
+	if held := hung.finishedAt.Sub(w.createdAt[reclaimed[0]]); held < simOccupancyBudget {
+		t.Fatalf("%s held its vector for %s, less than the %s budget it must outlive",
+			reclaimed[0], held, simOccupancyBudget)
+	}
+	// The whole point of taking the vector back: the queued work behind it runs.
+	if queued.status != jobDone {
+		t.Fatalf("the queued job behind the hung builder never ran: status %s runner %q", queued.status, queued.runner)
+	}
+	if wait := queued.startedAt.Sub(hung.finishedAt); wait <= 0 || wait > 12*simTick {
+		t.Fatalf("the queued job started %s after the reclaim, not promptly", wait)
+	}
+	// And the fleet settles, which it could not do while a job nothing could end
+	// held a runner GitHub still believed was working.
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+	final := w.observations[len(w.observations)-1]
+	if final.Queued != 0 {
+		t.Fatalf("the queue never drained: %d still queued", final.Queued)
+	}
+}
+
+// occupancyReclaims names every instance a planned drain reclaimed on the
+// occupancy budget's premise. It reads the scheduler's own operations, so a test
+// can assert WHICH recovery acted rather than merely that the instance went away.
+func (w *world) occupancyReclaims() []string {
+	var reclaimed []string
+	for _, observation := range w.observations {
+		for _, operation := range observation.Plan.Operations {
+			if operation.Kind == scheduler.OperationDrain && operation.OccupancyExceeded {
+				reclaimed = append(reclaimed, operation.Instance)
+			}
+		}
+	}
+	return reclaimed
+}
+
+// ---------------------------------------------------------------------------
 // Incident 2026-07-25 -- ADR 0017, the stranded residual behind a wedged drain
 // ---------------------------------------------------------------------------
 

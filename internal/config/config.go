@@ -35,6 +35,18 @@ type Profile struct {
 	// explicit Linux floor so ephemeral runners cannot inherit a tiny image.
 	DiskGiB   int `json:"diskGb,omitempty"`
 	MaxActive int `json:"maxActive,omitempty"`
+	// OccupancyBudgetSeconds is the wall-clock ceiling on how long one instance
+	// of this profile may hold its resource vector before the fleet reclaims it
+	// (ADR 0036). It has three distinguishable states on purpose:
+	//
+	//	nil  -- unstated; the platform default in internal/app applies
+	//	0    -- stated as unbounded; this profile is never reaped for age
+	//	n>0  -- this many seconds
+	//
+	// Unstated must stay omitempty and must not be materialized on encode, so a
+	// configuration written by a newer release is still decodable by an older
+	// strict one, exactly as githubSessionFailureWindowSeconds is.
+	OccupancyBudgetSeconds *int `json:"occupancyBudgetSeconds,omitempty"`
 }
 
 func (p Profile) normalized() Profile {
@@ -42,6 +54,59 @@ func (p Profile) normalized() Profile {
 		p.Resources = Resources{CPU: p.CPU, MemoryMiB: p.MemoryMiB}
 	}
 	return p
+}
+
+// MinOccupancyBudget and MaxOccupancyBudget bound a stated ceiling. The floor
+// keeps a typo from turning the fleet into a job killer: no profile in this
+// fleet runs work that finishes inside five minutes reliably enough to be
+// reaped at it. The ceiling is GitHub's own maximum job duration — past six
+// hours the platform has already ended the job, so a longer budget can never
+// fire and is a configuration mistake rather than a policy.
+const (
+	MinOccupancyBudget = 5 * time.Minute
+	MaxOccupancyBudget = 6 * time.Hour
+)
+
+var errOccupancyBudgetRange = errors.New("occupancy budget must be 0 (unbounded) or between 300 and 21600 seconds")
+
+// occupancyBudgetInRange accepts an unstated ceiling and an explicitly
+// unbounded one; anything else must be a duration that could plausibly fire.
+func (p Profile) occupancyBudgetInRange() bool {
+	if p.OccupancyBudgetSeconds == nil || *p.OccupancyBudgetSeconds == 0 {
+		return true
+	}
+	budget := time.Duration(*p.OccupancyBudgetSeconds) * time.Second
+	return budget >= MinOccupancyBudget && budget <= MaxOccupancyBudget
+}
+
+// OccupancyBudget resolves the profile's ceiling against the default for the
+// platform it runs on. A stated value always wins, including a stated zero,
+// which is how an operator says "this profile is never reaped for age".
+func (p Profile) OccupancyBudget(platform domain.Platform) time.Duration {
+	if p.OccupancyBudgetSeconds != nil {
+		return time.Duration(*p.OccupancyBudgetSeconds) * time.Second
+	}
+	return DefaultOccupancyBudget(platform)
+}
+
+// DefaultOccupancyBudget is the ceiling for a profile whose configuration does
+// not state one. The two numbers are sized to the work each platform actually
+// does on this fleet rather than to a round number:
+//
+//   - macOS runs the builders. An App Store archive plus upload legitimately
+//     takes forty-plus minutes, and a maestro device suite is comparable, so the
+//     ceiling is three times the longest healthy run we have measured.
+//   - Linux runs the fleet's own CI and short jobs. An hour is already far
+//     outside anything that has finished normally there.
+//
+// Both are well inside GitHub's six-hour job maximum, so the fleet reclaims the
+// vector before the platform gives up, and both are far enough above real work
+// that the budget is a backstop rather than a scheduling deadline (ADR 0036).
+func DefaultOccupancyBudget(platform domain.Platform) time.Duration {
+	if platform == domain.PlatformMacOS {
+		return 2 * time.Hour
+	}
+	return time.Hour
 }
 
 type Target struct {
@@ -658,11 +723,14 @@ func (c Config) Clone() Config {
 	out.Linux.Profiles = append([]Profile(nil), c.Linux.Profiles...)
 	for i := range out.Linux.Profiles {
 		out.Linux.Profiles[i].Aliases = append([]string(nil), c.Linux.Profiles[i].Aliases...)
+		out.Linux.Profiles[i].OccupancyBudgetSeconds = cloneBudget(c.Linux.Profiles[i].OccupancyBudgetSeconds)
 	}
 	out.Linux.BaseImageCapabilities = append([]string(nil), c.Linux.BaseImageCapabilities...)
 	out.MacOS.BaseImageCapabilities = append([]string(nil), c.MacOS.BaseImageCapabilities...)
 	out.MacOS.Builder.Aliases = append([]string(nil), c.MacOS.Builder.Aliases...)
 	out.MacOS.Maestro.Aliases = append([]string(nil), c.MacOS.Maestro.Aliases...)
+	out.MacOS.Builder.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Builder.OccupancyBudgetSeconds)
+	out.MacOS.Maestro.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Maestro.OccupancyBudgetSeconds)
 	out.GitHub.ScaleSets = append([]ScaleSet(nil), c.GitHub.ScaleSets...)
 	for i := range out.GitHub.ScaleSets {
 		out.GitHub.ScaleSets[i] = c.GitHub.ScaleSets[i].clone()
@@ -681,6 +749,16 @@ func (c Config) Clone() Config {
 		out.Targets[i].RunnerLabels = append([]string(nil), c.Targets[i].RunnerLabels...)
 	}
 	return out
+}
+
+// cloneBudget copies the stated ceiling by value so a clone and its original
+// cannot alias one operator setting.
+func cloneBudget(seconds *int) *int {
+	if seconds == nil {
+		return nil
+	}
+	copied := *seconds
+	return &copied
 }
 
 func (c Config) Validate() error {
@@ -737,6 +815,9 @@ func (c Config) Validate() error {
 		if p.ID == "" || p.Label == "" || p.Resources.CPU <= 0 || p.Resources.MemoryMiB <= 0 || p.DiskGiB < 0 {
 			return errors.New("invalid linux profile")
 		}
+		if !p.occupancyBudgetInRange() {
+			return fmt.Errorf("linux profile %s: %w", p.ID, errOccupancyBudgetRange)
+		}
 		if p.Resources.CPU > c.Linux.Capacity.CPU || p.Resources.MemoryMiB > c.Linux.Capacity.MemoryMiB {
 			return fmt.Errorf("profile %s exceeds capacity", p.ID)
 		}
@@ -766,6 +847,9 @@ func (c Config) Validate() error {
 		for _, p := range []Profile{c.MacOS.Builder.normalized(), c.MacOS.Maestro.normalized()} {
 			if p.Label == "" || p.Resources.CPU <= 0 || p.Resources.MemoryMiB <= 0 || p.MaxActive <= 0 {
 				return errors.New("invalid macOS profile")
+			}
+			if !p.occupancyBudgetInRange() {
+				return fmt.Errorf("macOS profile %s: %w", p.ID, errOccupancyBudgetRange)
 			}
 		}
 	}

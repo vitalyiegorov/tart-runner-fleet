@@ -122,9 +122,15 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 				}
 			}
 		}
+		// The occupancy clock is the durable row's creation instant, not its last
+		// state change: the host has been short these cores since the instance was
+		// planned, and a runner moving from Assigned to Running gives none of them
+		// back. This is the one per-instance age that must survive a state change,
+		// which is exactly why it reads CreatedAt where the two deadlines above
+		// read UpdatedAt (ADR 0036).
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Demand: instance.Demand, Platform: instance.Platform, Profile: instance.Profile,
 			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady,
-			AssignedSince: assignedSince, RunningSince: runningSince, JobInactive: jobInactive})
+			AssignedSince: assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {
