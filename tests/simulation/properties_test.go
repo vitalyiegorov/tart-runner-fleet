@@ -58,6 +58,20 @@ const (
 	// `if: always()` cleanup step held a builder for seventy-three minutes and no
 	// deadline in the system could take it back.
 	findingOverOccupied findingKind = "occupancy_budget"
+	// findingTierInversion is property (l): when two feasible demands compete for
+	// one identical vector on one platform, the higher priority tier is admitted.
+	// Equal vectors are the case with no packing explanation, so whatever decided
+	// the tick decided it on order alone -- and order is what a declared tier is.
+	findingTierInversion findingKind = "tier_inversion"
+	// findingEscalationRegression is property (m): a waiting demand's effective
+	// priority tier never falls. Escalation is the safety argument for tiers, and
+	// it only bounds anything if a demand cannot lose ground it has gained.
+	findingEscalationRegression findingKind = "escalation_regression"
+	// findingTierStarvation is property (n): escalation must END every tier-based
+	// pass-over. Property (b) stops counting a pass-over the declared policy
+	// explains; this is what keeps that exemption from becoming the starvation the
+	// design promised to avoid.
+	findingTierStarvation findingKind = "tier_starvation"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -219,6 +233,13 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// from an idle fleet to every oracle that reads only the fleet's own view.
 		unheardDemandChecker(cfg),
 		livenessChecker(cfg),
+		// (l), (m) and (n) precede bounded starvation for the same causal reason:
+		// a tier inversion, a tier that fell, and an escalation that never
+		// delivered are each the CAUSE of a queue whose order looks wrong, and
+		// property (b) would report the symptom (issue #224).
+		tierInversionChecker(cfg),
+		escalationChecker(cfg),
+		tierStarvationChecker(cfg),
 		boundedStarvationChecker(cfg),
 		quiescenceChecker(cfg),
 	}
@@ -1097,7 +1118,14 @@ func boundedStarvationChecker(cfg worldConfig) checker {
 		var findings []finding
 		for _, demand := range feasibleDemands(cfg, observation) {
 			overtaker, overtaken := youngestOvertaker(admitted, demand)
-			if !overtaken || !aged(cfg, observation.Now, demand) || holdsReservation(observation, demand) {
+			if !overtaken || !aged(cfg, observation.Now, demand) || holdsReservation(observation, demand) ||
+				outranksOnTier(cfg, observation.Now, overtaker, demand) {
+				// A declared priority tier that outranks this demand IS the written
+				// invariant now, exactly as the reserved head is (issue #224). The
+				// exemption is not open-ended: escalation raises the waiting demand
+				// one rank per threshold, and property (n) fails if the pass-over
+				// outlasts that. A world that declares no tier never reaches this
+				// clause, so its history is unchanged.
 				// ADR 0017: a reserved head is protected by ORDERING, not by
 				// idleness. It is re-checked first on every later tick and wins the
 				// first vector large enough for it, so residual admission ahead of it
