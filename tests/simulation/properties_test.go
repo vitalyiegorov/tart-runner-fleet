@@ -848,17 +848,14 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 	}
 	free := domain.Resources{CPU: min(headroom.CPU, observation.Host.Available.CPU),
 		MemoryMB: min(headroom.MemoryMB, observation.Host.Available.MemoryMB), Slots: headroom.Slots}
-	head, residual, withheld := reservedResidual(cfg, observation, free)
+	hold := reservedResidual(cfg, observation, free, repos)
 	var feasible []domain.Demand
 	for _, demand := range observation.Demands {
 		profile := cfg.Scheduler.Profiles[demand.Profile]
 		// The reserved head is entitled to the vector, so it is judged against the
 		// envelope that vector comes out of. Everything else is judged against what
 		// the fleet is allowed to hand out beside it.
-		envelope := free
-		if withheld && demand.Key != head {
-			envelope = residual
-		}
+		envelope := hold.envelope(demand, profile.Resources)
 		if incarnated[demand.Key] || !envelope.CanFit(profile.Resources) {
 			continue
 		}
@@ -911,22 +908,77 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 // aged, or remainder envelopes. So an envelope defect cannot reach this oracle;
 // only a reservation the scheduler admits to holding can.
 //
-// What is deliberately NOT modelled is ADR 0030's repository slot: a head also
-// holds one slot of its own repository's cap, and the remainder passes honour it.
-// Charging it here would narrow the oracle further, and narrowing is the
-// direction that BLINDS a property. Leaving it out can only produce a report the
-// scheduler must then justify, which is the direction a harness is allowed to
-// err in.
-func reservedResidual(cfg worldConfig, observation tickObservation, free domain.Resources) (domain.DemandKey, domain.Resources, bool) {
+// A head is held out of admission on TWO axes, and this function reads both
+// (issue #226, ADR 0038). `scheduler.feasible` folds the vector fit and the
+// repository cap into one boolean, and `planLinux` holds the reservation when
+// either term refuses the head. Asking only the first made the oracle withhold a
+// whole vector on behalf of a head that `feasibleDemands` itself, four lines
+// below, drops on `repos[...] >= repoCap(...)`. That is the blinding direction:
+// it suppresses reports. It suppressed a real one -- issue #216's tick is a
+// cap-held head, so property (a)'s report there was a TRUE POSITIVE that PR
+// #220 taught this oracle to disbelieve.
+//
+// Reading the cap makes `holds` bind less often, which WIDENS what other demands
+// are judged against and can only produce reports the scheduler must justify --
+// the direction #220's own safety argument says a harness is allowed to err in.
+//
+// What a cap-held head lends is bounded, and the bound is ADR 0017's own no-jump
+// construction stated rather than inherited: a demand that could itself take the
+// head's whole vector is still judged against `free - reservation`, because
+// `free` fits the head and an equal-or-larger peer admitted into it would invert
+// the aged FIFO the reservation exists to protect.
+//
+// What is still deliberately NOT modelled is ADR 0030's repository slot as a
+// charge against OTHER demands: a head also holds one slot of its own
+// repository's cap, and the remainder passes honour it. Charging THAT here would
+// narrow the oracle, and narrowing is the direction that BLINDS a property. The
+// cap term above is the opposite of a narrowing: it is the head's OWN
+// feasibility predicate, and making that stricter widens what the oracle reports.
+func reservedResidual(cfg worldConfig, observation tickObservation, free domain.Resources,
+	occupied map[string]int) reservedHold {
 	reservation := observation.Plan.Next.Reservation
 	if reservation == nil {
-		return domain.DemandKey{}, free, false
+		return reservedHold{free: free}
 	}
-	residual, fits := free.Sub(cfg.Scheduler.Profiles[reservation.Profile].Resources)
+	vector := cfg.Scheduler.Profiles[reservation.Profile].Resources
+	residual, fits := free.Sub(vector)
 	if !fits {
-		return domain.DemandKey{}, free, false
+		return reservedHold{free: free}
 	}
-	return reservation.Demand, residual, true
+	return reservedHold{head: reservation.Demand, vector: vector, free: free, residual: residual, holds: true,
+		capHeld: occupied[reservation.Demand.Repo] >= repoCap(cfg, reservation.Demand.Repo)}
+}
+
+// reservedHold is what one tick's held reservation withholds, and from whom.
+// `capHeld` names WHICH axis is holding the head out, which is the whole of
+// issue #226: on the vector axis the head can still use the envelope it is
+// waiting for, and on the repository-cap axis it cannot.
+type reservedHold struct {
+	head     domain.DemandKey
+	vector   domain.Resources
+	free     domain.Resources
+	residual domain.Resources
+	holds    bool
+	capHeld  bool
+}
+
+// envelope names what one demand is judged against on this tick.
+//
+// The reserved head is entitled to the vector, so it is always judged against
+// the envelope that vector comes out of. Everything else gets the residual --
+// unless the head is cap-held, in which case it gets the whole envelope, because
+// a head no amount of freed CPU can admit is not waiting on this tick's
+// admission. The single exception is the demand that could take the head's
+// vector whole: ADR 0017 lets nothing equal-or-larger jump the queue, and that
+// is the one guarantee a lent vector could otherwise break.
+func (h reservedHold) envelope(demand domain.Demand, resources domain.Resources) domain.Resources {
+	if !h.holds || demand.Key == h.head {
+		return h.free
+	}
+	if h.capHeld && !resources.CanFit(h.vector) {
+		return h.free
+	}
+	return h.residual
 }
 
 // macOSAdmissible applies the two macOS-only admission rules the physical

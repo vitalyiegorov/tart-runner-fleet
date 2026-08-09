@@ -87,22 +87,32 @@ func runLiveness(cfg worldConfig, observation tickObservation) []finding {
 	return findings
 }
 
-// TestFeasibilityWithholdsAFittingReservedHeadsVector is issue #216: the seed
-// 92 tick of the container-node arm, judged by the oracle alone.
+// TestFeasibilityWithholdsAFittingReservedHeadsVector is PR #220's pin,
+// RE-ANCHORED by ADR 0038 to the axis #220 was right about.
 //
-//	go test ./tests/simulation -run TestSimFuzzContainerNode -seeds=1 -seed-base=92 -sim-ticks=320
-//	tick 188: liveness_wedge: no admission for 12 ticks while b/repo/1011/1/500011 was feasible
+// #220 built this tick from issue #216's seed-92 dump, in which the aged head is
+// an `ops/fleet` `xl` that fits the free envelope and is held out by
+// `ops/fleet`'s cap of two. That is the CAP axis, and issue #226 established
+// that a cap-held head must lend its vector rather than withhold it: no amount
+// of freed CPU can admit such a head, so nothing is protected by the refusal.
+// Anchored there, this test asserted the defect. `TestIssue216AndIssue226Pin
+// TheSameState` and `TestOracleLendsACapHeldHeadsVectorToWorkItOutranks` in
+// oracle_repository_cap_test.go now carry that state and the corrected answer.
 //
-// Three live instances hold 4 CPU / 8192 MB / 3 slots of a 12 CPU / 30720 MB /
-// 4 slot ceiling, and the host reports 7 CPU available, so the oracle's own free
-// envelope is {7 CPU, 22528 MB, 1 slot}. The aged head is an `ops/fleet` xl that
-// FITS that envelope; it is held out of admission by its repository cap, which
-// `ops/fleet`'s two live smalls have already filled -- ADR 0029's own guard case.
+// The rule #220 established is untouched and still needs a pin, so this one
+// keeps the same arithmetic and moves the head to a repository that is UNDER its
+// cap. Three live instances hold 4 CPU / 8192 MB / 3 slots of a 12 CPU /
+// 30720 MB / 4 slot ceiling and the host reports 7 CPU, so the oracle's free
+// envelope is {7 CPU, 22528 MB, 1 slot}; the aged `a/repo` `xl` head FITS it,
+// and `a/repo` has no live instance at all.
 //
-// ADR 0029 condition 1 therefore withholds the head's whole vector, and
+// A head that fits the oracle's envelope and is under its cap is held by the
+// SCHEDULER's envelope, which is narrower than the oracle's by construction --
+// the four-slot ceiling, the guard clamps, and `LinuxCapacity`. That is the
+// vector axis, ADR 0029 condition 1 withholds the head's whole vector, and
 // `safeBackfill` plans inside {1 CPU, 10240 MB, 0 slots}. A `medium` needs two
 // cores and a slot. Calling it "definitely admissible" reports the aged-FIFO
-// guarantee as a defect: the plan is correct and the oracle was wrong.
+// guarantee as a defect: the plan is correct and the oracle would be wrong.
 func TestFeasibilityWithholdsAFittingReservedHeadsVector(t *testing.T) {
 	t.Parallel()
 	cfg := containerNodeWorld()
@@ -111,16 +121,30 @@ func TestFeasibilityWithholdsAFittingReservedHeadsVector(t *testing.T) {
 		oracleInstance(cfg, "trf-small-1", simControlPlaneRepo, "small"),
 		oracleInstance(cfg, "trf-small-2", simControlPlaneRepo, "small"),
 	}
-	head := oracleDemand(cfg, simControlPlaneRepo, 8, 24*time.Minute+30*time.Second, "xl")
+	head := oracleDemand(cfg, "a/repo", 8, 24*time.Minute+30*time.Second, "xl")
 	waiting := oracleDemand(cfg, "b/repo", 11, 15*time.Minute+30*time.Second, "medium")
 	observation := oracleObservation(188, []domain.Demand{head, waiting}, live,
 		domain.Resources{CPU: 7, MemoryMB: 22_528, Slots: 4}, reservationOf(cfg, head))
 
-	if keys := feasibleKeys(cfg, observation); len(keys) != 0 {
+	// The anchor itself is the assertion: this must be the VECTOR axis, so the
+	// head's own repository has to be under its cap. If a later change fills
+	// `a/repo`, this test would silently become the cap case again -- which is
+	// exactly how #220's pin came to assert the defect.
+	occupied := 0
+	for _, instance := range observation.Instances {
+		if instance.Repo == head.Key.Repo {
+			occupied++
+		}
+	}
+	if occupied >= repoCap(cfg, head.Key.Repo) {
+		t.Fatalf("anchor broken: %s must be UNDER its cap of %d for this to pin the vector axis, got %d live",
+			head.Key.Repo, repoCap(cfg, head.Key.Repo), occupied)
+	}
+	if keys := feasibleKeys(cfg, observation); len(keys) != 1 || keys[0] != head.Key {
 		t.Fatalf("a demand that fits only INSIDE the reserved head's vector is not definitely admissible: %v", keys)
 	}
-	if findings := runLiveness(cfg, observation); len(findings) > 0 {
-		t.Fatalf("property (a) must not report a tick that is correctly holding the head's vector: %s", findings[0])
+	if findings := runLiveness(cfg, observation); len(findings) != 1 || findings[0].Kind != findingWedge {
+		t.Fatalf("a reservation held for a head the oracle can admit, admitting nothing, is still a wedge: %v", findings)
 	}
 }
 
