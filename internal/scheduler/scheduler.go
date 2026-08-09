@@ -1390,24 +1390,60 @@ func fillMacRemainder(in Input, plan Plan, macos []domain.Demand) Plan {
 // reservation veto, and it wedged the fleet in issue #208, seed 210: twelve
 // consecutive ticks admitting nothing while four idle cores held an aged maestro.
 //
-// The target is therefore the highest-priority queued profile that still has
-// room, in the aged-FIFO order `priorityOrder` gives every other admission. A
-// profile at its `maxActive` ends its own turn rather than the pass, which is how
-// `appendMacSpawns` already treats an exhausted repository cap. It cannot admit
-// anything the envelope does not hold: `appendMacSpawns` charges every live
-// instance, this tick's planned spawns, and any reserved head before it selects.
+// The target is therefore the highest-priority queued demand this pass can
+// actually admit, in the aged-FIFO order `priorityOrder` gives every other
+// admission, and its profile. A candidate that cannot be admitted ends its own
+// turn rather than the pass, which is how `appendMacSpawns` already treats an
+// exhausted repository cap.
+//
+// "Cannot be admitted" is every veto `appendMacSpawns` will apply, read against
+// the same inputs it reads — profile `maxActive`, the aged-or-throttled
+// envelope for that demand, and the repository cap over live instances plus this
+// tick's planned spawns. Naming the target on `maxActive` alone was the third
+// instance of this seam's one bug: a `builder` (6 CPU / 12288 MB) with no
+// sibling live has `maxActive` room in a four-core residual it cannot fit, so it
+// won the target, was refused on the envelope, and the pass returned having
+// never offered the queued `maestro` that fit those four cores exactly. That
+// stalled the production Mac mini on 2026-08-09 at ~18:10Z with a quarter of the
+// machine idle behind a held reservation every other condition had released.
+//
+// Skipping such a candidate does not invert aged FIFO, because a demand the
+// residual cannot hold is not waiting on this pass at all: it is waiting on the
+// live instances holding what it needs, which is ADR 0017's rule and the same
+// reason a reserved head that does not fit lends its vector.
 func remainderMacProfile(in Input, macos []domain.Demand) (domain.ProfileID, bool) {
 	if !in.Config.MixedProfileCohorts {
 		if active, live := activeMacProfile(in.Instances.Value); live {
 			return active, macProfileCanGrow(in, active)
 		}
 	}
+	free, agedFree := linuxFree(in), linuxFreeAged(in)
+	counts := activeRepoCounts(in.Instances.Value)
 	for _, demand := range priorityOrder(in, macos) {
-		if macProfileCanGrow(in, demand.Profile) {
-			return demand.Profile, true
+		if !macProfileCanGrow(in, demand.Profile) {
+			continue
 		}
+		if !demandEnvelope(in, demand, free, agedFree).CanFit(in.Config.Profiles[demand.Profile].Resources) {
+			continue
+		}
+		if counts[demand.Key.Repo] >= repoCapLimit(in.Config.RepoCaps, demand.Key.Repo) {
+			continue
+		}
+		return demand.Profile, true
 	}
 	return "", false
+}
+
+// demandEnvelope names the envelope a macOS demand is judged against. A demand
+// past the fairness age is judged against the starvation-guard envelope, which
+// lifts only the advisory CPU-idle clamp; young demands keep the throttled one.
+// Both consume from both, so a young spawn this tick cannot double-spend
+// capacity an aged spawn already took.
+func demandEnvelope(in Input, demand domain.Demand, free, agedFree domain.Resources) domain.Resources {
+	if demandAged(in.Now, in.Config.FairnessAge, demand) {
+		return agedFree
+	}
+	return free
 }
 
 // appendPlannedSpawns models this tick's planned spawn operations as live,
@@ -1761,15 +1797,7 @@ func appendMacSpawns(in Input, plan Plan, demands []domain.Demand, dependencies 
 		if len(selected) >= available {
 			break
 		}
-		// A demand past the fairness age is judged against the starvation-guard
-		// envelope, which lifts only the advisory CPU-idle clamp; young demands
-		// keep the throttled envelope. Both consume from both, so a young spawn
-		// this tick cannot double-spend capacity an aged spawn already took.
-		envelope := free
-		if demandAged(in.Now, in.Config.FairnessAge, demand) {
-			envelope = agedFree
-		}
-		if !envelope.CanFit(profile.Resources) {
+		if !demandEnvelope(in, demand, free, agedFree).CanFit(profile.Resources) {
 			break
 		}
 		// A capped repository is skipped, never a stop: every candidate here shares
