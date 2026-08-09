@@ -684,6 +684,10 @@ func sortedKeys(counts map[string]int) []string {
 // already incarnates it, no idle runner already matches it (which is how
 // consumeCompatibleIdle serves a demand without spawning), and, for macOS, the
 // profile is under MaxActive and may coexist with whatever cohort is live.
+//
+// "Definitely" is the whole word. A held reservation is a WRITTEN rule about
+// which vectors this tick may hand out, so an envelope that ignores it does not
+// measure admissibility -- see reservedResidual.
 func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Demand {
 	live := domain.Resources{}
 	repos := map[string]int{}
@@ -715,10 +719,18 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 	}
 	free := domain.Resources{CPU: min(headroom.CPU, observation.Host.Available.CPU),
 		MemoryMB: min(headroom.MemoryMB, observation.Host.Available.MemoryMB), Slots: headroom.Slots}
+	head, residual, withheld := reservedResidual(cfg, observation, free)
 	var feasible []domain.Demand
 	for _, demand := range observation.Demands {
 		profile := cfg.Scheduler.Profiles[demand.Profile]
-		if incarnated[demand.Key] || !free.CanFit(profile.Resources) {
+		// The reserved head is entitled to the vector, so it is judged against the
+		// envelope that vector comes out of. Everything else is judged against what
+		// the fleet is allowed to hand out beside it.
+		envelope := free
+		if withheld && demand.Key != head {
+			envelope = residual
+		}
+		if incarnated[demand.Key] || !envelope.CanFit(profile.Resources) {
 			continue
 		}
 		if repos[demand.Key.Repo] >= repoCap(cfg, demand.Key.Repo) {
@@ -735,6 +747,57 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 		feasible = append(feasible, demand)
 	}
 	return feasible
+}
+
+// reservedResidual is the envelope every demand OTHER than the reserved head
+// must fit, and whether a reservation withholds anything from it at all.
+//
+// This is the issue #216 refinement, and it is the same shape as issue #129's
+// (feasibleDemands did not model the tick's own repository-cap consumption):
+// the oracle's arithmetic was right and its question was incomplete. A tick that
+// holds a reservation is not a tick with a free envelope, because the fleet has
+// a WRITTEN rule about part of it.
+//
+// The distinction is ADR 0017's own, and both halves of it are load-bearing:
+//
+//   - The head does NOT fit the free envelope. Nothing is charged, and admission
+//     proceeds in the full residual (ADR 0017; ADR 0029 condition 1's second
+//     sentence). Such a head is blocked by live instances holding what it needs,
+//     so it cannot start until they release whatever backfill does -- it is not
+//     waiting on backfill to stop. Work that fits and is refused HERE is a wedge,
+//     and it is precisely the 2026-07-25 incident and issue #125 that property
+//     (a) was built for. This function returns false and changes nothing.
+//   - The head DOES fit. ADR 0029 condition 1 withholds its whole vector by
+//     design, and `safeBackfill` plans inside `free - reservation`. A demand that
+//     fits only INSIDE that vector is not "definitely" admissible: admitting it
+//     would take exactly what the oldest aged demand is entitled to, so calling
+//     it feasible reports the aged-FIFO guarantee of ADR 0004 as a defect.
+//
+// Two properties of the inputs keep ADR 0031's independence rule intact. The
+// reservation is read from the plan's own next state, which is a DECISION the
+// plan publishes -- the same fact property (b) already reads through
+// holdsReservation -- and not an envelope computation. And the vector subtracted
+// is the head's CONFIGURED profile vector, taken from worldConfig, never the
+// `Resources` the scheduler stamped on the reservation and never any of its free,
+// aged, or remainder envelopes. So an envelope defect cannot reach this oracle;
+// only a reservation the scheduler admits to holding can.
+//
+// What is deliberately NOT modelled is ADR 0030's repository slot: a head also
+// holds one slot of its own repository's cap, and the remainder passes honour it.
+// Charging it here would narrow the oracle further, and narrowing is the
+// direction that BLINDS a property. Leaving it out can only produce a report the
+// scheduler must then justify, which is the direction a harness is allowed to
+// err in.
+func reservedResidual(cfg worldConfig, observation tickObservation, free domain.Resources) (domain.DemandKey, domain.Resources, bool) {
+	reservation := observation.Plan.Next.Reservation
+	if reservation == nil {
+		return domain.DemandKey{}, free, false
+	}
+	residual, fits := free.Sub(cfg.Scheduler.Profiles[reservation.Profile].Resources)
+	if !fits {
+		return domain.DemandKey{}, free, false
+	}
+	return reservation.Demand, residual, true
 }
 
 // macOSAdmissible applies the two macOS-only admission rules the physical
