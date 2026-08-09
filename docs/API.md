@@ -95,6 +95,39 @@ operations share it and the worst attempt count among them. Persisted upstream
 text is never rendered. The field is omitted while nothing is failing and is
 absent on daemons that published only the counts.
 
+`occupancy` reports how long each live instance has held its profile's resource
+vector, and `occupancyCheck` is the derived judgement `fleet doctor` renders:
+
+```json
+"occupancy": [
+  {
+    "instance": "trf-xl-05bbe1c83f21fcd6",
+    "profile": "xl",
+    "repo": "rnw-community/rnw-community",
+    "cpu": 6,
+    "memoryMiB": 12288,
+    "ageSeconds": 4500,
+    "budgetSeconds": 2700,
+    "warned": true,
+    "overBudget": true,
+    "starvesQueuedDemand": true
+  }
+],
+"occupancyCheck": {"ok": false, "reasons": ["instance trf-xl-05bbe1c83f21fcd6 ..."]}
+```
+
+`budgetSeconds` is `0` for a profile with no configured ceiling; `warned` and
+`overBudget` are then always `false`, because an unbounded hold cannot be past a
+bound. `starvesQueuedDemand` reports that queued work would fit inside the
+vector this instance is holding, and `occupancyCheck` fails only on the
+conjunction of `overBudget` and `starvesQueuedDemand`: a long job is allowed to
+be long, and a deep queue is allowed to be deep, but an over-budget hold with
+work waiting that fits it is the 2026-08-09 incident (ADR 0036). The same three
+facts are exported as `fleet_instance_occupancy_seconds`,
+`fleet_instance_occupancy_budget_seconds`, and
+`fleet_instance_occupancy_starving`, each labelled by profile and instance. Both
+fields are additive and absent on daemons that measured no occupancy at all.
+
 `operations.deadLetters` names the individual operations that have stopped
 retrying, because a count is not actionable: discharging one requires its
 identity. `parked` reports that nothing will advance the resource without an

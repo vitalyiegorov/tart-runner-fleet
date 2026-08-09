@@ -149,6 +149,8 @@ refusal.
 | g | **Conservation.** Instances never exceed the envelope or the caps. | Aggregate CPU, memory, and slots against the physical machine; per-repository count against its cap (excluding a rebound instance, whose repository the broker chose); per-profile count against MaxActive. | Enforced (finding 2 fixed 2026-08-03; see [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)) |
 | h | **No stranded demand.** A queued job is never held by an instance that is executing a different one. | An instance still incarnating a demand GitHub has queued and dispatched to nobody, while GitHub has dispatched another job of the same scale set to its runner, for more than G ticks. | Enforced (added with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md)) |
 | i | **No drain churn.** A recovery drain the executor aborts does not repeat. | Per-instance count of drains disproven at execution time, against N. | Enforced (added with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md)) |
+| j | **Nothing goes unheard.** A job whose `JobAvailable` the broker actually delivered reaches the durable demand ledger. | Per-job ticks between delivery and the ledger, against H. It is a delivery budget, not a scheduling one. | Enforced (added with [ADR 0035](0035-a-broker-message-id-is-unique-only-within-its-sequence.md)) |
+| k | **Bounded occupancy.** No instance holds its profile's resource vector beyond that profile's occupancy budget. | Per-instance age from the harness's own virtual creation instant, against the budget plus a bounded reclaim grace. Scoped to instances that consume host resources and are not already tearing down. | Enforced (added with [ADR 0036](0036-an-instance-may-not-hold-its-vector-forever.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the
@@ -167,6 +169,21 @@ found it. Every signature is pinned by its own characterization test in
 change shape, and its fix PR arrives with a test that already describes it.
 
 An unsignatured violation of any property fails the build.
+
+Finding 7 was found this way by the sweep that added property (k) and issue
+#223's `overrun_job`, and it is a SCHEDULING defect rather than an occupancy one:
+it reproduces unchanged with every simulated profile's budget set to zero, which
+makes `occupancyExceeded` constantly false and `assignmentRecoveries`
+byte-identical to the code before that change. A reservation held by a head that
+a REPOSITORY CAP is blocking -- resource-feasible, cap-infeasible -- sterilizes
+the residual, and an unrelated repository's feasible work waits for as long as
+the cap holder runs. It is tracked in issue #226. The wedge lasts exactly as long
+as that holder runs, which is why no earlier sweep reached it: the longest
+healthy simulated job is forty-two ticks and `LivenessK` is twelve, so until a
+job could outlive its expectation no cap holder ran long enough to breach it.
+This is the second time the harness has produced a finding as a side effect of
+being extended, and it is the intended shape -- a generator that can reach a new
+state finds what lives there.
 
 Three oracle refinements were needed to keep that promise honest. The first two
 were made with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md);

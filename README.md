@@ -52,6 +52,11 @@ flowchart LR
   and profile `maxActive` first; then a fresh host probe that defers on disk,
   memory, swap, or CPU pressure. Linux and macOS share one envelope by default
   ([ADR 0012](docs/adr/0012-shared-cross-platform-capacity.md)).
+- **No instance holds the host forever.** A profile states a wall-clock ceiling
+  on how long one of its instances may hold its resource vector; a hold past it
+  is reclaimed through the ordinary graceful drain, and a hold approaching it is
+  a warning, a metric, and a `fleet doctor` finding first
+  ([ADR 0036](docs/adr/0036-an-instance-may-not-hold-its-vector-forever.md)).
 - **Scheduling is fair by construction.** Young work is ordered by dominant
   resource share and packed for maximum cardinality; aging promotes old work to
   global FIFO so a large job cannot starve; a `control-plane` target gets one

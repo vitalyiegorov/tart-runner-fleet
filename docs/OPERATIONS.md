@@ -701,6 +701,44 @@ fleet doctor --endpoint unix://__STATE_DIR__/fleetd.sock
 The socket is `0600`, is unlinked on clean shutdown, and only a stale socket
 owned by the current user may be replaced. `fleet` never opens `fleet.db`.
 
+### An instance holding its vector too long
+
+`fleet doctor` reports `FAIL  occupancy` when an instance has held its profile's
+resource vector past that profile's configured ceiling **while queued work that
+would fit that vector waits**. Either half alone is not a fault: a long job is
+allowed to be long, and a deep queue is allowed to be deep. Together they are the
+2026-08-09 incident, where one 6 vCPU / 12 GiB instance held sixty percent of the
+host for seventy-five minutes on a job that had already failed, with five jobs
+queued behind it and four cores idle (ADR 0036).
+
+```sh
+fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
+  jq '.data.occupancy | map(select(.overBudget))'
+```
+
+`STATE` in the `OCCUPANCY` table of `fleet status` is the whole judgement:
+
+| `STATE` | Meaning | Action |
+| --- | --- | --- |
+| `ok` | Inside three quarters of the ceiling. | None. |
+| `warn` | Past three quarters of the ceiling. | None yet. The daemon has logged one WARN naming the job. |
+| `over` | Past the ceiling, but nothing queued fits the held vector. | None. The fleet reclaims it; no other work is waiting on it. |
+| `STARVING` | Past the ceiling with queued work that fits behind it. | The fleet is reclaiming it. Check the job named in the WARN before raising the ceiling. |
+
+A `-` in `BUDGET` is a profile with no ceiling configured, not a ceiling of zero.
+
+The reclaim is not silent. The daemon logs one line naming the instance, the
+vector, how long it was held, the ceiling, and the repository, run, attempt, and
+job it cut; the durable drain operation's payload carries the same job identity.
+A reaped job fails on GitHub with a lost-communication error, which is
+indistinguishable from a flake without those two records — so if a job failed
+that way and neither record names it, it was a flake and not a reap.
+
+If a profile's legitimate work has grown past its ceiling, raise it rather than
+removing it. The ceiling is per profile, `occupancyBudgetSeconds`, and must be
+`0` (never reaped for age) or between 300 and 21600 seconds; unstated takes the
+platform default of two hours on macOS and one hour on Linux.
+
 ### Diagnosing an unavailable GitHub observation
 
 `scheduler ready FAIL: critical_observation_unavailable` names how many
