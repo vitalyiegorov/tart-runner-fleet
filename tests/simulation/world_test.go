@@ -106,6 +106,19 @@ type worldConfig struct {
 	// on priority-tier grounds for at most this many ticks, because escalation
 	// must end the exemption a declared tier earns from property (b).
 	TierStarvationT int
+	// TeardownReleaseTicks bounds property (o): once a drain has passed
+	// deregistration — the runner is gone and the job is provably over — the
+	// instance may go on holding its vector for at most this many further ticks,
+	// WHATEVER the guest does.
+	//
+	// Twelve is the ladder plus slack. Production climbs three graceful stops,
+	// three forced ones and three destroys; the harness spends one tick per
+	// attempt, and the teardown needs two more edges after the guest is off. The
+	// worst honest case is therefore eight ticks, and twelve leaves room for the
+	// observation delays a stale host probe or an unavailable Tart can stack.
+	// The leak it exists to catch is unbounded: the 2026-08-10 incident ran 165
+	// ticks' worth of virtual time and was still climbing.
+	TeardownReleaseTicks int
 	// SequenceResetAt is the tick at which GitHub restarts the broker's
 	// message-id sequence, as it did for scale set 8077185082566234948 on
 	// 2026-08-01T18:32Z. Zero means the sequence is never restarted.
@@ -187,16 +200,17 @@ func defaultWorld() worldConfig {
 			MixedProfileCohorts:    true,
 			ElasticHostEnvelope:    true,
 		},
-		Bindings:            simBindings(profiles),
-		Repos:               []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
-		Profiles:            sortedProfileIDs(profiles),
-		LivenessK:           12,
-		StarvationN:         3,
-		QuiesceQ:            40,
-		StrandedG:           10,
-		DrainChurnN:         1,
-		HearingH:            2,
-		OccupancyGraceTicks: 12,
+		Bindings:             simBindings(profiles),
+		Repos:                []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
+		Profiles:             sortedProfileIDs(profiles),
+		LivenessK:            12,
+		StarvationN:          3,
+		QuiesceQ:             40,
+		StrandedG:            10,
+		DrainChurnN:          1,
+		HearingH:             2,
+		OccupancyGraceTicks:  12,
+		TeardownReleaseTicks: 12,
 	}
 }
 
@@ -542,6 +556,23 @@ type world struct {
 	drainAborts   map[string]int
 	stalledRunner map[string]bool
 	wedgedDrain   map[string]int
+	// unstoppableGuest is issue #233: a guest that will not power itself down, and
+	// the minimum force it finally yields to. Unlike every other fault here it is
+	// NOT decayed — that is the whole point. Nothing about a wedged macOS guest
+	// gets better because time passed, and a harness whose every fault expires is
+	// a harness that cannot express "this step will fail forever".
+	unstoppableGuest map[string]lifecycle.StopForce
+	wedgeNextGuest   lifecycle.StopForce
+	// repeatWithoutEscalating reproduces the executor as it behaved BEFORE issue
+	// #233: every stop attempt is the same polite request. It exists so a pinned
+	// test can prove property (o) is red on the defect and green on the fix; no
+	// generated trace ever sets it.
+	repeatWithoutEscalating bool
+	// stopAttempts counts, per instance, the stop attempts a drain has already
+	// spent failing. Production reads the same count off the durable operation
+	// row; the mirror keeps it here because the harness completes and re-steps a
+	// claimed operation rather than persisting a retry.
+	stopAttempts map[string]int
 	// arrivalsStopped marks the tick after which no new job may be created, which
 	// is what makes property (f) meaningful.
 	arrivalsStopped bool
@@ -655,6 +686,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, createdAt: map[string]time.Time{},
 		claimed: map[string]*simOperation{}, delivered: map[int]*simMessage{},
 		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
+		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
 		drainAborts: map[string]int{}, known: map[string]finding{},
 	}
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
@@ -917,6 +949,13 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		}
 		return operations.StateDeregistering, false
 	case operations.StateDeregistering:
+		// executor.go's deregistering arm: the runner is gone and its deletion is
+		// confirmed, so all that remains is to make the guest stop holding the
+		// host. A guest that will not do so is issue #233, and it is the one
+		// lifecycle step the harness models as able to fail indefinitely.
+		if !w.stopGuest(instance.ID) {
+			return "", false
+		}
 		return operations.StateStopping, false
 	case operations.StateStopping:
 		delete(w.vms, instance.ID)
@@ -932,6 +971,51 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		// Assigned or running: the drain operation waits for the job to end.
 		return "", false
 	}
+}
+
+// stopGuest performs one rung of the REAL escalation ladder against the
+// harness's own simulated guest.
+//
+// The rung is chosen by lifecycle.StopEscalation itself rather than by a copy of
+// it, so the policy under simulation is production's policy; what the mirror
+// supplies is the physics — a guest that ignores a polite request forever, and
+// yields only to the force its level names. A guest the trace never wedged
+// stops on the first ask, which is every trace that predates issue #233 and is
+// why their histories are unchanged.
+func (w *world) stopGuest(id string) bool {
+	// A trace event that arrived before any drain existed wedges the next guest
+	// the fleet actually asks to stop, which is the earliest instant the fault is
+	// meaningful. Arming it at claim time would miss every drain, because the
+	// harness drives a whole instance lifecycle from whichever operation it holds.
+	if w.wedgeNextGuest > lifecycle.StopGraceful {
+		if _, already := w.unstoppableGuest[id]; !already {
+			w.unstoppableGuest[id], w.wedgeNextGuest = w.wedgeNextGuest, lifecycle.StopGraceful
+		}
+	}
+	level, wedged := w.unstoppableGuest[id]
+	if !wedged {
+		return true
+	}
+	attempts := w.stopAttempts[id]
+	w.stopAttempts[id] = attempts + 1
+	force := lifecycle.StopEscalation(attempts)
+	if w.repeatWithoutEscalating {
+		force = lifecycle.StopGraceful
+	}
+	if force < level {
+		// The guest ignores the request. Production returns a stop-stage failure
+		// here and the operation is retried; the harness leaves the instance where
+		// it is, which is the same observable: the vector stays held.
+		return false
+	}
+	delete(w.unstoppableGuest, id)
+	if force >= lifecycle.StopDestructive {
+		// Destroy removes the guest outright rather than powering it off.
+		delete(w.vms, id)
+		return true
+	}
+	w.vms[id] = false
+	return true
 }
 
 // drainAbortsNow mirrors lifecycle.DrainExecutor's execution-time re-checks

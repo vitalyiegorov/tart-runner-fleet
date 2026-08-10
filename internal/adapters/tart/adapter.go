@@ -413,7 +413,50 @@ func (a *Adapter) isMacOSVM(name string) bool {
 	return false
 }
 
+// Stop asks the guest to power itself down, and gives `tart stop` an EXPLICIT
+// graceful window that fits inside this adapter's command deadline.
+//
+// The window is the whole repair of the 2026-08-10 incident. `tart stop` waits
+// `--timeout` seconds (default 30) for a guest-initiated shutdown and then
+// forcefully terminates the VM itself. A bare `tart stop` under a
+// `context.WithTimeout` therefore races tart's own escalation, and when the
+// context wins, `exec.CommandContext` SIGKILLs the very process whose next act
+// would have been to force the guest off. The daemon's stop could never be more
+// forceful than "ask nicely until the deadline", while an operator's shell
+// `tart stop` — bounded by nothing — escalated and returned exit 0 in about
+// thirty seconds. Naming the window explicitly makes tart's escalation happen
+// inside the deadline instead of being killed by it.
 func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ownership) error {
+	return a.stop(ctx, name, ownership, a.gracefulStopSeconds())
+}
+
+// Terminate powers the guest off without waiting for it to agree. It is `tart
+// stop --timeout 0`: tart forcefully terminates the VM immediately. Nothing is
+// signalled but the guest's own virtual machine process, which is what an
+// ephemeral runner's power button does.
+func (a *Adapter) Terminate(ctx context.Context, name string, ownership operations.Ownership) error {
+	return a.stop(ctx, name, ownership, 0)
+}
+
+// Destroy terminates the guest and deletes it, for a drain whose guest will not
+// stop. It keeps every guard Delete keeps — durable ownership, and fresh
+// deletion confirmation that the runner and its jobs are inactive — and differs
+// only in refusing to wait for a shutdown the guest has already proved it will
+// not perform.
+func (a *Adapter) Destroy(ctx context.Context, name string, ownership operations.Ownership) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
+	if err := a.Terminate(ctx, name, ownership); err != nil {
+		return err
+	}
+	return a.Delete(ctx, name, ownership)
+}
+
+// stop runs one `tart stop` with an explicit graceful window and re-observes the
+// VM before reporting a failure, so a stop that worked despite a command error
+// is never retried as if it had not.
+func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ownership, graceful int) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
@@ -425,7 +468,7 @@ func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ow
 		return err
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
-	_, commandErr := a.runner().Run(commandCtx, "stop", name)
+	_, commandErr := a.runner().Run(commandCtx, "stop", name, "--timeout", strconv.Itoa(graceful))
 	cancel()
 	if commandErr == nil {
 		return nil
@@ -536,6 +579,20 @@ func (a *Adapter) timeout() time.Duration {
 		return 30 * time.Second
 	}
 	return a.CommandTimeout
+}
+
+// gracefulStopSeconds is how long `tart stop` may wait for the guest before it
+// forcefully terminates the VM itself. It is one third of the command deadline
+// so that tart's own escalation, and the teardown that follows it, both fit
+// inside the deadline this adapter imposes — the daemon must never be the thing
+// that kills the process that was about to escalate. It never reaches zero,
+// because a graceful stop that never asks the guest is Terminate, not Stop.
+func (a *Adapter) gracefulStopSeconds() int {
+	graceful := int(a.timeout().Seconds()) / 3
+	if graceful < 1 {
+		return 1
+	}
+	return graceful
 }
 
 func (a *Adapter) startTimeout() time.Duration {

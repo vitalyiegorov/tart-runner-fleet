@@ -69,13 +69,15 @@ var (
 func TestExecutorPortSurfaceIsExactlyTheAgreedVerbs(t *testing.T) {
 	backend := reflect.TypeOf((*executor.Backend)(nil)).Elem()
 	want := map[string]string{
-		"Create":  "func(context.Context, executor.InstanceSpec) error",
-		"Start":   "func(context.Context, string, operations.Ownership) error",
-		"Stop":    "func(context.Context, string, operations.Ownership) error",
-		"Delete":  "func(context.Context, string, operations.Ownership) error",
-		"Running": "func(context.Context, string) (bool, error)",
-		"Reap":    "func(context.Context, string, operations.Ownership) error",
-		"List":    "func(context.Context) ([]executor.Instance, error)",
+		"Create":    "func(context.Context, executor.InstanceSpec) error",
+		"Start":     "func(context.Context, string, operations.Ownership) error",
+		"Stop":      "func(context.Context, string, operations.Ownership) error",
+		"Terminate": "func(context.Context, string, operations.Ownership) error",
+		"Destroy":   "func(context.Context, string, operations.Ownership) error",
+		"Delete":    "func(context.Context, string, operations.Ownership) error",
+		"Running":   "func(context.Context, string) (bool, error)",
+		"Reap":      "func(context.Context, string, operations.Ownership) error",
+		"List":      "func(context.Context) ([]executor.Instance, error)",
 	}
 	got := map[string]string{}
 	for index := range backend.NumMethod() {
@@ -269,6 +271,21 @@ func (b *memoryBackend) Stop(_ context.Context, name string, ownership operation
 	instance.Running = false
 	b.instances[name] = instance
 	return nil
+}
+
+// Terminate and Destroy are the stop ladder's forceful rungs (ADR 0039). In a
+// backend with no guest there is nothing to be forceful about, so Terminate is
+// Stop and Destroy is Delete — which is exactly the semantic difference the port
+// promises: the same effect, reached without waiting for a guest to agree.
+func (b *memoryBackend) Terminate(ctx context.Context, name string, ownership operations.Ownership) error {
+	return b.Stop(ctx, name, ownership)
+}
+
+func (b *memoryBackend) Destroy(ctx context.Context, name string, ownership operations.Ownership) error {
+	if err := b.Terminate(ctx, name, ownership); err != nil {
+		return err
+	}
+	return b.Delete(ctx, name, ownership)
 }
 
 func (b *memoryBackend) Delete(_ context.Context, name string, ownership operations.Ownership) error {

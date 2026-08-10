@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -39,6 +40,84 @@ func (s *Store) DeadLetters(ctx context.Context) ([]operations.DeadLetter, error
 		return nil, fmt.Errorf("iterate dead letters: %w", err)
 	}
 	return letters, nil
+}
+
+// cleanupStates are the durable instance states that mean "this row is being
+// torn down". An instance that has been in one of them for a long time is
+// holding its vector for no reason anybody can see, which is the 2026-08-10
+// incident: `deregistering` for 4939 seconds while 67 identical stop attempts
+// failed.
+var cleanupStates = []operations.State{operations.StateDraining, operations.StateDeregistering,
+	operations.StateStopping}
+
+// StalledOperations reports the operations that are still retrying and the
+// instances still held in a cleanup state, with the two facts joined so a caller
+// can say "operation X has failed N times at step S, and instance I has been
+// held in state T for D" in one sentence.
+//
+// The second half of the union is not redundant: an instance whose drain has
+// already dead-lettered has no retrying operation at all, and is precisely the
+// row an operator most needs named. Persisted failure text never leaves the
+// store; each message is reduced to one closed lifecycle code exactly as the
+// aggregate and the dead-letter set do.
+func (s *Store) StalledOperations(ctx context.Context, now time.Time) ([]operations.StalledOperation, error) {
+	rows, err := s.dbQuery(ctx, "operations.stalled.query", `SELECT operation.id,operation.kind,operation.last_error,
+			operation.attempts,operation.created_at,operation.resource_id,
+			COALESCE(instance.state,''),COALESCE(instance.updated_at,0)
+		FROM operations operation
+		LEFT JOIN instances instance ON instance.id=operation.resource_id AND instance.state IN (?,?,?)
+		WHERE operation.status IN (?,?) AND operation.attempts>0
+		UNION ALL
+		SELECT '','','',0,0,held.id,held.state,held.updated_at
+		FROM instances held
+		WHERE held.state IN (?,?,?) AND NOT EXISTS (
+			SELECT 1 FROM operations progressing WHERE progressing.resource_id=held.id
+			AND progressing.status IN (?,?) AND progressing.attempts>0)
+		ORDER BY 6,1`,
+		cleanupStates[0], cleanupStates[1], cleanupStates[2],
+		operations.OperationPending, operations.OperationClaimed,
+		cleanupStates[0], cleanupStates[1], cleanupStates[2],
+		operations.OperationPending, operations.OperationClaimed)
+	if err != nil {
+		return nil, fmt.Errorf("list stalled operations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	stalled := make([]operations.StalledOperation, 0)
+	for rows.Next() {
+		var row operations.StalledOperation
+		var lastError string
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&row.OperationID, &row.Kind, &lastError, &row.Attempts, &createdAt,
+			&row.Instance, &row.DrainState, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan stalled operation: %w", err)
+		}
+		if row.OperationID != "" {
+			row.Code = lifecycle.FailureCode(lastError)
+			row.Retrying = since(now, createdAt)
+		}
+		if row.DrainState != "" {
+			row.Held = since(now, updatedAt)
+		}
+		stalled = append(stalled, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate stalled operations: %w", err)
+	}
+	return stalled, nil
+}
+
+// since is the non-negative age of a durable nanosecond timestamp. A zero or
+// future timestamp yields zero rather than a negative or enormous duration: an
+// unreadable age must never be published as an alarming one.
+func since(now time.Time, at int64) time.Duration {
+	if at <= 0 {
+		return 0
+	}
+	age := now.Sub(fromNanos(at))
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 // reapableStates are the only instance states an operator discharge may retire.

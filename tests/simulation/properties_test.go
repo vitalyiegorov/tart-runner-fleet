@@ -72,6 +72,12 @@ const (
 	// explains; this is what keeps that exemption from becoming the starvation the
 	// design promised to avoid.
 	findingTierStarvation findingKind = "tier_starvation"
+	// findingHeldTeardown is property (o): once a drain has passed deregistration
+	// the instance releases its vector within a bounded time, whatever the guest
+	// does. It is the one bound the harness could not previously express, because
+	// every fault it could generate expired on its own — which is exactly why the
+	// 2026-08-10 wedge shipped (issue #233).
+	findingHeldTeardown findingKind = "teardown_hold"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -253,6 +259,14 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// machine is oversubscribed, two rows claim one identity -- which no reading
 		// of an occupancy clock can explain away.
 		occupancyBudgetChecker(cfg),
+		// (o) sits beside (k) and for the mirror-image reason. (k) bounds how long
+		// a WORKING instance may hold its vector and deliberately stops judging the
+		// moment a drain starts, on the grounds that the drain's completion is the
+		// drain's own contract. Issue #233 is what happens when nothing enforces
+		// that contract: the drain became the leak, and the exclusion in (k) is
+		// precisely the blind spot it hid in. (o) picks the instance up exactly
+		// where (k) puts it down.
+		teardownReleaseChecker(cfg),
 		// (h) and (i) precede the liveness and starvation oracles deliberately: a
 		// demand nobody can serve and a drain that will not stay dead are the CAUSE
 		// of the queue that never drains, and reporting the symptom would send an
@@ -273,6 +287,75 @@ func defaultCheckers(cfg worldConfig) []checker {
 		tierStarvationChecker(cfg),
 		boundedStarvationChecker(cfg),
 		quiescenceChecker(cfg),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (o) A drain past deregistration releases its vector within a bounded time.
+// ---------------------------------------------------------------------------
+
+// teardownReleaseChecker is the issue #233 oracle.
+//
+// On 2026-08-10 a macOS guest whose job had SUCCEEDED in two minutes could not
+// be stopped. The drain retried the identical graceful stop 67 times over 90
+// minutes, every attempt failing at the same step, while the instance held the
+// node's entire 6 CPU / 12288 MiB budget and twelve jobs queued behind it. A
+// manual `tart stop` from a shell ended it in about thirty seconds.
+//
+// The scope is deliberately narrow, and the narrowness is the property's
+// meaning. It judges only instances in `deregistering` or `stopping`: past that
+// line the runner has been removed from GitHub and its deletion confirmed, so
+// the work is provably over and NOTHING can justify going on holding the host.
+// It excludes `draining`, where a deregistration GitHub legitimately refuses may
+// take as long as a six-hour job (ADR 0007, ADR 0020) — that refusal is bounded
+// by evidence rather than by a clock, and property (i) already watches it.
+//
+// The clock is the oracle's own, counted from the first tick it SAW the instance
+// tearing down past deregistration. It deliberately does not read UpdatedAt: the
+// harness rewrites that field, and an oracle that reads a fact the harness
+// authored can inherit the defect it exists to catch.
+func teardownReleaseChecker(cfg worldConfig) checker {
+	firstSeen := map[string]int{}
+	reported := map[string]bool{}
+	return func(w *world, observation tickObservation) []finding {
+		if !observation.InstancesUsable {
+			// An unreadable inventory is not a released vector and not a held one.
+			return nil
+		}
+		live := map[string]bool{}
+		held := map[string]int{}
+		for _, instance := range observation.Instances {
+			past := instance.State == domain.InstanceDeregistering || instance.State == domain.InstanceStopping
+			if !past {
+				continue
+			}
+			live[instance.ID] = true
+			if !instance.ConsumesHostResources() {
+				// The guest is off or gone: the vector is back on the host whatever the
+				// durable row still says, which is the same fact conservation charges.
+				continue
+			}
+			if _, seen := firstSeen[instance.ID]; !seen {
+				firstSeen[instance.ID] = observation.Tick
+			}
+			if elapsed := observation.Tick - firstSeen[instance.ID]; elapsed > cfg.TeardownReleaseTicks && !reported[instance.ID] {
+				held[instance.ID] = elapsed
+			}
+		}
+		for id := range firstSeen {
+			if !live[id] {
+				delete(firstSeen, id)
+			}
+		}
+		var findings []finding
+		for _, id := range sortedKeys(held) {
+			reported[id] = true
+			findings = append(findings, finding{Kind: findingHeldTeardown, Tick: observation.Tick,
+				Detail: fmt.Sprintf("%s has held %+v in %s for %d ticks after its runner was deregistered, past the %d-tick release bound; the ladder reached %s\n%s",
+					id, occupiedVector(observation, id), instanceState(observation, id), held[id],
+					cfg.TeardownReleaseTicks, lifecycle.StopEscalation(w.stopAttempts[id]), w.dumpPlan(observation))})
+		}
+		return findings
 	}
 }
 

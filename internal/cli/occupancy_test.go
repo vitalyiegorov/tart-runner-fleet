@@ -150,29 +150,8 @@ func TestStatusOmitsOccupancyWhenNothingIsHeld(t *testing.T) {
 // asking about a slow release instead.
 func TestDoctorFailsOnAStarvedVector(t *testing.T) {
 	const reason = "instance trf-xl-05bbe1c83f21fcd6 of profile xl has held 6 cpu / 12288 MiB for 1h15m0s"
-	status := occupancyStatus([]adminapi.Occupancy{starvingOccupancy()}, &adminapi.Check{Reasons: []string{reason}})
-	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
-		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
-	}}
-	for name, testCase := range map[string]struct {
-		args     []string
-		contains []string
-	}{
-		"table": {args: []string{"doctor"}, contains: []string{"FAIL   occupancy", reason, "RESULT FAIL"}},
-		"json":  {args: []string{"doctor", "--output", "json"}, contains: []string{`"name": "occupancy"`, `"ok": false`, reason}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			if got := executeWith(context.Background(), testCase.args, &stdout, &stderr, deps); got != exitDegraded {
-				t.Fatalf("code=%d, want exitDegraded; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
-			}
-			for _, want := range testCase.contains {
-				if !strings.Contains(stdout.String(), want) {
-					t.Fatalf("doctor %s missing %q:\n%s", name, want, stdout.String())
-				}
-			}
-		})
-	}
+	assertDoctorNames(t, occupancyStatus([]adminapi.Occupancy{starvingOccupancy()},
+		&adminapi.Check{Reasons: []string{reason}}), "occupancy", reason)
 }
 
 // TestDoctorPassesWhenTheDaemonNeverMeasuredOccupancy is the handoff half. An
@@ -189,5 +168,36 @@ func TestDoctorPassesWhenTheDaemonNeverMeasuredOccupancy(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "PASS   occupancy") || !strings.Contains(stdout.String(), "RESULT PASS") {
 		t.Fatalf("doctor did not pass an unmeasured occupancy check:\n%s", stdout.String())
+	}
+}
+
+// assertDoctorNames drives `fleet doctor` in both output modes against a status
+// document and requires the named check to FAIL carrying the given reason. Both
+// modes matter: an operator reads the table and an alert reads the JSON, and a
+// check that names a condition in one and not the other is half a check.
+func assertDoctorNames(t *testing.T, status adminapi.StatusEnvelope, check, reason string) {
+	t.Helper()
+	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
+		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
+	}}
+	for name, testCase := range map[string][]string{
+		"table": {"FAIL   " + check, reason, "RESULT FAIL"},
+		"json":  {`"name": "` + check + `"`, `"ok": false`, reason},
+	} {
+		args := []string{"doctor"}
+		if name == "json" {
+			args = append(args, "--output", "json")
+		}
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if got := executeWith(context.Background(), args, &stdout, &stderr, deps); got != exitDegraded {
+				t.Fatalf("code=%d, want exitDegraded; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+			}
+			for _, want := range testCase {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("doctor %s missing %q:\n%s", name, want, stdout.String())
+				}
+			}
+		})
 	}
 }

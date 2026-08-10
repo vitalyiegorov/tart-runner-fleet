@@ -11,13 +11,15 @@
 // The verbs are the ones every ephemeral-runner backend already has, and no
 // more:
 //
-//	Create  tart clone <image> <name>      podman create --name <name> <image>
-//	Start   tart run <name>                podman start <name>
-//	Running tart list                      podman inspect
-//	Stop    tart stop <name>               podman stop <name>
-//	Delete  tart delete <name>             podman rm <name>
-//	Reap    tart delete <name>             podman rm <name>       (operator authority)
-//	List    tart list --format json        podman ps --format json
+//	Create    tart clone <image> <name>    podman create --name <name> <image>
+//	Start     tart run <name>              podman start <name>
+//	Running   tart list                    podman inspect
+//	Stop      tart stop <name>             podman stop <name>
+//	Terminate tart stop <name> -t 0        podman stop --time 0 <name>
+//	Destroy   tart stop -t 0 && delete     podman rm --force <name>
+//	Delete    tart delete <name>           podman rm <name>
+//	Reap      tart delete <name>           podman rm <name>       (operator authority)
+//	List      tart list --format json      podman ps --format json
 //
 // "Clone a base image" and "create a container from an image reference" are the
 // same verb over InstanceSpec.Image, so nothing VM-specific survives here: no
@@ -97,8 +99,22 @@ type Backend interface {
 	// Start powers the instance on and returns only once the backend confirms
 	// it is running, or fails.
 	Start(context.Context, string, operations.Ownership) error
-	// Stop powers the instance off. An absent instance is success.
+	// Stop asks the guest to power itself off and waits for it, under a deadline
+	// the backend owns. An absent instance is success. It is the polite verb: a
+	// guest that has stopped answering can refuse it indefinitely, which is why
+	// the two below exist (ADR 0039).
 	Stop(context.Context, string, operations.Ownership) error
+	// Terminate powers the instance off without asking the guest, and without
+	// waiting for a guest-initiated shutdown that may never come. An absent
+	// instance is success. It ends the guest, never the fleet's own processes or
+	// the message sessions it owns.
+	Terminate(context.Context, string, operations.Ownership) error
+	// Destroy terminates the instance and removes it in one step, for a drain
+	// whose guest will not stop. It requires exactly the evidence Delete requires
+	// — fresh ownership and fresh deletion confirmation — and differs from Delete
+	// only in the force it applies to a guest that has already finished its work.
+	// An absent instance is success.
+	Destroy(context.Context, string, operations.Ownership) error
 	// Delete removes the instance after fresh deletion confirmation. An absent
 	// instance is success.
 	Delete(context.Context, string, operations.Ownership) error

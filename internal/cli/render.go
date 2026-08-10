@@ -38,10 +38,11 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	queueSLO := status.Data.EffectiveQueueSLO()
 	occupancy := status.Data.EffectiveOccupancy()
 	reservation := status.Data.EffectiveReservationCheck()
+	progress := status.Data.EffectiveProgress()
 	state := "READY"
 	if !status.Data.Ready.OK {
 		state = "NOT READY"
-	} else if !queueSLO.OK || !occupancy.OK || !reservation.OK {
+	} else if !queueSLO.OK || !occupancy.OK || !reservation.OK || !progress.OK {
 		state = "DEGRADED"
 	}
 	fmt.Fprintf(output, "TART RUNNER FLEET — %s\n", state)
@@ -58,6 +59,9 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	}
 	if !reservation.OK {
 		fmt.Fprintf(output, "reservation: %s\n", joinReasons(reservation))
+	}
+	if !progress.OK {
+		fmt.Fprintf(output, "progress: %s\n", joinReasons(progress))
 	}
 	fmt.Fprintln(output, "\nHOST PRESSURE")
 	pressure := status.Data.HostPressure
@@ -85,8 +89,33 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 		fmt.Fprintf(output, "parked %t: %s on %s  %s  attempts %d\n", letter.Parked, letter.OperationID,
 			letter.ResourceID, letter.Code, letter.Attempts)
 	}
+	if len(status.Data.Stalled) > 0 {
+		fmt.Fprintln(output, "\nSTALLED")
+		renderStalled(output, status.Data.Stalled)
+	}
 	fmt.Fprintln(output, "\nOBSERVATIONS")
 	renderObservations(output, status.Data.Observations)
+}
+
+// renderStalled prints what is not finishing, named the way the 2026-08-10
+// incident had to be reconstructed by hand: the instance, the step, the attempt
+// count, and the elapsed time. An instance whose drain has already dead-lettered
+// has no operation left to name, so its operation columns read as a dash.
+func renderStalled(output io.Writer, rows []adminapi.Stalled) {
+	table := tabwriter.NewWriter(output, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(table, "INSTANCE\tOPERATION\tSTEP\tATTEMPTS\tRETRYING\tDRAIN STATE\tHELD")
+	for _, row := range rows {
+		fmt.Fprintf(table, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", row.Instance, orDash(row.Operation), orDash(row.Code),
+			row.Attempts, renderSeconds(row.RetryingSeconds), orDash(row.DrainState), renderSeconds(row.HeldSeconds))
+	}
+	_ = table.Flush()
+}
+
+func orDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func admissionState(allowed bool) string {

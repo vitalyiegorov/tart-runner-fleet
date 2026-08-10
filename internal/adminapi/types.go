@@ -43,14 +43,21 @@ type Status struct {
 	// older daemon omitted it entirely, which is why EffectiveReservationCheck
 	// exists. Issue #226 ran in production unobserved precisely because none of
 	// this was published.
-	Reservation      *Reservation     `json:"reservation,omitempty"`
-	ReservationCheck *Check           `json:"reservationCheck,omitempty"`
-	Queues           []Queue          `json:"queues"`
-	Instances        []Instance       `json:"instances"`
-	ScopeQueues      []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations     []Observation    `json:"observations"`
-	Operations       OperationSummary `json:"operations"`
-	HostPressure     HostPressure     `json:"hostPressure"`
+	Reservation      *Reservation `json:"reservation,omitempty"`
+	ReservationCheck *Check       `json:"reservationCheck,omitempty"`
+	// Stalled is an additive fleet.v1 field: the durable operations that are
+	// still retrying and the instances still held in a cleanup state, with the
+	// step, the attempt count, and the elapsed time an operator needs to name a
+	// wedge without reading the database. An older daemon published none of it,
+	// which is why EffectiveProgress exists.
+	Stalled       []Stalled        `json:"stalled,omitempty"`
+	ProgressCheck *Check           `json:"progressCheck,omitempty"`
+	Queues        []Queue          `json:"queues"`
+	Instances     []Instance       `json:"instances"`
+	ScopeQueues   []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations  []Observation    `json:"observations"`
+	Operations    OperationSummary `json:"operations"`
+	HostPressure  HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.
@@ -119,6 +126,35 @@ func (s Status) EffectiveOccupancy() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.OccupancyCheck
+}
+
+// Stalled is one operation that will not finish, one instance that will not let
+// go, or both. Operation and Kind are empty for an instance whose drain has
+// already dead-lettered: there is no operation left to name, and that is exactly
+// when the instance is most stuck.
+type Stalled struct {
+	Operation string `json:"operation,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	// Code is the closed lifecycle vocabulary naming the STEP that keeps failing.
+	Code            string  `json:"code,omitempty"`
+	Instance        string  `json:"instance"`
+	Attempts        int     `json:"attempts"`
+	RetryingSeconds float64 `json:"retryingSeconds"`
+	// DrainState is empty for an instance that is not tearing down.
+	DrainState  string  `json:"drainState,omitempty"`
+	HeldSeconds float64 `json:"heldSeconds"`
+}
+
+// EffectiveProgress keeps a new fleet CLI compatible with an older fleet.v1
+// daemon during atomic handoff, exactly as EffectiveOccupancy does. An older
+// daemon could not see a stalled drain at all — which is the condition issue
+// #233 ran in production unnamed — so its absence is an unspecified check rather
+// than a measured pass.
+func (s Status) EffectiveProgress() Check {
+	if s.ProgressCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.ProgressCheck
 }
 
 // EffectiveReservationCheck is the same handoff accessor for the reservation

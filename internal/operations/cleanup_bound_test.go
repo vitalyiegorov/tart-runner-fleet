@@ -27,7 +27,7 @@ func TestDurableCleanupRetriesPastAnyLegitimateRefusalThenDeadLetters(t *testing
 	// A cleanup still inside the ceiling keeps retrying at the capped delay: the
 	// exact behaviour ADR 0007 requires while a job could still be running.
 	for _, attempt := range []int{1, 2, 100, 397, 469, DurableCleanupMaxAttempts - 1} {
-		next, retry := policy.Next(attempt, now)
+		next, retry := policy.Next(attempt, now, now)
 		if !retry {
 			t.Fatalf("attempt %d abandoned cleanup inside the escalation ceiling", attempt)
 		}
@@ -38,7 +38,7 @@ func TestDurableCleanupRetriesPastAnyLegitimateRefusalThenDeadLetters(t *testing
 	if DurableCleanupMaxAttempts*30*time.Second < 6*time.Hour {
 		t.Fatalf("ceiling of %d attempts is shorter than GitHub's maximum job duration", DurableCleanupMaxAttempts)
 	}
-	if _, retry := policy.Next(DurableCleanupMaxAttempts, now); retry {
+	if _, retry := policy.Next(DurableCleanupMaxAttempts, now, now); retry {
 		t.Fatal("a cleanup failing past the escalation ceiling must dead-letter, not retry invisibly forever")
 	}
 }

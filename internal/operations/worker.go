@@ -96,7 +96,13 @@ func (w Worker) runOperation(parent context.Context, operation Operation) (bool,
 	}
 	now := w.now()
 	if executionErr != nil {
-		next, retry := w.retryPolicy(operation.Kind).Next(operation.Attempts+1, now)
+		next, retry := w.retryPolicy(operation.Kind).Next(operation.Attempts+1, now, operation.CreatedAt)
+		if errors.Is(executionErr, ErrExhausted) {
+			// The executor has proved this failure is permanent, which no ceiling
+			// sized for a fault that might still resolve itself can discover in time.
+			// Park it now so an operator can discharge it.
+			next, retry = time.Time{}, false
+		}
 		if err := w.Store.Retry(context.WithoutCancel(parent), operation.ID, w.Owner, executionErr.Error(), next, !retry); err != nil {
 			return false, errorsJoin(executionErr, err)
 		}

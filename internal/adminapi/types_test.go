@@ -37,14 +37,25 @@ func TestStatusEnvelopeJSONContract(t *testing.T) {
 // an unspecified check — OK with no reasons — while a daemon that did measure is
 // reported verbatim, including the reasons that name the starving hold.
 func TestEffectiveOccupancySupportsFleetV1Handoff(t *testing.T) {
-	got := (Status{}).EffectiveOccupancy()
-	if !got.OK || got.Reasons == nil || len(got.Reasons) != 0 {
-		t.Fatalf("omitted occupancy check = %#v, want an empty non-nil reason list", got)
+	assertHandoffCheck(t, "occupancy", Status.EffectiveOccupancy,
+		func(check *Check) Status { return Status{OccupancyCheck: check} },
+		"instance trf-xl-05bbe1c83f21fcd6 of profile xl has held 6 cpu")
+}
+
+// assertHandoffCheck pins the compatibility rule every Effective* accessor
+// shares: an omitted check is UNSPECIFIED — OK with an empty, non-nil reason
+// list — and a measured one is passed through verbatim. The distinction is the
+// whole point of these accessors. A daemon that cannot see a condition must
+// never render as a daemon that looked and found none.
+func assertHandoffCheck(t *testing.T, name string, effective func(Status) Check,
+	measured func(*Check) Status, reason string) {
+	t.Helper()
+	if got := effective(Status{}); !got.OK || got.Reasons == nil || len(got.Reasons) != 0 {
+		t.Fatalf("omitted %s check = %#v, want an empty non-nil reason list", name, got)
 	}
-	want := Check{Reasons: []string{"instance trf-xl-05bbe1c83f21fcd6 of profile xl has held 6 cpu"}}
-	if got := (Status{OccupancyCheck: &want}).EffectiveOccupancy(); got.OK || len(got.Reasons) != 1 ||
-		got.Reasons[0] != want.Reasons[0] {
-		t.Fatalf("reported occupancy check = %#v", got)
+	want := Check{Reasons: []string{reason}}
+	if got := effective(measured(&want)); got.OK || len(got.Reasons) != 1 || got.Reasons[0] != reason {
+		t.Fatalf("reported %s check = %#v", name, got)
 	}
 }
 
@@ -75,6 +86,17 @@ func TestOccupancyRowsTravelAsAnAdditiveField(t *testing.T) {
 			t.Fatalf("occupancy row missing %s: %s", fragment, encoded)
 		}
 	}
+}
+
+// TestEffectiveProgressSupportsFleetV1Handoff pins the same rule for the drain
+// progress check (ADR 0039). An older daemon could not see a stalled drain at
+// all — which is the condition issue #233 ran in production unnamed — so its
+// absence is an unspecified check rather than a measured pass, and a new CLI
+// against it must not start failing every host that has not been upgraded.
+func TestEffectiveProgressSupportsFleetV1Handoff(t *testing.T) {
+	assertHandoffCheck(t, "drain progress", Status.EffectiveProgress,
+		func(check *Check) Status { return Status{ProgressCheck: check} },
+		"operation event-drain-x (deregister) has failed 67 times at stop")
 }
 
 func TestEffectiveQueueSLOSupportsFleetV1Handoff(t *testing.T) {

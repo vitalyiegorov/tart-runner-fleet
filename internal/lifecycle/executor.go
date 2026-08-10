@@ -52,6 +52,11 @@ const (
 type stageError struct {
 	stage  Stage
 	reason string
+	// exhausted marks a failure no further attempt can change. It travels as a Go
+	// error and never as text: the persisted message stays byte-identical to the
+	// ordinary failure at the same stage, so FailureCode and every operator
+	// surface keep reading exactly one closed code.
+	exhausted bool
 }
 
 func (e stageError) Error() string {
@@ -59,6 +64,15 @@ func (e stageError) Error() string {
 		return "runner lifecycle failed at " + string(e.stage)
 	}
 	return "runner lifecycle failed at " + string(e.stage) + " (" + e.reason + ")"
+}
+
+// Unwrap exposes an exhausted ladder as operations.ErrExhausted, which is what
+// the durable worker parks on rather than retries.
+func (e stageError) Unwrap() error {
+	if e.exhausted {
+		return operations.ErrExhausted
+	}
+	return nil
 }
 
 // FailureReason exposes the bounded diagnostic to programmatic callers, exactly
@@ -120,6 +134,10 @@ type VMControl interface {
 	Create(context.Context, executor.InstanceSpec) error
 	Start(context.Context, string, operations.Ownership) error
 	Stop(context.Context, string, operations.Ownership) error
+	// Terminate and Destroy are the second and third rungs of the stop ladder a
+	// drain climbs when its guest will not power itself down (ADR 0039).
+	Terminate(context.Context, string, operations.Ownership) error
+	Destroy(context.Context, string, operations.Ownership) error
 	Delete(context.Context, string, operations.Ownership) error
 	// Running reports the VM's current power state; an absent VM is not
 	// running. Recovery drains re-verify their premise against this before
@@ -515,11 +533,15 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// power down — and it is what ends the job. GitHub then reports the
 				// job as a lost-communication failure, which is what an operator sees
 				// and what the drain's own operation record explains.
-				if e.VM == nil {
-					return e.fail(ctx, instance, StageStop)
-				}
-				if err := e.VM.Stop(ctx, instance.ID, instance.Ownership); err != nil {
-					return e.fail(ctx, instance, StageStop)
+				//
+				// The stop that ends the job climbs the same ladder every other
+				// already-decided drain climbs. ADR 0036 bounds how long an instance
+				// may hold its vector, but its only enforcement action is a drain, and
+				// a drain whose stop cannot escalate is exactly the wall the budget
+				// would enqueue itself into. The ladder is what gives the budget teeth
+				// (ADR 0039).
+				if err := e.stopGuest(ctx, instance, operation); err != nil {
+					return err
 				}
 			default:
 				// An event drain is issued when the demand this VM was spawned for
@@ -573,11 +595,12 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 			}
 			instance, err = e.advance(ctx, instance, operations.StateDeregistering)
 		case operations.StateDeregistering:
-			if e.VM == nil {
-				return e.fail(ctx, instance, StageStop)
-			}
-			if err := e.VM.Stop(ctx, instance.ID, instance.Ownership); err != nil {
-				return e.fail(ctx, instance, StageStop)
+			// The runner is deregistered and its deletion confirmed: the work this
+			// guest was spawned for is provably over, and all that remains is to make
+			// it stop holding the host. That is the one place a drain may escalate,
+			// and it is where the 2026-08-10 incident spent 90 minutes.
+			if err := e.stopGuest(ctx, instance, operation); err != nil {
+				return err
 			}
 			instance, err = e.advance(ctx, instance, operations.StateStopping)
 		case operations.StateStopping:
@@ -602,6 +625,40 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 		}
 	}
 	return safeError(StagePersist)
+}
+
+// stopGuest performs one rung of the stop ladder, chosen from what this drain's
+// own durable record says it has already tried (ADR 0039).
+//
+// It is deliberately reachable only from a drain that is already decided: the
+// deregistering arm, where the runner is gone and its deletion confirmed, and
+// the occupancy-budget arm, where an operator-configured ceiling has already
+// judged the hold. No rung is ever applied to a guest whose job the fleet
+// believes is still running — every other phase aborts on busy evidence before
+// it can get here.
+func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instance, operation operations.Operation) error {
+	if e.VM == nil {
+		return e.fail(ctx, instance, StageStop)
+	}
+	var stopErr error
+	switch force := StopEscalation(StopAttempts(operation)); force {
+	case StopGraceful:
+		stopErr = e.VM.Stop(ctx, instance.ID, instance.Ownership)
+	case StopForced:
+		stopErr = e.VM.Terminate(ctx, instance.ID, instance.Ownership)
+	case StopDestructive:
+		stopErr = e.VM.Destroy(ctx, instance.ID, instance.Ownership)
+	default:
+		// Every rung has been tried and every rung has failed. Retrying is now
+		// superstition, and an operation that retries forever is one an operator
+		// cannot discharge, so the drain reports a failure the worker must park
+		// rather than repeat.
+		return exhaustedError(StageStop)
+	}
+	if stopErr != nil {
+		return e.fail(ctx, instance, StageStop)
+	}
+	return nil
 }
 
 // verifyRunnerIdle re-verifies the premise every drain of a live runner
@@ -713,6 +770,10 @@ func validateOwned(instance operations.Instance, resourceID string) error {
 }
 
 func safeError(stage Stage) error { return stageError{stage: stage} }
+
+// exhaustedError is the same bounded stage failure, marked as one no further
+// retry can change, so the durable operation parks and becomes dischargeable.
+func exhaustedError(stage Stage) error { return stageError{stage: stage, exhausted: true} }
 
 // StdinRunner is the only process boundary used for JIT bootstrap. The secret
 // is supplied on standard input and never appears in argv or environment.

@@ -665,6 +665,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	queueSLO := status.Data.EffectiveQueueSLO()
 	occupancy := status.Data.EffectiveOccupancy()
 	reservation := status.Data.EffectiveReservationCheck()
+	progress := status.Data.EffectiveProgress()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -677,6 +678,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// 0038's axes — and fails only for one standing capacity down. Issue #226
 		// was invisible in production because none of this was published at all.
 		{Name: "reservation", OK: reservation.OK, Detail: reservationDetail(status.Data, reservation)},
+		// The progress check names an operation that keeps failing and an instance
+		// that keeps being held, with the step, the attempt count, and the elapsed
+		// time. On 2026-08-10 `fleet doctor` reported only the queue symptom and
+		// PASS occupancy, and the cause could only be read by copying the SQLite
+		// file off the host (issue #233).
+		{Name: "drain progress", OK: progress.OK, Detail: joinReasons(progress)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {
