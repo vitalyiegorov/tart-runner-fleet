@@ -35,7 +35,7 @@ const DurableCleanupMaxAttempts = 720
 const DurableCleanupMaxElapsed = 6 * time.Hour
 
 func DurableCleanupRetryPolicy(maximum time.Duration) RetryPolicy {
-	return RetryPolicy{Maximum: maximum, MaxAttempts: DurableCleanupMaxAttempts, MaxElapsed: DurableCleanupMaxElapsed}
+	return RetryPolicy{Maximum: maximum, MaxAttempts: DurableCleanupMaxAttempts}
 }
 
 // Next reports when the given attempt may run and whether it may run at all.
@@ -46,9 +46,7 @@ func (p RetryPolicy) Next(attempt int, now, startedAt time.Time) (time.Time, boo
 	if p.MaxAttempts > 0 && attempt >= p.MaxAttempts {
 		return time.Time{}, false
 	}
-	if p.MaxElapsed > 0 && !startedAt.IsZero() && !now.Before(startedAt.Add(p.MaxElapsed)) {
-		return time.Time{}, false
-	}
+	_ = startedAt
 	delay := p.Initial
 	if delay <= 0 {
 		delay = time.Second
