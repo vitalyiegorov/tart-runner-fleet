@@ -123,7 +123,7 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 			return
 		}
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth(), health.Occupancy(), health.Reservation())
+		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth(), health.Occupancy(), health.Reservation(), health.Progress())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
@@ -197,7 +197,7 @@ func queueTiers(snapshot Snapshot, rows []QueueTierMetrics) []adminapi.QueueTier
 }
 
 func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
-	live, ready, queueSLO, occupancy, reservation HealthResult) adminapi.StatusEnvelope {
+	live, ready, queueSLO, occupancy, reservation, progress HealthResult) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
 		metric := snapshot.Queues[profile]
@@ -236,6 +236,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	queueCheck := adminapi.Check{OK: queueSLO.OK, Reasons: nonNilStrings(queueSLO.Reasons)}
 	occupancyCheck := adminapi.Check{OK: occupancy.OK, Reasons: nonNilStrings(occupancy.Reasons)}
 	reservationCheck := adminapi.Check{OK: reservation.OK, Reasons: nonNilStrings(reservation.Reasons)}
+	progressCheck := adminapi.Check{OK: progress.OK, Reasons: nonNilStrings(progress.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -245,6 +246,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			QueueSLO:  &queueCheck,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
+			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -273,6 +275,23 @@ func occupancyRows(snapshot Snapshot) []adminapi.Occupancy {
 			CPU: metric.CPU, MemoryMiB: metric.MemoryMiB, AgeSeconds: metric.Age.Seconds(),
 			BudgetSeconds: metric.Budget.Seconds(), Warned: metric.Warned, OverBudget: metric.OverBudget,
 			StarvesQueuedDemand: metric.StarvesQueuedDemand})
+	}
+	return rows
+}
+
+// stalledRows projects the operations that will not finish and the instances
+// that will not let go into the versioned DTO. Nil stays nil so a fleet where
+// everything is progressing emits exactly the document older clients already
+// saw.
+func stalledRows(snapshot Snapshot) []adminapi.Stalled {
+	if len(snapshot.Stalled) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.Stalled, 0, len(snapshot.Stalled))
+	for _, row := range snapshot.Stalled {
+		rows = append(rows, adminapi.Stalled{Operation: row.Operation, Kind: row.Kind, Code: row.Code,
+			Instance: row.Instance, Attempts: row.Attempts, RetryingSeconds: row.Retrying.Seconds(),
+			DrainState: row.DrainState, HeldSeconds: row.Held.Seconds()})
 	}
 	return rows
 }

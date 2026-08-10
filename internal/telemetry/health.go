@@ -16,6 +16,16 @@ const (
 	defaultCriticalObservationTTL = 45 * time.Second
 	defaultQueueSLO               = 10 * time.Minute
 	defaultQueueIncidentSLO       = 30 * time.Minute
+	// defaultStalledAttempts is how many failed attempts a durable operation may
+	// spend before it is worth waking someone for. A healthy lifecycle operation
+	// succeeds on its first attempt; the stop ladder has stopped being polite by
+	// its sixth, so six failures is the earliest point at which repetition has
+	// provably not helped (ADR 0039).
+	defaultStalledAttempts = 6
+	// defaultDrainHold is how long an instance may sit in a cleanup state before
+	// the same is true of it. A healthy drain takes seconds. The 2026-08-10
+	// incident spent 82 minutes in `deregistering` with nothing naming it.
+	defaultDrainHold = 10 * time.Minute
 )
 
 var (
@@ -57,8 +67,13 @@ type HealthConfig struct {
 	CriticalObservationTTL time.Duration
 	QueueSLO               time.Duration
 	QueueIncidentSLO       time.Duration
-	Profiles               []string
-	CriticalObservations   []string
+	// StalledAttempts and DrainHold are the two thresholds the progress check
+	// judges against: how many failed attempts an operation may spend, and how
+	// long an instance may be held in a cleanup state.
+	StalledAttempts      int
+	DrainHold            time.Duration
+	Profiles             []string
+	CriticalObservations []string
 	// FailureComponents is the closed set of control-plane loops whose failures
 	// may be counted. Naming them here rather than inside telemetry keeps the
 	// loop inventory with the process that starts the loops, exactly as
@@ -196,6 +211,7 @@ type Snapshot struct {
 	OperationFailures  []OperationFailure
 	ComponentFailures  []ComponentFailure
 	DeadLetters        []DeadLetter
+	Stalled            []Stalled
 	Occupancy          []OccupancyMetric
 	Reservation        *ReservationMetric
 	HostPressure       HostPressureMetric
@@ -219,6 +235,8 @@ type Health struct {
 	criticalObservationTTL time.Duration
 	queueSLO               time.Duration
 	queueIncidentSLO       time.Duration
+	stalledAttempts        int
+	drainHold              time.Duration
 	profiles               map[string]struct{}
 	critical               map[string]struct{}
 	failureComponents      map[string]struct{}
@@ -235,6 +253,7 @@ type Health struct {
 	operationFailures  []OperationFailure
 	componentFailures  map[componentFailureKey]int
 	deadLetters        []DeadLetter
+	stalled            []Stalled
 	occupancy          []OccupancyMetric
 	reservation        *ReservationMetric
 	hostPressure       HostPressureMetric
@@ -246,8 +265,14 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 		return nil, errClockRequired
 	}
 	if config.ReadyTickTTL < 0 || config.LiveTickTTL < 0 || config.CriticalObservationTTL < 0 ||
-		config.QueueSLO < 0 || config.QueueIncidentSLO < 0 {
+		config.QueueSLO < 0 || config.QueueIncidentSLO < 0 || config.StalledAttempts < 0 || config.DrainHold < 0 {
 		return nil, errInvalidHealthConfig
+	}
+	if config.StalledAttempts == 0 {
+		config.StalledAttempts = defaultStalledAttempts
+	}
+	if config.DrainHold == 0 {
+		config.DrainHold = defaultDrainHold
 	}
 	if config.ReadyTickTTL == 0 {
 		config.ReadyTickTTL = defaultReadyTickTTL
@@ -289,6 +314,7 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 		readyTickTTL: config.ReadyTickTTL, liveTickTTL: config.LiveTickTTL,
 		criticalObservationTTL: config.CriticalObservationTTL,
 		queueSLO:               config.QueueSLO, queueIncidentSLO: config.QueueIncidentSLO,
+		stalledAttempts: config.StalledAttempts, drainHold: config.DrainHold,
 		profiles: profiles, critical: critical, failureComponents: failureComponents, mode: ModeIdle,
 		componentFailures: make(map[componentFailureKey]int, len(failureComponents)),
 		queues:            make(map[string]QueueMetrics, len(profiles)),
@@ -582,6 +608,95 @@ func (h *Health) Occupancy() HealthResult {
 	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
 }
 
+// Stalled is one durable operation that is still retrying, one instance still
+// held in a cleanup state, or both at once.
+//
+// It is the answer to "nothing named it". On 2026-08-10 `fleet doctor` reported
+// the queue symptom and `PASS occupancy`, and the cause — a drain that had
+// failed 67 times at the stop step for 82 minutes while holding the whole node —
+// could only be read by copying the SQLite file off the host. Every field below
+// was already durable; none of it was published.
+type Stalled struct {
+	// Operation and Kind are empty for an instance held in a cleanup state with no
+	// operation still retrying on it, which is when it is most stuck.
+	Operation string
+	Kind      string
+	// Code is the closed lifecycle failure vocabulary: the STEP that keeps
+	// failing, which is the single most useful word in the diagnosis.
+	Code     string
+	Instance string
+	Attempts int
+	Retrying time.Duration
+	// DrainState is the durable cleanup state, and Held how long the instance has
+	// been in it.
+	DrainState string
+	Held       time.Duration
+}
+
+// maxStalled bounds the published set for the same reason maxDeadLetters does:
+// no node this fleet runs on can hold this many instances at once, so an
+// over-long set is a producer fault rather than a busy host.
+const maxStalled = 32
+
+// validDrainState is the closed set of durable cleanup states a published row
+// may name. It is enforced rather than trusted because the state is rendered as
+// a metric LABEL.
+var validDrainState = map[string]bool{"": true, "draining": true, "deregistering": true, "stopping": true}
+
+// SetStalled replaces the whole set. It is a replacement rather than a merge
+// because an operation that finished must disappear from the document, and a
+// merged map would go on reporting a wedge that has cleared. An over-long or
+// ungrammatical set is rejected outright rather than truncated, so a rejected
+// observation can never masquerade as "everything is progressing".
+func (h *Health) SetStalled(stalled []Stalled) error {
+	if len(stalled) > maxStalled {
+		return errInvalidMetric
+	}
+	recorded := make([]Stalled, 0, len(stalled))
+	for _, row := range stalled {
+		if row.Attempts < 0 || row.Retrying < 0 || row.Held < 0 || !boundedResourceID.MatchString(row.Instance) ||
+			!validDrainState[row.DrainState] {
+			return errInvalidMetric
+		}
+		if row.Operation != "" && (!boundedResourceID.MatchString(row.Operation) ||
+			!boundedFailureToken.MatchString(row.Kind) || !boundedFailureToken.MatchString(row.Code)) {
+			return errInvalidMetric
+		}
+		recorded = append(recorded, row)
+	}
+	h.mu.Lock()
+	h.revision++
+	h.stalled = recorded
+	h.mu.Unlock()
+	return nil
+}
+
+// Progress reports the two conditions the 2026-08-10 incident presented and
+// nothing published: an operation retrying far past the point where repetition
+// could plausibly help, and an instance held in a cleanup state far past the
+// point where a drain could plausibly still be working.
+//
+// Each reason names the instance, the step, the attempt count, and the elapsed
+// time, because those four facts together are the diagnosis — and each of them
+// had to be read out of a hand-copied database instead.
+func (h *Health) Progress() HealthResult {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	reasons := []string{}
+	for _, row := range h.stalled {
+		if row.Operation != "" && row.Attempts >= h.stalledAttempts {
+			reasons = append(reasons, "operation "+row.Operation+" ("+row.Kind+") has failed "+
+				strconv.Itoa(row.Attempts)+" times at "+row.Code+" over "+row.Retrying.Round(time.Second).String()+
+				", holding instance "+row.Instance)
+		}
+		if row.DrainState != "" && row.Held >= h.drainHold {
+			reasons = append(reasons, "instance "+row.Instance+" has been held in "+row.DrainState+
+				" for "+row.Held.Round(time.Second).String())
+		}
+	}
+	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
+}
+
 // validReservationAxis is the closed vocabulary scheduler.ReservationAxis
 // defines. It is enforced here rather than trusted, because the axis is rendered
 // as a metric LABEL and an open vocabulary there is unbounded cardinality.
@@ -715,6 +830,7 @@ func (h *Health) Snapshot() Snapshot {
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
 		ComponentFailures: h.sortedComponentFailures(),
 		DeadLetters:       append([]DeadLetter(nil), h.deadLetters...),
+		Stalled:           append([]Stalled(nil), h.stalled...),
 		Occupancy:         append([]OccupancyMetric(nil), h.occupancy...),
 		Reservation:       cloneReservation(h.reservation),
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,

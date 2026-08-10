@@ -41,6 +41,7 @@ type runtimeStore interface {
 	OperationCounts(context.Context) (int, int, error)
 	OperationFailures(context.Context) ([]operations.OperationFailure, error)
 	operations.DeadLetterStore
+	operations.StalledOperationStore
 	Close() error
 }
 
@@ -599,7 +600,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
-		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters, reporter: reporter}
+		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
+		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1362,6 +1364,10 @@ type engineTicker struct {
 	operationCounts   func(context.Context) (int, int, error)
 	operationFailures func(context.Context) ([]operations.OperationFailure, error)
 	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
+	// stalledOperations names what is not finishing: the operations still
+	// retrying and the instances still held in a cleanup state (ADR 0039).
+	stalledOperations func(context.Context, time.Time) ([]operations.StalledOperation, error)
+	now               func() time.Time
 	// reporter carries the occupancy warning. A nil reporter publishes the metric
 	// and says nothing, which is what an observe-mode harness wants.
 	reporter *failureReporter
@@ -1407,7 +1413,8 @@ func (e engineTicker) Tick(ctx context.Context) error {
 			retrying, dead, countErr := e.operationCounts(ctx)
 			failures, failureErr := e.operationFailureMetrics(ctx)
 			letters, letterErr := e.deadLetterMetrics(ctx, result.Instances)
-			if countErr != nil || failureErr != nil || letterErr != nil {
+			stalled, stalledErr := e.stalledMetrics(ctx)
+			if countErr != nil || failureErr != nil || letterErr != nil || stalledErr != nil {
 				// Rule 4: an unreadable aggregate degrades the observation. It never
 				// publishes an empty failure set, which would read as a healed fleet, and
 				// never an empty dead-letter set, which would read as "nothing is parked"
@@ -1417,6 +1424,7 @@ func (e engineTicker) Tick(ctx context.Context) error {
 				_ = e.health.SetOperations(retrying, dead)
 				_ = e.health.SetOperationFailures(failures)
 				_ = e.health.SetDeadLetters(letters)
+				_ = e.health.SetStalled(stalled)
 				_ = e.health.RecordObservation("operations", telemetry.ObservationFresh)
 			}
 		}
@@ -1479,6 +1487,30 @@ func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.
 			Parked: idle && !letter.ResourceProgressing})
 	}
 	return letters, nil
+}
+
+// stalledMetrics converts the durable stall projection into telemetry values. A
+// daemon without the port simply publishes none, and an unreadable read degrades
+// the operations observation rather than publishing "everything is progressing".
+func (e engineTicker) stalledMetrics(ctx context.Context) ([]telemetry.Stalled, error) {
+	if e.stalledOperations == nil {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	if e.now != nil {
+		now = e.now().UTC()
+	}
+	durable, err := e.stalledOperations(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	stalled := make([]telemetry.Stalled, 0, len(durable))
+	for _, row := range durable {
+		stalled = append(stalled, telemetry.Stalled{Operation: row.OperationID, Kind: row.Kind, Code: row.Code,
+			Instance: row.Instance, Attempts: row.Attempts, Retrying: row.Retrying,
+			DrainState: row.DrainState, Held: row.Held})
+	}
+	return stalled, nil
 }
 
 // queueTierMetrics carries the per-tier breakdown to telemetry. An empty
