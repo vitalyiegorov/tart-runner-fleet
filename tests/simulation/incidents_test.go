@@ -2,6 +2,7 @@ package simulation_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -531,4 +532,92 @@ func (w *world) admissionsAfter(tick int) int {
 		}
 	}
 	return admissions
+}
+
+// ---------------------------------------------------------------------------
+// Incident 2026-08-10 -- ADR 0039, the drain that could not stop its guest
+// ---------------------------------------------------------------------------
+
+// unstoppableGuestTrace is the 2026-08-10 mac studio incident (issue #233): a
+// builder whose job finishes normally, a guest that then refuses to power itself
+// down, and work queued behind the vector it is holding. MaxActive 1 on the
+// builder profile means the queued job cannot start until that vector comes
+// back, which is what made twelve jobs wait ninety minutes for a job that took
+// two.
+func unstoppableGuestTrace(cfg worldConfig, level int) simTrace {
+	return simTrace{Seed: 20_260_810, Ticks: 120, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 3, Kind: eventUnstoppableGuest, Count: level},
+		{Tick: 4, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 5, Kind: eventStopArrivals},
+	}}
+}
+
+// TestUnstoppableGuestStillReleasesItsVector proves the ladder ends the hold for
+// both kinds of stubborn guest: one that yields to a forced power-off, and one
+// that has to be removed outright.
+func TestUnstoppableGuestStillReleasesItsVector(t *testing.T) {
+	t.Parallel()
+	for name, level := range map[string]int{"yields to a forced stop": 1, "yields only to removal": 2} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := defaultWorld()
+			w := newWorld(t, cfg, unstoppableGuestTrace(cfg, level))
+			defer w.close()
+			if findings := w.run(); len(findings) > 0 {
+				t.Fatalf("the unstoppable-guest incident must no longer violate a property: %s", findings[0])
+			}
+			// The harness really did reach the incident state. A green run over a
+			// trace whose guest stopped politely would prove nothing at all.
+			escalated := ""
+			for id, attempts := range w.stopAttempts {
+				if attempts > lifecycle.GracefulStopAttempts {
+					escalated = id
+				}
+			}
+			if escalated == "" {
+				t.Fatalf("no guest ever refused a graceful stop: attempts %v", w.stopAttempts)
+			}
+			if _, stillWedged := w.unstoppableGuest[escalated]; stillWedged {
+				t.Fatalf("%s was never forced off", escalated)
+			}
+			// The whole point of taking the vector back: the queued work behind it
+			// runs, and the fleet settles.
+			if queued := w.jobs[1]; queued.status != jobDone {
+				t.Fatalf("the queued job behind the wedged guest never ran: status %s", queued.status)
+			}
+			if live := w.liveInstanceCount(); live != 0 {
+				t.Fatalf("the fleet never settled: %d live instances", live)
+			}
+			if final := w.observations[len(w.observations)-1]; final.Queued != 0 {
+				t.Fatalf("the queue never drained: %d still queued", final.Queued)
+			}
+		})
+	}
+}
+
+// TestARepeatedStopIsCaughtByTheReleaseBound is the negative control, and it is
+// the part that makes the property worth having. With the executor asking the
+// same way every time — which is what it did on 2026-08-10, 67 times over 90
+// minutes — property (o) fires and names the instance, the vector, and the rung
+// the ladder never left.
+func TestARepeatedStopIsCaughtByTheReleaseBound(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, unstoppableGuestTrace(cfg, 1))
+	w.repeatWithoutEscalating = true
+	defer w.close()
+	findings := w.run()
+	if len(findings) == 0 {
+		t.Fatal("a stop that never escalates held a whole vector and no property noticed")
+	}
+	if findings[0].Kind != findingHeldTeardown {
+		t.Fatalf("first finding = %s, want the teardown release bound", findings[0])
+	}
+	for _, want := range []string{"after its runner was deregistered", "release bound", "deregistering",
+		"CPU:6", "trf-builder-"} {
+		if !strings.Contains(findings[0].Detail, want) {
+			t.Fatalf("finding does not name %q:\n%s", want, findings[0].Detail)
+		}
+	}
 }

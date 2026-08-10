@@ -154,6 +154,7 @@ refusal.
 | l | **No tier inversion.** Two feasible demands of one platform, one resource vector, and one ADR 0004 lane are admitted in priority-tier order. | Effective tier of each not-admitted feasible demand against each admitted one that shares its vector and lane, excluding the reserved head and any repository this plan has already filled to its cap. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md); inert on every world that declares no tier) |
 | m | **Monotonic escalation.** A waiting demand's effective priority tier never falls. | Per-demand high-water mark of the effective tier, recomputed by the harness from the demand and the clock. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | n | **No tier starvation.** Escalation ends every tier-based pass-over within T ticks. | Per-demand count of ticks passed over by an aged overtaker of strictly higher effective tier, against T = declared tiers x escalation ticks + K. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
+| o | **Bounded teardown release.** Once a drain has passed deregistration, the instance releases its resource vector within a bounded number of ticks, whatever the guest does. | Per-instance ticks since the oracle first saw the instance in `deregistering` or `stopping` while still consuming host resources, against the release bound. Scoped past deregistration deliberately: a deregistration GitHub legitimately refuses is bounded by evidence rather than by a clock, and property (i) already watches it. | Enforced (added with [ADR 0039](0039-a-drain-that-cannot-stop-its-guest-escalates.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the
@@ -431,7 +432,11 @@ into a smoke test, so the required event vocabulary is asserted directly.
 - `tests/simulation/incidents_test.go` -- 2026-08-01 (ADR 0026), 2026-08-02 (ADR
   0027), and 2026-07-25 (ADR 0017) replayed as pinned traces, plus finding 1's
   minimal three-tick regression: the boot window plans nothing, and a terminal
-  incarnation is still retried.
+  incarnation is still retried. 2026-08-10 (ADR 0039) is pinned twice, because a
+  property is only worth having if it is red on the defect: once with the
+  escalation ladder, where the vector comes back and the queued job runs, and
+  once with the pre-#233 executor that asked the same way every time, where
+  property (o) fires and names the instance, the vector, and the hold.
 - `tests/simulation/findings_test.go` -- characterizations of findings 2 to 5.
 - `tests/simulation/oracle_reservation_test.go` -- the feasibility oracle asked
   directly about a held reservation: the tick of issue #216 it must stop

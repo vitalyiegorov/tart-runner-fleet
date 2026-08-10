@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -82,10 +83,26 @@ const (
 	// nothing smaller than the occupancy reclaim can end it. That is the whole
 	// point: before the budget existed no generated job could outlive any sane
 	// ceiling, which is exactly why this defect class was invisible to the sweep.
-	eventOverrunJob      eventKind = "overrun_job"
-	eventStalledRunner   eventKind = "stalled_runner"
-	eventWedgedDrain     eventKind = "wedged_drain"
-	eventSiblingReassign eventKind = "sibling_reassign"
+	eventOverrunJob    eventKind = "overrun_job"
+	eventStalledRunner eventKind = "stalled_runner"
+	eventWedgedDrain   eventKind = "wedged_drain"
+	// eventUnstoppableGuest is issue #233: a guest that will not power itself
+	// down when the fleet asks it to, for as long as the fleet keeps asking.
+	//
+	// It is deliberately a THIRD drain-failure event rather than a longer
+	// wedged_drain, because the two model different worlds and different steps.
+	// A wedged_drain is GitHub refusing to deregister a runner it considers busy:
+	// it happens BEFORE deregistration, it decays, and it is a refusal the fleet
+	// must retry through. An unstoppable guest happens AFTER deregistration, when
+	// the runner is gone and the job is provably over, and it NEVER decays --
+	// nothing about a wedged macOS guest gets better because time passed. On
+	// 2026-08-10 one of them absorbed 67 identical stop attempts over 90 minutes.
+	//
+	// This is the fault class the harness could not previously express at all: a
+	// lifecycle step that fails indefinitely. Everything it had was bounded by
+	// construction, which is exactly why the defect shipped.
+	eventUnstoppableGuest eventKind = "unstoppable_guest"
+	eventSiblingReassign  eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
@@ -153,8 +170,8 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	}
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
-		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventSiblingReassign,
-		eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
+		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
+		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
@@ -232,6 +249,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.stallRunner(event.Count)
 	case eventWedgedDrain:
 		w.wedgeDrain(event.Count)
+	case eventUnstoppableGuest:
+		w.wedgeGuest(event.Count)
 	case eventSiblingReassign:
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:
@@ -331,6 +350,32 @@ func (w *world) wedgeDrain(ticks int) {
 		}
 	}
 	w.wedgeNextDrain = ticks
+}
+
+// wedgeGuest makes one guest refuse to power itself down, and keeps it refusing.
+//
+// The level is how much force the guest finally yields to: an odd Count models a
+// guest that ignores every polite request but dies when the hypervisor is told
+// to end it, and an even Count one that has to be removed outright. There is
+// deliberately no level that survives removal — that is a broken host rather
+// than a wedged guest, and the fleet's answer to it is a dead letter and a named
+// `fleet doctor` finding, not a released vector.
+func (w *world) wedgeGuest(count int) {
+	level := lifecycle.StopForced
+	if count%2 == 0 {
+		level = lifecycle.StopDestructive
+	}
+	instances, err := w.store.LiveInstances(w.ctx)
+	if err != nil {
+		return
+	}
+	for _, instance := range instances {
+		if instance.State == operations.StateDeregistering || instance.State == operations.StateDraining {
+			w.unstoppableGuest[instance.ID] = level
+			return
+		}
+	}
+	w.wedgeNextGuest = level
 }
 
 // ---------------------------------------------------------------------------
