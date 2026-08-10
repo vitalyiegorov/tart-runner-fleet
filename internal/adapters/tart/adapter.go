@@ -427,7 +427,7 @@ func (a *Adapter) isMacOSVM(name string) bool {
 // thirty seconds. Naming the window explicitly makes tart's escalation happen
 // inside the deadline instead of being killed by it.
 func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ownership) error {
-	return a.stop(ctx, name, ownership, -1)
+	return a.stop(ctx, name, ownership, a.gracefulStopSeconds())
 }
 
 // Terminate powers the guest off without waiting for it to agree. It is `tart
@@ -467,12 +467,8 @@ func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ow
 	if err != nil || !vm.Running {
 		return err
 	}
-	args := []string{"stop", name}
-	if graceful >= 0 {
-		args = append(args, "--timeout", strconv.Itoa(graceful))
-	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
-	_, commandErr := a.runner().Run(commandCtx, args...)
+	_, commandErr := a.runner().Run(commandCtx, "stop", name, "--timeout", strconv.Itoa(graceful))
 	cancel()
 	if commandErr == nil {
 		return nil
