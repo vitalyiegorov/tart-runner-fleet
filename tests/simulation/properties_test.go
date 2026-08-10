@@ -145,6 +145,37 @@ const sigCrossPlatformResidualArbitration = "cross_platform_residual_arbitration
 // outranks one aged large one.
 const sigCountMaximizationOvertakesAgedWork = "count_maximization_overtakes_aged_work"
 
+// sigReservedHeadHeldByARepositoryCap is FINDING 7, found by the sweep that
+// added property (k) and issue #223's overrun_job. It is FIXED, by ADR 0038, and
+// the signature is kept for the reason findings 1, 2 and 3 keep theirs: so a
+// regression is reported by NAME rather than as an anonymous refusal. It is
+// deliberately absent from knownFinding -- a wedge of this shape now fails the
+// sweep like any other violation of property (a).
+//
+// The observed condition is precise. Seed 67 of the container-node arm stalled
+// admission for more than LivenessK ticks in this state: c/repo at its cap of
+// two with a `large` and a `medium` instance; the aged head holding the
+// reservation a c/repo `xl` needing six vCPU, and the host with exactly six
+// free. The head was therefore RESOURCE-feasible and CAP-infeasible -- no amount
+// of freed CPU could admit it -- while `a/repo`'s four-vCPU `large`, from a
+// repository with no live instance at all, waited behind it.
+//
+// [ADR 0017](../../docs/adr/0017-infeasible-reservation-residual-backfill.md)
+// decided that a reservation whose head cannot be admitted must not sterilize
+// the host, and stated that decision on the vector axis because the vector was
+// the only axis in the predicate when it was written. The mechanism IS reduced,
+// contrary to what this signature said while the finding was open: it is
+// `safeBackfill`'s remainder subtraction, and it is a property of one tick's
+// inputs rather than of the cross-tick composition the arm reaches.
+// `TestFinding7AReservedHeadHeldByARepositoryCapLendsItsVector` pins it as a
+// single `PlanTick`, which holds unconditionally where the old trace pin held
+// only while `overrun_job` was armed.
+//
+// overrun_job is why the sweep reached it at all: the wedge lasted as long as
+// the cap holder ran, and until a job could outlive its expectation no cap
+// holder ran long enough to breach LivenessK.
+const sigReservedHeadHeldByARepositoryCap = "reserved_head_held_by_a_repository_cap"
+
 // tickObservation is the simulator's complete observable state for one tick. It
 // is the only thing property oracles read, so a property is a pure function of
 // observations rather than of harness internals.
@@ -848,17 +879,14 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 	}
 	free := domain.Resources{CPU: min(headroom.CPU, observation.Host.Available.CPU),
 		MemoryMB: min(headroom.MemoryMB, observation.Host.Available.MemoryMB), Slots: headroom.Slots}
-	head, residual, withheld := reservedResidual(cfg, observation, free)
+	hold := reservedResidual(cfg, observation, free, repos)
 	var feasible []domain.Demand
 	for _, demand := range observation.Demands {
 		profile := cfg.Scheduler.Profiles[demand.Profile]
 		// The reserved head is entitled to the vector, so it is judged against the
 		// envelope that vector comes out of. Everything else is judged against what
 		// the fleet is allowed to hand out beside it.
-		envelope := free
-		if withheld && demand.Key != head {
-			envelope = residual
-		}
+		envelope := hold.envelope(demand, profile.Resources)
 		if incarnated[demand.Key] || !envelope.CanFit(profile.Resources) {
 			continue
 		}
@@ -911,22 +939,77 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 // aged, or remainder envelopes. So an envelope defect cannot reach this oracle;
 // only a reservation the scheduler admits to holding can.
 //
-// What is deliberately NOT modelled is ADR 0030's repository slot: a head also
-// holds one slot of its own repository's cap, and the remainder passes honour it.
-// Charging it here would narrow the oracle further, and narrowing is the
-// direction that BLINDS a property. Leaving it out can only produce a report the
-// scheduler must then justify, which is the direction a harness is allowed to
-// err in.
-func reservedResidual(cfg worldConfig, observation tickObservation, free domain.Resources) (domain.DemandKey, domain.Resources, bool) {
+// A head is held out of admission on TWO axes, and this function reads both
+// (issue #226, ADR 0038). `scheduler.feasible` folds the vector fit and the
+// repository cap into one boolean, and `planLinux` holds the reservation when
+// either term refuses the head. Asking only the first made the oracle withhold a
+// whole vector on behalf of a head that `feasibleDemands` itself, four lines
+// below, drops on `repos[...] >= repoCap(...)`. That is the blinding direction:
+// it suppresses reports. It suppressed a real one -- issue #216's tick is a
+// cap-held head, so property (a)'s report there was a TRUE POSITIVE that PR
+// #220 taught this oracle to disbelieve.
+//
+// Reading the cap makes `holds` bind less often, which WIDENS what other demands
+// are judged against and can only produce reports the scheduler must justify --
+// the direction #220's own safety argument says a harness is allowed to err in.
+//
+// What a cap-held head lends is bounded, and the bound is ADR 0017's own no-jump
+// construction stated rather than inherited: a demand that could itself take the
+// head's whole vector is still judged against `free - reservation`, because
+// `free` fits the head and an equal-or-larger peer admitted into it would invert
+// the aged FIFO the reservation exists to protect.
+//
+// What is still deliberately NOT modelled is ADR 0030's repository slot as a
+// charge against OTHER demands: a head also holds one slot of its own
+// repository's cap, and the remainder passes honour it. Charging THAT here would
+// narrow the oracle, and narrowing is the direction that BLINDS a property. The
+// cap term above is the opposite of a narrowing: it is the head's OWN
+// feasibility predicate, and making that stricter widens what the oracle reports.
+func reservedResidual(cfg worldConfig, observation tickObservation, free domain.Resources,
+	occupied map[string]int) reservedHold {
 	reservation := observation.Plan.Next.Reservation
 	if reservation == nil {
-		return domain.DemandKey{}, free, false
+		return reservedHold{free: free}
 	}
-	residual, fits := free.Sub(cfg.Scheduler.Profiles[reservation.Profile].Resources)
+	vector := cfg.Scheduler.Profiles[reservation.Profile].Resources
+	residual, fits := free.Sub(vector)
 	if !fits {
-		return domain.DemandKey{}, free, false
+		return reservedHold{free: free}
 	}
-	return reservation.Demand, residual, true
+	return reservedHold{head: reservation.Demand, vector: vector, free: free, residual: residual, holds: true,
+		capHeld: occupied[reservation.Demand.Repo] >= repoCap(cfg, reservation.Demand.Repo)}
+}
+
+// reservedHold is what one tick's held reservation withholds, and from whom.
+// `capHeld` names WHICH axis is holding the head out, which is the whole of
+// issue #226: on the vector axis the head can still use the envelope it is
+// waiting for, and on the repository-cap axis it cannot.
+type reservedHold struct {
+	head     domain.DemandKey
+	vector   domain.Resources
+	free     domain.Resources
+	residual domain.Resources
+	holds    bool
+	capHeld  bool
+}
+
+// envelope names what one demand is judged against on this tick.
+//
+// The reserved head is entitled to the vector, so it is always judged against
+// the envelope that vector comes out of. Everything else gets the residual --
+// unless the head is cap-held, in which case it gets the whole envelope, because
+// a head no amount of freed CPU can admit is not waiting on this tick's
+// admission. The single exception is the demand that could take the head's
+// vector whole: ADR 0017 lets nothing equal-or-larger jump the queue, and that
+// is the one guarantee a lent vector could otherwise break.
+func (h reservedHold) envelope(demand domain.Demand, resources domain.Resources) domain.Resources {
+	if !h.holds || demand.Key == h.head {
+		return h.free
+	}
+	if h.capHeld && !resources.CanFit(h.vector) {
+		return h.free
+	}
+	return h.residual
 }
 
 // macOSAdmissible applies the two macOS-only admission rules the physical
@@ -1059,10 +1142,45 @@ func livenessChecker(cfg worldConfig) checker {
 			return nil
 		}
 		stalled = 0
-		return []finding{{Kind: findingWedge, Tick: observation.Tick,
+		return []finding{{Kind: findingWedge, Signature: wedgeSignature(cfg, observation),
+			Tick: observation.Tick,
 			Detail: fmt.Sprintf("no admission for %d ticks while %s was feasible\n%s",
 				cfg.LivenessK, since, w.dumpPlan(observation))}}
 	}
+}
+
+// wedgeSignature names the documented defect that explains a wedge, or the empty
+// string when none does. While a finding is open that is what makes an
+// unexplained wedge fail the build and a known one not; once it is fixed -- as
+// FINDING 7 now is -- the name survives so a REGRESSION is reported by the
+// defect it is rather than as an anonymous refusal.
+//
+// It is derived from configured caps and observed instances only, never from the
+// scheduler's reservation arithmetic, so it cannot excuse a wedge by inheriting
+// the reasoning that caused it.
+func wedgeSignature(cfg worldConfig, observation tickObservation) string {
+	reservation := observation.Plan.Next.Reservation
+	if reservation == nil {
+		return ""
+	}
+	// The head is held by a repository slot rather than by resources: its own
+	// repository is at its cap, while the vector it reserves is one the host
+	// could hand over right now. Freeing CPU cannot admit it, so reserving CPU
+	// for it starves everybody else for nothing (issue #226, ADR 0038).
+	repos := map[string]int{}
+	for _, instance := range observation.Instances {
+		if instance.ConsumesHostResources() && !instance.State.TearingDown() &&
+			instance.State != domain.InstanceOnlineIdle {
+			repos[instance.Repo]++
+		}
+	}
+	if repos[reservation.Demand.Repo] < repoCap(cfg, reservation.Demand.Repo) {
+		return ""
+	}
+	if !observation.Host.Available.CanFit(reservation.Resources) {
+		return ""
+	}
+	return sigReservedHeadHeldByARepositoryCap
 }
 
 // tearingDown reports whether any instance is already in the cleanup chain, or a

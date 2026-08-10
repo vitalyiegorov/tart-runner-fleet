@@ -80,11 +80,19 @@ func sweep(t *testing.T, name string, cfg worldConfig) {
 // Each is pinned by its own characterization test in findings_test.go, so the
 // sweep tolerating it cannot let it silently change shape.
 //
-// FINDINGS 1, 2 and 3 are deliberately absent: they are fixed, so
-// sigRespawnLiveIncarnation, sigMacOSIgnoresRepositoryCap and
-// sigControlPlaneOvertakesAgedWork now fail the sweep like any other violation
-// of properties (e), (g) and (b). Each signature itself is kept so a regression
-// is reported by name rather than as an anonymous refusal.
+// FINDINGS 1, 2, 3 and 7 are deliberately absent: they are fixed, so
+// sigRespawnLiveIncarnation, sigMacOSIgnoresRepositoryCap,
+// sigControlPlaneOvertakesAgedWork and sigReservedHeadHeldByARepositoryCap now
+// fail the sweep like any other violation of properties (e), (g), (b) and (a).
+// Each signature itself is kept so a regression is reported by name rather than
+// as an anonymous refusal.
+//
+// FINDING 7 is the one to read this list by. It was tolerated here, then removed
+// as "retired pending #226" when no seed reproduced it any more, and the reason
+// no seed reproduced it was that an oracle refinement had blinded the harness to
+// it rather than that the scheduler had stopped producing it (ADR 0031, ADR
+// 0038). A signature that stops firing is evidence about the ORACLE until
+// somebody proves it is evidence about the scheduler.
 func knownFinding(item finding) bool {
 	switch item.Signature {
 	case sigCrossPlatformResidualArbitration, sigCountMaximizationOvertakesAgedWork:

@@ -35,14 +35,22 @@ type Status struct {
 	// held its profile's resource vector, and whether that hold is past the
 	// profile's ceiling while work that would fit it waits. An older daemon
 	// omitted it entirely, which is why EffectiveOccupancy exists.
-	Occupancy      []Occupancy      `json:"occupancy,omitempty"`
-	OccupancyCheck *Check           `json:"occupancyCheck,omitempty"`
-	Queues         []Queue          `json:"queues"`
-	Instances      []Instance       `json:"instances"`
-	ScopeQueues    []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations   []Observation    `json:"observations"`
-	Operations     OperationSummary `json:"operations"`
-	HostPressure   HostPressure     `json:"hostPressure"`
+	Occupancy      []Occupancy `json:"occupancy,omitempty"`
+	OccupancyCheck *Check      `json:"occupancyCheck,omitempty"`
+	// Reservation is an additive fleet.v1 field: the vector the scheduler is
+	// holding for its aged global-FIFO head, and WHICH of the two axes is
+	// holding that head out of admission. Nil means no reservation is held; an
+	// older daemon omitted it entirely, which is why EffectiveReservationCheck
+	// exists. Issue #226 ran in production unobserved precisely because none of
+	// this was published.
+	Reservation      *Reservation     `json:"reservation,omitempty"`
+	ReservationCheck *Check           `json:"reservationCheck,omitempty"`
+	Queues           []Queue          `json:"queues"`
+	Instances        []Instance       `json:"instances"`
+	ScopeQueues      []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations     []Observation    `json:"observations"`
+	Operations       OperationSummary `json:"operations"`
+	HostPressure     HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.
@@ -111,6 +119,41 @@ func (s Status) EffectiveOccupancy() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.OccupancyCheck
+}
+
+// EffectiveReservationCheck is the same handoff accessor for the reservation
+// judgement. An older daemon published no reservation at all — which is the
+// condition issue #226 exploited — so its absence is reported as an unspecified
+// pass rather than as a measured "nothing is held".
+func (s Status) EffectiveReservationCheck() Check {
+	if s.ReservationCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.ReservationCheck
+}
+
+// Reservation is the aged head the fleet is standing capacity by for.
+//
+// Axis is a closed vocabulary: `vector` (the head's resource vector does not fit
+// the starvation envelope, so it waits on live instances to release),
+// `repository_cap` (the vector fits and the head's own repository is at its cap,
+// so it waits on one of that repository's instances to exit and freeing CPU
+// cannot hasten it), `both`, `none` (neither term refuses the head — a fleet
+// reserving a vector for work it could have started), or empty when the plan
+// judged nothing.
+type Reservation struct {
+	Demand      string  `json:"demand"`
+	Repo        string  `json:"repo"`
+	Profile     string  `json:"profile"`
+	CPU         int     `json:"cpu"`
+	MemoryMiB   int     `json:"memoryMiB"`
+	Slots       int     `json:"slots"`
+	HeldSeconds float64 `json:"heldSeconds"`
+	Axis        string  `json:"axis"`
+	// LendsVector reports that the withheld vector is lent to work the head
+	// outranks (ADR 0017 on the vector axis, ADR 0038 on the repository-cap
+	// axis). False is the expensive case: capacity standing idle.
+	LendsVector bool `json:"lendsVector"`
 }
 
 type Queue struct {

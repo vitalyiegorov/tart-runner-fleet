@@ -140,7 +140,7 @@ refusal.
 
 | | Property | Oracle | Status |
 |---|---|---|---|
-| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. On a tick whose plan holds a reservation for a head that FITS the oracle's own free envelope, every other demand is judged against `free - reservation`. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; the reserved-vector refinement 2026-08-09, issue #216) |
+| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. On a tick whose plan holds a reservation for a head that FITS the oracle's own free envelope and is UNDER its repository cap, every other demand is judged against `free - reservation`. When the head's own repository cap is what holds it, only a demand that could take the head's whole vector is judged against `free - reservation`; everything else is judged against `free`. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; the reserved-vector refinement 2026-08-09, issue #216; the repository-cap axis 2026-08-10, issue #226 and [ADR 0038](0038-a-cap-held-reserved-head-lends-its-vector.md)) |
 | b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Pass-over count per (demand, CAUSE) against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03 and issue #208's stale reservation 2026-08-05, both in [ADR 0004](0004-bounded-control-plane-priority.md) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
@@ -174,13 +174,40 @@ change shape, and its fix PR arrives with a test that already describes it.
 An unsignatured violation of any property fails the build.
 
 Finding 7 -- a wedge behind a reserved head a REPOSITORY CAP, not the host, was
-holding -- is RETIRED PENDING issue #226, never fixed: no seed reproduces it
-since the third oracle refinement below, but that refinement judges a withheld
-reservation on the vector axis and not on the repository-cap axis, so the
-suspicion is that the oracle stopped being able to SEE the wedge rather than that
-the wedge stopped happening. A pin no seed reaches cannot be maintained; the
-question of whether the oracle is blind stays open in #226, and if it is, the
-signature and its characterization test come back.
+holding -- was found by the sweep that added property (k) and issue #223's
+`overrun_job`. It is FIXED, by [ADR 0038](0038-a-cap-held-reserved-head-lends-its-vector.md),
+and its history is the most instructive thing in this record.
+
+It was first reported as a scheduling defect rather than an occupancy one -- it
+reproduced unchanged with every simulated profile's budget set to zero -- and
+tolerated under `sigReservedHeadHeldByARepositoryCap` while issue #226 tracked
+it. Then the third oracle refinement below landed, and no seed of the
+container-node arm reproduced it any more. The pin was RETIRED PENDING #226,
+recorded as retired and never as fixed, because a pin no seed reaches cannot be
+maintained.
+
+The suspicion in that retirement was right, and the record should be blunt about
+it: **the wedge never went away, the oracle stopped being able to see it.** The
+refinement judged a withheld reservation on the vector axis and not on the
+repository-cap axis, so `feasibleDemands` withheld a whole vector on behalf of a
+head it had itself already ruled inadmissible on the cap. Worse, the tick the
+refinement was measured on -- issue #216's seed 92 -- is itself a cap-held head,
+so property (a)'s original report there was a TRUE POSITIVE that the refinement
+taught the harness to disbelieve. The oracle defect that refinement fixed was
+real; the state it was anchored to was not an instance of it.
+
+That is the failure mode worth keeping: teaching an oracle to agree with the
+implementation on one axis stops it asking about the others, and a blind oracle
+does not merely permit a defect -- it certifies the fleet as correct while the
+defect runs in production. The signature, `wedgeSignature`, and the
+characterization test are restored, with three corrections. The signature no
+longer says the mechanism is unreduced: it is `safeBackfill`'s remainder
+subtraction, and the wedge reduces to a single tick's inputs. The
+characterization is a one-tick `PlanTick` test rather than a trace pin, because a
+trace pin only holds while `overrun_job` is armed. And finding 7 is NOT in
+`knownFinding`: like findings 1, 2 and 3 it is fixed, so a wedge carrying its
+signature now fails the sweep like any other violation, reported by name rather
+than as an anonymous refusal.
 
 Three oracle refinements were needed to keep that promise honest. The first two
 were made with [ADR 0033](0033-a-runner-is-bound-to-the-job-github-gave-it.md);

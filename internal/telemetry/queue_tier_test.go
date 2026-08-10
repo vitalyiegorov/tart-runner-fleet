@@ -47,7 +47,8 @@ func TestStatusEnvelopeCarriesTheTierBreakdown(t *testing.T) {
 	if err := health.SetScopeQueues(tierRows()); err != nil {
 		t.Fatal(err)
 	}
-	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true})
+	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true})
 	if len(envelope.Data.ScopeQueues) != 1 {
 		t.Fatalf("scope queues = %#v", envelope.Data.ScopeQueues)
 	}

@@ -625,6 +625,34 @@ func runHealth(ctx context.Context, client apiClient, output string, stdout, std
 	return exitSuccess
 }
 
+// reservationDetail says what the fleet is standing capacity by for, in one
+// line, whether or not the check passes. A passing check with no detail would
+// leave the reservation exactly as unobservable as it was before issue #226.
+func reservationDetail(status adminapi.Status, check adminapi.Check) string {
+	if !check.OK {
+		return joinReasons(check)
+	}
+	held := status.Reservation
+	if held == nil {
+		return "no reservation held"
+	}
+	lending := "lending its vector"
+	if !held.LendsVector {
+		lending = "withholding its vector"
+	}
+	return fmt.Sprintf("%s (%s) held %s on the %s axis, %s", held.Demand, held.Profile,
+		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis), lending)
+}
+
+// axisOrUnjudged renders a plan that judged nothing as a word rather than as an
+// empty gap in the sentence.
+func axisOrUnjudged(axis string) string {
+	if axis == "" {
+		return "unjudged"
+	}
+	return axis
+}
+
 func runDoctor(ctx context.Context, client apiClient, output string, stdout, stderr io.Writer) int {
 	status, err := client.Status(ctx)
 	if err != nil {
@@ -636,12 +664,19 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	}
 	queueSLO := status.Data.EffectiveQueueSLO()
 	occupancy := status.Data.EffectiveOccupancy()
+	reservation := status.Data.EffectiveReservationCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
 		{Name: "scheduler ready", OK: status.Data.Ready.OK, Detail: joinReasons(status.Data.Ready)},
 		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "occupancy", OK: occupancy.OK, Detail: joinReasons(occupancy)},
+		// The reservation check names the head, its repository, and the axis
+		// holding it. It PASSES for a reservation that lends the vector it cannot
+		// use — that is the ordinary, cheap case on both of ADR 0017's and ADR
+		// 0038's axes — and fails only for one standing capacity down. Issue #226
+		// was invisible in production because none of this was published at all.
+		{Name: "reservation", OK: reservation.OK, Detail: reservationDetail(status.Data, reservation)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {

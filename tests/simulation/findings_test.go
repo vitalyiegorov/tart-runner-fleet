@@ -211,3 +211,81 @@ func TestFindingCrossPlatformResidualArbitration(t *testing.T) {
 		t.Fatalf("finding changed shape; admitted %v", admitted)
 	}
 }
+
+// TestFinding7AReservedHeadHeldByARepositoryCapLendsItsVector was FINDING 7's
+// characterization and is now its REGRESSION.
+//
+// Seed 67 of the container-node arm stalled admission for more than LivenessK
+// ticks in this state: `c/repo` at its cap of two, the aged reserved head a
+// `c/repo` `xl` whose vector the host could hand over immediately, and the
+// demand waiting behind it from a repository with no live instance at all. The
+// mechanism is `safeBackfill`'s remainder subtraction, and ADR 0038 makes the
+// head lend the vector it cannot use to work it still outranks.
+//
+// Three things about this test are corrections to how the finding was pinned
+// while it was open, and each one is a lesson rather than a detail.
+//
+// It is a ONE-TICK PlanTick rather than a trace pin. The original comment said a
+// direct PlanTick over the same instances and demands ADMITS the waiting work,
+// so the wedge could only be a cross-tick composition. That was wrong: it is a
+// property of one tick's inputs, in both directions of the prior state. A trace
+// pin also only holds while `overrun_job` is armed, because the wedge lasts
+// exactly as long as the cap holder runs -- so the trace pin was hostage to a
+// generator feature, and this one is not.
+//
+// It asserts the ADMISSION rather than the signature. While the finding was open
+// it asserted that the wedge kept its documented shape; its own comment
+// anticipated flipping to the admission once the fix landed, and this is that
+// flip. `sigReservedHeadHeldByARepositoryCap` is consequently NOT in
+// `knownFinding` any more: a wedge of this shape fails the sweep like any other.
+//
+// And the reason it needed restoring at all is worth carrying: the pin was
+// retired because no seed reproduced it, and no seed reproduced it because an
+// oracle refinement had stopped the harness from being able to see it.
+func TestFinding7AReservedHeadHeldByARepositoryCapLendsItsVector(t *testing.T) {
+	t.Parallel()
+	cfg := containerNodeWorld()
+	head := oracleDemand(cfg, "c/repo", 9, 13*time.Minute, "xl")
+	waiting := oracleDemand(cfg, "a/repo", 10, 9*time.Minute+30*time.Second, "large")
+	host := domain.Fresh(domain.Host{Available: issue226Available(),
+		Capacity: domain.Resources{CPU: 12, MemoryMB: 30_720, Slots: 4}}, oracleNow)
+
+	plan := scheduler.PlanTick(scheduler.Input{Now: oracleNow, Config: cfg.Scheduler,
+		Demands:   domain.Fresh([]domain.Demand{waiting, head}, oracleNow),
+		Instances: domain.Fresh(issue226Live(cfg), oracleNow), Host: host})
+
+	admitted := spawnedKeys(plan)
+	if len(admitted) != 1 || admitted[0] != waiting.Key {
+		t.Fatalf("FINDING 7 has regressed: a head its repository cap holds out must lend the vector "+
+			"it cannot use to the `large` it outranks; admitted %v", admitted)
+	}
+	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != head.Key {
+		t.Fatalf("FINDING 7's fix must not cost the head its place in line: %#v", plan.Next.Reservation)
+	}
+}
+
+// TestFinding7SweepReportsNothingOnItsOwnSeed is the other half of the
+// regression, and the half the one-tick test cannot give: the whole seed-67
+// history of the container-node arm, with `overrun_job` armed, must now report
+// NOTHING at all -- not a tolerated signature, not an unsignatured wedge.
+//
+// It is the test that would have caught the retirement being wrong. While the
+// defect was live this seed reported a wedge under
+// `sigReservedHeadHeldByARepositoryCap`; after the oracle was blinded it
+// reported nothing, which looked identical to fixed. It is only identical from
+// the harness's side, which is why the ADMISSION above is the primary assertion
+// and this is the confirmation.
+func TestFinding7SweepReportsNothingOnItsOwnSeed(t *testing.T) {
+	t.Parallel()
+	cfg := containerNodeWorld()
+	w := newWorld(t, cfg, generateTrace(67, 200, cfg))
+	defer w.close()
+
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("seed 67 of the container-node arm must be clean under ADR 0038: %s", findings[0])
+	}
+	if _, met := w.known[sigReservedHeadHeldByARepositoryCap+string(findingWedge)]; met {
+		t.Fatal("FINDING 7 is fixed, so its signature must never be MET again — if this fires, the " +
+			"cap-held head is sterilizing the residual once more")
+	}
+}
