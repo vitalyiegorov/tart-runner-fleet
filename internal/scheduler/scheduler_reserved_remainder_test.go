@@ -195,12 +195,14 @@ func TestBoundedHandoffWaveHonoursTheReservation(t *testing.T) {
 		// (4 CPU / 7168 MB) cannot take a `large`'s (4 CPU / 8192 MB) vector.
 		{name: "a cap-held head lends its vector to work it outranks",
 			headProfile: "large", headRepoCap: 1, mac: "maestro", wantMac: true},
-		// ...and never to work that could take the vector whole. A `builder`
-		// (6 CPU / 12288 MB) is exactly an `xl`, so admitting it would let a
-		// younger demand jump the oldest one — ADR 0017's no-jump guarantee,
-		// which is a RULE here rather than a by-product of the subtraction.
+		// ...and never to work that could take the vector whole. A `maestro`
+		// (4 CPU / 7168 MB) fits the free envelope but not the {3, 11264, 1}
+		// remainder beside a `medium` head, so it can only be admitted by eating
+		// into that head's own vector — and it could take the vector whole. That
+		// is ADR 0017's no-jump guarantee, which is a RULE here rather than a
+		// by-product of the subtraction.
 		{name: "a cap-held head still refuses a peer that could take its vector",
-			headProfile: "xl", headRepoCap: 1, mac: "builder", wantMac: false},
+			headProfile: "medium", headRepoCap: 1, mac: "maestro", wantMac: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := reservedRemainderConfig()

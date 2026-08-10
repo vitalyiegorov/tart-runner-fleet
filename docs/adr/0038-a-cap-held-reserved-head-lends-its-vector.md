@@ -170,16 +170,30 @@ Two clauses, and both bind:
    which axis is holding the head.
 
 2. **The bound, stated rather than inherited.** No demand that could itself take
-   the reserved head's vector whole may be admitted into anything lent beyond
-   `free - reservation`. This is ADR 0017's no-jump guarantee promoted from a
-   by-product of the fit test to a predicate, `takesTheReservedVector`, applied
-   on **both** axes: provably a no-op on the vector axis, load-bearing on the cap
-   axis.
+   the reserved head's vector whole may be admitted **into** it. This is
+   ADR 0017's no-jump guarantee promoted from a by-product of the fit test to a
+   predicate, applied on **both** axes: provably a no-op on the vector axis,
+   load-bearing on the cap axis.
+
+   "Into it" is exact, and it is the whole of clause 2. Work that fits
+   `free - reservation` sits **beside** the head and cannot delay it by a tick,
+   so no jump is possible and the rule does not apply — such work is admitted
+   for the reason the remainder has always admitted work. The rule binds only on
+   a candidate that must consume part of the head's own vector.
 
 Keeping clause 2 on the axis where it cannot bind is deliberate. The guarantee
 is now stated in one place and tested directly, instead of being re-derived from
 arithmetic every time somebody changes what a reservation lends — which is
 precisely the failure this whole issue is an instance of.
+
+The narrower reading of clause 2 — refusing every vector-taking candidate,
+including those that fit beside the head — was written first, and the
+deterministic simulator refused it: seed 104 of the container-node arm reported
+a wedge at tick 117 with a `small` head reserved and a feasible `medium`
+refused. That reading would have reintroduced the sterilization this decision
+exists to end, inside the fix for it. It is recorded here because the correction
+came from the harness rather than from review, which is the arrangement
+ADR 0031 exists to produce.
 
 Everything else is unchanged and still binds work admitted here: the exact CPU,
 memory and slot vectors; the four-slot Linux ceiling; repository caps; profile
@@ -238,7 +252,8 @@ Nothing equal to or larger than the reserved vector can be admitted into it, on
 either axis, by rule. Several jobs each smaller than the head can still occupy
 it collectively — that is the "one backfill wave" cost above, priced and
 accepted, not a hole in clause 2, whose guarantee is per-job exactly as ADR
-0017 states it.
+0017 states it. And a job larger than the head is still admitted freely when it
+fits beside it, because that job takes nothing the head is entitled to.
 
 Because the withheld branch of `safeBackfill` was only ever reachable for a
 cap-held head, this decision changes that path's behaviour wherever a cap-held
@@ -253,7 +268,8 @@ is reported by name, and it is deliberately absent from `knownFinding`.
 - `internal/scheduler/scheduler_reserved_cap_test.go`: issue #226's tick as a
   single `PlanTick`, with the prior reservation carried in and with none at all;
   the no-jump rule held directly, with the smaller demand admitted on the same
-  tick so the refusal cannot pass on an empty envelope;
+  tick so the refusal cannot pass on an empty envelope; the counterweight, a
+  demand LARGER than the head admitted because it fits beside it;
   `takesTheReservedVector` and `reservedHeadAtRepositoryCap` pinned as
   predicates, including the proof that the cap predicate and `feasible` cannot
   disagree; and the published axis in all four of its values.

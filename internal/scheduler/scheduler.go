@@ -979,7 +979,8 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 	for _, demand := range alreadySelected {
 		counts[demand.Key.Repo]++
 	}
-	backfillCapacity, fits := free.Sub(reservation.Resources)
+	remainder, fits := free.Sub(reservation.Resources)
+	backfillCapacity := remainder
 	lends := !fits || reservedHeadAtRepositoryCap(in.Config, counts, reservation)
 	if lends {
 		backfillCapacity = free
@@ -993,10 +994,10 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 		if excluded[demand.Key] {
 			continue
 		}
-		// Whatever is lent beyond `free - reservation` is lent only to work the
+		// Whatever is lent BEYOND `free - reservation` is lent only to work the
 		// head outranks. ADR 0017's queue-position guarantee is a rule here, not
 		// a by-product of the subtraction that used to imply it.
-		if lends && takesTheReservedVector(in.Config, reservation, demand) {
+		if lends && jumpsTheReservedHead(in.Config, reservation, remainder, fits, demand) {
 			continue
 		}
 		candidates = append(candidates, demand)
@@ -1047,6 +1048,30 @@ func reservedHeadAtRepositoryCap(config Config, occupied map[string]int, reserva
 // time somebody changes what a reservation lends.
 func takesTheReservedVector(config Config, reservation *domain.Reservation, demand domain.Demand) bool {
 	return config.Profiles[demand.Profile].Resources.CanFit(reservation.Resources)
+}
+
+// jumpsTheReservedHead reports whether admitting one candidate would let an
+// equal-or-larger job take the vector the reserved head is entitled to.
+//
+// The distinction that matters is WHICH capacity the candidate lands in. Work
+// that fits `free - reservation` sits BESIDE the head and cannot delay it by a
+// tick: it is admitted for exactly the reason the remainder has always admitted
+// work, and no jump is possible because the head's own vector is untouched.
+// Applying the no-jump rule there would be strictly worse than the behaviour
+// this decision replaces -- it would refuse a `large` that coexists with a
+// cap-held `medium` head, which is the very sterilization issue #226 is about.
+//
+// The rule binds only on a candidate that must eat INTO the head's vector, and
+// there it is ADR 0017's guarantee verbatim: nothing equal or larger takes that
+// vector. When the head does not fit `free` at all there is no remainder to sit
+// beside, so every candidate is judged by the rule -- where, as above, it is
+// provably a no-op.
+func jumpsTheReservedHead(config Config, reservation *domain.Reservation, remainder domain.Resources,
+	remainderExists bool, demand domain.Demand) bool {
+	if remainderExists && remainder.CanFit(config.Profiles[demand.Profile].Resources) {
+		return false
+	}
+	return takesTheReservedVector(config, reservation, demand)
 }
 
 // demandAged reports whether one demand has crossed the fairness age, using the
@@ -1625,11 +1650,13 @@ func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []do
 	// When the head lends its vector instead of withholding it, the arithmetic
 	// that used to keep an equal-or-larger peer out is gone, and ADR 0017's
 	// no-jump rule takes its place explicitly: nothing that could take the head's
-	// vector whole may bid for it.
+	// vector whole may bid for the part of it that is lent. Work that still fits
+	// BESIDE the head is untouched, because it cannot delay the head at all.
 	if reservedHeadLendsItsVector(in, reservation) {
+		remainder, remainderExists := linuxFreeAged(in).Sub(reservation.Resources)
 		kept := make([]domain.Demand, 0, len(demands))
 		for _, demand := range demands {
-			if !takesTheReservedVector(in.Config, reservation, demand) {
+			if !jumpsTheReservedHead(in.Config, reservation, remainder, remainderExists, demand) {
 				kept = append(kept, demand)
 			}
 		}

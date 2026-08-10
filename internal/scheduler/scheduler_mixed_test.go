@@ -181,8 +181,9 @@ func TestMixedFillMacSkippedWhileReservationHeld(t *testing.T) {
 	// The head is a `medium` (2 CPU / 4096 MB) its own repository's cap holds
 	// out, so ADR 0038 lends its vector rather than withholding it. What keeps
 	// the maestro (4 CPU / 7168 MB) out is therefore ADR 0017's no-jump rule and
-	// nothing else: a maestro could take the head's whole vector, so admitting it
-	// would let a younger demand jump the oldest one.
+	// nothing else: the maestro does not fit BESIDE the head, and it could take
+	// the head's whole vector, so admitting it would let a younger demand jump
+	// the oldest one.
 	reservedHead := demand("blocked", 1, 12*time.Minute, "medium")
 	backfill := demand("a/repo", 2, time.Minute, "small")
 	maestro := demand("mac-a", 3, time.Minute, "maestro")
@@ -190,6 +191,12 @@ func TestMixedFillMacSkippedWhileReservationHeld(t *testing.T) {
 		Route: "legacy", Resources: mixedConfig().Profiles["large"].Resources, State: domain.InstanceRunning}
 	in := mixedInput(t, []domain.Demand{reservedHead, backfill, maestro}, []domain.Instance{liveLarge}, State{})
 	in.Config.RepoCaps["blocked"] = 1 // the aged head is blocked by cap, so it reserves its vector
+	// Five free cores: the maestro fits the envelope but NOT the {3, 6144, 2}
+	// remainder beside the head, so it can only be admitted by eating into the
+	// head's own vector. That is the case the no-jump rule exists for, and it is
+	// the only arrangement in which this test asserts the rule rather than an
+	// exhausted envelope.
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 5, MemoryMB: 10_240, Slots: 4}}, testNow)
 	plan := PlanTick(in)
 	if plan.Next.Reservation == nil || plan.Next.Reservation.Demand != reservedHead.Key {
 		t.Fatalf("expected a held reservation for the aged head: %#v", plan.Next.Reservation)

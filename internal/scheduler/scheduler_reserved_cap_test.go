@@ -151,6 +151,52 @@ func TestCapHeldReservedHeadRefusesAPeerThatCouldTakeItsVector(t *testing.T) {
 	}
 }
 
+// TestWorkThatFitsBesideACapHeldHeadIsNeverRefused is the counterweight to the
+// no-jump rule, and the deterministic simulator found it: seed 104 of the
+// container-node arm, tick 117, reported a wedge with a `small` head reserved
+// and a feasible `medium` refused.
+//
+// The rule binds on capacity lent BEYOND `free - reservation`. Work that fits
+// beside the head coexists with it and cannot delay it by a tick, so the
+// question of jumping the queue never arises. Applying the rule there is
+// strictly worse than the behaviour ADR 0038 replaces — it would refuse a
+// `large` behind a cap-held `medium` head against eight spare cores, which is
+// exactly the sterilization issue #226 is about, reintroduced by its own fix.
+//
+// The relationship is deliberately inverted here: the waiting demand is LARGER
+// than the head and could take its whole vector, and it must still be admitted,
+// because it does not need to take it.
+func TestWorkThatFitsBesideACapHeldHeadIsNeverRefused(t *testing.T) {
+	cfg := capHeldConfig()
+	head := capHeldDemand(cfg, "c/repo", 1, 20*time.Minute, "medium")
+	waiting := capHeldDemand(cfg, "a/repo", 2, 10*time.Minute, "large")
+	live := []domain.Instance{
+		liveInstance(cfg, "trf-small-1", "c/repo", "small"),
+		liveInstance(cfg, "trf-small-2", "c/repo", "small"),
+	}
+	in := Input{Now: testNow, Config: cfg, Demands: domain.Fresh([]domain.Demand{waiting, head}, testNow),
+		Instances: domain.Fresh(live, testNow),
+		Host: domain.Fresh(domain.Host{Available: domain.Resources{CPU: 10, MemoryMB: 28_672, Slots: 4},
+			Capacity: domain.Resources{CPU: 12, MemoryMB: 32_768, Slots: 4}}, testNow)}
+
+	// The premise: the `large` could take the head's whole vector, AND it fits
+	// beside the head. Only the second fact decides.
+	remainder, ok := linuxFree(in).Sub(cfg.Profiles["medium"].Resources)
+	if !ok || !remainder.CanFit(cfg.Profiles["large"].Resources) {
+		t.Fatalf("premise broken: the large must fit beside the head, remainder=%v", remainder)
+	}
+	if !cfg.Profiles["large"].Resources.CanFit(cfg.Profiles["medium"].Resources) {
+		t.Fatal("premise broken: the large must be able to take the head's vector, or this proves nothing")
+	}
+
+	plan := PlanTick(in)
+	spawned := spawnedKeys(plan)
+	if len(spawned) != 1 || spawned[0] != waiting.Key {
+		t.Fatalf("work that fits BESIDE a cap-held head cannot delay it and must never be refused; "+
+			"the no-jump rule binds only on capacity lent into the head's own vector: %v", spawned)
+	}
+}
+
 // TestTakesTheReservedVectorIsTheNoJumpRuleItself holds ADR 0017's guarantee at
 // the level of the predicate, so it survives whatever a future change decides a
 // reservation should lend.
