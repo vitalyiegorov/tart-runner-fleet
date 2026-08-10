@@ -123,7 +123,7 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 			return
 		}
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth(), health.Occupancy())
+		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth(), health.Occupancy(), health.Reservation())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
@@ -196,7 +196,8 @@ func queueTiers(snapshot Snapshot, rows []QueueTierMetrics) []adminapi.QueueTier
 	return tiers
 }
 
-func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string, live, ready, queueSLO, occupancy HealthResult) adminapi.StatusEnvelope {
+func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
+	live, ready, queueSLO, occupancy, reservation HealthResult) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
 		metric := snapshot.Queues[profile]
@@ -234,6 +235,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	}
 	queueCheck := adminapi.Check{OK: queueSLO.OK, Reasons: nonNilStrings(queueSLO.Reasons)}
 	occupancyCheck := adminapi.Check{OK: occupancy.OK, Reasons: nonNilStrings(occupancy.Reasons)}
+	reservationCheck := adminapi.Check{OK: reservation.OK, Reasons: nonNilStrings(reservation.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -242,6 +244,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Ready:     adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
 			QueueSLO:  &queueCheck,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
+			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -272,6 +275,21 @@ func occupancyRows(snapshot Snapshot) []adminapi.Occupancy {
 			StarvesQueuedDemand: metric.StarvesQueuedDemand})
 	}
 	return rows
+}
+
+// reservationRow projects the held reservation into the versioned DTO. Nil stays
+// nil so a fleet holding nothing emits exactly the document older clients saw --
+// and, more importantly, so "no reservation" and "a reservation nobody
+// published" stop being the same observation, which is what let issue #226 run
+// unseen.
+func reservationRow(snapshot Snapshot) *adminapi.Reservation {
+	metric := snapshot.Reservation
+	if metric == nil {
+		return nil
+	}
+	return &adminapi.Reservation{Demand: metric.Demand, Repo: metric.Repo, Profile: metric.Profile,
+		CPU: metric.CPU, MemoryMiB: metric.MemoryMiB, Slots: metric.Slots,
+		HeldSeconds: metric.Held.Seconds(), Axis: metric.Axis, LendsVector: metric.LendsVector}
 }
 
 // operationFailures projects the bounded failure aggregate into the versioned
@@ -427,6 +445,31 @@ func renderMetrics(snapshot Snapshot) string {
 				boolGauge(metric.OverBudget && metric.StarvesQueuedDemand))
 		}
 	}
+	if reservation := snapshot.Reservation; reservation != nil {
+		// A reservation is singular by design (State.Reservation is one pointer),
+		// so these are scalars. The head's demand key and repository are
+		// deliberately NOT labels: they are unbounded cardinality, and they travel
+		// in the status document instead.
+		writeHelpType("fleet_reservation_held_seconds", "How long the scheduler has been holding a vector for its aged head.", "gauge")
+		fmt.Fprintf(&output, "fleet_reservation_held_seconds{profile=%s} %s\n",
+			prometheusLabel(reservation.Profile), seconds(reservation.Held))
+		writeHelpType("fleet_reservation_vector_cpu", "vCPU withheld for the reserved head.", "gauge")
+		fmt.Fprintf(&output, "fleet_reservation_vector_cpu{profile=%s} %d\n",
+			prometheusLabel(reservation.Profile), reservation.CPU)
+		// The axis is the diagnosis, and it is a closed vocabulary so the label
+		// cannot open a new time series: a `vector` hold ends when live instances
+		// release, and a `repository_cap` hold ends only when one of the head's own
+		// repository's instances exits (issue #226, ADR 0038).
+		writeHelpType("fleet_reservation_axis", "1 for the axis holding the reserved head out of admission.", "gauge")
+		for _, axis := range reservationAxes {
+			fmt.Fprintf(&output, "fleet_reservation_axis{axis=%s} %d\n",
+				prometheusLabel(axis), boolGauge(axis == reservationAxisOrUnjudged(reservation.Axis)))
+		}
+		// 0 is the expensive state: a vector standing idle rather than lent to work
+		// the head outranks.
+		writeHelpType("fleet_reservation_lends_vector", "1 when the reserved head lends the vector it cannot use to work it outranks.", "gauge")
+		fmt.Fprintf(&output, "fleet_reservation_lends_vector %d\n", boolGauge(reservation.LendsVector))
+	}
 	if len(snapshot.OperationFailures) > 0 {
 		// The failure code is closed vocabulary, so label cardinality is bounded and
 		// an alert can name the cause: a cleanup stuck on a busy-runner refusal reads
@@ -510,6 +553,20 @@ func renderMetrics(snapshot Snapshot) string {
 	}
 	fmt.Fprintf(&output, "fleet_last_successful_tick_timestamp_seconds %d\n", lastSuccessful)
 	return output.String()
+}
+
+// reservationAxes is the closed label vocabulary fleet_reservation_axis emits,
+// every value on every scrape, so an alert can say "the cap axis has been set
+// for twenty minutes" instead of having to infer it from a series appearing.
+var reservationAxes = []string{"vector", "repository_cap", "both", "none", "unjudged"}
+
+// reservationAxisOrUnjudged maps a plan that judged nothing onto a word, so the
+// axis label is never empty.
+func reservationAxisOrUnjudged(axis string) string {
+	if axis == "" {
+		return "unjudged"
+	}
+	return axis
 }
 
 func sortedKeys[V any](values map[string]V) []string {

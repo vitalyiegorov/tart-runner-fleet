@@ -135,6 +135,37 @@ facts are exported as `fleet_instance_occupancy_seconds`,
 `fleet_instance_occupancy_starving`, each labelled by profile and instance. Both
 fields are additive and absent on daemons that measured no occupancy at all.
 
+`reservation` names the aged global-FIFO head the scheduler is standing capacity
+by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:
+
+```json
+"reservation": {
+  "demand": "c/repo/1009/1/500009", "repo": "c/repo", "profile": "xl",
+  "cpu": 6, "memoryMiB": 12288, "slots": 1,
+  "heldSeconds": 780, "axis": "repository_cap", "lendsVector": true
+},
+"reservationCheck": {"ok": true, "reasons": []}
+```
+
+`axis` is the operator's whole diagnosis and is a closed vocabulary: `vector`
+(the head's resource vector does not fit the starvation envelope, so it waits on
+live instances to release), `repository_cap` (the vector fits and the head's own
+repository is at its cap, so it waits on one of that repository's instances to
+exit and freeing CPU cannot hasten it), `both`, `none` (neither term refuses the
+head), or empty when the plan judged nothing. `lendsVector` reports that the
+vector the head cannot use is lent to work it outranks — ADR 0017 on the vector
+axis, [ADR 0038](adr/0038-a-cap-held-reserved-head-lends-its-vector.md) on the
+repository-cap axis — and `reservationCheck` fails only when it is false, which
+is a vector standing idle.
+
+The same facts are exported as `fleet_reservation_held_seconds` and
+`fleet_reservation_vector_cpu` (labelled by profile), `fleet_reservation_axis`
+(labelled by the closed axis vocabulary, every value emitted on every scrape),
+and `fleet_reservation_lends_vector`. The head's demand key and repository are
+deliberately NOT metric labels; they travel in this document only. Both fields
+are additive and absent on daemons that published no reservation at all — which
+is the condition issue #226 ran in unobserved.
+
 `operations.deadLetters` names the individual operations that have stopped
 retrying, because a count is not actionable: discharging one requires its
 identity. `parked` reports that nothing will advance the resource without an

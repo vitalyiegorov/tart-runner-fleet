@@ -1558,6 +1558,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	}
 	_ = e.health.SetMode(mode)
 	e.recordOccupancy(result)
+	e.recordReservation(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
@@ -1590,6 +1591,43 @@ func (e engineTicker) recordOccupancy(result app.TickResult) {
 	for _, operation := range result.Plan.Operations {
 		e.reporter.reportOccupancyReclaim(operation, occupancy)
 	}
+}
+
+// recordReservation publishes the vector the scheduler is holding for its aged
+// global-FIFO head, and WHICH of the two axes is holding that head out.
+//
+// Nothing published this before, and that is why issue #226 ran in production
+// unobserved: a reserved head its own repository cap held sterilized the
+// residual for the whole runtime of the blocking job, and no artifact named the
+// reservation, its repository, or the axis. `grep reservation` over the
+// authority log returned nothing, because there was nothing to find. A
+// deterministic simulator caught it; the fleet itself could not have.
+//
+// The axis comes from the plan that decided it rather than being recomputed
+// here, so the diagnosis an operator reads is the one the scheduler acted on.
+func (e engineTicker) recordReservation(result app.TickResult) {
+	reservation := result.Plan.Next.Reservation
+	if reservation == nil {
+		_ = e.health.SetReservation(nil)
+		return
+	}
+	held := time.Duration(0)
+	if !reservation.Since.IsZero() && result.At.After(reservation.Since) {
+		held = result.At.Sub(reservation.Since)
+	}
+	axis := result.Plan.ReservationAxis
+	_ = e.health.SetReservation(&telemetry.ReservationMetric{
+		Demand: reservation.Demand.String(), Repo: reservation.Demand.Repo,
+		Profile: string(reservation.Profile), CPU: reservation.Resources.CPU,
+		MemoryMiB: reservation.Resources.MemoryMB, Slots: reservation.Resources.Slots,
+		Held: held, Axis: string(axis),
+		// ADR 0017 lends on the vector axis and ADR 0038 lends on the
+		// repository-cap axis, so every axis the planner can publish lends. A
+		// reservation that does NOT lend is capacity standing idle, and naming it
+		// as such is the whole point of this metric.
+		LendsVector: axis == scheduler.ReservationAxisVector || axis == scheduler.ReservationAxisRepositoryCap ||
+			axis == scheduler.ReservationAxisBoth,
+	})
 }
 
 type wallClock struct{}

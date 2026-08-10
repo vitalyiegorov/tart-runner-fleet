@@ -123,6 +123,38 @@ type OccupancyMetric struct {
 	StarvesQueuedDemand bool
 }
 
+// ReservationMetric is the vector the scheduler is holding for its aged
+// global-FIFO head, and WHY it is holding it.
+//
+// It exists because issue #226 was invisible on a live fleet. A reserved head
+// its own repository cap was holding sterilized the residual for the entire
+// runtime of the blocking job, and nothing published named the reservation, its
+// repository, or which axis held it -- so no artifact would have shown the
+// wedge, and only a deterministic simulator found it. `grep reservation` over
+// the authority log returned nothing at all, because there was nothing to find.
+//
+// Axis is the closed vocabulary scheduler.ReservationAxis defines: `vector`,
+// `repository_cap`, `both`, `none`, or empty when the plan judged nothing. It is
+// the operator's whole diagnosis. A `vector` hold ends when live instances
+// release; a `repository_cap` hold ends only when one of the head's OWN
+// repository's instances exits, and freeing CPU cannot hasten it by a tick.
+type ReservationMetric struct {
+	// Demand and Repo name the head. They travel in the status document, never
+	// as metric labels: a demand key is unbounded cardinality.
+	Demand    string
+	Repo      string
+	Profile   string
+	CPU       int
+	MemoryMiB int
+	Slots     int
+	Held      time.Duration
+	Axis      string
+	// LendsVector reports that ADR 0017 or ADR 0038 releases the head's vector
+	// to work it outranks rather than withholding it. A held reservation that
+	// does NOT lend is the expensive one: it is standing capacity down.
+	LendsVector bool
+}
+
 type ObservationMetric struct {
 	Freshness  ObservationFreshness
 	ObservedAt time.Time
@@ -165,6 +197,7 @@ type Snapshot struct {
 	ComponentFailures  []ComponentFailure
 	DeadLetters        []DeadLetter
 	Occupancy          []OccupancyMetric
+	Reservation        *ReservationMetric
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
@@ -203,6 +236,7 @@ type Health struct {
 	componentFailures  map[componentFailureKey]int
 	deadLetters        []DeadLetter
 	occupancy          []OccupancyMetric
+	reservation        *ReservationMetric
 	hostPressure       HostPressureMetric
 	revision           uint64
 }
@@ -548,6 +582,79 @@ func (h *Health) Occupancy() HealthResult {
 	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
 }
 
+// validReservationAxis is the closed vocabulary scheduler.ReservationAxis
+// defines. It is enforced here rather than trusted, because the axis is rendered
+// as a metric LABEL and an open vocabulary there is unbounded cardinality.
+var validReservationAxis = map[string]bool{
+	"": true, "vector": true, "repository_cap": true, "both": true, "none": true,
+}
+
+// SetReservation publishes the vector the scheduler is holding for its aged
+// head, or clears it when no reservation is held. Nil is the "nothing held"
+// value and is published as an ABSENCE rather than as a zero row, so a fleet
+// holding nothing cannot be read as a fleet holding an unnamed something.
+//
+// An ungrammatical metric is rejected outright rather than clamped, for the same
+// reason SetOccupancy rejects one: a mangled reservation must never masquerade
+// as "no vector is standing idle".
+func (h *Health) SetReservation(reservation *ReservationMetric) error {
+	if reservation != nil {
+		if reservation.Held < 0 || reservation.CPU < 0 || reservation.MemoryMiB < 0 || reservation.Slots < 0 {
+			return errInvalidMetric
+		}
+		if !validReservationAxis[reservation.Axis] {
+			return errInvalidMetric
+		}
+		if _, ok := h.profiles[reservation.Profile]; !ok {
+			return errUnknownProfile
+		}
+	}
+	h.mu.Lock()
+	h.revision++
+	h.reservation = cloneReservation(reservation)
+	h.mu.Unlock()
+	return nil
+}
+
+// cloneReservation keeps the published document from aliasing the caller's
+// struct, exactly as the occupancy and dead-letter slices are copied.
+func cloneReservation(reservation *ReservationMetric) *ReservationMetric {
+	if reservation == nil {
+		return nil
+	}
+	copied := *reservation
+	return &copied
+}
+
+// Reservation reports whether a held reservation is standing capacity down
+// without lending it. A reservation is normal and mostly cheap: the head is
+// first in line and, on both of ADR 0017's and ADR 0038's axes, the vector it
+// cannot use is lent to work it outranks. The expensive case is the one that
+// does NOT lend, because that is an idle vector the size of the head's profile
+// for however long the blocking job runs (ADR 0029's units), and it is the shape
+// issue #226 ran in production unseen.
+func (h *Health) Reservation() HealthResult {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	reasons := []string{}
+	if reservation := h.reservation; reservation != nil && !reservation.LendsVector {
+		reasons = append(reasons, "reservation for "+reservation.Demand+" of profile "+reservation.Profile+
+			" has withheld "+strconv.Itoa(reservation.CPU)+" cpu / "+strconv.Itoa(reservation.MemoryMiB)+
+			" MiB for "+reservation.Held.Round(time.Second).String()+" on the "+
+			reservationAxisLabel(reservation.Axis)+" axis")
+	}
+	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
+}
+
+// reservationAxisLabel renders an unjudged plan's empty axis as a word rather
+// than as nothing, so a diagnosis never reads as a missing sentence.
+func reservationAxisLabel(axis string) string {
+	if axis == "" {
+		return "unjudged"
+	}
+	return axis
+}
+
 func (h *Health) SetOperations(retries, dead int) error {
 	if retries < 0 || dead < 0 {
 		return errInvalidMetric
@@ -609,6 +716,7 @@ func (h *Health) Snapshot() Snapshot {
 		ComponentFailures: h.sortedComponentFailures(),
 		DeadLetters:       append([]DeadLetter(nil), h.deadLetters...),
 		Occupancy:         append([]OccupancyMetric(nil), h.occupancy...),
+		Reservation:       cloneReservation(h.reservation),
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }

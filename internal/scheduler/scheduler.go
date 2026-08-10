@@ -154,6 +154,63 @@ type Plan struct {
 	// It is composed only from observation reasons (adapter-authored safe
 	// strings) and static scheduler error text, never from wrapped errors.
 	Reason string
+	// ReservationAxis names WHY this plan is holding Next.Reservation, at the
+	// moment and in the envelope the decision was made. It is empty when the plan
+	// holds no reservation, and empty when a reservation is merely carried
+	// through a plan that decided nothing (a blocked observation, for instance):
+	// a plan that did not judge the head must not publish a judgement.
+	//
+	// This exists because issue #226 was invisible on a live fleet. Nothing
+	// published named the held reservation, its repository, or which of the two
+	// axes was holding it, so a defect that strands a vector for the whole
+	// runtime of a blocking job left no artifact at all and only a simulator
+	// found it. The axis is the diagnostic: a `vector` hold is waiting on live
+	// instances to release, and a `repository_cap` hold is waiting on one of its
+	// own repository's instances to exit, which no amount of freed CPU can
+	// shorten.
+	ReservationAxis ReservationAxis
+}
+
+// ReservationAxis is the closed vocabulary of reasons a reserved head is not
+// admitted. It is closed deliberately: it is published as a metric label, and an
+// open vocabulary there is unbounded cardinality.
+type ReservationAxis string
+
+const (
+	// ReservationAxisVector is ADR 0017's axis: the head's vector does not fit
+	// the starvation envelope, so it is waiting on live instances to release.
+	ReservationAxisVector ReservationAxis = "vector"
+	// ReservationAxisRepositoryCap is ADR 0038's axis: the vector fits and the
+	// head's own repository is at its cap, so it is waiting on one of that
+	// repository's instances to exit and nothing else.
+	ReservationAxisRepositoryCap ReservationAxis = "repository_cap"
+	// ReservationAxisBoth is both at once.
+	ReservationAxisBoth ReservationAxis = "both"
+	// ReservationAxisNone is a reservation held for a head that neither axis
+	// refuses. The scheduler does not produce it — a reservation is minted only
+	// when `feasible` is false — so it is published for the case an operator
+	// most needs named: a fleet reserving a vector for work it could have
+	// started, which is issue #125's wedge wearing a reservation.
+	ReservationAxisNone ReservationAxis = "none"
+)
+
+// reservationAxis names which of `feasible`'s two terms refused the head, judged
+// in the envelope and against the occupancy `planLinux` used to decide.
+//
+// It is a diagnostic and never a decision: nothing in the planner reads it, so a
+// wrong answer here can misinform an operator but can never misplan a tick.
+func reservationAxis(config Config, resources, agedFree domain.Resources, repo string, occupied map[string]int) ReservationAxis {
+	vector := !agedFree.CanFit(resources)
+	cap := occupied[repo] >= repoCapLimit(config.RepoCaps, repo)
+	switch {
+	case vector && cap:
+		return ReservationAxisBoth
+	case vector:
+		return ReservationAxisVector
+	case cap:
+		return ReservationAxisRepositoryCap
+	}
+	return ReservationAxisNone
 }
 
 // PlanTick computes a complete plan without performing side effects.
@@ -570,6 +627,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 			plan.Next.Reservation = nil
 		} else {
 			plan.Next.Reservation = copyReservation(in.Prior.Reservation)
+			plan.ReservationAxis = reservationAxis(in.Config, profile.Resources, agedFree, reserved.Key.Repo, baseCounts)
 			backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, nil)
 			plan.Operations = append(plan.Operations, backfill...)
 			if len(backfill) > 0 {
@@ -587,6 +645,11 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 			selected := spawnedDemands(plan.Operations)
 			if !feasible(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps) {
 				plan.Next.Reservation = &domain.Reservation{Demand: candidate.Key, Profile: candidate.Profile, Resources: profile.Resources, Since: in.Now}
+				occupied := cloneCounts(baseCounts)
+				for _, chosen := range selected {
+					occupied[chosen.Key.Repo]++
+				}
+				plan.ReservationAxis = reservationAxis(in.Config, profile.Resources, agedFree, candidate.Key.Repo, occupied)
 				backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, selected)
 				plan.Operations = append(plan.Operations, backfill...)
 				if len(backfill) > 0 {
@@ -1668,6 +1731,10 @@ func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
 	sub := planLinux(augmented, Plan{Status: PlanReady, Next: plan.Next}, linux)
 	plan.Operations = append(plan.Operations, sub.Operations...)
 	plan.Next.Reservation = sub.Next.Reservation
+	// The sub-pass owns the reservation, so it owns the diagnosis of why it is
+	// held. Carrying one without the other would publish a reservation nothing
+	// can explain.
+	plan.ReservationAxis = sub.ReservationAxis
 	plan.Next.DRRCursor = sub.Next.DRRCursor
 	return plan
 }

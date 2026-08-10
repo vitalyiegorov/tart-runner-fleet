@@ -37,10 +37,11 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	queueSLO := status.Data.EffectiveQueueSLO()
 	occupancy := status.Data.EffectiveOccupancy()
+	reservation := status.Data.EffectiveReservationCheck()
 	state := "READY"
 	if !status.Data.Ready.OK {
 		state = "NOT READY"
-	} else if !queueSLO.OK || !occupancy.OK {
+	} else if !queueSLO.OK || !occupancy.OK || !reservation.OK {
 		state = "DEGRADED"
 	}
 	fmt.Fprintf(output, "TART RUNNER FLEET — %s\n", state)
@@ -55,6 +56,9 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	if !occupancy.OK {
 		fmt.Fprintf(output, "occupancy: %s\n", joinReasons(occupancy))
 	}
+	if !reservation.OK {
+		fmt.Fprintf(output, "reservation: %s\n", joinReasons(reservation))
+	}
 	fmt.Fprintln(output, "\nHOST PRESSURE")
 	pressure := status.Data.HostPressure
 	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
@@ -67,6 +71,10 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	if len(status.Data.Occupancy) > 0 {
 		fmt.Fprintln(output, "\nOCCUPANCY")
 		renderOccupancy(output, status.Data.Occupancy)
+	}
+	if held := status.Data.Reservation; held != nil {
+		fmt.Fprintln(output, "\nRESERVATION")
+		renderReservation(output, *held)
 	}
 	fmt.Fprintln(output, "\nOPERATIONS")
 	fmt.Fprintf(output, "retrying %d  dead %d\n", status.Data.Operations.Retrying, status.Data.Operations.Dead)
@@ -238,6 +246,32 @@ func renderObservations(output io.Writer, observations []adminapi.Observation) {
 		fmt.Fprintf(table, "%s\t%s\t%s\n", observation.Name, observation.Freshness, formatAge(observation.AgeSeconds))
 	}
 	_ = table.Flush()
+}
+
+// renderReservation names the aged head the fleet is standing capacity by for.
+//
+// The axis is the operator's whole diagnosis and is why this section exists: a
+// `vector` hold ends when live instances release, and a `repository_cap` hold
+// ends only when one of the head's OWN repository's instances exits — freeing
+// CPU cannot shorten it by a tick. Issue #226 was a `repository_cap` hold that
+// withheld its vector for the entire runtime of the blocking job, and nothing on
+// the fleet said so.
+func renderReservation(output io.Writer, held adminapi.Reservation) {
+	fmt.Fprintf(output, "%-24s %-10s %s\n", "HEAD", "PROFILE", "VECTOR      HELD      AXIS            VECTOR")
+	fmt.Fprintf(output, "%-24s %-10s %d cpu / %d MiB / %d slots  %-9s %-15s %s\n",
+		held.Repo, held.Profile, held.CPU, held.MemoryMiB, held.Slots,
+		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis), lendingState(held.LendsVector))
+	fmt.Fprintf(output, "demand %s\n", held.Demand)
+}
+
+// lendingState says whether the withheld vector is working for somebody. "idle"
+// is the expensive answer: a vector the size of the head's profile standing down
+// for as long as whatever blocks the head runs.
+func lendingState(lends bool) string {
+	if lends {
+		return "lent to work it outranks"
+	}
+	return "idle"
 }
 
 func renderCheck(output io.Writer, name string, check adminapi.Check) {

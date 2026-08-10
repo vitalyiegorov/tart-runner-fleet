@@ -223,6 +223,81 @@ func TestReservedHeadAtRepositoryCapReadsTheSameOccupancyFeasibleWill(t *testing
 	}
 }
 
+// TestReservationAxisNamesWhichTermRefusedTheHead pins the diagnostic issue #226
+// was invisible for want of.
+//
+// Nothing published on a live fleet named the held reservation, its repository,
+// or which of `feasible`'s two terms was holding it, so a defect that stranded a
+// vector for the whole runtime of a blocking job left no artifact at all — only
+// a simulator found it. The axis is what an operator needs: a `vector` hold ends
+// when live instances release, and a `repository_cap` hold ends only when one of
+// the head's OWN repository's instances exits, which no amount of freed CPU can
+// hasten.
+//
+// `none` is the row worth keeping. The planner cannot produce it, because a
+// reservation is minted only where `feasible` is false — but it is the state an
+// operator most needs named if it ever appears, since a fleet reserving a vector
+// for work it could have started is issue #125's wedge wearing a reservation.
+func TestReservationAxisNamesWhichTermRefusedTheHead(t *testing.T) {
+	cfg := capHeldConfig()
+	vector := cfg.Profiles["xl"].Resources
+	roomy := domain.Resources{CPU: 12, MemoryMB: 32_768, Slots: 4}
+	tight := domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 4}
+
+	for _, test := range []struct {
+		name     string
+		agedFree domain.Resources
+		occupied map[string]int
+		want     ReservationAxis
+	}{
+		{"the envelope refuses it", tight, map[string]int{"c/repo": 0}, ReservationAxisVector},
+		{"its repository cap refuses it", roomy, map[string]int{"c/repo": 2}, ReservationAxisRepositoryCap},
+		{"both refuse it", tight, map[string]int{"c/repo": 2}, ReservationAxisBoth},
+		{"neither refuses it", roomy, map[string]int{"c/repo": 0}, ReservationAxisNone},
+	} {
+		got := reservationAxis(cfg, vector, test.agedFree, "c/repo", test.occupied)
+		if got != test.want {
+			t.Fatalf("%s: reservationAxis = %q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
+// TestPlanPublishesTheAxisHoldingItsReservation is the same diagnostic through
+// `PlanTick`, which is the only way an operator ever sees it. Issue #226's own
+// tick must publish `repository_cap`, because that is the fact whose absence
+// made the defect unobservable in production.
+func TestPlanPublishesTheAxisHoldingItsReservation(t *testing.T) {
+	cfg := capHeldConfig()
+	head := capHeldDemand(cfg, "c/repo", 9, 13*time.Minute, "xl")
+	waiting := capHeldDemand(cfg, "a/repo", 10, 9*time.Minute+30*time.Second, "large")
+
+	plan := PlanTick(capHeldInput(cfg, []domain.Demand{waiting, head}, issue226Occupancy(cfg), State{}))
+	if plan.ReservationAxis != ReservationAxisRepositoryCap {
+		t.Fatalf("issue #226's tick is held by the repository cap and must say so: %q", plan.ReservationAxis)
+	}
+
+	// The vector axis, same topology, with the cap opened and the envelope
+	// closed instead: one `xl` live in another repository leaves too little for
+	// a second one.
+	roomy := capHeldConfig()
+	roomy.RepoCaps["c/repo"] = 4
+	vectorHeld := PlanTick(capHeldInput(roomy, []domain.Demand{waiting, head},
+		[]domain.Instance{liveInstance(roomy, "trf-xl-1", "b/repo", "xl")}, State{}))
+	if vectorHeld.ReservationAxis != ReservationAxisVector {
+		t.Fatalf("a head no envelope can hold is held by the vector axis: %q", vectorHeld.ReservationAxis)
+	}
+
+	// A plan that decided nothing publishes no judgement: a stale observation
+	// carries the prior reservation through without ever judging the head.
+	blocked := capHeldInput(cfg, []domain.Demand{waiting, head}, issue226Occupancy(cfg),
+		State{Reservation: &domain.Reservation{Demand: head.Key, Profile: head.Profile,
+			Resources: cfg.Profiles["xl"].Resources, Since: testNow.Add(-time.Hour)}})
+	blocked.Host = domain.Stale(blocked.Host.Value, testNow.Add(-time.Hour), "probe stale")
+	if carried := PlanTick(blocked); carried.ReservationAxis != "" {
+		t.Fatalf("a plan that judged nothing must publish no axis, got %q", carried.ReservationAxis)
+	}
+}
+
 // containsDemandKey reports whether a spawn list names one demand.
 func containsDemandKey(keys []domain.DemandKey, want domain.DemandKey) bool {
 	for _, key := range keys {
