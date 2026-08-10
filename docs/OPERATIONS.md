@@ -739,6 +739,102 @@ removing it. The ceiling is per profile, `occupancyBudgetSeconds`, and must be
 `0` (never reaped for age) or between 300 and 21600 seconds; unstated takes the
 platform default of two hours on macOS and one hour on Linux.
 
+### A drain that is not progressing, and a guest that will not stop
+
+`fleet doctor` reports `FAIL  drain progress` when a durable operation has failed
+more than six times, or when an instance has sat in a cleanup state
+(`draining`, `deregistering`, `stopping`) for more than ten minutes. The reason
+names the instance, the step, the attempt count, and the elapsed time.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "drain progress")'
+fleet status --endpoint "$ENDPOINT" --output json | jq '.data.stalled'
+```
+
+The same rows render as the `STALLED` table of `fleet status`:
+
+```
+STALLED
+INSTANCE                          OPERATION                              STEP  ATTEMPTS  RETRYING  DRAIN STATE    HELD
+trf-macos-6x12-f458a747883b9a0d   event-drain-trf-macos-6x12-f458a...    stop  67        1h22m19s  deregistering  1h22m19s
+```
+
+`STEP` is the whole diagnosis. Read it first:
+
+| `STEP` | Meaning | Action |
+| --- | --- | --- |
+| `drain_guard` | The fleet cannot read fresh GitHub runner or job state. | Check the `github` observation. Nothing is being killed; the guard is fail-closed. |
+| `deregister:runner_busy` | GitHub refuses to remove a runner it considers to be executing a job. | Legitimate for up to GitHub's six-hour job maximum. See the case study below. |
+| `confirm_inactive` | Deregistration succeeded but GitHub will not confirm the runner and its jobs inactive. | Check the `github` observation; the fleet retries. |
+| `stop` | The guest will not power itself down. | **This section.** |
+| `delete` | The guest is off but the backend will not remove it. | Check host disk and the backend's own logs. |
+
+#### A guest that will not stop
+
+A `stop` step that keeps failing means the guest is wedged: its runner is already
+deregistered and its deletion already confirmed, so the job is over and all that
+remains is to make the VM stop holding the host. The fleet escalates on its own
+(ADR 0039) — three graceful stops, then three forced ones, then three that remove
+the guest outright — which is roughly four minutes to stop being polite and eight
+to remove it. **In most cases the right action is to wait those few minutes and
+watch `ATTEMPTS` stop climbing.**
+
+If it climbs past nine, every rung has failed and the operation dead-letters at
+once. Confirm the guest really is wedged before doing anything by hand:
+
+```sh
+# The VM the fleet cannot stop. On a container node this is `podman ps`.
+tart list --format json | jq '.[] | select(.Name == "<instance>")'
+tart ip --wait 5 <instance>          # "no IP address found" on a wedged guest
+pgrep -fl "tart run <instance>"      # the run process is alive from the host's view
+```
+
+A wedged guest may need a manual stop. It is safe here and only here — the
+instance is in `deregistering` or `stopping`, so the runner is gone from GitHub
+and the job is over:
+
+```sh
+tart stop <instance> --timeout 0     # forceful; no graceful wait
+```
+
+Never do this for an instance in any other state, and never delete a controller
+VM by hand while its row is live (see the ordering note under
+[Discharging a dead-lettered cleanup](#discharging-a-dead-lettered-cleanup)).
+The fleet completes the drain on its next attempt and reaps the record itself.
+
+#### When discharge is refused
+
+`fleet operations discharge` refuses with `operation_not_dead` while the
+operation is still retrying. That is correct — a retrying operation is still
+making progress and discharging it would record that a human accepted an effect
+the fleet had not finished trying.
+
+On 2026-08-10 that refusal held for ninety minutes because the operation could
+not dead-letter at all: the attempt ceiling was 720 and each attempt cost 45
+seconds, so the "six hour" bound was in fact fifteen hours. Both bounds are now
+real (ADR 0039). An operation dead-letters when **any** of these is true:
+
+- it has failed 720 times;
+- it has been retrying for six hours;
+- the executor proved the failure permanent — for a drain, the stop ladder ran
+  out of rungs, which takes about twelve minutes.
+
+So if `discharge` is refused with `operation_not_dead`:
+
+1. Read `ATTEMPTS` in the `STALLED` table. Under nine, the ladder has not
+   finished; wait.
+2. Over nine and still `retrying`, the ladder is being re-entered from an
+   earlier step — read `STEP` again, because it is no longer `stop`.
+3. If the guest is wedged and the queue behind it cannot wait for the ladder,
+   perform the manual `tart stop --timeout 0` above. That is the remedy, not
+   discharge: discharge closes an operation the fleet can never complete, and a
+   guest an operator can stop is one the fleet can complete.
+
+Discharge is for the case where the effect will never happen — a permanently
+leaked GitHub registration, the case study below. It is not a way to skip a slow
+retry, and it does not release the instance's vector on its own.
+
 ### Diagnosing an unavailable GitHub observation
 
 `scheduler ready FAIL: critical_observation_unavailable` names how many
