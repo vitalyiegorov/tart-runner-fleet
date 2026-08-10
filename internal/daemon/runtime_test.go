@@ -2194,9 +2194,11 @@ func (v *lifecycleVM) Start(context.Context, string, operations.Ownership) error
 	v.start.Add(1)
 	return nil
 }
-func (*lifecycleVM) Stop(context.Context, string, operations.Ownership) error   { return nil }
-func (*lifecycleVM) Delete(context.Context, string, operations.Ownership) error { return nil }
-func (*lifecycleVM) Running(context.Context, string) (bool, error)              { return false, nil }
+func (*lifecycleVM) Stop(context.Context, string, operations.Ownership) error      { return nil }
+func (*lifecycleVM) Terminate(context.Context, string, operations.Ownership) error { return nil }
+func (*lifecycleVM) Destroy(context.Context, string, operations.Ownership) error   { return nil }
+func (*lifecycleVM) Delete(context.Context, string, operations.Ownership) error    { return nil }
+func (*lifecycleVM) Running(context.Context, string) (bool, error)                 { return false, nil }
 
 type readyProbe struct{}
 

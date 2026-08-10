@@ -52,6 +52,11 @@ const (
 type stageError struct {
 	stage  Stage
 	reason string
+	// exhausted marks a failure no further attempt can change. It travels as a Go
+	// error and never as text: the persisted message stays byte-identical to the
+	// ordinary failure at the same stage, so FailureCode and every operator
+	// surface keep reading exactly one closed code.
+	exhausted bool
 }
 
 func (e stageError) Error() string {
@@ -59,6 +64,15 @@ func (e stageError) Error() string {
 		return "runner lifecycle failed at " + string(e.stage)
 	}
 	return "runner lifecycle failed at " + string(e.stage) + " (" + e.reason + ")"
+}
+
+// Unwrap exposes an exhausted ladder as operations.ErrExhausted, which is what
+// the durable worker parks on rather than retries.
+func (e stageError) Unwrap() error {
+	if e.exhausted {
+		return operations.ErrExhausted
+	}
+	return nil
 }
 
 // FailureReason exposes the bounded diagnostic to programmatic callers, exactly
@@ -120,6 +134,10 @@ type VMControl interface {
 	Create(context.Context, executor.InstanceSpec) error
 	Start(context.Context, string, operations.Ownership) error
 	Stop(context.Context, string, operations.Ownership) error
+	// Terminate and Destroy are the second and third rungs of the stop ladder a
+	// drain climbs when its guest will not power itself down (ADR 0039).
+	Terminate(context.Context, string, operations.Ownership) error
+	Destroy(context.Context, string, operations.Ownership) error
 	Delete(context.Context, string, operations.Ownership) error
 	// Running reports the VM's current power state; an absent VM is not
 	// running. Recovery drains re-verify their premise against this before
@@ -713,6 +731,10 @@ func validateOwned(instance operations.Instance, resourceID string) error {
 }
 
 func safeError(stage Stage) error { return stageError{stage: stage} }
+
+// exhaustedError is the same bounded stage failure, marked as one no further
+// retry can change, so the durable operation parks and becomes dischargeable.
+func exhaustedError(stage Stage) error { return stageError{stage: stage, exhausted: true} }
 
 // StdinRunner is the only process boundary used for JIT bootstrap. The secret
 // is supplied on standard input and never appears in argv or environment.

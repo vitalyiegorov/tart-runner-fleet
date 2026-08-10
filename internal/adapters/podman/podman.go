@@ -512,6 +512,29 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 // Stop powers the container off. An absent container is success, because the
 // fleet's durable cleanup depends on retrying this verb (ADR 0007).
 func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ownership) error {
+	return a.stop(ctx, name, ownership, a.stopSeconds())
+}
+
+// Terminate kills the container's process group without the grace period Stop
+// grants it. It is `podman stop --time 0`, which is what an ephemeral runner's
+// container gets when its guest will not wind itself down (ADR 0039).
+func (a *Adapter) Terminate(ctx context.Context, name string, ownership operations.Ownership) error {
+	return a.stop(ctx, name, ownership, 0)
+}
+
+// Destroy terminates the container and removes it, keeping exactly the evidence
+// Delete requires.
+func (a *Adapter) Destroy(ctx context.Context, name string, ownership operations.Ownership) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
+	if err := a.Terminate(ctx, name, ownership); err != nil {
+		return err
+	}
+	return a.Delete(ctx, name, ownership)
+}
+
+func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ownership, graceful int) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
@@ -523,7 +546,7 @@ func (a *Adapter) Stop(ctx context.Context, name string, ownership operations.Ow
 		return err
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
-	_, commandErr := a.runner().Run(commandCtx, "stop", "--time", strconv.Itoa(a.stopSeconds()), name)
+	_, commandErr := a.runner().Run(commandCtx, "stop", "--time", strconv.Itoa(graceful), name)
 	cancel()
 	if commandErr == nil {
 		return nil

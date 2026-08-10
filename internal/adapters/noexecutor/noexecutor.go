@@ -46,6 +46,10 @@ func (Backend) Start(context.Context, string, operations.Ownership) error { retu
 
 func (Backend) Stop(context.Context, string, operations.Ownership) error { return ErrNoBackend }
 
+func (Backend) Terminate(context.Context, string, operations.Ownership) error { return ErrNoBackend }
+
+func (Backend) Destroy(context.Context, string, operations.Ownership) error { return ErrNoBackend }
+
 func (Backend) Delete(context.Context, string, operations.Ownership) error { return ErrNoBackend }
 
 func (Backend) Reap(context.Context, string, operations.Ownership) error { return ErrNoBackend }

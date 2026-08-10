@@ -12,7 +12,7 @@ func TestCanceledJITRequestCleanupOutlivesReplacementJob(t *testing.T) {
 	policy := operations.DurableCleanupRetryPolicy(30 * time.Second)
 
 	for attempt := 1; attempt <= 100; attempt++ {
-		next, retry := policy.Next(attempt, now)
+		next, retry := policy.Next(attempt, now, now)
 		if !retry {
 			t.Fatalf("cleanup dead-lettered at attempt %d while the replacement job can still be running", attempt)
 		}

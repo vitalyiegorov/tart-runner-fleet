@@ -16,6 +16,12 @@ var (
 	ErrLeaseLost = errors.New("lease lost")
 	ErrInvalid   = errors.New("invalid operation")
 	ErrUncertain = errors.New("observation uncertain")
+	// ErrExhausted reports a failure that no further attempt can change, because
+	// every remedy the executor has has already been tried and has already
+	// failed. It is the executor's way of saying "park this now" rather than
+	// waiting out an attempt or elapsed ceiling that was sized for a fault which
+	// might still resolve itself.
+	ErrExhausted = errors.New("operation exhausted")
 	// ErrSchedulerStateMissing reports that the seeded scheduler_state singleton
 	// is absent (e.g. an operator deleted it). Callers distinguish it from a
 	// generic store failure to drive a bounded cold-start reseed.

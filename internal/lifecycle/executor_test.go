@@ -47,6 +47,7 @@ func (s *memoryState) Advance(_ context.Context, change StateChange) (operations
 type fakeVM struct {
 	calls                       *[]string
 	cloneErr, startErr, stopErr error
+	terminateErr, destroyErr    error
 	deleteErr                   error
 	running                     bool
 	runningErr                  error
@@ -63,6 +64,14 @@ func (v fakeVM) Start(_ context.Context, name string, _ operations.Ownership) er
 func (v fakeVM) Stop(_ context.Context, name string, _ operations.Ownership) error {
 	*v.calls = append(*v.calls, "stop:"+name)
 	return v.stopErr
+}
+func (v fakeVM) Terminate(_ context.Context, name string, _ operations.Ownership) error {
+	*v.calls = append(*v.calls, "terminate:"+name)
+	return v.terminateErr
+}
+func (v fakeVM) Destroy(_ context.Context, name string, _ operations.Ownership) error {
+	*v.calls = append(*v.calls, "destroy:"+name)
+	return v.destroyErr
 }
 func (v fakeVM) Delete(_ context.Context, name string, _ operations.Ownership) error {
 	*v.calls = append(*v.calls, "delete:"+name)

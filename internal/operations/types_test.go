@@ -201,27 +201,27 @@ func TestRetryPolicy(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	policy := RetryPolicy{Initial: time.Second, Maximum: 4 * time.Second, MaxAttempts: 4}
 	for attempt, want := range map[int]time.Duration{1: time.Second, 2: 2 * time.Second, 3: 4 * time.Second} {
-		got, ok := policy.Next(attempt, now)
+		got, ok := policy.Next(attempt, now, now)
 		if !ok || got.Sub(now) != want {
 			t.Fatalf("attempt %d: got %v %v", attempt, got.Sub(now), ok)
 		}
 	}
-	if _, ok := policy.Next(4, now); ok {
+	if _, ok := policy.Next(4, now, now); ok {
 		t.Fatal("max attempts should stop")
 	}
-	got, ok := (RetryPolicy{}).Next(1, now)
+	got, ok := (RetryPolicy{}).Next(1, now, now)
 	if !ok || got.Sub(now) != time.Second {
 		t.Fatal("default retry delay mismatch")
 	}
-	got, ok = (RetryPolicy{Initial: time.Second, Maximum: 2 * time.Second, Jitter: func(int, time.Duration) time.Duration { return 5 * time.Second }}).Next(1, now)
+	got, ok = (RetryPolicy{Initial: time.Second, Maximum: 2 * time.Second, Jitter: func(int, time.Duration) time.Duration { return 5 * time.Second }}).Next(1, now, now)
 	if !ok || got.Sub(now) != 2*time.Second {
 		t.Fatal("positive jitter was not capped")
 	}
-	got, ok = (RetryPolicy{Initial: time.Second, Jitter: func(int, time.Duration) time.Duration { return -2 * time.Second }}).Next(1, now)
+	got, ok = (RetryPolicy{Initial: time.Second, Jitter: func(int, time.Duration) time.Duration { return -2 * time.Second }}).Next(1, now, now)
 	if !ok || got != now {
 		t.Fatal("negative jitter was not clamped")
 	}
-	got, ok = (RetryPolicy{Initial: 3 * time.Second, Maximum: 2 * time.Second}).Next(1, now)
+	got, ok = (RetryPolicy{Initial: 3 * time.Second, Maximum: 2 * time.Second}).Next(1, now, now)
 	if !ok || got.Sub(now) != 2*time.Second {
 		t.Fatal("initial retry delay was not capped")
 	}
