@@ -22,11 +22,13 @@ func TestEveryMutationIsRefused(t *testing.T) {
 	backend := Backend{}
 	ownership := operations.Ownership{}
 	refusals := map[string]error{
-		"create": backend.Create(ctx, executor.InstanceSpec{Name: "trf-small-1", Image: "base"}),
-		"start":  backend.Start(ctx, "trf-small-1", ownership),
-		"stop":   backend.Stop(ctx, "trf-small-1", ownership),
-		"delete": backend.Delete(ctx, "trf-small-1", ownership),
-		"reap":   backend.Reap(ctx, "trf-small-1", ownership),
+		"create":    backend.Create(ctx, executor.InstanceSpec{Name: "trf-small-1", Image: "base"}),
+		"start":     backend.Start(ctx, "trf-small-1", ownership),
+		"stop":      backend.Stop(ctx, "trf-small-1", ownership),
+		"terminate": backend.Terminate(ctx, "trf-small-1", ownership),
+		"destroy":   backend.Destroy(ctx, "trf-small-1", ownership),
+		"delete":    backend.Delete(ctx, "trf-small-1", ownership),
+		"reap":      backend.Reap(ctx, "trf-small-1", ownership),
 	}
 	for verb, err := range refusals {
 		if !errors.Is(err, ErrNoBackend) {

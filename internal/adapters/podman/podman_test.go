@@ -732,6 +732,43 @@ func TestStopUsesTheConfiguredGracePeriod(t *testing.T) {
 	}
 }
 
+// TestTerminateAndDestroyAreTheLadderRungs pins the two verbs a drain climbs to
+// when its guest will not wind itself down (ADR 0039). Terminate is a stop with
+// no grace at all; Destroy is that stop followed by the same forced removal
+// Delete performs, under the same deletion confirmation Delete requires.
+func TestTerminateAndDestroyAreTheLadderRungs(t *testing.T) {
+	host := newFakePodman().with("trf-small-abc", "running")
+	adapter := adapterFor(host, ownedBy("trf-small-abc", testOwnership))
+	adapter.StopTimeout = 45 * time.Second
+	if err := adapter.Terminate(context.Background(), "trf-small-abc", testOwnership); err != nil {
+		t.Fatalf("Terminate() = %v", err)
+	}
+	commands := host.commands()
+	if got := commands[len(commands)-1]; got != "stop --time 0 trf-small-abc" {
+		t.Fatalf("terminate vector = %q, want no grace at all", got)
+	}
+
+	host = newFakePodman().with("trf-small-abc", "running")
+	adapter = adapterFor(host, ownedBy("trf-small-abc", testOwnership))
+	if err := adapter.Destroy(context.Background(), "trf-small-abc", testOwnership); err != nil {
+		t.Fatalf("Destroy() = %v", err)
+	}
+	if countVerb(host, "rm") != 1 {
+		t.Fatalf("destroy did not remove the container: %v", host.commands())
+	}
+	if err := adapter.Destroy(context.Background(), "../escape", testOwnership); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("Destroy(bad name) = %v", err)
+	}
+
+	// Destroy keeps every guard Delete keeps: an unconfirmed removal is refused.
+	host = newFakePodman().with("trf-small-abc", "running")
+	adapter = adapterFor(host, ownedBy("trf-small-abc", testOwnership))
+	adapter.Confirmation = &fakeConfirmation{answers: []operations.DeletionConfirmation{{}}}
+	if err := adapter.Destroy(context.Background(), "trf-small-abc", testOwnership); err == nil {
+		t.Fatal("Destroy removed a container without fresh deletion confirmation")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Delete
 // ---------------------------------------------------------------------------

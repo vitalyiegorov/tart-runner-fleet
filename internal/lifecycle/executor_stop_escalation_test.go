@@ -20,9 +20,9 @@ import (
 //
 // The tests below pin the rungs the drain had none of.
 
-// wedgedGuest is a guest that will not stop, however politely it is asked. It is
+// errWedgedGuest is a guest that will not stop, however politely it is asked. It is
 // the whole incident in one value.
-var wedgedGuest = errors.New("guest will not power down")
+var errWedgedGuest = errors.New("guest will not power down")
 
 func stopFailure() operations.Operation {
 	return operations.Operation{Kind: OperationDrain, ResourceID: "trf-small-1", LastError: safeError(StageStop).Error()}
@@ -43,7 +43,7 @@ func TestDrainEscalatesAStopThatKeepsFailing(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			executor, state, vm, _ := drainFixture(operations.StateDeregistering)
-			vm.stopErr, vm.terminateErr, vm.destroyErr = wedgedGuest, wedgedGuest, wedgedGuest
+			vm.stopErr, vm.terminateErr, vm.destroyErr = errWedgedGuest, errWedgedGuest, errWedgedGuest
 			operation := stopFailure()
 			operation.Attempts = test.attempts
 			err := executor.Execute(context.Background(), operation)
@@ -78,7 +78,7 @@ func TestDrainStopLadderCompletesTheDrainOnceARungWorks(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			executor, state, vm, _ := drainFixture(operations.StateDeregistering)
-			vm.stopErr = wedgedGuest
+			vm.stopErr = errWedgedGuest
 			operation := stopFailure()
 			operation.Attempts = test.attempts
 			if err := executor.Execute(context.Background(), operation); err != nil {
@@ -101,7 +101,7 @@ func TestDrainStopLadderCompletesTheDrainOnceARungWorks(t *testing.T) {
 // minutes.
 func TestDrainStopLadderExhaustionIsTerminal(t *testing.T) {
 	executor, state, vm, _ := drainFixture(operations.StateDeregistering)
-	vm.stopErr, vm.terminateErr, vm.destroyErr = wedgedGuest, wedgedGuest, wedgedGuest
+	vm.stopErr, vm.terminateErr, vm.destroyErr = errWedgedGuest, errWedgedGuest, errWedgedGuest
 	operation := stopFailure()
 	operation.Attempts = GracefulStopAttempts + ForcedStopAttempts + DestructiveStopAttempts
 	err := executor.Execute(context.Background(), operation)
@@ -127,7 +127,7 @@ func TestDrainOpensAtTheGentlestRungAfterFailuresElsewhere(t *testing.T) {
 	for _, lastError := range []string{"", classifiedError(StageDeregister, errors.New("refused")).Error(),
 		safeError(StageGuard).Error(), "executor panic: something unclassified"} {
 		executor, _, vm, _ := drainFixture(operations.StateDeregistering)
-		vm.stopErr = wedgedGuest
+		vm.stopErr = errWedgedGuest
 		operation := stopFailure()
 		operation.LastError = lastError
 		operation.Attempts = 500
@@ -169,7 +169,7 @@ func TestDrainNeverEscalatesAGuestWhoseJobIsStillRunning(t *testing.T) {
 func TestOccupancyBudgetReclaimClimbsTheSameLadder(t *testing.T) {
 	executor, state, vm, _ := drainFixture(operations.StateDraining)
 	state.instance.DrainPhase = operations.DrainPhaseOccupancyBudget
-	vm.stopErr = wedgedGuest
+	vm.stopErr = errWedgedGuest
 	operation := stopFailure()
 	operation.Attempts = GracefulStopAttempts
 	if err := executor.Execute(context.Background(), operation); err != nil {

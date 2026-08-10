@@ -85,29 +85,8 @@ func TestStatusOmitsTheStalledSectionWhenEverythingProgresses(t *testing.T) {
 // symptom — plus PASS occupancy and PASS reservation, and named nothing.
 func TestDoctorFailsOnADrainThatIsNotProgressing(t *testing.T) {
 	const reason = "operation event-drain-trf-macos-6x12-f458a747883b9a0d (deregister) has failed 67 times at stop over 1h22m19s, holding instance trf-macos-6x12-f458a747883b9a0d"
-	status := stalledStatus([]adminapi.Stalled{wedgedDrain()}, &adminapi.Check{Reasons: []string{reason}})
-	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
-		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
-	}}
-	for name, testCase := range map[string]struct {
-		args     []string
-		contains []string
-	}{
-		"table": {args: []string{"doctor"}, contains: []string{"FAIL   drain progress", reason, "RESULT FAIL"}},
-		"json":  {args: []string{"doctor", "--output", "json"}, contains: []string{`"name": "drain progress"`, `"ok": false`, reason}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			if got := executeWith(context.Background(), testCase.args, &stdout, &stderr, deps); got != exitDegraded {
-				t.Fatalf("code=%d, want exitDegraded; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
-			}
-			for _, want := range testCase.contains {
-				if !strings.Contains(stdout.String(), want) {
-					t.Fatalf("doctor %s missing %q:\n%s", name, want, stdout.String())
-				}
-			}
-		})
-	}
+	assertDoctorNames(t, stalledStatus([]adminapi.Stalled{wedgedDrain()},
+		&adminapi.Check{Reasons: []string{reason}}), "drain progress", reason)
 }
 
 // TestDoctorPassesWhenTheDaemonNeverMeasuredProgress is the handoff half: an

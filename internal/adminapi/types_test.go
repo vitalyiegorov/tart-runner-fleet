@@ -77,6 +77,23 @@ func TestOccupancyRowsTravelAsAnAdditiveField(t *testing.T) {
 	}
 }
 
+// TestEffectiveProgressSupportsFleetV1Handoff pins the same rule for the drain
+// progress check (ADR 0039). An older daemon could not see a stalled drain at
+// all — which is the condition issue #233 ran in production unnamed — so its
+// absence is an unspecified check rather than a measured pass, and a new CLI
+// against it must not start failing every host that has not been upgraded.
+func TestEffectiveProgressSupportsFleetV1Handoff(t *testing.T) {
+	got := (Status{}).EffectiveProgress()
+	if !got.OK || got.Reasons == nil || len(got.Reasons) != 0 {
+		t.Fatalf("EffectiveProgress() = %#v, want an unspecified pass with a non-nil reason slice", got)
+	}
+	want := Check{Reasons: []string{"operation event-drain-x (deregister) has failed 67 times at stop"}}
+	if got := (Status{ProgressCheck: &want}).EffectiveProgress(); got.OK || len(got.Reasons) != 1 ||
+		got.Reasons[0] != want.Reasons[0] {
+		t.Fatalf("a measured progress check was not passed through: %#v", got)
+	}
+}
+
 func TestEffectiveQueueSLOSupportsFleetV1Handoff(t *testing.T) {
 	if got := (Status{}).EffectiveQueueSLO(); !got.OK || len(got.Reasons) != 0 {
 		t.Fatalf("missing queue SLO = %#v", got)

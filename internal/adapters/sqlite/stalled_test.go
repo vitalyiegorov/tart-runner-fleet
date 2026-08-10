@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -118,5 +119,36 @@ func TestStalledOperationsNeverPublishesANegativeOrUnreadableAge(t *testing.T) {
 	}
 	if got := since(now, now.Add(-time.Minute).UnixNano()); got != time.Minute {
 		t.Fatalf("since(a minute ago) = %s", got)
+	}
+}
+
+// TestStalledOperationsFailClosedOnStoreFaults keeps rule 4: an unreadable
+// projection is an error, never an empty set that would read as "everything is
+// progressing" and send an operator away from a wedge.
+func TestStalledOperationsFailClosedOnStoreFaults(t *testing.T) {
+	now := time.Date(2026, 8, 10, 14, 16, 0, 0, time.UTC)
+	store := testStore(t)
+	if err := store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StalledOperations(context.Background(), now); err == nil {
+		t.Fatal("closed database stall listing succeeded")
+	}
+	for name, rows := range map[string]*injectedRows{
+		"scan":    {next: true, scanErr: errors.New("scan")},
+		"iterate": {rowsErr: errors.New("iterate")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			faulty := testStore(t)
+			faulty.injectRows = func(point string) rowsScanner {
+				if point == "operations.stalled.query" {
+					return rows
+				}
+				return nil
+			}
+			if _, err := faulty.StalledOperations(context.Background(), now); err == nil {
+				t.Fatal("row failure ignored")
+			}
+		})
 	}
 }
