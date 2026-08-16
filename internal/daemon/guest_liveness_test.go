@@ -8,9 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
 // probeRunner is the neutral command runner under the probe: it records the
@@ -236,5 +238,96 @@ func TestAnUnobservedGuestIsNamedRatherThanDated(t *testing.T) {
 
 	if !strings.Contains(logged.String(), `lastAlive="never observed"`) {
 		t.Fatalf("an unobserved guest must be named, not dated: %q", logged.String())
+	}
+}
+
+// silenceTicker builds the engine ticker over the incident's profile and bound,
+// so the metric, the warning, and the reclaim all read the same projection.
+func silenceTicker(t *testing.T, reporter *failureReporter) (engineTicker, *telemetry.Health) {
+	t.Helper()
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"xl"},
+		CriticalObservations: []string{"scheduler"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := domain.Profile{ID: "xl", Platform: domain.PlatformLinux, Route: "tiered",
+		Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1}}
+	engine := app.Engine{Config: scheduler.Config{Profiles: map[domain.ProfileID]domain.Profile{"xl": profile},
+		GuestLiveness: domain.GuestLivenessPolicy{ConsecutiveRefusals: 5, Window: 90 * time.Second}}}
+	return engineTicker{engine: engine, health: health, reporter: reporter}, health
+}
+
+func silenceTickResult(reclaimed bool) app.TickResult {
+	dead := domain.Instance{ID: "trf-xl-0aacdbcc6653bd8a", Repo: lostJob.Repo, Demand: lostJob,
+		Platform: domain.PlatformLinux, Profile: "xl", Route: "tiered",
+		Resources: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 1},
+		State:     domain.InstanceRunning, Power: domain.InstancePowerRunning,
+		RunningSince: deathClock.Add(-20 * time.Minute), OccupiedSince: deathClock.Add(-20 * time.Minute),
+		Guest: domain.GuestLivenessState{Refusals: 5, RefusedSince: deathClock.Add(-2 * time.Minute),
+			LastAlive: deathClock.Add(-150 * time.Second), LastProbe: deathClock}}
+	result := app.TickResult{At: deathClock, Instances: []domain.Instance{dead}}
+	if reclaimed {
+		result.Plan = scheduler.Plan{Operations: []scheduler.Operation{{Kind: scheduler.OperationDrain,
+			Instance: dead.ID, Profile: "xl", Demand: lostJob, Recovery: true, GuestUnresponsive: true}}}
+	}
+	return result
+}
+
+// The tick fans one projection out to both surfaces: the metric an alert scrapes
+// and the lines an operator reads. They come from the same scheduler.GuestSilences
+// call as the reclaim itself, so they cannot disagree about a silence.
+func TestRecordGuestLivenessPublishesAndSpeaks(t *testing.T) {
+	reporter, logged := silenceReporter()
+	ticker, health := silenceTicker(t, reporter)
+
+	ticker.recordGuestLiveness(silenceTickResult(true))
+
+	published := health.Snapshot().GuestSilences
+	if len(published) != 1 {
+		t.Fatalf("published silences = %#v, want the dead guest", published)
+	}
+	want := telemetry.GuestSilenceMetric{Instance: "trf-xl-0aacdbcc6653bd8a", Profile: "xl", Repo: lostJob.Repo,
+		CPU: 6, MemoryMB: 12_288, Refusals: 5, Silence: 2 * time.Minute, RequiredRefusals: 5,
+		Window: 90 * time.Second, Unresponsive: true, RunID: lostJob.RunID, JobID: lostJob.JobID}
+	if published[0] != want {
+		t.Fatalf("published metric = %#v, want %#v", published[0], want)
+	}
+	if health.GuestLiveness().OK {
+		t.Fatalf("the dead guest did not reach the health verdict: %#v", health.GuestLiveness())
+	}
+	for _, fragment := range []string{"instance guest unresponsive",
+		"instance reclaimed because its guest stopped answering"} {
+		if !strings.Contains(logged.String(), fragment) {
+			t.Fatalf("tick log missing %q: %q", fragment, logged.String())
+		}
+	}
+}
+
+// The warning is optional and the metric is mandatory: an observe-mode harness
+// has no reporter and must still measure every silence rather than becoming a
+// fleet that sees nothing.
+func TestRecordGuestLivenessWithoutAReporterStillPublishes(t *testing.T) {
+	ticker, health := silenceTicker(t, nil)
+
+	ticker.recordGuestLiveness(silenceTickResult(true))
+
+	if published := health.Snapshot().GuestSilences; len(published) != 1 || !published[0].Unresponsive {
+		t.Fatalf("a reporterless tick published %#v", published)
+	}
+}
+
+// The quiet path stays quiet: no rows, no warning, and a health verdict that is
+// OK because every guest answered rather than because nothing was measured.
+func TestRecordGuestLivenessOfAFleetWhoseGuestsAnswer(t *testing.T) {
+	reporter, logged := silenceReporter()
+	ticker, health := silenceTicker(t, reporter)
+
+	ticker.recordGuestLiveness(app.TickResult{At: deathClock})
+
+	if published := health.Snapshot().GuestSilences; len(published) != 0 {
+		t.Fatalf("a fleet whose guests answer published %#v", published)
+	}
+	if !health.GuestLiveness().OK || logged.Len() != 0 {
+		t.Fatalf("a quiet fleet was reported: %#v %q", health.GuestLiveness(), logged.String())
 	}
 }

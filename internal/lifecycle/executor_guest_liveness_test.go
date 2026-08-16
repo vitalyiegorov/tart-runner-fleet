@@ -149,6 +149,22 @@ func TestADeadGuestReclaimClimbsTheStopLadder(t *testing.T) {
 	}
 }
 
+// A dead guest can also be a wedged one — a panicked kernel is under no
+// obligation to answer a power-off either. The reclaim then fails at the stop
+// step and retries, holding its state, exactly as every other decided drain does
+// while it climbs.
+func TestADeadGuestThatAlsoRefusesToStopFailsAtTheStopStep(t *testing.T) {
+	executor, state, vm, _ := guestDrainFixture(domain.GuestLivenessRefused)
+	vm.stopErr, vm.terminateErr, vm.destroyErr = errWedgedGuest, errWedgedGuest, errWedgedGuest
+	err := executor.Execute(context.Background(), stopFailure())
+	if err == nil || err.Error() != safeError(StageStop).Error() {
+		t.Fatalf("error = %v, want a bounded stop-stage failure", err)
+	}
+	if state.instance.State != operations.StateDraining {
+		t.Fatalf("state = %s, want the reclaim to stay where it failed", state.instance.State)
+	}
+}
+
 // Deletion confirmation must not wait for a job-completion event that will never
 // arrive: the machine that would have reported it stopped executing minutes ago.
 func TestTheReclaimedPhasesDeriveInactivityFromRunnerAbsence(t *testing.T) {

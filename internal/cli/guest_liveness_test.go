@@ -1,11 +1,7 @@
 package cli
 
 import (
-	"bytes"
-	"context"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 )
@@ -26,17 +22,7 @@ func TestDoctorFailsOnAGuestThatStoppedAnswering(t *testing.T) {
 // The handoff half. An older daemon probed nothing, and `fleet doctor` must not
 // start failing against every host that has not been upgraded yet.
 func TestDoctorPassesWhenTheDaemonNeverProbedAGuest(t *testing.T) {
-	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
-		status := healthyStatus()
-		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
-	}}
-	var stdout, stderr bytes.Buffer
-	if got := executeWith(context.Background(), []string{"doctor"}, &stdout, &stderr, deps); got != exitSuccess {
-		t.Fatalf("code=%d, want exitSuccess; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "PASS   guest liveness") || !strings.Contains(stdout.String(), "RESULT PASS") {
-		t.Fatalf("doctor did not pass an unmeasured guest-liveness check:\n%s", stdout.String())
-	}
+	assertDoctorPasses(t, healthyStatus(), "guest liveness")
 }
 
 // A guest inside both bounds is the fleet watching, not the fleet reporting. It
@@ -46,14 +32,5 @@ func TestDoctorPassesWhileAGuestIsMerelyBeingWatched(t *testing.T) {
 	status.Data.GuestSilences = []adminapi.GuestSilence{{Instance: "trf-small-9a1c", Profile: "linux-small",
 		Refusals: 2, SilenceSeconds: 40, RequiredRefusals: 5, WindowSeconds: 90}}
 	status.Data.GuestLivenessCheck = &adminapi.Check{OK: true, Reasons: []string{}}
-	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
-		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
-	}}
-	var stdout, stderr bytes.Buffer
-	if got := executeWith(context.Background(), []string{"doctor"}, &stdout, &stderr, deps); got != exitSuccess {
-		t.Fatalf("code=%d, want exitSuccess; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "PASS   guest liveness") {
-		t.Fatalf("a watched guest must not fail the check:\n%s", stdout.String())
-	}
+	assertDoctorPasses(t, status, "guest liveness")
 }
