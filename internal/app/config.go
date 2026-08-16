@@ -47,7 +47,9 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 		MixedProfileCohorts:    cfg.MacOS.MixedProfileCohorts,
 		ElasticHostEnvelope:    cfg.Guards.ElasticHostEnvelope,
 		PriorityEscalation:     priorityEscalation(cfg),
-		HostBudget:             domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB}}
+		HostBudget:             domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB},
+		GuestLiveness: domain.GuestLivenessPolicy{ConsecutiveRefusals: cfg.GuestLiveness.ConsecutiveRefusals,
+			Window: cfg.GuestLiveness.Window}}
 }
 
 // priorityEscalation is the escalation threshold the planner reads. It is

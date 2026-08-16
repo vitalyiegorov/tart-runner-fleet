@@ -257,9 +257,14 @@ type dependencies struct {
 	newReaper       func(runtimeStore, config.Config) discharge.VM
 	readiness       func(config.Config) lifecycle.Readiness
 	bootstrap       func(config.Config) lifecycle.Bootstrapper
-	now             func() time.Time
-	after           func(time.Duration) <-chan time.Time
-	leaseOwner      func(config.Config) string
+	// guestProbe is the fresh re-verification a guest-liveness drain performs at
+	// the moment it acts. It is the same probe the inventory runs each tick; the
+	// drain holds its own so a standing kill order re-derives its premise from
+	// ground truth rather than trusting the observation that planned it.
+	guestProbe func(config.Config) app.GuestProbe
+	now        func() time.Time
+	after      func(time.Duration) <-chan time.Time
+	leaseOwner func(config.Config) string
 }
 
 var deps = defaultDependencies()
@@ -340,19 +345,21 @@ func newDependencies(goos string) dependencies {
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
-				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB}}
+				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB},
+				Guest:               guestLivenessTracker(node, cfg, time.Now)}
 		},
 		listen:      net.Listen,
 		adminListen: adminapi.Listen,
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
-		newVM:     node.newVM,
-		newReaper: node.newReaper,
-		readiness: node.readiness,
-		bootstrap: node.bootstrap,
-		now:       time.Now,
-		after:     time.After,
+		newVM:      node.newVM,
+		newReaper:  node.newReaper,
+		readiness:  node.readiness,
+		bootstrap:  node.bootstrap,
+		guestProbe: node.guestProbe,
+		now:        time.Now,
+		after:      time.After,
 		leaseOwner: func(cfg config.Config) string {
 			owner := cfg.GitHub.SessionOwner
 			if owner == "" {
@@ -361,6 +368,24 @@ func newDependencies(goos string) dependencies {
 			return fmt.Sprintf("%s/%d", owner, os.Getpid())
 		},
 	}
+}
+
+// guestLivenessTracker builds this node's probe accumulator, or nil when either
+// half of the mechanism is absent: a configuration that states no bound, or a
+// backend with no guest to ask. Both are fail-open by construction — a nil
+// tracker probes nothing, so no instance can ever be declared dead by a node
+// that is not measuring.
+func guestLivenessTracker(node platform, cfg config.Config, now func() time.Time) *app.GuestLivenessTracker {
+	if !cfg.GuestLiveness.Enabled() || node.guestProbe == nil {
+		return nil
+	}
+	probe := node.guestProbe(cfg)
+	if probe == nil {
+		return nil
+	}
+	return &app.GuestLivenessTracker{Probe: probe, Now: now,
+		Policy: domain.GuestLivenessPolicy{ConsecutiveRefusals: cfg.GuestLiveness.ConsecutiveRefusals,
+			Window: cfg.GuestLiveness.Window}}
 }
 
 func runDaemon(ctx context.Context, opts options) error { return runWithDependencies(ctx, opts, deps) }
@@ -614,7 +639,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
-					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
+					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -890,6 +915,45 @@ func (p execReadiness) Wait(ctx context.Context, instance operations.Instance) e
 			return probeCtx.Err()
 		case <-after(retryInterval):
 		}
+	}
+}
+
+// execGuestProbe asks a running guest to execute a trivial command, and
+// classifies the three outcomes that matter. It is the same `exec <instance>
+// true` verb `execReadiness` polls at boot, on the same neutral command runner,
+// so a second backend changes the wiring rather than this code.
+//
+// The classification is the whole safety argument of ADR 0040, and it is
+// deliberately made from the probe's OWN deadline rather than from anything the
+// backend said. A command that returned before the deadline and failed could not
+// reach the guest: on Tart that is `Failed to connect to the VM using its control
+// socket`, which is what a panicked kernel produces immediately and repeatedly. A
+// command that ran out of the deadline established nothing — a guest running a
+// monorepo build at full tilt is slow, and slow is not dead. Reading a backend's
+// error text to tell those apart would put a Tart string in a layer that must not
+// know which machine it is on.
+type execGuestProbe struct {
+	Runner  executor.CommandRunner
+	Timeout time.Duration
+}
+
+func (p execGuestProbe) Probe(ctx context.Context, instanceID string) domain.GuestLiveness {
+	if p.Runner == nil || p.Timeout <= 0 || domain.ValidateInstanceName(instanceID) != nil {
+		return domain.GuestLivenessUnknown
+	}
+	attempt, cancel := context.WithTimeout(ctx, p.Timeout)
+	defer cancel()
+	_, err := p.Runner.Run(attempt, "exec", instanceID, "true")
+	switch {
+	case err == nil:
+		return domain.GuestLivenessAlive
+	case attempt.Err() != nil:
+		// The probe ran out of its own deadline, or the tick was cancelled under
+		// it. Either way nothing was established, and an unknown observation never
+		// accumulates toward a verdict.
+		return domain.GuestLivenessUnknown
+	default:
+		return domain.GuestLivenessRefused
 	}
 }
 
@@ -1345,6 +1409,71 @@ func (r *failureReporter) reportOccupancyReclaim(operation scheduler.Operation, 
 		"outcome", "the job ends as a lost-communication failure on GitHub")
 }
 
+// reportGuestSilence says out loud that an instance's guest has stopped
+// answering, while it is happening.
+//
+// It exists because issue #236 produced NO daemon log line at all, eight times.
+// The whole class was self-concealing: nothing in the guest could report its own
+// kernel panic, nothing in the workflow could run after it, and nothing on the
+// host was asking. The line below is the first artifact this fleet has ever
+// produced for that condition.
+//
+// It is rate limited per instance and per state, so a guest that goes quiet and
+// is then declared dead produces two lines rather than one per tick, while the
+// escalation to a verdict is never suppressed by the warning that preceded it.
+func (r *failureReporter) reportGuestSilence(silences []scheduler.GuestSilence) {
+	for _, silence := range silences {
+		state := "silent"
+		if silence.Unresponsive {
+			state = "unresponsive"
+		}
+		if !r.admit("guest\x00" + silence.Instance + "\x00" + state) {
+			continue
+		}
+		r.logger.Warn("instance guest "+state, "instance", silence.Instance,
+			"profile", string(silence.Profile), "repo", silence.Repo,
+			"cpu", silence.Resources.CPU, "memoryMb", silence.Resources.MemoryMB,
+			"refusals", silence.Refusals, "requiredRefusals", silence.RequiredRefusals,
+			"silent", silence.Silence.Round(time.Second).String(),
+			"window", silence.Window.Round(time.Second).String(),
+			"lastAlive", livenessInstant(silence.LastAlive),
+			"runId", silence.Demand.RunID, "jobId", silence.Demand.JobID)
+	}
+}
+
+// reportGuestReclaim names a job the fleet is about to end because the machine
+// running it stopped executing. It is never rate limited: each reclaim is a
+// distinct destructive decision, and the whole point of this record is that the
+// eight it is modelled on produced none.
+func (r *failureReporter) reportGuestReclaim(operation scheduler.Operation, silences []scheduler.GuestSilence) {
+	if !operation.GuestUnresponsive {
+		return
+	}
+	refusals, silent, lastAlive := 0, time.Duration(0), time.Time{}
+	for _, silence := range silences {
+		if silence.Instance == operation.Instance {
+			refusals, silent, lastAlive = silence.Refusals, silence.Silence, silence.LastAlive
+		}
+	}
+	r.logger.Warn("instance reclaimed because its guest stopped answering", "instance", operation.Instance,
+		"profile", string(operation.Profile), "repo", operation.Demand.Repo,
+		"runId", operation.Demand.RunID, "jobId", operation.Demand.JobID, "attempt", operation.Demand.Attempt,
+		"refusals", refusals, "silent", silent.Round(time.Second).String(),
+		"lastAlive", livenessInstant(lastAlive),
+		"outcome", "the job ends as a lost-communication failure on GitHub")
+}
+
+// livenessInstant renders a probe instant, or names its absence. A guest this
+// daemon has never seen answer is a different fact from one that answered a
+// minute ago, and a zero time rendered as a date is the kind of artifact that
+// sends an operator looking at 0001-01-01.
+func livenessInstant(at time.Time) string {
+	if at.IsZero() {
+		return "never observed"
+	}
+	return at.UTC().Format(time.RFC3339)
+}
+
 // admit is the shared rate-limit gate: one line per key per window.
 func (r *failureReporter) admit(key string) bool {
 	r.mu.Lock()
@@ -1590,6 +1719,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	}
 	_ = e.health.SetMode(mode)
 	e.recordOccupancy(result)
+	e.recordGuestLiveness(result)
 	e.recordReservation(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
@@ -1622,6 +1752,31 @@ func (e engineTicker) recordOccupancy(result app.TickResult) {
 	e.reporter.reportOccupancy(occupancy)
 	for _, operation := range result.Plan.Operations {
 		e.reporter.reportOccupancyReclaim(operation, occupancy)
+	}
+}
+
+// recordGuestLiveness publishes every guest that has stopped answering and says
+// out loud when one is declared dead. Both readings come from
+// scheduler.GuestSilences — the same pure projection the reclaim itself is
+// planned from — so the metric, the warning, the doctor finding and the drain
+// can never disagree about a silence.
+func (e engineTicker) recordGuestLiveness(result app.TickResult) {
+	silences := scheduler.GuestSilences(result.At, e.engine.Config, result.Instances)
+	metrics := make([]telemetry.GuestSilenceMetric, 0, len(silences))
+	for _, silence := range silences {
+		metrics = append(metrics, telemetry.GuestSilenceMetric{Instance: silence.Instance,
+			Profile: string(silence.Profile), Repo: silence.Repo, CPU: silence.Resources.CPU,
+			MemoryMB: silence.Resources.MemoryMB, Refusals: silence.Refusals, Silence: silence.Silence,
+			RequiredRefusals: silence.RequiredRefusals, Window: silence.Window,
+			Unresponsive: silence.Unresponsive, RunID: silence.Demand.RunID, JobID: silence.Demand.JobID})
+	}
+	_ = e.health.SetGuestSilences(metrics)
+	if e.reporter == nil {
+		return
+	}
+	e.reporter.reportGuestSilence(silences)
+	for _, operation := range result.Plan.Operations {
+		e.reporter.reportGuestReclaim(operation, silences)
 	}
 }
 

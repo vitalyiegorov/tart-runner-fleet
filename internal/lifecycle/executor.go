@@ -417,8 +417,22 @@ type DrainExecutor struct {
 	ConfirmationMaxAge       time.Duration
 	ConfirmationTimeout      time.Duration
 	ConfirmationPollInterval time.Duration
-	Now                      func() time.Time
-	After                    func(time.Duration) <-chan time.Time
+	// Guest re-verifies the one premise a guest-liveness reclaim rests on, at the
+	// moment it is about to act. A nil probe fails that phase closed: a drain that
+	// cannot re-check a premise this destructive must not proceed on the strength
+	// of an observation the scheduler made a tick ago (ADR 0040).
+	Guest GuestLivenessProbe
+	Now   func() time.Time
+	After func(time.Duration) <-chan time.Time
+}
+
+// GuestLivenessProbe is the drain executor's half of the guest-liveness port:
+// one fresh answer about one guest, at the instant the drain is about to end its
+// job. It is the same probe the inventory runs each tick; the executor holds it
+// separately because a standing kill order must re-derive its premise from
+// ground truth rather than trust the observation that planned it (ADR 0033).
+type GuestLivenessProbe interface {
+	Probe(context.Context, string) domain.GuestLiveness
 }
 
 func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operation) error {
@@ -515,6 +529,40 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				if active {
 					return e.abort(ctx, instance)
 				}
+			case operations.DrainPhaseGuestUnresponsive:
+				// The scheduler planned this reclaim from an unbroken run of refused
+				// probes. Unlike the occupancy budget, that premise IS re-verifiable
+				// against ground truth, so it is re-verified here at the moment of
+				// acting: only a guest that refuses the transport again may be cut.
+				//
+				// An answered probe aborts to Running — the guest came back, and the
+				// next tick's accumulator has already been reset by the same answer.
+				// An inconclusive probe fails the guard and retries, exactly as every
+				// other phase treats evidence it could not read: a probe the fleet
+				// could not run is not permission to end a job.
+				//
+				// The guest is then powered off BEFORE deregistration, for the reason
+				// ADR 0036 established: GitHub refuses to remove a runner it considers
+				// busy, and it will go on considering this one busy until its own grace
+				// timer expires — the sixteen to eighteen minutes issue #236 measured
+				// eight times. Deregistering first can only retry with the vector still
+				// held. The stop climbs ADR 0039's ladder like every other decided
+				// drain, so the vector comes back on a bound the fleet owns rather than
+				// on GitHub's.
+				if e.Guest == nil {
+					return e.fail(ctx, instance, StageGuard)
+				}
+				switch e.Guest.Probe(ctx, instance.ID) {
+				case domain.GuestLivenessAlive:
+					return e.abort(ctx, instance)
+				case domain.GuestLivenessRefused:
+					// The premise holds. Proceed.
+				default:
+					return e.fail(ctx, instance, StageGuard)
+				}
+				if err := e.stopGuest(ctx, instance, operation); err != nil {
+					return err
+				}
 			case operations.DrainPhaseOccupancyBudget:
 				// The occupancy budget planned this reclaim from a fact no fresh
 				// evidence can disprove: the instance has held its profile's vector
@@ -571,11 +619,13 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// retryable deregister-stage failure. This is what bounds the incident's
 				// 60+ attempt kill loop for every drain phase, not just the event drain.
 				//
-				// An occupancy-budget reclaim is the one exception, for the reason its
-				// phase exists: a busy runner does not disprove that premise, it is the
-				// premise. Aborting here would return the instance to Running with its
-				// vector still held and the next tick would plan the same reap forever.
-				if instance.DrainPhase != operations.DrainPhaseOccupancyBudget {
+				// The two reclaims a busy runner does not disprove are the exception, for
+				// the reason their phases exist: busy evidence is the premise, not a
+				// refutation of it. Aborting there would return the instance to Running
+				// with its vector still held and the next tick would plan the same reclaim
+				// forever. For a dead guest the busy evidence is GitHub's, and GitHub is
+				// describing a job whose machine stopped executing minutes ago.
+				if !stopsItsGuestFirst(instance.DrainPhase) {
 					if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
 						return e.abort(ctx, instance)
 					}

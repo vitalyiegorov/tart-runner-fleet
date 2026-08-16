@@ -152,6 +152,8 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 					drainPhase = operations.DrainPhaseStalledAssignment
 				case operation.LingeringRunner:
 					drainPhase = operations.DrainPhaseLingeringRunner
+				case operation.GuestUnresponsive:
+					drainPhase = operations.DrainPhaseGuestUnresponsive
 				case operation.OccupancyExceeded:
 					drainPhase = operations.DrainPhaseOccupancyBudget
 				}

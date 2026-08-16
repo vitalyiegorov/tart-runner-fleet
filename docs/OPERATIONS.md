@@ -739,6 +739,55 @@ removing it. The ceiling is per profile, `occupancyBudgetSeconds`, and must be
 `0` (never reaped for age) or between 300 and 21600 seconds; unstated takes the
 platform default of two hours on macOS and one hour on Linux.
 
+### A guest that has stopped answering
+
+`fleet doctor` reports `FAIL  guest liveness` when an instance's guest has
+refused a whole run of liveness probes: the VM is still enumerated as `running`,
+GitHub still reports its job `in_progress`, and nothing inside it is executing
+any more.
+
+This is the 2026-08-16 class (ADR 0040, issue #236). A job's `--privileged`
+container wrote to the guest's `/proc/sysrq-trigger` and panicked the guest
+kernel; with `kernel.panic=0` the panicked kernel hung forever. Eight runners
+died that way, each holding 6 vCPU / 12 GiB until GitHub's own grace timer failed
+the job **sixteen to eighteen minutes later**, and the fleet produced no artifact
+of any kind — no log line, no metric, no doctor finding.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "guest liveness")'
+fleet status --endpoint "$ENDPOINT" --output json | jq '.data.guestSilences'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `refusals` / `requiredRefusals` | Consecutive probes refused, against the bound this node requires. |
+| `silenceSeconds` / `windowSeconds` | How long the run has lasted, against the bound. |
+| `unresponsive` | `true` once BOTH bounds are met: the fleet has declared the guest dead and is reclaiming its vector. |
+| `runId` / `jobId` | The job that died with the guest. |
+
+Only a refused **transport** counts. A guest that answers slowly, and a probe
+that runs out of its own deadline against a saturated guest, both clear the run —
+so a job using every core cannot be probed into a drain. The check fails only on
+the verdict; a partial run of refusals is the fleet watching, and is not
+actionable.
+
+The reclaim is not silent and not automatic-and-invisible. The daemon logs one
+line when a guest goes quiet and another when it is declared dead, each naming
+the instance, the vector, the probe timeline, and the job; a third names the
+reclaim itself. The drain re-probes once more before acting, and a guest that
+answers that probe is returned to `running` untouched.
+
+**If this fires and the guest was healthy**, the bound is wrong for this node, not
+the mechanism. Raise `guestLivenessRefusals` / `guestLivenessWindowSeconds`, or
+set `guestLivenessRefusals: -1` to stop probing altogether. The floors are three
+refusals and thirty seconds; the shipped default is five over ninety seconds.
+
+**If this fires and the guest really is dead**, the job is already lost: the
+machine executing it stopped minutes before the fleet said so. The remedy is on
+the consumer side — a `--privileged` container can panic the kernel it shares,
+and the fleet cannot take that away while granting privileged at all.
+
 ### A drain that is not progressing, and a guest that will not stop
 
 `fleet doctor` reports `FAIL  drain progress` when a durable operation has failed

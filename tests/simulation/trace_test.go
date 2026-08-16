@@ -102,7 +102,34 @@ const (
 	// lifecycle step that fails indefinitely. Everything it had was bounded by
 	// construction, which is exactly why the defect shipped.
 	eventUnstoppableGuest eventKind = "unstoppable_guest"
-	eventSiblingReassign  eventKind = "sibling_reassign"
+	// eventSilentGuest is issue #236: a running guest whose KERNEL stops. On
+	// 2026-08-16 a job's `--privileged` container wrote to the guest's
+	// /proc/sysrq-trigger and panicked it; with kernel.panic=0 the panicked kernel
+	// hung forever. No userspace ran again, so the runner agent's socket was never
+	// closed, `tart list` went on reporting the VM running, and GitHub went on
+	// reporting the job in_progress until its own grace timer expired sixteen to
+	// eighteen minutes later.
+	//
+	// It is deliberately a FOURTH failure event rather than a variant of any of
+	// the three above, because it fails at a place none of them can reach. A
+	// stalled_runner never starts its job; a wedged_drain and an unstoppable_guest
+	// both happen after the fleet has already decided to drain. This one happens
+	// while the instance is healthy, Running, and executing work, and the only
+	// signal is that the guest stops answering. Like unstoppable_guest it NEVER
+	// decays: a panicked kernel does not recover.
+	eventSilentGuest eventKind = "silent_guest"
+	// eventSaturatedGuest is the false positive the mechanism above must never
+	// produce: a guest doing so much legitimate work that its liveness probe
+	// cannot complete inside its own deadline. A monorepo Gradle build using every
+	// core is exactly this.
+	//
+	// It exists as its own event because the whole risk of a guest-liveness
+	// reclaim is confusing it with a dead one, and a sweep that only ever
+	// generated dead guests would prove nothing about the discrimination. Its
+	// probes are INCONCLUSIVE rather than refused, its job progresses normally,
+	// and no instance carrying it may ever be reclaimed for guest death.
+	eventSaturatedGuest  eventKind = "saturated_guest"
+	eventSiblingReassign eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
@@ -171,6 +198,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
+		eventSilentGuest, eventSaturatedGuest,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
@@ -251,6 +279,10 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.wedgeDrain(event.Count)
 	case eventUnstoppableGuest:
 		w.wedgeGuest(event.Count)
+	case eventSilentGuest:
+		w.silenceGuest()
+	case eventSaturatedGuest:
+		w.saturateGuest()
 	case eventSiblingReassign:
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:

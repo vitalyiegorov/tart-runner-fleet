@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -226,9 +228,20 @@ type Adapter struct {
 	// cannot nest. macOS guests never get the flag: Apple's Virtualization
 	// framework does not support nesting them and tart rejects it at boot.
 	LinuxNestedVirtualization bool
-	Now                       func() time.Time
-	Poller                    Poller
-	mu                        sync.Mutex
+	// LinuxSerialLogDirectory is where a Linux guest's serial console is written
+	// on the host, one file per instance. Empty is off, which is what every node
+	// runs today and is byte-for-byte the argument vector this adapter has always
+	// passed.
+	//
+	// It exists because issue #236's guest kernel panicked and the panic reached
+	// nobody: the base image's cmdline named `console=ttyAMA0` while the VM exposes
+	// `hvc*`, so there was no console to capture, and the adapter passed no sink to
+	// capture it into. Both halves are needed, and the guest half ships in the base
+	// image rather than here (ADR 0040).
+	LinuxSerialLogDirectory string
+	Now                     func() time.Time
+	Poller                  Poller
+	mu                      sync.Mutex
 }
 
 // validateName applies the fleet-wide instance grammar of
@@ -372,10 +385,19 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 		if a.MacOSSharedDirectoryPath != "" {
 			args = append(args, "--dir=ci-shared:"+a.MacOSSharedDirectoryPath)
 		}
-	} else if a.LinuxNestedVirtualization {
-		// Apple's Virtualization framework offers nested virtualization to
-		// Linux guests only (M3+); tart rejects --nested for macOS guests.
-		args = append(args, "--nested")
+	} else {
+		if a.LinuxNestedVirtualization {
+			// Apple's Virtualization framework offers nested virtualization to
+			// Linux guests only (M3+); tart rejects --nested for macOS guests.
+			args = append(args, "--nested")
+		}
+		path, serialErr := a.serialLogPath(name)
+		if serialErr != nil {
+			return serialErr
+		}
+		if path != "" {
+			args = append(args, "--serial-path", path)
+		}
 	}
 	started, err := a.runner().Start(ctx, args...)
 	if err != nil {
@@ -402,6 +424,26 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 		}
 	}
 	return &Error{Op: "run", Kind: ErrorTimeout, ExitCode: -1, Err: context.DeadlineExceeded}
+}
+
+// serialLogPath is where this instance's serial console goes, or the empty
+// string when no directory is configured.
+//
+// The directory is created rather than assumed, because the alternative is a
+// `tart run` that fails for every instance on a node whose operator made one
+// typo, and a guest console is diagnostic rather than load-bearing. It fails the
+// start rather than silently dropping the flag: a node that was configured to
+// keep a panic trace and is not keeping one has a fact its operator needs, and
+// discovering that after the next panic is the whole failure mode this exists to
+// end.
+func (a *Adapter) serialLogPath(name string) (string, error) {
+	if a.LinuxSerialLogDirectory == "" {
+		return "", nil
+	}
+	if err := os.MkdirAll(a.LinuxSerialLogDirectory, 0o750); err != nil {
+		return "", &Error{Op: "run", Kind: ErrorPermission, ExitCode: -1, Err: err}
+	}
+	return filepath.Join(a.LinuxSerialLogDirectory, name+".log"), nil
 }
 
 func (a *Adapter) isMacOSVM(name string) bool {

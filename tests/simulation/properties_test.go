@@ -78,6 +78,15 @@ const (
 	// every fault it could generate expired on its own — which is exactly why the
 	// 2026-08-10 wedge shipped (issue #233).
 	findingHeldTeardown findingKind = "teardown_hold"
+	// findingDeadGuestHold is property (p): no instance whose GUEST has stopped
+	// executing holds its vector beyond the probe window plus the escalation
+	// bound. It is the issue #236 oracle, and it is the mirror image of (k): the
+	// budget bounds a job that is still running too long, while this bounds a job
+	// that stopped running and nothing noticed. On 2026-08-16 eight instances held
+	// 6 CPU / 12288 MiB each for sixteen to eighteen minutes after their kernels
+	// had panicked, and the fleet's only reaction was to the failure GitHub
+	// eventually reported -- there was no bound at all on the fleet's side.
+	findingDeadGuestHold findingKind = "dead_guest_hold"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -267,6 +276,13 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// precisely the blind spot it hid in. (o) picks the instance up exactly
 		// where (k) puts it down.
 		teardownReleaseChecker(cfg),
+		// (p) sits with (k) and (o) because it is the third answer to the same
+		// question -- what bounds one instance's hold on the host -- and it is a
+		// CAUSE of the wedge and the starving queue rather than a symptom of them.
+		// It precedes (o) in neither direction by accident: (o) begins at
+		// deregistration, and a dead guest is judged from the instant it died,
+		// which is always earlier.
+		deadGuestReleaseChecker(cfg),
 		// (h) and (i) precede the liveness and starvation oracles deliberately: a
 		// demand nobody can serve and a drain that will not stay dead are the CAUSE
 		// of the queue that never drains, and reporting the symptom would send an
@@ -354,6 +370,58 @@ func teardownReleaseChecker(cfg worldConfig) checker {
 				Detail: fmt.Sprintf("%s has held %+v in %s for %d ticks after its runner was deregistered, past the %d-tick release bound; the ladder reached %s\n%s",
 					id, occupiedVector(observation, id), instanceState(observation, id), held[id],
 					cfg.TeardownReleaseTicks, lifecycle.StopEscalation(w.stopAttempts[id]), w.dumpPlan(observation))})
+		}
+		return findings
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (p) An instance whose guest has stopped executing releases its vector.
+// ---------------------------------------------------------------------------
+
+// deadGuestReleaseChecker is the issue #236 oracle.
+//
+// On 2026-08-16 eight instances held 6 CPU / 12288 MiB each while their guest
+// kernels were panicked and executing nothing. `tart list` reported every one of
+// them running, GitHub reported every job in_progress, and every reclaim cause
+// in the fleet was a statement about whether WORK was happening rather than
+// about whether the machine was alive. The hold ended sixteen to eighteen
+// minutes later because GitHub's own grace timer expired -- not because anything
+// in this control plane bounded it.
+//
+// The clock is the harness's own ground truth: the tick the guest DIED, not the
+// tick the fleet first suspected it. That is deliberate and it is what makes the
+// property independent of the mechanism under test. An oracle counting from the
+// verdict would go green the moment the fleet declared a guest dead, however
+// long it had taken to notice, and the noticing is half the defect.
+//
+// It judges only instances still consuming host resources, because a guest that
+// has been powered off has already released the vector whatever the durable row
+// says -- which is the same fact conservation charges.
+func deadGuestReleaseChecker(cfg worldConfig) checker {
+	reported := map[string]bool{}
+	return func(w *world, observation tickObservation) []finding {
+		if !observation.InstancesUsable || cfg.GuestDeathReleaseTicks <= 0 {
+			// An unreadable inventory is not a released vector and not a held one.
+			return nil
+		}
+		held := map[string]int{}
+		for _, instance := range observation.Instances {
+			diedAt, died := w.guestDiedAt[instance.ID]
+			if !died || !instance.ConsumesHostResources() || reported[instance.ID] {
+				continue
+			}
+			if elapsed := observation.Tick - diedAt; elapsed > cfg.GuestDeathReleaseTicks {
+				held[instance.ID] = elapsed
+			}
+		}
+		var findings []finding
+		for _, id := range sortedKeys(held) {
+			reported[id] = true
+			findings = append(findings, finding{Kind: findingDeadGuestHold, Tick: observation.Tick,
+				Detail: fmt.Sprintf("%s has held %+v in %s for %d ticks after its guest stopped executing, past the %d-tick release bound\n%s",
+					id, occupiedVector(observation, id), instanceState(observation, id), held[id],
+					cfg.GuestDeathReleaseTicks, w.dumpPlan(observation))})
 		}
 		return findings
 	}

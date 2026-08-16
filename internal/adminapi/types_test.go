@@ -108,3 +108,32 @@ func TestEffectiveQueueSLOSupportsFleetV1Handoff(t *testing.T) {
 		t.Fatalf("reported queue SLO = %#v", got)
 	}
 }
+
+// TestEffectiveGuestLivenessSupportsFleetV1Handoff pins the same rule for the
+// guest-liveness check (ADR 0040). An older daemon never asked a guest anything
+// — which is exactly the fleet issue #236's eight runner deaths happened on — so
+// its absence is an unspecified check rather than a measured pass. A daemon that
+// looked and found nothing and a daemon that never looked must not read alike.
+func TestEffectiveGuestLivenessSupportsFleetV1Handoff(t *testing.T) {
+	assertHandoffCheck(t, "guest liveness", Status.EffectiveGuestLiveness,
+		func(check *Check) Status { return Status{GuestLivenessCheck: check} },
+		"instance trf-xl-0aacdbcc6653bd8a of profile xl stopped answering its guest probe 2m0s ago")
+}
+
+// A guest silence carries the measurement, the bound it was judged against, and
+// the job that dies with it. The bound travels beside the measurement because
+// two refusals is a hiccup or a verdict depending only on which bound.
+func TestGuestSilenceRowCarriesTheBoundAndTheJob(t *testing.T) {
+	encoded, err := json.Marshal(GuestSilence{Instance: "trf-xl-0aacdbcc6653bd8a", Profile: "xl",
+		Repo: "rnw-community/rnw-community", CPU: 6, MemoryMiB: 12_288, Refusals: 5, SilenceSeconds: 120,
+		RequiredRefusals: 5, WindowSeconds: 90, Unresponsive: true, RunID: 31_939_037_119, JobID: 93_540_000_001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{`"refusals":5`, `"silenceSeconds":120`, `"requiredRefusals":5`,
+		`"windowSeconds":90`, `"unresponsive":true`, `"runId":31939037119`, `"jobId":93540000001`} {
+		if !strings.Contains(string(encoded), fragment) {
+			t.Fatalf("guest silence row missing %s: %s", fragment, encoded)
+		}
+	}
+}

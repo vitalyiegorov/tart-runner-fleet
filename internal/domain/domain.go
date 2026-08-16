@@ -247,8 +247,15 @@ type Instance struct {
 	// which is what distinguishes it from AssignedSince and RunningSince. Zero
 	// means unknown, treated fail-closed as "no measurable occupancy".
 	OccupiedSince time.Time
-	Attempts      int
-	RetryAt       time.Time
+	// Guest is what the node's guest-liveness probe has accumulated about this
+	// instance: how many consecutive probes the guest refused outright, since
+	// when, and when it last answered one. It is the only evidence the fleet has
+	// that a VM Tart still enumerates as `running` is in fact a wedged or
+	// panicked kernel executing nothing (ADR 0040). The zero value is "never
+	// probed", which is fail-closed: it can never declare a guest dead.
+	Guest    GuestLivenessState
+	Attempts int
+	RetryAt  time.Time
 }
 
 type InstancePower string
