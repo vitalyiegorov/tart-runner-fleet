@@ -334,7 +334,7 @@ make fmt
 git diff --check
 ```
 
-Requires Go 1.25.12. Coverage floor is 99% statements; changes are test-first
+Requires Go 1.25.13. Coverage floor is 99% statements; changes are test-first
 and PR titles are Conventional Commits — see [`CONTRIBUTING.md`](CONTRIBUTING.md)
 and [`AGENTS.md`](AGENTS.md). CI runs entirely on runners this fleet schedules
 for itself, under a two-generation rule: the installed generation stays
