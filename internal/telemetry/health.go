@@ -213,6 +213,7 @@ type Snapshot struct {
 	DeadLetters        []DeadLetter
 	Stalled            []Stalled
 	Occupancy          []OccupancyMetric
+	GuestSilences      []GuestSilenceMetric
 	Reservation        *ReservationMetric
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
@@ -255,6 +256,7 @@ type Health struct {
 	deadLetters        []DeadLetter
 	stalled            []Stalled
 	occupancy          []OccupancyMetric
+	guestSilences      []GuestSilenceMetric
 	reservation        *ReservationMetric
 	hostPressure       HostPressureMetric
 	revision           uint64
@@ -608,6 +610,91 @@ func (h *Health) Occupancy() HealthResult {
 	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
 }
 
+// GuestSilenceMetric is one instance whose guest has refused an unbroken run of
+// liveness probes: how many, for how long, against what bound, and whether the
+// fleet has called it dead.
+//
+// It exists because issue #236's eight production deaths produced no fleet
+// artifact at all. Every one of them was visible host-side within seconds — the
+// guest agent stopped answering while `tart list` still said `running` — and
+// nothing asked, so nothing could say. The set is per-instance and bounded by
+// maxOccupancy for the same reason the occupancy set is: the fault is one
+// instance, and an aggregate averages it away.
+type GuestSilenceMetric struct {
+	Instance string
+	Profile  string
+	Repo     string
+	CPU      int
+	MemoryMB int
+	// Refusals is the length of the unbroken run and Silence is how long it has
+	// lasted. RequiredRefusals and Window are the bound they are judged against,
+	// published beside them because the measurement alone is unreadable.
+	Refusals         int
+	Silence          time.Duration
+	RequiredRefusals int
+	Window           time.Duration
+	// Unresponsive is the verdict: both halves of the bound are satisfied and the
+	// fleet is reclaiming this instance.
+	Unresponsive bool
+	// RunID and JobID name the job that dies with the guest. They are carried in
+	// the status document rather than as metric labels, which are a closed
+	// vocabulary by design.
+	RunID int64
+	JobID int64
+}
+
+// SetGuestSilences publishes every guest currently in a run of refusals. It
+// replaces the whole set rather than merging: a guest that answered again must
+// disappear from the document, and a merged map would keep reporting a silence
+// that has ended. An over-long or ungrammatical set is rejected outright rather
+// than truncated, so a rejected observation can never masquerade as "every guest
+// is answering".
+func (h *Health) SetGuestSilences(silences []GuestSilenceMetric) error {
+	if len(silences) > maxOccupancy {
+		return errInvalidMetric
+	}
+	recorded := make([]GuestSilenceMetric, 0, len(silences))
+	for _, metric := range silences {
+		if metric.Refusals < 0 || metric.Silence < 0 || metric.RequiredRefusals < 0 || metric.Window < 0 ||
+			metric.CPU < 0 || metric.MemoryMB < 0 || !boundedResourceID.MatchString(metric.Instance) {
+			return errInvalidMetric
+		}
+		if _, ok := h.profiles[metric.Profile]; !ok {
+			return errUnknownProfile
+		}
+		recorded = append(recorded, metric)
+	}
+	h.mu.Lock()
+	h.revision++
+	h.guestSilences = recorded
+	h.mu.Unlock()
+	return nil
+}
+
+// GuestLiveness reports every instance the fleet has declared guest-dead. It
+// fails only on the verdict, never on a partial run: a guest that has refused
+// two of five probes is a guest the fleet is watching, and waking an operator
+// for that would make the check unreadable within a week.
+//
+// Each reason names the instance, the job that died with it, and the probe
+// timeline, because those are the three facts that were missing eight times.
+func (h *Health) GuestLiveness() HealthResult {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	reasons := []string{}
+	for _, metric := range h.guestSilences {
+		if !metric.Unresponsive {
+			continue
+		}
+		reasons = append(reasons, "instance "+metric.Instance+" of profile "+metric.Profile+
+			" stopped answering its guest probe "+metric.Silence.Round(time.Second).String()+" ago ("+
+			strconv.Itoa(metric.Refusals)+" consecutive refusals), holding "+strconv.Itoa(metric.CPU)+
+			" cpu / "+strconv.Itoa(metric.MemoryMB)+" MiB for run "+strconv.FormatInt(metric.RunID, 10)+
+			" job "+strconv.FormatInt(metric.JobID, 10))
+	}
+	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
+}
+
 // Stalled is one durable operation that is still retrying, one instance still
 // held in a cleanup state, or both at once.
 //
@@ -832,6 +919,7 @@ func (h *Health) Snapshot() Snapshot {
 		DeadLetters:       append([]DeadLetter(nil), h.deadLetters...),
 		Stalled:           append([]Stalled(nil), h.stalled...),
 		Occupancy:         append([]OccupancyMetric(nil), h.occupancy...),
+		GuestSilences:     append([]GuestSilenceMetric(nil), h.guestSilences...),
 		Reservation:       cloneReservation(h.reservation),
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}

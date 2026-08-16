@@ -50,14 +50,21 @@ type Status struct {
 	// step, the attempt count, and the elapsed time an operator needs to name a
 	// wedge without reading the database. An older daemon published none of it,
 	// which is why EffectiveProgress exists.
-	Stalled       []Stalled        `json:"stalled,omitempty"`
-	ProgressCheck *Check           `json:"progressCheck,omitempty"`
-	Queues        []Queue          `json:"queues"`
-	Instances     []Instance       `json:"instances"`
-	ScopeQueues   []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations  []Observation    `json:"observations"`
-	Operations    OperationSummary `json:"operations"`
-	HostPressure  HostPressure     `json:"hostPressure"`
+	Stalled       []Stalled `json:"stalled,omitempty"`
+	ProgressCheck *Check    `json:"progressCheck,omitempty"`
+	// GuestSilences is an additive fleet.v1 field: every instance whose guest has
+	// stopped answering the node's liveness probe, with the probe timeline and the
+	// job that dies with it. An older daemon asked its guests nothing and published
+	// nothing, which is why EffectiveGuestLiveness exists — and why issue #236's
+	// eight production deaths left no fleet artifact at all.
+	GuestSilences      []GuestSilence   `json:"guestSilences,omitempty"`
+	GuestLivenessCheck *Check           `json:"guestLivenessCheck,omitempty"`
+	Queues             []Queue          `json:"queues"`
+	Instances          []Instance       `json:"instances"`
+	ScopeQueues        []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations       []Observation    `json:"observations"`
+	Operations         OperationSummary `json:"operations"`
+	HostPressure       HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.
@@ -126,6 +133,43 @@ func (s Status) EffectiveOccupancy() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.OccupancyCheck
+}
+
+// GuestSilence is one instance whose guest has refused an unbroken run of
+// liveness probes. It is per-instance for the reason ADR 0040 gives: the fault
+// is one guest that stopped executing, and the vector it is still holding.
+type GuestSilence struct {
+	Instance  string `json:"instance"`
+	Profile   string `json:"profile"`
+	Repo      string `json:"repo,omitempty"`
+	CPU       int    `json:"cpu"`
+	MemoryMiB int    `json:"memoryMiB"`
+	// Refusals and SilenceSeconds are the measurement; RequiredRefusals and
+	// WindowSeconds are the bound it is judged against. The bound travels with the
+	// measurement because two refusals is a hiccup and five is a verdict only if
+	// something says which. Both bounds are zero on a node that probes nothing.
+	Refusals         int     `json:"refusals"`
+	SilenceSeconds   float64 `json:"silenceSeconds"`
+	RequiredRefusals int     `json:"requiredRefusals"`
+	WindowSeconds    float64 `json:"windowSeconds"`
+	// Unresponsive is the verdict: the fleet has called this guest dead and is
+	// reclaiming its vector.
+	Unresponsive bool `json:"unresponsive"`
+	// RunID and JobID name the job that dies with the guest, so a reclaimed runner
+	// is distinguishable from a flake without opening the daemon log.
+	RunID int64 `json:"runId,omitempty"`
+	JobID int64 `json:"jobId,omitempty"`
+}
+
+// EffectiveGuestLiveness keeps a new fleet CLI compatible with an older fleet.v1
+// daemon during atomic handoff, exactly as EffectiveOccupancy does. An older
+// daemon never probed a guest, and a daemon that cannot see a condition must
+// never render as having found none.
+func (s Status) EffectiveGuestLiveness() Check {
+	if s.GuestLivenessCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.GuestLivenessCheck
 }
 
 // Stalled is one operation that will not finish, one instance that will not let

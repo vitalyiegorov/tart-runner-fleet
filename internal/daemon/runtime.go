@@ -1409,6 +1409,71 @@ func (r *failureReporter) reportOccupancyReclaim(operation scheduler.Operation, 
 		"outcome", "the job ends as a lost-communication failure on GitHub")
 }
 
+// reportGuestSilence says out loud that an instance's guest has stopped
+// answering, while it is happening.
+//
+// It exists because issue #236 produced NO daemon log line at all, eight times.
+// The whole class was self-concealing: nothing in the guest could report its own
+// kernel panic, nothing in the workflow could run after it, and nothing on the
+// host was asking. The line below is the first artifact this fleet has ever
+// produced for that condition.
+//
+// It is rate limited per instance and per state, so a guest that goes quiet and
+// is then declared dead produces two lines rather than one per tick, while the
+// escalation to a verdict is never suppressed by the warning that preceded it.
+func (r *failureReporter) reportGuestSilence(silences []scheduler.GuestSilence) {
+	for _, silence := range silences {
+		state := "silent"
+		if silence.Unresponsive {
+			state = "unresponsive"
+		}
+		if !r.admit("guest\x00" + silence.Instance + "\x00" + state) {
+			continue
+		}
+		r.logger.Warn("instance guest "+state, "instance", silence.Instance,
+			"profile", string(silence.Profile), "repo", silence.Repo,
+			"cpu", silence.Resources.CPU, "memoryMb", silence.Resources.MemoryMB,
+			"refusals", silence.Refusals, "requiredRefusals", silence.RequiredRefusals,
+			"silent", silence.Silence.Round(time.Second).String(),
+			"window", silence.Window.Round(time.Second).String(),
+			"lastAlive", livenessInstant(silence.LastAlive),
+			"runId", silence.Demand.RunID, "jobId", silence.Demand.JobID)
+	}
+}
+
+// reportGuestReclaim names a job the fleet is about to end because the machine
+// running it stopped executing. It is never rate limited: each reclaim is a
+// distinct destructive decision, and the whole point of this record is that the
+// eight it is modelled on produced none.
+func (r *failureReporter) reportGuestReclaim(operation scheduler.Operation, silences []scheduler.GuestSilence) {
+	if !operation.GuestUnresponsive {
+		return
+	}
+	refusals, silent, lastAlive := 0, time.Duration(0), time.Time{}
+	for _, silence := range silences {
+		if silence.Instance == operation.Instance {
+			refusals, silent, lastAlive = silence.Refusals, silence.Silence, silence.LastAlive
+		}
+	}
+	r.logger.Warn("instance reclaimed because its guest stopped answering", "instance", operation.Instance,
+		"profile", string(operation.Profile), "repo", operation.Demand.Repo,
+		"runId", operation.Demand.RunID, "jobId", operation.Demand.JobID, "attempt", operation.Demand.Attempt,
+		"refusals", refusals, "silent", silent.Round(time.Second).String(),
+		"lastAlive", livenessInstant(lastAlive),
+		"outcome", "the job ends as a lost-communication failure on GitHub")
+}
+
+// livenessInstant renders a probe instant, or names its absence. A guest this
+// daemon has never seen answer is a different fact from one that answered a
+// minute ago, and a zero time rendered as a date is the kind of artifact that
+// sends an operator looking at 0001-01-01.
+func livenessInstant(at time.Time) string {
+	if at.IsZero() {
+		return "never observed"
+	}
+	return at.UTC().Format(time.RFC3339)
+}
+
 // admit is the shared rate-limit gate: one line per key per window.
 func (r *failureReporter) admit(key string) bool {
 	r.mu.Lock()
@@ -1654,6 +1719,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	}
 	_ = e.health.SetMode(mode)
 	e.recordOccupancy(result)
+	e.recordGuestLiveness(result)
 	e.recordReservation(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
@@ -1686,6 +1752,31 @@ func (e engineTicker) recordOccupancy(result app.TickResult) {
 	e.reporter.reportOccupancy(occupancy)
 	for _, operation := range result.Plan.Operations {
 		e.reporter.reportOccupancyReclaim(operation, occupancy)
+	}
+}
+
+// recordGuestLiveness publishes every guest that has stopped answering and says
+// out loud when one is declared dead. Both readings come from
+// scheduler.GuestSilences — the same pure projection the reclaim itself is
+// planned from — so the metric, the warning, the doctor finding and the drain
+// can never disagree about a silence.
+func (e engineTicker) recordGuestLiveness(result app.TickResult) {
+	silences := scheduler.GuestSilences(result.At, e.engine.Config, result.Instances)
+	metrics := make([]telemetry.GuestSilenceMetric, 0, len(silences))
+	for _, silence := range silences {
+		metrics = append(metrics, telemetry.GuestSilenceMetric{Instance: silence.Instance,
+			Profile: string(silence.Profile), Repo: silence.Repo, CPU: silence.Resources.CPU,
+			MemoryMB: silence.Resources.MemoryMB, Refusals: silence.Refusals, Silence: silence.Silence,
+			RequiredRefusals: silence.RequiredRefusals, Window: silence.Window,
+			Unresponsive: silence.Unresponsive, RunID: silence.Demand.RunID, JobID: silence.Demand.JobID})
+	}
+	_ = e.health.SetGuestSilences(metrics)
+	if e.reporter == nil {
+		return
+	}
+	e.reporter.reportGuestSilence(silences)
+	for _, operation := range result.Plan.Operations {
+		e.reporter.reportGuestReclaim(operation, silences)
 	}
 }
 

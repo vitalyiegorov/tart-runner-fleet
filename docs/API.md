@@ -135,6 +135,44 @@ facts are exported as `fleet_instance_occupancy_seconds`,
 `fleet_instance_occupancy_starving`, each labelled by profile and instance. Both
 fields are additive and absent on daemons that measured no occupancy at all.
 
+`guestSilences` reports every instance whose guest has stopped answering the
+node's liveness probe, and `guestLivenessCheck` is the derived judgement `fleet
+doctor` renders:
+
+```json
+"guestSilences": [
+  {
+    "instance": "trf-xl-0aacdbcc6653bd8a",
+    "profile": "xl",
+    "repo": "rnw-community/rnw-community",
+    "cpu": 6,
+    "memoryMiB": 12288,
+    "refusals": 5,
+    "silenceSeconds": 120,
+    "requiredRefusals": 5,
+    "windowSeconds": 90,
+    "unresponsive": true,
+    "runId": 31939037119,
+    "jobId": 93540000001
+  }
+],
+"guestLivenessCheck": {"ok": false, "reasons": ["instance trf-xl-0aacdbcc6653bd8a ..."]}
+```
+
+`refusals` and `silenceSeconds` are the measurement; `requiredRefusals` and
+`windowSeconds` are the bound this node judges it against, and both are `0` on a
+node that probes nothing. Only a refused **transport** is counted: a guest that
+answers slowly, and a probe that ran out of its own deadline, both clear the run,
+which is what stops a saturated-but-alive guest being probed into a drain.
+`unresponsive` is the verdict — both bounds met — and `guestLivenessCheck` fails
+on that alone, never on a partial run. `runId` and `jobId` name the job that dies
+with the guest; they travel here rather than as metric labels, which are a closed
+vocabulary. The measurement is exported as
+`fleet_instance_guest_silence_seconds`, `fleet_instance_guest_probe_refusals`,
+`fleet_instance_guest_probe_refusals_required`, and
+`fleet_instance_guest_unresponsive`, each labelled by profile and instance. Both
+fields are additive and absent on daemons that probed no guest at all (ADR 0040).
+
 `reservation` names the aged global-FIFO head the scheduler is standing capacity
 by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:
 

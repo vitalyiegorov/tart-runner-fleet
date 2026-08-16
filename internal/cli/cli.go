@@ -666,6 +666,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	occupancy := status.Data.EffectiveOccupancy()
 	reservation := status.Data.EffectiveReservationCheck()
 	progress := status.Data.EffectiveProgress()
+	guests := status.Data.EffectiveGuestLiveness()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -684,6 +685,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// PASS occupancy, and the cause could only be read by copying the SQLite
 		// file off the host (issue #233).
 		{Name: "drain progress", OK: progress.OK, Detail: joinReasons(progress)},
+		// The guest-liveness check names an instance whose guest stopped executing
+		// while the backend still reported it running, the job that died with it,
+		// and the probe timeline. On 2026-08-16 eight runners died exactly this way
+		// and the fleet produced no artifact of any kind: the only record was a
+		// drain that followed GitHub's failure by minutes (issue #236).
+		{Name: "guest liveness", OK: guests.OK, Detail: joinReasons(guests)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {
