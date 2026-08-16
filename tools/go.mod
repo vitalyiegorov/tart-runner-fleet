@@ -1,6 +1,6 @@
 module github.com/vitalyiegorov/tart-runner-fleet/tools
 
-go 1.25.12
+go 1.25.13
 
 tool (
 	github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod

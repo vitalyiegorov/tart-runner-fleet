@@ -1,6 +1,6 @@
 module github.com/vitalyiegorov/tart-runner-fleet
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/actions/scaleset v0.4.0
