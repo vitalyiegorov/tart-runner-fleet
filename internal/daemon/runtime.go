@@ -257,9 +257,14 @@ type dependencies struct {
 	newReaper       func(runtimeStore, config.Config) discharge.VM
 	readiness       func(config.Config) lifecycle.Readiness
 	bootstrap       func(config.Config) lifecycle.Bootstrapper
-	now             func() time.Time
-	after           func(time.Duration) <-chan time.Time
-	leaseOwner      func(config.Config) string
+	// guestProbe is the fresh re-verification a guest-liveness drain performs at
+	// the moment it acts. It is the same probe the inventory runs each tick; the
+	// drain holds its own so a standing kill order re-derives its premise from
+	// ground truth rather than trusting the observation that planned it.
+	guestProbe func(config.Config) app.GuestProbe
+	now        func() time.Time
+	after      func(time.Duration) <-chan time.Time
+	leaseOwner func(config.Config) string
 }
 
 var deps = defaultDependencies()
@@ -348,12 +353,13 @@ func newDependencies(goos string) dependencies {
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
-		newVM:     node.newVM,
-		newReaper: node.newReaper,
-		readiness: node.readiness,
-		bootstrap: node.bootstrap,
-		now:       time.Now,
-		after:     time.After,
+		newVM:      node.newVM,
+		newReaper:  node.newReaper,
+		readiness:  node.readiness,
+		bootstrap:  node.bootstrap,
+		guestProbe: node.guestProbe,
+		now:        time.Now,
+		after:      time.After,
 		leaseOwner: func(cfg config.Config) string {
 			owner := cfg.GitHub.SessionOwner
 			if owner == "" {
@@ -633,7 +639,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
-					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
+					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
