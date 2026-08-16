@@ -51,8 +51,22 @@ type GuestProbe interface {
 type GuestLivenessTracker struct {
 	Probe  GuestProbe
 	Policy domain.GuestLivenessPolicy
-	mu     sync.Mutex
-	state  map[string]domain.GuestLivenessState
+	// Now must be the SAME clock the scheduler plans on. The instants this
+	// accumulator stamps are compared against the tick's instant by
+	// domain.GuestLivenessPolicy.Dead, and a run of refusals recorded on one clock
+	// and judged on another is not measurable at all — it fails closed and the
+	// mechanism silently never fires. Nil is the wall clock, which is what every
+	// production node runs on.
+	Now   func() time.Time
+	mu    sync.Mutex
+	state map[string]domain.GuestLivenessState
+}
+
+func (t *GuestLivenessTracker) now() time.Time {
+	if t.Now == nil {
+		return time.Now().UTC()
+	}
+	return t.Now().UTC()
 }
 
 // Observe probes every named instance and returns the accumulated state for each.
@@ -64,10 +78,11 @@ type GuestLivenessTracker struct {
 // probing would spend one deadline per instance inside a single tick, which on a
 // saturated host is how a liveness check becomes the thing that stops the control
 // loop.
-func (t *GuestLivenessTracker) Observe(ctx context.Context, now time.Time, ids []string) map[string]domain.GuestLivenessState {
+func (t *GuestLivenessTracker) Observe(ctx context.Context, ids []string) map[string]domain.GuestLivenessState {
 	if t == nil || t.Probe == nil || !t.Policy.Enabled() || len(ids) == 0 {
 		return nil
 	}
+	now := t.now()
 	outcomes := make([]domain.GuestLiveness, len(ids))
 	var group sync.WaitGroup
 	for index, id := range ids {
@@ -209,7 +224,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 			return domain.Unavailable[[]domain.Instance]("untracked controller VM requires reconciliation"), host
 		}
 	}
-	return domain.Fresh(p.probeGuests(ctx, now, result), now), host
+	return domain.Fresh(p.probeGuests(ctx, result), now), host
 }
 
 // probeGuests asks every powered-on Running instance's guest whether it is still
@@ -221,14 +236,14 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 // the backend reports stopped or absent is already reclaimable through a gate
 // that needs no probe at all. The probe therefore never runs against an instance
 // the fleet was about to recover anyway.
-func (p ProductionInventory) probeGuests(ctx context.Context, now time.Time, instances []domain.Instance) []domain.Instance {
+func (p ProductionInventory) probeGuests(ctx context.Context, instances []domain.Instance) []domain.Instance {
 	candidates := make([]string, 0, len(instances))
 	for _, instance := range instances {
 		if instance.State == domain.InstanceRunning && instance.Power == domain.InstancePowerRunning {
 			candidates = append(candidates, instance.ID)
 		}
 	}
-	states := p.Guest.Observe(ctx, now, candidates)
+	states := p.Guest.Observe(ctx, candidates)
 	if len(states) == 0 {
 		return instances
 	}

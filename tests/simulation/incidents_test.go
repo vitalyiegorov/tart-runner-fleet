@@ -621,3 +621,172 @@ func TestARepeatedStopIsCaughtByTheReleaseBound(t *testing.T) {
 		}
 	}
 }
+
+// silentGuestTrace is the 2026-08-16 incident (issue #236): a builder whose job
+// is running normally, a guest kernel that then stops executing, and work queued
+// behind the vector it is holding. MaxActive 1 on the builder profile means the
+// queued job cannot start until that vector comes back — which on the real fleet
+// took sixteen to eighteen minutes, and only because GitHub gave up.
+func silentGuestTrace(cfg worldConfig) simTrace {
+	return simTrace{Seed: 20_260_816, Ticks: 120, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		// Late enough that the instance has reached Running and its job has started,
+		// which is the state every one of the eight production deaths was in.
+		{Tick: 12, Kind: eventSilentGuest, Count: 1},
+		{Tick: 13, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 14, Kind: eventStopArrivals},
+	}}
+}
+
+// TestASilentGuestReleasesItsVectorWithoutWaitingForGitHub is the incident with
+// the mechanism in place. Nothing GitHub does is part of this: the harness's
+// broker goes on calling the job in_progress forever, exactly as the real one did
+// for sixteen to eighteen minutes, and the vector comes back anyway.
+func TestASilentGuestReleasesItsVectorWithoutWaitingForGitHub(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, silentGuestTrace(cfg))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("the silent-guest incident must no longer violate a property: %s", findings[0])
+	}
+	// The harness really did reach the incident state. A green run over a trace
+	// whose guest kept answering would prove nothing at all.
+	if len(w.guestDiedAt) != 1 {
+		t.Fatalf("no guest ever stopped executing: %v", w.guestDiedAt)
+	}
+	dead, queued := w.jobs[0], w.jobs[1]
+	if dead.status != jobCancelled {
+		t.Fatalf("the job on the dead guest was never ended by a reclaim: status %s", dead.status)
+	}
+	// It was the guest-liveness verdict that ended it, and not some other recovery
+	// that happened to fire. Every other premise is provably false here: GitHub
+	// calls the runner busy, the bound demand carries a started job, and the hold
+	// is nowhere near the occupancy ceiling.
+	reclaimed := w.guestDeathReclaims()
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected exactly one guest-death reclaim, got %v", reclaimed)
+	}
+	if len(w.occupancyReclaims()) != 0 {
+		t.Fatalf("the occupancy budget must not have been what acted: %v", w.occupancyReclaims())
+	}
+	// And it happened on the fleet's own bound rather than on GitHub's. Sixteen
+	// minutes is thirty-two ticks; this must be a small multiple of the probe
+	// window, not a small multiple of the grace timer.
+	held := 0
+	for id, diedAt := range w.guestDiedAt {
+		if id == reclaimed[0] {
+			held = w.releaseTick(id, diedAt) - diedAt
+		}
+	}
+	if held <= 0 || held > cfg.GuestDeathReleaseTicks {
+		t.Fatalf("%s held its vector for %d ticks after its guest died, outside the %d-tick bound",
+			reclaimed[0], held, cfg.GuestDeathReleaseTicks)
+	}
+	// The whole point of taking the vector back: the queued work behind it runs,
+	// and the fleet settles.
+	if queued.status != jobDone {
+		t.Fatalf("the queued job behind the dead guest never ran: status %s", queued.status)
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+	if final := w.observations[len(w.observations)-1]; final.Queued != 0 {
+		t.Fatalf("the queue never drained: %d still queued", final.Queued)
+	}
+}
+
+// TestADeadGuestNobodyProbesIsCaughtByTheReleaseBound is the negative control,
+// and it is the part that makes the property worth having. With the bound
+// unconfigured — which is the fleet of every day up to 2026-08-16 — nothing in
+// the control plane can express the condition, and property (p) fires.
+func TestADeadGuestNobodyProbesIsCaughtByTheReleaseBound(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	cfg.Scheduler.GuestLiveness = domain.GuestLivenessPolicy{}
+	w := newWorld(t, cfg, silentGuestTrace(cfg))
+	defer w.close()
+	findings := w.run()
+	if len(findings) == 0 {
+		t.Fatal("a guest that stopped executing held a whole vector and no property noticed")
+	}
+	if findings[0].Kind != findingDeadGuestHold {
+		t.Fatalf("first finding = %s, want the dead-guest release bound", findings[0])
+	}
+	for _, want := range []string{"after its guest stopped executing", "release bound", "running",
+		"CPU:6", "trf-builder-"} {
+		if !strings.Contains(findings[0].Detail, want) {
+			t.Fatalf("finding does not name %q:\n%s", want, findings[0].Detail)
+		}
+	}
+}
+
+// TestASaturatedButAliveGuestIsNeverReclaimed is the false-positive control, and
+// it is the risk the whole mechanism carries. A guest doing so much legitimate
+// work that its probe cannot complete must finish its job untouched, however
+// many probes go unanswered and however long that lasts.
+func TestASaturatedButAliveGuestIsNeverReclaimed(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	trace := simTrace{Seed: 20_260_817, Ticks: 200, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		// A long, legitimate suite on a guest too busy to answer a probe: the exact
+		// pair of facts that would be indistinguishable from death to any mechanism
+		// that treated an unanswered probe as a refusal.
+		{Tick: 3, Kind: eventLongJob, Count: 6},
+		{Tick: 12, Kind: eventSaturatedGuest, Count: 1},
+		{Tick: 13, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 14, Kind: eventStopArrivals},
+	}}
+	w := newWorld(t, cfg, trace)
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("a saturated guest must violate nothing: %s", findings[0])
+	}
+	if len(w.saturatedGuest) != 1 {
+		t.Fatalf("no guest was ever saturated: %v", w.saturatedGuest)
+	}
+	if reclaimed := w.guestDeathReclaims(); len(reclaimed) != 0 {
+		t.Fatalf("a guest that was merely busy was reclaimed as dead: %v", reclaimed)
+	}
+	for index, job := range w.jobs {
+		if job.status != jobDone {
+			t.Fatalf("job %d on a live guest did not complete: status %s", index, job.status)
+		}
+	}
+}
+
+// guestDeathReclaims names every instance a planned drain reclaimed on the
+// guest-liveness premise. It reads the scheduler's own operations, so a test can
+// assert WHICH recovery acted rather than merely that the instance went away.
+func (w *world) guestDeathReclaims() []string {
+	var reclaimed []string
+	for _, observation := range w.observations {
+		for _, operation := range observation.Plan.Operations {
+			if operation.Kind == scheduler.OperationDrain && operation.GuestUnresponsive {
+				reclaimed = append(reclaimed, operation.Instance)
+			}
+		}
+	}
+	return reclaimed
+}
+
+// releaseTick is the first tick after `from` at which an instance stopped
+// consuming host resources, which is when the vector actually came back.
+func (w *world) releaseTick(id string, from int) int {
+	for _, observation := range w.observations {
+		if !observation.InstancesUsable || observation.Tick <= from {
+			continue
+		}
+		held := false
+		for _, instance := range observation.Instances {
+			if instance.ID == id && instance.ConsumesHostResources() {
+				held = true
+			}
+		}
+		if !held {
+			return observation.Tick
+		}
+	}
+	return 0
+}

@@ -346,7 +346,7 @@ func newDependencies(goos string) dependencies {
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
 				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB},
-				Guest:               guestLivenessTracker(node, cfg)}
+				Guest:               guestLivenessTracker(node, cfg, time.Now)}
 		},
 		listen:      net.Listen,
 		adminListen: adminapi.Listen,
@@ -375,7 +375,7 @@ func newDependencies(goos string) dependencies {
 // backend with no guest to ask. Both are fail-open by construction — a nil
 // tracker probes nothing, so no instance can ever be declared dead by a node
 // that is not measuring.
-func guestLivenessTracker(node platform, cfg config.Config) *app.GuestLivenessTracker {
+func guestLivenessTracker(node platform, cfg config.Config, now func() time.Time) *app.GuestLivenessTracker {
 	if !cfg.GuestLiveness.Enabled() || node.guestProbe == nil {
 		return nil
 	}
@@ -383,7 +383,7 @@ func guestLivenessTracker(node platform, cfg config.Config) *app.GuestLivenessTr
 	if probe == nil {
 		return nil
 	}
-	return &app.GuestLivenessTracker{Probe: probe,
+	return &app.GuestLivenessTracker{Probe: probe, Now: now,
 		Policy: domain.GuestLivenessPolicy{ConsecutiveRefusals: cfg.GuestLiveness.ConsecutiveRefusals,
 			Window: cfg.GuestLiveness.Window}}
 }

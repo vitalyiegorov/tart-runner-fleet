@@ -93,25 +93,25 @@ func TestTheGuestProbeEstablishesNothingWithoutItsInputs(t *testing.T) {
 func TestTheTrackerIsWiredOnlyWhereBothHalvesExist(t *testing.T) {
 	apple, linux := platformFor("darwin"), platformFor("linux")
 	enabled := config.Default()
-	if tracker := guestLivenessTracker(apple, enabled); tracker == nil {
+	if tracker := guestLivenessTracker(apple, enabled, nil); tracker == nil {
 		t.Fatal("a Tart node with the shipped bound must probe its guests")
 	}
 	disabled := config.Default()
 	disabled.GuestLiveness = config.GuestLiveness{}
-	if tracker := guestLivenessTracker(apple, disabled); tracker != nil {
+	if tracker := guestLivenessTracker(apple, disabled, nil); tracker != nil {
 		t.Fatal("a node whose operator disabled the bound must not probe at all")
 	}
 	// Node B before it has a container backend: a real daemon measuring a real
 	// machine, with no guest to ask.
-	if tracker := guestLivenessTracker(linux, enabled); tracker != nil {
+	if tracker := guestLivenessTracker(linux, enabled, nil); tracker != nil {
 		t.Fatal("a node with no execution technology has no guest to probe")
 	}
 	containers := config.Default()
 	containers.Executor = config.Executor{Backend: config.ExecutorPodman, Image: "ghcr.io/example/runner:1"}
-	if tracker := guestLivenessTracker(linux, containers); tracker == nil {
+	if tracker := guestLivenessTracker(linux, containers, nil); tracker == nil {
 		t.Fatal("a container node probes its guests with the same verb")
 	}
-	if tracker := guestLivenessTracker(platform{}, enabled); tracker != nil {
+	if tracker := guestLivenessTracker(platform{}, enabled, nil); tracker != nil {
 		t.Fatal("a platform with no probe constructor wires nothing")
 	}
 }

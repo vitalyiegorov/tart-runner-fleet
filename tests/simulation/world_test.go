@@ -119,6 +119,21 @@ type worldConfig struct {
 	// The leak it exists to catch is unbounded: the 2026-08-10 incident ran 165
 	// ticks' worth of virtual time and was still climbing.
 	TeardownReleaseTicks int
+	// GuestDeathReleaseTicks bounds property (p): once an instance's guest has
+	// stopped executing, the instance may go on holding its vector for at most
+	// this many further ticks.
+	//
+	// Its clock starts at the DEATH, not at the fleet's first suspicion, which is
+	// what makes it an honest bound rather than a restatement of the mechanism.
+	// The budget it has to cover: three probes to reach the verdict, one tick to
+	// observe and plan it, one to claim the operation, one drain edge to stop the
+	// guest, up to nine more if that guest also refuses to power down, and two to
+	// finish the teardown -- plus whatever a stale host probe, an unavailable Tart
+	// enumeration or a wedged drain stacks on top. Twenty-four ticks is twelve
+	// virtual minutes. The leak it exists to catch is not merely larger: it is
+	// unbounded by the fleet, and ended only because GitHub gave up sixteen to
+	// eighteen minutes in.
+	GuestDeathReleaseTicks int
 	// SequenceResetAt is the tick at which GitHub restarts the broker's
 	// message-id sequence, as it did for scale set 8077185082566234948 on
 	// 2026-08-01T18:32Z. Zero means the sequence is never restarted.
@@ -138,6 +153,18 @@ type worldConfig struct {
 // unreachable by anything except the condition it exists to reclaim, or a green
 // sweep would prove only that the ceiling is loose.
 const simOccupancyBudget = 60 * time.Minute
+
+// simGuestLiveness is the bound every simulated node judges a silent guest
+// against: three consecutive REFUSED probes spanning at least sixty virtual
+// seconds. At one probe per tick that is a verdict on the third refusal, ninety
+// virtual seconds after the guest died.
+//
+// It is deliberately the tightest bound configuration permits rather than the
+// shipped default, for the same reason simOccupancyBudget is deliberately loose:
+// the sweep must be able to REACH the mechanism within a trace, while nothing a
+// healthy guest does may satisfy it. Nothing can, by construction -- only a
+// refused transport counts, and only eventSilentGuest produces one.
+var simGuestLiveness = domain.GuestLivenessPolicy{ConsecutiveRefusals: 3, Window: time.Minute}
 
 func simProfiles() map[domain.ProfileID]domain.Profile {
 	return map[domain.ProfileID]domain.Profile{
@@ -199,18 +226,20 @@ func defaultWorld() worldConfig {
 			MixedPlatformAdmission: true,
 			MixedProfileCohorts:    true,
 			ElasticHostEnvelope:    true,
+			GuestLiveness:          simGuestLiveness,
 		},
-		Bindings:             simBindings(profiles),
-		Repos:                []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
-		Profiles:             sortedProfileIDs(profiles),
-		LivenessK:            12,
-		StarvationN:          3,
-		QuiesceQ:             40,
-		StrandedG:            10,
-		DrainChurnN:          1,
-		HearingH:             2,
-		OccupancyGraceTicks:  12,
-		TeardownReleaseTicks: 12,
+		Bindings:               simBindings(profiles),
+		Repos:                  []string{"a/repo", "b/repo", "c/repo", simControlPlaneRepo},
+		Profiles:               sortedProfileIDs(profiles),
+		LivenessK:              12,
+		StarvationN:            3,
+		QuiesceQ:               40,
+		StrandedG:              10,
+		DrainChurnN:            1,
+		HearingH:               2,
+		OccupancyGraceTicks:    12,
+		TeardownReleaseTicks:   12,
+		GuestDeathReleaseTicks: 24,
 	}
 }
 
@@ -408,6 +437,24 @@ func (r simRecovery) JobActive(_ context.Context, instance operations.Instance) 
 	return job != nil && job.status == jobRunning, nil
 }
 
+// simGuestProbe is the node's guest-liveness probe. It answers from the
+// simulator's own physics rather than from anything the fleet has learned,
+// because the discrimination under test IS the classification: a dead guest
+// refuses the transport, a saturated one cannot answer inside the deadline, and
+// a healthy one runs the command.
+type simGuestProbe struct{ world *world }
+
+func (p simGuestProbe) Probe(_ context.Context, name string) domain.GuestLiveness {
+	switch {
+	case p.world.silentGuest[name]:
+		return domain.GuestLivenessRefused
+	case p.world.saturatedGuest[name]:
+		return domain.GuestLivenessUnknown
+	default:
+		return domain.GuestLivenessAlive
+	}
+}
+
 // simInstances is the durable instance reader with two substitutions, and they
 // are the ONLY places this harness rewrites a durable fact (ADR 0031).
 //
@@ -563,6 +610,21 @@ type world struct {
 	// a harness that cannot express "this step will fail forever".
 	unstoppableGuest map[string]lifecycle.StopForce
 	wedgeNextGuest   lifecycle.StopForce
+	// silentGuest is issue #236: a guest whose kernel has stopped executing. Its
+	// probes are REFUSED, its job stops making progress, and its VM goes on being
+	// enumerated as running. Like unstoppableGuest it never decays.
+	silentGuest map[string]bool
+	// guestDiedAt is the harness's own ground truth for property (p): the tick at
+	// which each guest stopped executing. It is kept separately from silentGuest
+	// because the reclaim CLEARS silentGuest when it powers the guest off, and an
+	// oracle that measured from a fact the fix erases would be measuring the fix.
+	guestDiedAt map[string]int
+	// saturatedGuest is the false positive the mechanism must never produce: a
+	// guest so busy with legitimate work that its probe cannot complete. Its
+	// probes are INCONCLUSIVE, and its job progresses normally.
+	saturatedGuest    map[string]bool
+	silenceNextGuest  bool
+	saturateNextGuest bool
 	// repeatWithoutEscalating reproduces the executor as it behaved BEFORE issue
 	// #233: every stop attempt is the same polite request. It exists so a pinned
 	// test can prove property (o) is red on the defect and green on the fix; no
@@ -687,6 +749,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		claimed: map[string]*simOperation{}, delivered: map[int]*simMessage{},
 		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
 		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
+		silentGuest: map[string]bool{}, guestDiedAt: map[string]int{}, saturatedGuest: map[string]bool{},
 		drainAborts: map[string]int{}, known: map[string]finding{},
 	}
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
@@ -698,6 +761,13 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 			Store: simInstances{world: w}, Executor: simTart{world: w}, Host: simHost{world: w},
 			Recovery: simRecovery{world: w}, Capacity: cfg.Scheduler.LinuxCapacity, Guards: cfg.Guards,
 			ElasticHostEnvelope: cfg.Scheduler.ElasticHostEnvelope, HostBudget: cfg.Scheduler.HostBudget,
+			// The accumulator's clock must be the harness's virtual clock, because the
+			// scheduler judges its instants against the tick's instant. On the wall
+			// clock a run of refusals recorded thirteen real days after the simulated
+			// epoch is not measurable at all, the verdict fails closed, and the
+			// property would go green against a mechanism that never fires.
+			Guest: &app.GuestLivenessTracker{Probe: simGuestProbe{world: w},
+				Policy: cfg.Scheduler.GuestLiveness, Now: func() time.Time { return w.now }},
 		},
 	}
 	w.checkers = defaultCheckers(cfg)
@@ -916,6 +986,21 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		// operation is finished either way.
 		return "", true
 	case operations.StateDraining:
+		if instance.DrainPhase == operations.DrainPhaseGuestUnresponsive {
+			// executor.go's guest-liveness branch re-probes at the moment of acting,
+			// and this is the one recovery premise a fresh observation CAN disprove: a
+			// guest that answers again is alive, whatever the accumulator said a tick
+			// ago, and the drain returns the instance to Running untouched.
+			if !w.silentGuest[instance.ID] {
+				w.drainAborts[instance.ID]++
+				return operations.StateRunning, true
+			}
+			// The premise holds, so the guest is powered off BEFORE deregistration,
+			// for the same reason the occupancy branch below does it: GitHub will go
+			// on calling this runner busy until its own grace timer expires.
+			delete(w.silentGuest, instance.ID)
+			w.stopOccupyingGuest(instance.ID)
+		}
 		if instance.DrainPhase == operations.DrainPhaseOccupancyBudget {
 			// executor.go's occupancy branch stops the guest BEFORE it deregisters,
 			// because GitHub will go on calling this runner busy for as long as the
@@ -1018,6 +1103,77 @@ func (w *world) stopGuest(id string) bool {
 	return true
 }
 
+// silenceGuest kills the kernel of one running guest, and latches when there is
+// none yet. Arming is deferred rather than dropped for the same reason
+// wedgeGuest defers: a trace event that lands before any instance is running
+// would otherwise be a no-op, and the fault would be unreachable in most traces.
+func (w *world) silenceGuest() {
+	if id, found := w.runningInstance(); found {
+		w.killGuest(id)
+		return
+	}
+	w.silenceNextGuest = true
+}
+
+// saturateGuest puts one running guest under so much legitimate load that its
+// probe cannot complete. Its job keeps making progress; only the probe suffers.
+func (w *world) saturateGuest() {
+	if id, found := w.runningInstance(); found {
+		w.saturatedGuest[id] = true
+		return
+	}
+	w.saturateNextGuest = true
+}
+
+func (w *world) killGuest(id string) {
+	if w.silentGuest[id] {
+		return
+	}
+	w.silentGuest[id] = true
+	w.guestDiedAt[id] = w.tick
+}
+
+// runningInstance is the first live instance actually executing work.
+//
+// It is deliberately RUNNING only, not Assigned. The guest-liveness mechanism is
+// scoped the same way and for the same reason: an instance that never reached
+// Running has never had a guest worth this question, and the assignment deadline
+// already owns that ground. Arming either guest fault against an Assigned
+// instance would be asking property (p) to bound a condition a different
+// deadline is responsible for.
+func (w *world) runningInstance() (string, bool) {
+	instances, err := w.store.LiveInstances(w.ctx)
+	if err != nil {
+		return "", false
+	}
+	for _, instance := range instances {
+		if instance.State == operations.StateRunning {
+			return instance.ID, true
+		}
+	}
+	return "", false
+}
+
+// armLatchedGuestFaults applies a guest fault the trace asked for before any
+// guest existed, at the first tick one does.
+func (w *world) armLatchedGuestFaults() {
+	if !w.silenceNextGuest && !w.saturateNextGuest {
+		return
+	}
+	id, found := w.runningInstance()
+	if !found {
+		return
+	}
+	if w.silenceNextGuest {
+		w.killGuest(id)
+		w.silenceNextGuest = false
+	}
+	if w.saturateNextGuest {
+		w.saturatedGuest[id] = true
+		w.saturateNextGuest = false
+	}
+}
+
 // drainAbortsNow mirrors lifecycle.DrainExecutor's execution-time re-checks
 // against the REAL durable evidence the production adapters read. It is
 // deliberately not answered from the simulator's own ground truth: the
@@ -1062,6 +1218,13 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 			return true
 		}
 	case operations.DrainPhaseStoppedRecovery, operations.DrainPhaseInactiveRecovery:
+		return false
+	case operations.DrainPhaseGuestUnresponsive:
+		// Already re-verified against a fresh probe in nextLifecycleState, ahead of
+		// the stop, exactly where executor.go performs it. Falling through to the
+		// runner-keyed question below would abort every one of these drains: GitHub
+		// calls a dead guest's runner busy for as long as its own grace timer runs,
+		// and that refusal is the premise rather than a refutation of it.
 		return false
 	case operations.DrainPhaseOccupancyBudget:
 		// The one phase with nothing to re-verify. Every other cause claims that no

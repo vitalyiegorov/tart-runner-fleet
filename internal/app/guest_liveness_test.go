@@ -43,12 +43,14 @@ func trackerPolicy() domain.GuestLivenessPolicy {
 
 func TestTheTrackerAccumulatesRefusalsAcrossTicks(t *testing.T) {
 	probe := &fakeGuestProbe{fallback: domain.GuestLivenessRefused}
-	tracker := &GuestLivenessTracker{Probe: probe, Policy: trackerPolicy()}
 	start := time.Date(2026, 8, 16, 17, 48, 26, 0, time.UTC)
+	clock := start
+	tracker := &GuestLivenessTracker{Probe: probe, Policy: trackerPolicy(), Now: func() time.Time { return clock }}
 
 	var state domain.GuestLivenessState
 	for tick := range 3 {
-		states := tracker.Observe(context.Background(), start.Add(time.Duration(tick)*30*time.Second), []string{"trf-xl-1"})
+		clock = start.Add(time.Duration(tick) * 30 * time.Second)
+		states := tracker.Observe(context.Background(), []string{"trf-xl-1"})
 		state = states["trf-xl-1"]
 	}
 	if state.Refusals != 3 || state.RefusedSince != start {
@@ -63,11 +65,14 @@ func TestTheTrackerAccumulatesRefusalsAcrossTicks(t *testing.T) {
 // cannot accumulate one accumulator per instance it has ever seen.
 func TestTheTrackerForgetsAnInstanceItIsNoLongerAskedAbout(t *testing.T) {
 	probe := &fakeGuestProbe{fallback: domain.GuestLivenessRefused}
-	tracker := &GuestLivenessTracker{Probe: probe, Policy: trackerPolicy()}
 	now := time.Now().UTC()
-	tracker.Observe(context.Background(), now, []string{"trf-xl-1", "trf-xl-2"})
-	tracker.Observe(context.Background(), now.Add(time.Minute), []string{"trf-xl-1"})
-	states := tracker.Observe(context.Background(), now.Add(2*time.Minute), []string{"trf-xl-1", "trf-xl-2"})
+	clock := now
+	tracker := &GuestLivenessTracker{Probe: probe, Policy: trackerPolicy(), Now: func() time.Time { return clock }}
+	tracker.Observe(context.Background(), []string{"trf-xl-1", "trf-xl-2"})
+	clock = now.Add(time.Minute)
+	tracker.Observe(context.Background(), []string{"trf-xl-1"})
+	clock = now.Add(2 * time.Minute)
+	states := tracker.Observe(context.Background(), []string{"trf-xl-1", "trf-xl-2"})
 	if states["trf-xl-1"].Refusals != 3 {
 		t.Fatalf("a continuously reported instance keeps its run; got %#v", states["trf-xl-1"])
 	}
@@ -92,7 +97,7 @@ func TestTheTrackerProbesNothingWithoutABoundOrAProbe(t *testing.T) {
 		{name: "nothing to probe", tracker: &GuestLivenessTracker{Probe: probe, Policy: trackerPolicy()}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if states := test.tracker.Observe(context.Background(), time.Now(), test.ids); len(states) != 0 {
+			if states := test.tracker.Observe(context.Background(), test.ids); len(states) != 0 {
 				t.Fatalf("%s must report nothing; got %#v", test.name, states)
 			}
 		})

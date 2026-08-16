@@ -155,6 +155,7 @@ refusal.
 | m | **Monotonic escalation.** A waiting demand's effective priority tier never falls. | Per-demand high-water mark of the effective tier, recomputed by the harness from the demand and the clock. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | n | **No tier starvation.** Escalation ends every tier-based pass-over within T ticks. | Per-demand count of ticks passed over by an aged overtaker of strictly higher effective tier, against T = declared tiers x escalation ticks + K. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | o | **Bounded teardown release.** Once a drain has passed deregistration, the instance releases its resource vector within a bounded number of ticks, whatever the guest does. | Per-instance ticks since the oracle first saw the instance in `deregistering` or `stopping` while still consuming host resources, against the release bound. Scoped past deregistration deliberately: a deregistration GitHub legitimately refuses is bounded by evidence rather than by a clock, and property (i) already watches it. | Enforced (added with [ADR 0039](0039-a-drain-that-cannot-stop-its-guest-escalates.md)) |
+| p | **Bounded dead-guest release.** No instance whose GUEST has stopped executing holds its resource vector beyond the probe window plus the escalation bound. | Per-instance ticks since the harness's own virtual instant of guest death — not since the fleet first suspected it — against the release bound. Scoped to instances still consuming host resources. Counting from the death rather than from the verdict is what keeps the oracle independent of the mechanism it judges: an oracle counting from the verdict would go green however long the noticing took, and the noticing is half the defect. | Enforced (added with [ADR 0040](0040-a-guest-that-stopped-answering-is-not-running.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the
@@ -436,7 +437,12 @@ into a smoke test, so the required event vocabulary is asserted directly.
   property is only worth having if it is red on the defect: once with the
   escalation ladder, where the vector comes back and the queued job runs, and
   once with the pre-#233 executor that asked the same way every time, where
-  property (o) fires and names the instance, the vector, and the hold.
+  property (o) fires and names the instance, the vector, and the hold. 2026-08-16
+  (ADR 0040) is pinned three times: once with the guest-liveness reclaim, where
+  the vector comes back on the fleet's own bound instead of GitHub's; once with
+  the bound unconfigured — the fleet of every day up to that date — where property
+  (p) fires; and once against a guest that is merely SATURATED, which must finish
+  its job untouched however many probes go unanswered.
 - `tests/simulation/findings_test.go` -- characterizations of findings 2 to 5.
 - `tests/simulation/oracle_reservation_test.go` -- the feasibility oracle asked
   directly about a held reservation: the tick of issue #216 it must stop
