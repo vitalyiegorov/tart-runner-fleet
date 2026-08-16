@@ -91,7 +91,8 @@ func applePlatform() platform {
 				StartTimeout: cfg.Timeouts.Boot, ConfirmationMaxAge: deletionConfirmationMaxAge,
 				MacOSVMPrefixes:      []string{"trf-" + strings.ToLower(cfg.MacOS.Builder.ID) + "-", "trf-" + strings.ToLower(cfg.MacOS.Maestro.ID) + "-"},
 				MacOSRootDiskOptions: cfg.MacOS.RootDiskOptions, MacOSSharedDirectoryPath: cfg.MacOS.SharedDirectoryPath,
-				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization}
+				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization,
+				LinuxSerialLogDirectory:   cfg.Linux.SerialLogDirectory}
 		},
 		// newReaper builds the discharge path's own backend port. It deliberately
 		// omits Confirmation: Reap does not consult GitHub runner evidence, because

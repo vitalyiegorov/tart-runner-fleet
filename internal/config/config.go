@@ -135,6 +135,16 @@ type Linux struct {
 	// hardware-accelerated VMs of their own (KVM for Android emulators).
 	// Apple's Virtualization framework only offers this to Linux guests.
 	NestedVirtualization bool
+	// SerialLogDirectory is where each Linux guest's serial console is written on
+	// the host, one file per instance. Empty is off, which is every node today and
+	// is byte-for-byte the argument vector the adapter has always passed.
+	//
+	// It exists for issue #236: a guest kernel panicked and the panic reached
+	// nobody. Turning it on is only half the fix — the base image must also name
+	// the console the VM actually exposes, which is a rebuild — and the flag is
+	// unverified against this fleet's tart build, so a node enables it after
+	// checking `tart run --help` (ADR 0040).
+	SerialLogDirectory string
 	// BaseImageCapabilities declares what BaseVM provides beyond the guest
 	// contract this codebase already checks. ADR 0034 §4 says the canonical label
 	// cannot lie about CPU, memory, OS, and architecture because all four are
@@ -501,6 +511,7 @@ type wireConfig struct {
 	// and would refuse the block outright.
 	Executor                  *wireExecutor `json:"executor,omitempty"`
 	LinuxNestedVirtualization bool          `json:"linuxNestedVirtualization,omitempty"`
+	LinuxSerialLogDirectory   string        `json:"linuxSerialLogDirectory,omitempty"`
 	MinFreeDiskGiB            int           `json:"minFreeDiskGb"`
 	MinAvailableMemoryMiB     int           `json:"minAvailableMemoryMb,omitempty"`
 	MaxSwapUsedMiB            int           `json:"maxSwapUsedMb,omitempty"`
@@ -563,6 +574,7 @@ func Decode(r io.Reader) (Config, error) {
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
 			NestedVirtualization:  w.LinuxNestedVirtualization,
+			SerialLogDirectory:    w.LinuxSerialLogDirectory,
 			BaseImageCapabilities: append([]string(nil), w.BaseImageCapabilities...)},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
 			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
@@ -678,6 +690,7 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.RootDiskOptions = cfg.MacOS.RootDiskOptions
 	wire.MacOSBurst.SharedDirectoryPath = cfg.MacOS.SharedDirectoryPath
 	wire.LinuxNestedVirtualization = cfg.Linux.NestedVirtualization
+	wire.LinuxSerialLogDirectory = cfg.Linux.SerialLogDirectory
 
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
