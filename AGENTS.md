@@ -83,6 +83,37 @@ The full copy-paste monitoring and incident procedure is in
 5. Never expose generic SQL, arbitrary process execution, or raw Tart/GitHub
    passthrough commands through `fleet`.
 
+## The three questions (owner directive, 2026-08-17)
+
+Before finishing any fix or improvement, answer all three explicitly in the PR:
+
+1. **Can I remove overengineering?** Prefer deleting a mechanism to adding one.
+   A rule stated once and enforced by a named predicate beats a rule re-derived
+   at every call site; a change that makes the system smaller is presumed better
+   than one that makes it larger until shown otherwise.
+2. **Can I reduce complexity?** If the diff adds a new pass, a new state, a new
+   knob, or a new axis, first show why the existing ones cannot express the
+   behavior. Repo history is explicit warning: four scheduler defects came from
+   one seam re-implementing feasibility one axis at a time instead of stating
+   one rule.
+3. **Can I test this?** A change the deterministic simulation cannot exercise is
+   a change the fleet cannot trust. If the harness cannot yet generate the
+   triggering state, extending the harness is part of the fix, not optional —
+   every incident in this repo that reached production did so through a blind
+   spot in the generator, and one "green no-op" shipped only because a clock
+   bug made a verdict unfirable. When a finding is refuted, label which side
+   was wrong precisely: property/oracle defect (the invariant judged wrongly),
+   world-model defect (the simulation reached an impossible state), or fleet
+   defect (production is wrong). Misattribution has already blinded the harness
+   to a live production wedge once (#216/#220/#226).
+
+Every unit of work is tracked: a GitHub issue states the problem and carries
+progress comments (the durable-progress convention — one commit per validated
+chunk, so any agent can resume from issues + commits after a session limit);
+an ADR records every decision that changes a rule, including decisions to
+retire or NOT to build something; docs (`README`, `USAGE`, `docs/`, this file)
+are updated in the same PR, never deferred.
+
 ## Required handoff evidence
 
 ```sh
