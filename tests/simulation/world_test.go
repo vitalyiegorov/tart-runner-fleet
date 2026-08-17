@@ -445,14 +445,36 @@ func (r simRecovery) JobActive(_ context.Context, instance operations.Instance) 
 type simGuestProbe struct{ world *world }
 
 func (p simGuestProbe) Probe(_ context.Context, name string) domain.GuestLiveness {
-	switch {
-	case p.world.silentGuest[name]:
+	return p.world.guestLiveness(name)
+}
+
+// guestLiveness is the simulated hypervisor's answer to `exec <instance> true`,
+// and it is the ONE place the harness decides what a guest is doing. Both the
+// probe port and the drain mirror read it, so they cannot disagree about a guest
+// the way they did before 2026-08-17.
+//
+// The powered-off case is the one that matters and the one that was missing. A VM
+// that is not running executes nothing, so the command cannot succeed; it fails
+// at once, against the control socket rather than against the probe's deadline,
+// and daemon.execGuestProbe classifies exactly that as Refused. Reporting such a
+// guest ALIVE is not a conservative approximation, it is the one answer the real
+// probe can never give, and it is load-bearing here: the guest-liveness reclaim
+// powers the guest off before it deregisters and CLEARS silentGuest when it does,
+// so a probe that read only that flag declared every reclaimed guest healthy one
+// tick after killing it. The drain then aborted back to Running holding a vector
+// domain.ConsumesHostResources had already released to a replacement spawn, which
+// is the conservation violation the nightly sweep reported on three arms.
+func (w *world) guestLiveness(name string) domain.GuestLiveness {
+	if w.silentGuest[name] {
 		return domain.GuestLivenessRefused
-	case p.world.saturatedGuest[name]:
-		return domain.GuestLivenessUnknown
-	default:
-		return domain.GuestLivenessAlive
 	}
+	if running, exists := w.vms[name]; !exists || !running {
+		return domain.GuestLivenessRefused
+	}
+	if w.saturatedGuest[name] {
+		return domain.GuestLivenessUnknown
+	}
+	return domain.GuestLivenessAlive
 }
 
 // simInstances is the durable instance reader with two substitutions, and they
@@ -991,15 +1013,29 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 			// and this is the one recovery premise a fresh observation CAN disprove: a
 			// guest that answers again is alive, whatever the accumulator said a tick
 			// ago, and the drain returns the instance to Running untouched.
-			if !w.silentGuest[instance.ID] {
+			//
+			// It asks the simulated hypervisor rather than the silent-guest flag,
+			// because the stop below clears that flag and a drain held here by a wedge
+			// re-enters this branch on the next tick. Reading the flag answered "alive"
+			// for a guest this very drain had already powered off, and aborted a
+			// reclaim whose vector was gone (2026-08-17 nightly). All three outcomes
+			// are honoured exactly as executor.go honours them: alive aborts,
+			// inconclusive fails the guard and retries, and only a refused transport
+			// may cut.
+			switch w.guestLiveness(instance.ID) {
+			case domain.GuestLivenessAlive:
 				w.drainAborts[instance.ID]++
 				return operations.StateRunning, true
+			case domain.GuestLivenessRefused:
+				// The premise holds, so the guest is powered off BEFORE deregistration,
+				// for the same reason the occupancy branch below does it: GitHub will go
+				// on calling this runner busy until its own grace timer expires.
+				delete(w.silentGuest, instance.ID)
+				w.stopOccupyingGuest(instance.ID)
+			default:
+				// A probe that established nothing is not permission to end a job.
+				return "", false
 			}
-			// The premise holds, so the guest is powered off BEFORE deregistration,
-			// for the same reason the occupancy branch below does it: GitHub will go
-			// on calling this runner busy until its own grace timer expires.
-			delete(w.silentGuest, instance.ID)
-			w.stopOccupyingGuest(instance.ID)
 		}
 		if instance.DrainPhase == operations.DrainPhaseOccupancyBudget {
 			// executor.go's occupancy branch stops the guest BEFORE it deregisters,

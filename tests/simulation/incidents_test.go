@@ -756,6 +756,89 @@ func TestASaturatedButAliveGuestIsNeverReclaimed(t *testing.T) {
 	}
 }
 
+// wedgedSilentGuestTrace is the 2026-08-17 nightly counterexample, and it is
+// silentGuestTrace plus one fact: the reclaim drain is WEDGED at its deregister
+// step for two ticks.
+//
+// That single extra tick is the entire trigger. The guest-liveness reclaim stops
+// the guest BEFORE it deregisters (ADR 0040), so the moment the stop lands the
+// instance is Draining with a powered-off VM — which is exactly the pair of facts
+// domain.ConsumesHostResources reads as "this one has given its vector back". The
+// scheduler is then free to spawn against the capacity, and does. A wedge holds
+// the drain in Draining across the next tick, so the phase branch is re-entered
+// with the guest already off, and whatever it decides there decides the fate of a
+// vector that has already been lent to somebody else.
+//
+// The nightly found this three times over on three different arms (TestSimFuzz
+// seed 96 at tick 190, TestSimFuzzBudgetedHost seed 33 at tick 260,
+// TestSimFuzzTieredPriority seed 499 at tick 136), each time as a conservation
+// violation four ticks after a silent_guest event. This is that shape, minimized.
+func wedgedSilentGuestTrace(cfg worldConfig) simTrace {
+	return simTrace{Seed: 20_260_817, Ticks: 120, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 12, Kind: eventSilentGuest, Count: 1},
+		// Armed on the tick the reclaim's drain operation is claimed, so the wedge
+		// lands on the guest-liveness drain itself rather than on a later one.
+		{Tick: 13, Kind: eventWedgedDrain, Count: 2},
+		{Tick: 14, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		{Tick: 15, Kind: eventStopArrivals},
+	}}
+}
+
+// TestAStoppedGuestIsNeverProbedBackToLife pins the defect the 2026-08-17 nightly
+// found: a guest-liveness reclaim that has already powered its guest off must not
+// then abort, because its vector is no longer its own to take back.
+//
+// The mechanism is a disagreement about what a powered-off guest answers. The
+// production probe runs `exec <instance> true` and classifies an immediate
+// failure as Refused (daemon.execGuestProbe) — a VM that is not running executes
+// nothing, so the premise of the reclaim is if anything MORE established after
+// the stop than before it. The production executor is built on that: the only
+// abort in the guest-unresponsive phase sits ahead of the stop, and the one abort
+// that could follow a stop is explicitly withheld from this phase
+// (lifecycle.stopsItsGuestFirst). Nothing in the fleet can return a
+// stopped-guest instance to Running.
+//
+// The harness could, and did. It answered the probe from the silent-guest flag
+// alone, and the reclaim's own stop CLEARS that flag — so one tick after the stop
+// the guest read as alive, the drain aborted, and the instance came back to
+// Running holding a full vector the scheduler had already committed to a
+// replacement. That is an oracle defect, not a fleet defect, and it is asserted
+// here from both sides: the fleet must settle, and no drain may abort.
+func TestAStoppedGuestIsNeverProbedBackToLife(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, wedgedSilentGuestTrace(cfg))
+	defer w.close()
+	findings := w.run()
+	if len(findings) > 0 {
+		t.Fatalf("a wedged guest-death reclaim must violate nothing: %s", findings[0])
+	}
+	// The trace really did reach the incident state: a guest died, its reclaim was
+	// planned, and the drain really was held across a tick after its stop. A green
+	// run over a trace that never wedged anything would prove nothing.
+	if len(w.guestDiedAt) != 1 {
+		t.Fatalf("no guest ever stopped executing: %v", w.guestDiedAt)
+	}
+	reclaimed := w.guestDeathReclaims()
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected exactly one guest-death reclaim, got %v", reclaimed)
+	}
+	if w.wedgedDrain[reclaimed[0]] == 0 && len(w.wedgedDrain) == 0 {
+		t.Fatalf("the reclaim drain was never wedged, so the defect's trigger never fired: %v", w.wedgedDrain)
+	}
+	// The heart of it. A stopped guest cannot answer a probe, so this drain has
+	// nothing left that could disprove its premise and must never abort.
+	if aborts := w.drainAborts[reclaimed[0]]; aborts != 0 {
+		t.Fatalf("the reclaim of %s aborted %d times after powering its own guest off; "+
+			"a stopped guest must never read as alive", reclaimed[0], aborts)
+	}
+	// And the vector really came back rather than being re-taken by the corpse.
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+}
+
 // guestDeathReclaims names every instance a planned drain reclaimed on the
 // guest-liveness premise. It reads the scheduler's own operations, so a test can
 // assert WHICH recovery acted rather than merely that the instance went away.
