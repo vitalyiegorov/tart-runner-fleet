@@ -137,3 +137,23 @@ func TestGuestSilenceRowCarriesTheBoundAndTheJob(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectiveRunnerVersionCheckTreatsAbsenceAsAPass is the fleet.v1 handoff
+// rule for the runner-version floor: a daemon that predates the check published
+// no judgement, and the CLI must not invent a compliance answer it never gave.
+func TestEffectiveRunnerVersionCheckTreatsAbsenceAsAPass(t *testing.T) {
+	var status Status
+	absent := status.EffectiveRunnerVersionCheck()
+	if !absent.OK || len(absent.Reasons) != 0 {
+		t.Fatalf("an unpublished check is an unspecified pass, got %+v", absent)
+	}
+	if absent.Reasons == nil {
+		t.Fatal("reasons must render as an empty array, never as null")
+	}
+	reason := "linux base image carries actions/runner 2.335.1, below the 2.336.0 floor"
+	status.RunnerVersionCheck = &Check{Reasons: []string{reason}}
+	published := status.EffectiveRunnerVersionCheck()
+	if published.OK || len(published.Reasons) != 1 || published.Reasons[0] != reason {
+		t.Fatalf("a published judgement must pass through untouched, got %+v", published)
+	}
+}

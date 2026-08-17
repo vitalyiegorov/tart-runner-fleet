@@ -92,6 +92,7 @@ func TestSetRunnerImagesRejectsAnUnreadableRow(t *testing.T) {
 			{Platform: "linux", VM: "two", Version: "2.336.0", Floor: "2.329.0"}},
 		"unbounded reason": {{Platform: "linux", VM: "vm", Version: "2.336.0", Floor: "2.329.0",
 			Reason: strings.Repeat("a", 4096)}},
+		"unreadable version": {{Platform: "linux", VM: "vm", Version: "2.336.0 or so", Floor: "2.329.0"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			health := runnerVersionHealth(t)
@@ -102,5 +103,62 @@ func TestSetRunnerImagesRejectsAnUnreadableRow(t *testing.T) {
 				t.Fatalf("want a refused set to publish nothing, got %+v", rows)
 			}
 		})
+	}
+}
+
+// TestRunnerImagesReachTheStatusDocumentAndTheMetrics is the observability half:
+// the acceptance criterion of issue #206 is that the version in service can be
+// read without SSH-ing into a guest, so it must survive the projection into the
+// versioned DTO and the bounded metrics endpoint.
+func TestRunnerImagesReachTheStatusDocumentAndTheMetrics(t *testing.T) {
+	const reason = `linux base image "linux-runner-base-go" carries actions/runner 2.335.1, below the 2.336.0 floor`
+	health := runnerVersionHealth(t)
+	if err := health.SetRunnerImages([]RunnerImageMetric{
+		{Platform: "linux", VM: "linux-runner-base-go", Version: "2.335.1", Floor: "2.336.0", Reason: reason},
+		{Platform: "macOS", VM: "macos-tartelet-base-go", Version: "2.336.0", Floor: "2.336.0"},
+	}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, health.RunnerVersions())
+	rows := envelope.Data.RunnerImages
+	if len(rows) != 2 || rows[0].Version != "2.335.1" || !rows[0].BelowFloor || rows[0].Reason != reason {
+		t.Fatalf("the behind image must reach the document intact: %#v", rows)
+	}
+	if rows[1].BelowFloor || rows[1].Reason != "" {
+		t.Fatalf("a current image is not below the floor: %#v", rows[1])
+	}
+	if check := envelope.Data.EffectiveRunnerVersionCheck(); check.OK || len(check.Reasons) != 1 {
+		t.Fatalf("the published check must carry the finding: %+v", check)
+	}
+
+	// The verdict is the metric; the version strings are deliberately not labels.
+	metrics := renderTestMetrics(t, health)
+	for _, want := range []string{
+		`fleet_runner_image_below_floor{platform="linux"} 1`,
+		`fleet_runner_image_below_floor{platform="macOS"} 0`,
+	} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics missing %q:\n%s", want, metrics)
+		}
+	}
+	if strings.Contains(metrics, "2.335.1") {
+		t.Fatalf("a version must never become a label; it churns the series on every rebuild:\n%s", metrics)
+	}
+}
+
+// TestRunnerImagesAreAbsentUntilPublished keeps the handoff shape: a daemon that
+// recorded nothing emits exactly the document and the metrics older clients saw.
+func TestRunnerImagesAreAbsentUntilPublished(t *testing.T) {
+	health := runnerVersionHealth(t)
+	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, health.RunnerVersions())
+	if envelope.Data.RunnerImages != nil {
+		t.Fatalf("nil must stay nil; got %#v", envelope.Data.RunnerImages)
+	}
+	if strings.Contains(renderTestMetrics(t, health), "fleet_runner_image_below_floor") {
+		t.Fatal("a daemon with nothing recorded must emit no runner-image series")
 	}
 }

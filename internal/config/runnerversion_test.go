@@ -212,3 +212,33 @@ func TestRunnerImageDeclarationSurvivesClone(t *testing.T) {
 		t.Fatalf("clone lost the declaration: %+v", clone)
 	}
 }
+
+// TestCompareRunnerVersionsOrdersReleases pins the ordering the floor rule rests
+// on, including the numeric case a string comparison gets wrong: 2.9.0 is older
+// than 2.10.0, and `actions/runner` has already crossed that boundary twice.
+func TestCompareRunnerVersionsOrdersReleases(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		left, right string
+		want        int
+	}{
+		"equal":                 {"2.336.0", "2.336.0", 0},
+		"patch older":           {"2.336.0", "2.336.1", -1},
+		"patch newer":           {"2.336.1", "2.336.0", 1},
+		"minor older":           {"2.329.0", "2.336.0", -1},
+		"minor is not lexical":  {"2.9.0", "2.10.0", -1},
+		"major newer":           {"3.0.0", "2.336.0", 1},
+		"leading zeros are not": {"2.336.00", "2.336.0", 0},
+		// The grammar admits neither of the next two, so they can only mean the
+		// grammar and the comparison have drifted apart. Both order the value
+		// LAST, which fails the floor rather than silently clearing it.
+		"unparsable component": {"2.x.0", "2.336.0", -1},
+		"short":                {"2.336", "2.336.0", -1},
+		"long":                 {"2.336.0.1", "2.336.0", 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := compareRunnerVersions(testCase.left, testCase.right); got != testCase.want {
+				t.Fatalf("compare(%q, %q) = %d, want %d", testCase.left, testCase.right, got, testCase.want)
+			}
+		})
+	}
+}
