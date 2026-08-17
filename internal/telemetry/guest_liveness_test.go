@@ -147,7 +147,7 @@ func TestTheStatusDocumentNamesTheJobThatDiedWithTheGuest(t *testing.T) {
 	}
 	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
 		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
-		health.GuestLiveness())
+		health.GuestLiveness(), health.RunnerVersions())
 	rows := envelope.Data.GuestSilences
 	if len(rows) != 1 {
 		t.Fatalf("guest silences = %#v", rows)
@@ -166,7 +166,7 @@ func TestTheStatusDocumentNamesTheJobThatDiedWithTheGuest(t *testing.T) {
 	}
 	envelope = statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
 		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
-		health.GuestLiveness())
+		health.GuestLiveness(), health.RunnerVersions())
 	if envelope.Data.GuestSilences != nil {
 		t.Fatalf("nil must stay nil; got %#v", envelope.Data.GuestSilences)
 	}
