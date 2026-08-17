@@ -648,6 +648,29 @@ and must match the node's `baseImageCapabilities` exactly. They are compared for
 string equality across two machines' configuration files, so a spelling that
 differs is a capability that does not exist.
 
+### Then declare the runner version this image carries
+
+`RUNNER_VERSION` above is whatever `actions/runner` release was newest at build
+time, and the guest will never change it: every clone registers from a JIT
+configuration with `DisableUpdate` set. GitHub enforces a minimum version and a
+30-day rolling window on top of it ([ADR 0041](adr/0041-a-base-image-declares-its-runner-version.md),
+issue #206), so this number has an expiry date and the fleet has to know it.
+
+```sh
+"$TART" exec "$BUILD" bash -lc 'grep runner_version "$HOME/.ci-base-manifest"'
+```
+
+Put that value in this node's configuration and nowhere else:
+
+```json
+{ "baseVm": "linux-runner-base-go", "baseImageRunnerVersion": "2.336.0" }
+```
+
+`fleet doctor` then reports it on every run, and fails the `runner version` check
+if it is below `runnerVersionFloor`. **Skipping this step does not produce a
+quiet pass — an image that declares no version fails the check**, because an
+unvouched-for image is exactly what this was built to stop.
+
 ### Then stop the guest
 
 `tart exec` runs with a `PATH` that has no `/sbin`, so `shutdown` must be

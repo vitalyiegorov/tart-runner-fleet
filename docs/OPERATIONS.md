@@ -788,6 +788,73 @@ machine executing it stopped minutes before the fleet said so. The remedy is on
 the consumer side — a `--privileged` container can panic the kernel it shares,
 and the fleet cannot take that away while granting privileged at all.
 
+### A base image whose runner GitHub will refuse
+
+`fleet doctor` reports `FAIL  runner version` when a base image carries an
+`actions/runner` release below the configured floor, or when an image declares no
+version at all. ADR 0041, issue #206.
+
+This is the only check here whose failure is **not** something the fleet did
+wrong and **not** something the fleet can fix. GitHub enforces a minimum runner
+version: 2.329.0 to register at all, and every new release must be installed
+within 30 days of its publication. Brownouts on github.com began 24 Aug 2026;
+enforcement is permanent from 25 Sep 2026. Every guest here registers from a JIT
+configuration with `DisableUpdate` set, so **no runner will ever upgrade itself** —
+the version sealed into the image is the version that runs jobs until the image
+is rebuilt.
+
+A blocked registration is silent by construction: jobs queue, nodes idle, nothing
+turns red. It looks exactly like a quiet day.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "runner version")'
+fleet status --endpoint "$ENDPOINT" --output json | jq '.data.runnerImages'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `platform` | `linux` or `macOS`. A node has one image per platform. |
+| `vm` | The base image that platform boots. |
+| `version` | The `actions/runner` release the image carries, as declared. Empty means nobody has vouched for it. |
+| `floor` | The version it is judged against: `runnerVersionFloor`, or 2.329.0. |
+| `belowFloor` | The verdict. |
+
+The check passes loudly as well as failing loudly: a passing `runner version`
+check still prints what each image carries, because the point is that the version
+in service is readable without SSH-ing into a guest.
+
+**To find out what an image really carries** — the declaration is the operator's
+word and a rebuild can invalidate it:
+
+```sh
+# Linux, from any live clone (the manifest and the binary must agree):
+tart exec "$INSTANCE" bash -lc 'cat ~/.ci-base-manifest; ~/actions-runner/bin/Runner.Listener --version'
+
+# macOS, from a base image that is not running, without booting it:
+hdiutil attach -readonly -nomount ~/.tart/vms/"$IMAGE"/disk.img   # note the APFS Data volume
+diskutil mount -mountPoint /tmp/img readOnly diskNsM
+python3 -c 'import json;print(json.load(open("/tmp/img/Users/admin/actions-runner/bin/Runner.Listener.deps.json"))["libraries"])' | tr , '\n' | grep Runner.Listener
+diskutil unmount /tmp/img && hdiutil detach diskN
+```
+
+**When it fires, the remedy is a rebuild, and only a rebuild.** Refresh the runner
+payload per [`docs/LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md) or
+[`docs/BASE_IMAGE.md`](BASE_IMAGE.md), update `runner_version=` in the image's
+`$HOME/.ci-base-manifest`, then update `baseImageRunnerVersion` in that node's
+configuration to what was actually sealed. There is no runtime fix and no
+restart that helps.
+
+**Raising the floor is an operator action, not an automatic one.** When a new
+`actions/runner` release ships, a 30-day clock starts; set `runnerVersionFloor`
+to the new release on every node so the check goes red *before* GitHub does.
+Nothing in the fleet watches GitHub's release feed — the check makes staleness
+visible, it does not make it self-correcting.
+
+**A daemon older than this check publishes no `runnerVersionCheck` at all**, and
+that renders as a pass with the detail `not reported by this daemon`. That is a
+statement about the daemon, not about the images.
+
 ### A drain that is not progressing, and a guest that will not stop
 
 `fleet doctor` reports `FAIL  drain progress` when a durable operation has failed

@@ -84,15 +84,23 @@ fi
 # the smoke test proves the shipped configuration boots rather than a bespoke one
 # written to make the assertion pass.
 #
-# One key is removed, and only one: `hostBudget`. It is a declaration about ONE
-# specific machine — the example states the live Mac mini's 10 cores and
-# 23552 MiB — and `app.budgetExceedsHost` fails the host observation closed when
-# the machine cannot honour it (issue #136). That is correct behaviour, and it
+# One key is removed and two are added, and no others. First the removal:
+# `hostBudget` is a declaration about ONE specific machine — the example states
+# the live Mac mini's 10 cores and 23552 MiB — and `app.budgetExceedsHost` fails
+# the host observation closed when the machine cannot honour it (issue #136). That is correct behaviour, and it
 # is what a node claiming capacity it does not have deserves; it just means the
 # example's budget is a false claim on every other machine, including a two-core
 # CI guest. An unset budget imposes no bound and is a documented byte-for-byte
 # no-op, so removing it leaves every other guard, profile, and target exactly as
 # shipped.
+#
+# The additions are `baseImageRunnerVersion` on each of the two images. The
+# shipped example deliberately declares neither — a template that asserted a
+# version its reader's image may not carry would be a lie baked into every fresh
+# install, and ADR 0041 fails an undeclared image on purpose — so a smoke run has
+# to state one for the images it pretends to have, exactly as a real node states
+# what its own build sealed. Nothing here boots a guest, so the value is a
+# stand-in and is marked as such.
 python3 - "config/fleet.example.json" "$work/fleet.json" <<'PY'
 import json
 import sys
@@ -100,9 +108,13 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     config = json.load(handle)
 removed = config.pop("hostBudget", None)
+declared = "2.336.0"
+config["baseImageRunnerVersion"] = declared
+config["macosBurst"]["baseImageRunnerVersion"] = declared
 with open(sys.argv[2], "w", encoding="utf-8") as handle:
     json.dump(config, handle, indent=2)
-print(f"smoke configuration: {sys.argv[1]} without hostBudget={removed!r}")
+print(f"smoke configuration: {sys.argv[1]} without hostBudget={removed!r}, "
+      f"with a stand-in baseImageRunnerVersion={declared}")
 PY
 "$binary" config validate "$work/fleet.json"
 

@@ -517,6 +517,15 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 
 	reporter := newFailureReporter(os.Stderr, d.now)
 	reporter.counter = health
+	// What runner version each base image carries is a fact about the
+	// configuration this process started with, and configuration does not change
+	// without a restart, so it is published once rather than recomputed on every
+	// tick. A refusal is said out loud: an unpublished set renders as "no image is
+	// behind", which is precisely the silence issue #206 exists to remove.
+	if err := health.SetRunnerImages(runnerImages(cfg)); err != nil {
+		reporter.logger.Warn("runner image versions were refused, so this node cannot judge its own "+
+			"brownout compliance", "error", err, "linuxBaseVm", cfg.Linux.BaseVM, "macosBaseVm", cfg.MacOS.BaseVM)
+	}
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}
@@ -696,6 +705,21 @@ func profileDiskFloors(cfg config.Config) map[domain.ProfileID]int {
 // the scale set it was spawned for, and a profile may be exposed by more than
 // one scope, so the union across every scale set routed to it is both the
 // conservative answer and the only one derivable at this point.
+// runnerImages projects each base image this node boots into the telemetry DTO,
+// carrying the verdict internal/config computed rather than a second opinion.
+// The floor rule is stated once, as config.RunnerImage.Reason, so the metric,
+// the `fleet doctor` finding and the configuration file cannot disagree about
+// which image GitHub is about to stop accepting registrations from.
+func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
+	declared := cfg.RunnerImages()
+	images := make([]telemetry.RunnerImageMetric, 0, len(declared))
+	for _, image := range declared {
+		images = append(images, telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM,
+			Version: image.Version, Floor: image.Floor, Reason: image.Reason()})
+	}
+	return images
+}
+
 func profileCapabilities(cfg config.Config) map[domain.ProfileID][]string {
 	required := cfg.ProfileRequiredCapabilities()
 	capabilities := make(map[domain.ProfileID][]string, len(required))

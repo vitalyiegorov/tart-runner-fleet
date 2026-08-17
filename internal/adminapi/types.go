@@ -57,8 +57,17 @@ type Status struct {
 	// job that dies with it. An older daemon asked its guests nothing and published
 	// nothing, which is why EffectiveGuestLiveness exists — and why issue #236's
 	// eight production deaths left no fleet artifact at all.
-	GuestSilences      []GuestSilence   `json:"guestSilences,omitempty"`
-	GuestLivenessCheck *Check           `json:"guestLivenessCheck,omitempty"`
+	GuestSilences      []GuestSilence `json:"guestSilences,omitempty"`
+	GuestLivenessCheck *Check         `json:"guestLivenessCheck,omitempty"`
+	// RunnerImages is an additive fleet.v1 field: the `actions/runner` version
+	// each of this node's guest images carries, and the floor GitHub's minimum
+	// version enforcement judges it against. It exists so the version in service
+	// is readable without SSH-ing into a guest — until issue #206 the fleet could
+	// not answer the question at all, on either node, and a runner too old to
+	// register looks exactly like a healthy idle fleet. An older daemon published
+	// none of it, which is why EffectiveRunnerVersionCheck exists.
+	RunnerImages       []RunnerImage    `json:"runnerImages,omitempty"`
+	RunnerVersionCheck *Check           `json:"runnerVersionCheck,omitempty"`
 	Queues             []Queue          `json:"queues"`
 	Instances          []Instance       `json:"instances"`
 	ScopeQueues        []ScopeQueue     `json:"scopeQueues,omitempty"`
@@ -199,6 +208,42 @@ func (s Status) EffectiveProgress() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.ProgressCheck
+}
+
+// EffectiveRunnerVersionCheck is the handoff accessor for the runner-version
+// floor judgement. Its absence means the daemon predates issue #206 and never
+// looked, which is reported as an unspecified pass rather than as a measured
+// "every image is current" — the CLI must not invent a compliance answer an old
+// daemon never gave.
+//
+// Note the deliberate asymmetry with the check itself: absence of the whole
+// FIELD is a pass, because that is a version-handoff fact about the daemon.
+// Absence of a declared VERSION on a published row is a failure, because that is
+// a fact about an image nobody can vouch for.
+func (s Status) EffectiveRunnerVersionCheck() Check {
+	if s.RunnerVersionCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.RunnerVersionCheck
+}
+
+// RunnerImage is one guest image's `actions/runner` version and the floor it is
+// judged against. Platform is a closed vocabulary (`linux`, `macOS`): a node has
+// exactly one image per platform, and each answers only for the profiles it
+// boots.
+type RunnerImage struct {
+	Platform string `json:"platform"`
+	VM       string `json:"vm"`
+	// Version is empty when the node declares none for this image, which is a
+	// failing state and carries a Reason.
+	Version string `json:"version,omitempty"`
+	Floor   string `json:"floor"`
+	// BelowFloor is the verdict, published beside the two versions because a
+	// reader comparing them by eye is a reader who will eventually compare 2.9.0
+	// against 2.10.0 and be wrong.
+	BelowFloor bool `json:"belowFloor"`
+	// Reason is empty when the image is compliant.
+	Reason string `json:"reason,omitempty"`
 }
 
 // EffectiveReservationCheck is the same handoff accessor for the reservation

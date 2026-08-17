@@ -155,6 +155,11 @@ type Linux struct {
 	// repository — so it is declared, exactly like the shared-label fact beside
 	// it. Absent is a byte-for-byte no-op.
 	BaseImageCapabilities []string
+	// BaseImageRunnerVersion is the `actions/runner` version BaseVM carries. It
+	// is declared for the same reason the capabilities beside it are: the daemon
+	// never opens the image, and the image build scripts seal whatever release
+	// was newest at build time and then never touch it again. See ADR 0041.
+	BaseImageRunnerVersion string
 }
 
 // ExecutorBackend names the execution technology of this node. It is empty on
@@ -228,6 +233,10 @@ type MacOS struct {
 	// Linux one. See Linux.BaseImageCapabilities for why it is declared rather
 	// than inferred.
 	BaseImageCapabilities []string
+	// BaseImageRunnerVersion is the `actions/runner` version the macOS BaseVM
+	// carries. A node's two images are built by two different procedures and have
+	// already drifted a whole release apart, so each declares its own.
+	BaseImageRunnerVersion string
 }
 
 type Timeouts struct {
@@ -462,14 +471,22 @@ type Config struct {
 	// The zero value means unset and imposes no bound, which is today's behavior
 	// byte-for-byte: the envelope stays the physical machine (or the configured
 	// constant under the static model). Rollback is removing the setting.
-	HostBudget      Resources
-	Linux           Linux
-	Executor        Executor
-	MacOS           MacOS
-	GitHub          GitHub
-	Timeouts        Timeouts
-	Guards          Guards
-	SessionRecovery SessionRecovery
+	HostBudget Resources
+	// RunnerVersionFloor overrides the `actions/runner` version this node's base
+	// images are judged against. Empty means DefaultRunnerVersionFloor, which is
+	// what GitHub's minimum version enforcement announcement states. It is an
+	// override rather than a constant alone because GitHub also requires each new
+	// release be installed within 30 days of publication, so the number an
+	// operator must act on moves at least monthly and must be raisable without
+	// cutting a fleet release. See ADR 0041.
+	RunnerVersionFloor string
+	Linux              Linux
+	Executor           Executor
+	MacOS              MacOS
+	GitHub             GitHub
+	Timeouts           Timeouts
+	Guards             Guards
+	SessionRecovery    SessionRecovery
 	// GuestLiveness bounds how long an instance whose guest has stopped answering
 	// may go on holding its vector (ADR 0040). An absent block is the shipped
 	// default bound, not an absent one.
@@ -495,11 +512,16 @@ type wireConfig struct {
 	// encodes no key at all, which is what keeps this feature a byte-for-byte
 	// no-op for a release older than it decoding with DisallowUnknownFields.
 	BaseImageCapabilities []string `json:"baseImageCapabilities,omitempty"`
-	VMPrefix              string   `json:"vmPrefix"`
-	PollSeconds           int      `json:"pollSeconds"`
-	MaxLinuxWhenMacOSIdle int      `json:"maxLinuxWhenMacosIdle"`
-	MaxLinuxCPU           int      `json:"maxLinuxCpu"`
-	MaxLinuxMemoryMiB     int      `json:"maxLinuxMemoryMb"`
+	// BaseImageRunnerVersion and RunnerVersionFloor are omitted when empty for
+	// the same reason, so a node that declares neither encodes exactly the file
+	// it encoded before issue #206.
+	BaseImageRunnerVersion string `json:"baseImageRunnerVersion,omitempty"`
+	RunnerVersionFloor     string `json:"runnerVersionFloor,omitempty"`
+	VMPrefix               string `json:"vmPrefix"`
+	PollSeconds            int    `json:"pollSeconds"`
+	MaxLinuxWhenMacOSIdle  int    `json:"maxLinuxWhenMacosIdle"`
+	MaxLinuxCPU            int    `json:"maxLinuxCpu"`
+	MaxLinuxMemoryMiB      int    `json:"maxLinuxMemoryMb"`
 	// HostBudget is a pointer so an unset budget is absent from the encoded file
 	// rather than present as a zero object: a release older than this setting
 	// decodes with DisallowUnknownFields and would refuse the key outright.
@@ -541,6 +563,7 @@ type wireConfig struct {
 		MixedProfileCohorts    bool                 `json:"mixedProfileCohorts,omitempty"`
 		BaseVM                 string               `json:"baseVm"`
 		BaseImageCapabilities  []string             `json:"baseImageCapabilities,omitempty"`
+		BaseImageRunnerVersion string               `json:"baseImageRunnerVersion,omitempty"`
 		VMPrefix               string               `json:"vmPrefix"`
 		Builder                Profile              `json:"builder"`
 		Maestro                Profile              `json:"maestro"`
@@ -571,18 +594,22 @@ func Decode(r io.Reader) (Config, error) {
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		HostBudget:     hostBudget(w.HostBudget),
 		Executor:       decodeExecutor(w.Executor),
+
+		RunnerVersionFloor: w.RunnerVersionFloor,
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
-			NestedVirtualization:  w.LinuxNestedVirtualization,
-			SerialLogDirectory:    w.LinuxSerialLogDirectory,
-			BaseImageCapabilities: append([]string(nil), w.BaseImageCapabilities...)},
+			NestedVirtualization:   w.LinuxNestedVirtualization,
+			SerialLogDirectory:     w.LinuxSerialLogDirectory,
+			BaseImageCapabilities:  append([]string(nil), w.BaseImageCapabilities...),
+			BaseImageRunnerVersion: w.BaseImageRunnerVersion},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
 			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
 			BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
-			NestedVirtualization:  w.MacOSBurst.NestedVirtualization,
-			BaseImageCapabilities: append([]string(nil), w.MacOSBurst.BaseImageCapabilities...)},
+			NestedVirtualization:   w.MacOSBurst.NestedVirtualization,
+			BaseImageCapabilities:  append([]string(nil), w.MacOSBurst.BaseImageCapabilities...),
+			BaseImageRunnerVersion: w.MacOSBurst.BaseImageRunnerVersion},
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
@@ -648,6 +675,8 @@ func Encode(w io.Writer, cfg Config) error {
 		PollSeconds: pollSeconds, MaxLinuxWhenMacOSIdle: cfg.Linux.MaxInstances,
 		MaxLinuxCPU: cfg.Linux.Capacity.CPU, MaxLinuxMemoryMiB: cfg.Linux.Capacity.MemoryMiB,
 		BaseImageCapabilities:   append([]string(nil), cfg.Linux.BaseImageCapabilities...),
+		BaseImageRunnerVersion:  cfg.Linux.BaseImageRunnerVersion,
+		RunnerVersionFloor:      cfg.RunnerVersionFloor,
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
@@ -684,6 +713,7 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.MixedProfileCohorts = cfg.MacOS.MixedProfileCohorts
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
 	wire.MacOSBurst.BaseImageCapabilities = append([]string(nil), cfg.MacOS.BaseImageCapabilities...)
+	wire.MacOSBurst.BaseImageRunnerVersion = cfg.MacOS.BaseImageRunnerVersion
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
@@ -1052,6 +1082,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateCapabilities(); err != nil {
+		return err
+	}
+	if err := c.validateRunnerVersions(); err != nil {
 		return err
 	}
 	// Label derivation runs last so a broken vector is reported as the vector

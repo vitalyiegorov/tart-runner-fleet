@@ -64,6 +64,42 @@ func TestNodeConfigurationsAgreeAcrossTheFleet(t *testing.T) {
 	}
 }
 
+// TestEveryNodeDeclaresTheRunnerVersionItsImagesCarry is the repository half of
+// the runner-version floor (ADR 0041). It asserts only that every image a node
+// boots has a declared, orderable `actions/runner` version — not that the
+// version clears the floor.
+//
+// The distinction is deliberate and is the whole reason this is not a stricter
+// test. Whether an image clears the floor is a LIVE condition: GitHub requires
+// each new release be installed within 30 days of publication, so a declaration
+// that is compliant this week is non-compliant the next without anyone touching
+// this repository. That verdict belongs to `fleet doctor`, which reads the node
+// that is actually running. Asserting it here instead would turn "an image needs
+// rebuilding" into "every pull request is blocked", which is a worse failure than
+// the one being prevented.
+//
+// What a repository CAN own is that nobody ships a node config that declines to
+// answer the question. Until issue #206 neither node answered it, and neither
+// did anything else.
+func TestEveryNodeDeclaresTheRunnerVersionItsImagesCarry(t *testing.T) {
+	nodes := loadNodeConfigs(t, filepath.Join(documentationRoot(t), "config", "nodes"))
+	if len(nodes) == 0 {
+		t.Skip("config/nodes holds no node configurations yet")
+	}
+	for _, node := range nodes {
+		images := node.Config.RunnerImages()
+		if len(images) == 0 {
+			t.Fatalf("%s boots no guest image at all", node.Node)
+		}
+		for _, image := range images {
+			if image.Version == "" {
+				t.Errorf("%s: %s base image %q declares no baseImageRunnerVersion, so the fleet cannot "+
+					"tell whether GitHub will still accept its registrations", node.Node, image.Platform, image.VM)
+			}
+		}
+	}
+}
+
 // TestSharedLabelWithUnequalCapabilitiesIsRejected replays the 2026-08-04
 // incident as configuration.
 //

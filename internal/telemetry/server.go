@@ -124,7 +124,8 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 		}
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
 		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(),
-			health.QueueHealth(), health.Occupancy(), health.Reservation(), health.Progress(), health.GuestLiveness())
+			health.QueueHealth(), health.Occupancy(), health.Reservation(), health.Progress(), health.GuestLiveness(),
+			health.RunnerVersions())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
@@ -198,7 +199,8 @@ func queueTiers(snapshot Snapshot, rows []QueueTierMetrics) []adminapi.QueueTier
 }
 
 func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
-	live, ready, queueSLO, occupancy, reservation, progress, guestLiveness HealthResult) adminapi.StatusEnvelope {
+	live, ready, queueSLO, occupancy, reservation, progress, guestLiveness, runnerVersions HealthResult,
+) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
 		metric := snapshot.Queues[profile]
@@ -239,6 +241,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	reservationCheck := adminapi.Check{OK: reservation.OK, Reasons: nonNilStrings(reservation.Reasons)}
 	progressCheck := adminapi.Check{OK: progress.OK, Reasons: nonNilStrings(progress.Reasons)}
 	guestLivenessCheck := adminapi.Check{OK: guestLiveness.OK, Reasons: nonNilStrings(guestLiveness.Reasons)}
+	runnerVersionCheck := adminapi.Check{OK: runnerVersions.OK, Reasons: nonNilStrings(runnerVersions.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -250,6 +253,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
 			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
+			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -296,6 +300,21 @@ func guestSilenceRows(snapshot Snapshot) []adminapi.GuestSilence {
 			SilenceSeconds: metric.Silence.Seconds(), RequiredRefusals: metric.RequiredRefusals,
 			WindowSeconds: metric.Window.Seconds(), Unresponsive: metric.Unresponsive,
 			RunID: metric.RunID, JobID: metric.JobID})
+	}
+	return rows
+}
+
+// runnerImageRows projects each base image's declared runner version into the
+// versioned DTO. Nil stays nil so a daemon that has recorded nothing emits
+// exactly the document older clients already saw.
+func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
+	if len(snapshot.RunnerImages) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.RunnerImage, 0, len(snapshot.RunnerImages))
+	for _, metric := range snapshot.RunnerImages {
+		rows = append(rows, adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM,
+			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
 	}
 	return rows
 }
@@ -515,6 +534,20 @@ func renderMetrics(snapshot Snapshot) string {
 		for _, metric := range snapshot.GuestSilences {
 			fmt.Fprintf(&output, "fleet_instance_guest_unresponsive{profile=%s,instance=%s} %d\n",
 				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), boolGauge(metric.Unresponsive))
+		}
+	}
+	if len(snapshot.RunnerImages) > 0 {
+		// One series, one label, at most two rows per node. The version strings are
+		// deliberately NOT labels: a version changes on every image rebuild, which
+		// would churn the series and make a query for "is this node behind" depend
+		// on knowing what the answer used to be. The verdict is the metric; the
+		// versions travel in the status document, which is where an operator who
+		// needs to know WHICH release to install reads them.
+		writeHelpType("fleet_runner_image_below_floor",
+			"1 when a base image's actions/runner version is below the enforcement floor, or is not declared at all.", "gauge")
+		for _, metric := range snapshot.RunnerImages {
+			fmt.Fprintf(&output, "fleet_runner_image_below_floor{platform=%s} %d\n",
+				prometheusLabel(metric.Platform), boolGauge(metric.Reason != ""))
 		}
 	}
 	if reservation := snapshot.Reservation; reservation != nil {
