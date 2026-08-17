@@ -424,6 +424,33 @@ python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json 
 '
 ```
 
+### Then declare the runner version this image carries
+
+The runner payload step above installs whatever `actions/runner` release was
+newest at build time and the guest will never change it: every clone registers
+from a JIT configuration with `DisableUpdate` set. GitHub enforces a minimum
+version and a 30-day rolling window on top of it
+([ADR 0041](adr/0041-a-base-image-declares-its-runner-version.md), issue #206),
+so this number has an expiry date and the fleet has to know it.
+
+```sh
+tart exec "$BASE" bash -lc '"$HOME"/actions-runner/bin/Runner.Listener --version'
+```
+
+Put that value in this node's configuration, under `macosBurst`:
+
+```json
+{ "macosBurst": { "baseVm": "macos-tartelet-base", "baseImageRunnerVersion": "2.336.0" } }
+```
+
+`fleet doctor` then reports it on every run, and fails the `runner version` check
+if it is below `runnerVersionFloor`. **Skipping this step does not produce a
+quiet pass — an image that declares no version fails the check**, because an
+unvouched-for image is exactly what this was built to stop.
+
+To read the version out of a base image that is not running, without booting it,
+see the `runner version` section of [`OPERATIONS.md`](OPERATIONS.md).
+
 ### The macOS capability vocabulary
 
 A capability is a lowercase identifier matching

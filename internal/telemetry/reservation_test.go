@@ -34,7 +34,7 @@ func TestStatusAndMetricsPublishTheHeldReservation(t *testing.T) {
 
 	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true},
 		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, health.Reservation(), health.Progress(),
-		health.GuestLiveness())
+		health.GuestLiveness(), health.RunnerVersions())
 	held := envelope.Data.Reservation
 	if held == nil {
 		t.Fatal("a held reservation must reach the status document")
@@ -88,7 +88,7 @@ func TestFleetHoldingNoReservationPublishesNoneAtAll(t *testing.T) {
 	}
 	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true},
 		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, health.Reservation(), health.Progress(),
-		health.GuestLiveness())
+		health.GuestLiveness(), health.RunnerVersions())
 	if envelope.Data.Reservation != nil {
 		t.Fatalf("a released reservation must disappear, not linger: %#v", envelope.Data.Reservation)
 	}

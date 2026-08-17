@@ -17,6 +17,13 @@ only with every node in hand:
   every node that advertises it, on the base image for that label's platform.
 - **One owner per scale set.** A `(scope, scale-set name)` pair appears in
   exactly one node's file.
+- **Every image answers for its runner version.** Each image a node boots
+  declares a `baseImageRunnerVersion`
+  ([ADR 0041](../../docs/adr/0041-a-base-image-declares-its-runner-version.md)).
+  The test asserts the declaration exists and is orderable; whether it clears the
+  floor is a live condition `fleet doctor` judges on the node that is running,
+  because GitHub's 30-day rolling rule makes today's compliant declaration
+  tomorrow's stale one without anyone touching this repository.
 
 The same rules run on demand:
 
@@ -47,6 +54,16 @@ placeholders. They therefore validate in observe mode, which is what the contrac
 test asserts, and they are not runnable as-is. A node's real file supplies its own
 credential source, its own installation ID, and the scale-set IDs
 `fleet scale-sets provision` writes back.
+
+Their `baseImageRunnerVersion` values are **measured, not aspirational**: on
+2026-08-17 node A's two images carried `actions/runner` 2.335.1 and node C's
+carried 2.336.0, which is why the two files disagree. `runnerVersionFloor` is
+`2.336.0` on both because 2.336.0 was published 2026-07-20 and GitHub's rolling
+rule gives 30 days to install a new release. Node A is therefore declared below
+its own floor on purpose: `fleet doctor` fails the `runner version` check there
+until the image is refreshed. Raising the floor is what an operator does when a
+new `actions/runner` release ships; it is stated per node so it can be raised
+without cutting a fleet release.
 
 The capability vocabulary these files draw from is documented at the seal step of
 [`docs/LINUX_BASE_IMAGE.md`](../../docs/LINUX_BASE_IMAGE.md) and
