@@ -346,6 +346,68 @@ arms under the new oracle as under the old one, and the pull-request sweep still
 fails on its first seed. With `internal/scheduler` reverted to the commit before
 issue #208's repair, both of that issue's pinned regressions still fire.
 
+#### Amendment 2026-08-17: the harness's physics may not answer what no adapter can
+
+Issue #239. The first nightly sweep after ADR 0040's guest-liveness reclaim landed
+reported conservation violations on three arms at once — `TestSimFuzz` seed 96
+(tick 190), `TestSimFuzzBudgetedHost` seed 33 (tick 260), and
+`TestSimFuzzTieredPriority` seed 499 (tick 136) — each of them exactly four ticks
+after a `silent_guest` event. Like issue #216 above, the plan was right and the
+oracle was wrong, and the record is here for the same reason.
+
+`simGuestProbe` answered the probe from the harness's `silentGuest` flag alone.
+The reclaim CLEARS that flag when it powers the guest off, so one tick later the
+harness reported the guest it had just killed as **alive**. That is not a
+conservative approximation; it is the one answer the real probe can never give. A
+VM that is not running executes nothing, so `exec <instance> true` fails against
+the control socket rather than against the probe's own deadline, and
+`daemon.execGuestProbe` classifies precisely that as **refused**.
+
+The cost of the fiction was a fabricated abort. A drain held in `Draining` by a
+wedge re-enters its phase branch on the next tick, read "alive", and returned the
+instance to `Running` — with its VM powered off. `Draining` plus a proven-idle
+power is exactly what `domain.ConsumesHostResources` reads as the vector having
+come back, so the scheduler had already committed that capacity to a replacement
+spawn. The corpse then re-took it. Both instances charged the host, and property
+(g) reported the sum, correctly: the harness really had built a world holding
+11 CPU on a 10-CPU machine. What it had not done was build one the fleet could
+reach.
+
+**The rule.** The simulator's physics may be crueller than reality and may be
+simpler than reality, but it may never return an observation the production
+adapter it stands in for could not return. A harness that can answer a question
+in a way no adapter can is not testing the fleet against the world; it is testing
+it against a world that does not exist, and every property downstream inherits
+the fiction. `world.guestLiveness` is now the single place the harness decides
+what a guest is doing, and both the probe port and the drain mirror read it, so
+they cannot drift apart again.
+
+**Which side was wrong, and how that was established.** From the records, not by
+making the harness agree with the code:
+
+- `daemon.execGuestProbe` classifies a fast failure as refused and only a
+  successful command as alive, pinned by
+  `TestTheGuestProbeClassifiesRefusalSeparatelyFromSlowness` — including the
+  literal control-socket error a stopped VM produces.
+- The only abort in `DrainPhaseGuestUnresponsive` sits AHEAD of the stop
+  (`internal/lifecycle/executor.go`), so no vector has been released when it can
+  fire.
+- The one abort that could follow a stop — the `runner_busy` deregister refusal —
+  is explicitly withheld from the phases that stop their guest first
+  (`lifecycle.stopsItsGuestFirst`), whose comment names this exact hazard.
+
+So no sequence of production code returns a stopped-guest instance to `Running`.
+`TestAReclaimThatAlreadyStoppedItsGuestCompletesOnRetry` now pins the composition
+rather than either half, because the retry-after-stop path is where the harness
+went wrong and nothing exercised it end to end.
+
+**One dependency worth naming.** The phase re-probes at the top of every attempt
+and keeps no memory of having stopped the guest already. Its safety on a retry is
+therefore carried entirely by the probe's answer for a powered-off VM, not by an
+ordering guard. That is true today and pinned on both sides; a future change that
+made a stopped VM read as anything other than refused would reintroduce this
+defect in the fleet rather than in the harness.
+
 ## Consequences
 
 The harness found four previously unknown defects while it was being written,

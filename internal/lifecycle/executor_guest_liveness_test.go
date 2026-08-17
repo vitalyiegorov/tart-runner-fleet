@@ -165,6 +165,64 @@ func TestADeadGuestThatAlsoRefusesToStopFailsAtTheStopStep(t *testing.T) {
 	}
 }
 
+// A reclaim that has already powered its guest off completes on the retry, and
+// never returns the instance to Running on the way.
+//
+// This is the composition the 2026-08-17 nightly sweep found violated -- in the
+// SIMULATOR, not here. The harness answered the probe from a silent-guest flag
+// that the reclaim's own stop cleared, so a guest read ALIVE one tick after being
+// killed, the drain aborted, and the instance came back to Running holding a
+// vector the scheduler had already committed to a replacement. That is a
+// conservation violation and not merely an untidy state: the moment the stop
+// lands, the instance is Draining with a powered-off VM, which is exactly what
+// domain.ConsumesHostResources reads as the vector having come back.
+//
+// The fleet is safe because a stopped guest REFUSES the probe -- `exec <instance>
+// true` fails against the control socket rather than against the probe's own
+// deadline, which daemon.execGuestProbe classifies as Refused (pinned by
+// TestTheGuestProbeClassifiesRefusalSeparatelyFromSlowness). That dependency is
+// load-bearing and worth naming: the phase re-probes at the top of EVERY attempt
+// and has no memory of having stopped the guest already, so it is the probe's
+// answer, not an ordering guard, that keeps a retried reclaim from resurrecting
+// its own corpse. The `stopsItsGuestFirst` withholding covers only the
+// deregister-refusal abort further down.
+func TestAReclaimThatAlreadyStoppedItsGuestCompletesOnRetry(t *testing.T) {
+	executor, state, vm, probe := guestDrainFixture(domain.GuestLivenessRefused)
+	// The first attempt stops the guest and is then refused at the deregister step,
+	// exactly as GitHub refuses a runner it still calls busy. The operation retries.
+	control := executor.Control.(*fakeDrainControl)
+	control.busy = true
+	control.deregisterErr = errors.New("runner is busy")
+	operation := operations.Operation{Kind: OperationDrain, ResourceID: "trf-small-1"}
+	if err := executor.Execute(context.Background(), operation); err == nil {
+		t.Fatal("a refused deregistration must still be a failure")
+	}
+	stopped := false
+	for _, call := range *vm.calls {
+		if call == "stop:trf-small-1" {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Fatalf("the first attempt must have stopped the guest; calls = %v", *vm.calls)
+	}
+	if state.instance.State != operations.StateDraining {
+		t.Fatalf("state = %s, want the reclaim to hold its place for the retry", state.instance.State)
+	}
+	// The retry, with the guest now provably powered off. It re-probes, and because
+	// a stopped guest refuses, it proceeds rather than returning to Running.
+	control.deregisterErr = nil
+	if err := executor.Execute(context.Background(), operation); err != nil {
+		t.Fatal(err)
+	}
+	if state.instance.State != operations.StateDeleted {
+		t.Fatalf("state = %s, want the retried reclaim to complete", state.instance.State)
+	}
+	if probe.asked != 2 {
+		t.Fatalf("the drain must re-verify its premise once per attempt; asked %d", probe.asked)
+	}
+}
+
 // Deletion confirmation must not wait for a job-completion event that will never
 // arrive: the machine that would have reported it stopped executing minutes ago.
 func TestTheReclaimedPhasesDeriveInactivityFromRunnerAbsence(t *testing.T) {
