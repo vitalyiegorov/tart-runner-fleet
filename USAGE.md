@@ -267,6 +267,17 @@ warns at three quarters of the ceiling, and `fleet doctor` fails when an
 over-budget instance holds a vector that queued work would fit. See
 [`ADR 0036`](docs/adr/0036-an-instance-may-not-hold-its-vector-forever.md).
 
+`baseImageRunnerVersion` declares which `actions/runner` release a base image
+carries, once per image — top level for the Linux image, inside `macosBurst` for
+the macOS one. `runnerVersionFloor` is what those declarations are judged
+against; omit it for GitHub's registration minimum of 2.329.0, and raise it when
+a new `actions/runner` release starts its 30-day clock. `fleet doctor` prints the
+version each image carries on every run and fails the `runner version` check when
+one is below the floor — or when an image declines to declare one at all, because
+a guest here registers with `DisableUpdate` set and can never upgrade itself, so
+an image nobody has vouched for is one nobody can vouch for. See
+[`ADR 0041`](docs/adr/0041-a-base-image-declares-its-runner-version.md).
+
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
 it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
 experiment that must fill one macOS profile cohort without admitting new Linux

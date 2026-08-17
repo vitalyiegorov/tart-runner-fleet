@@ -17,7 +17,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `operations discharge` | Close one dead-lettered cleanup an operator has established can never complete; optionally retire the phantom instance row and its stopped VM |
 | `observations` | Scheduler observation freshness and age |
 | `health` | Liveness and readiness probes |
-| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, and metrics checks |
+| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
