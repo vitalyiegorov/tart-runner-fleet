@@ -346,14 +346,28 @@ arms under the new oracle as under the old one, and the pull-request sweep still
 fails on its first seed. With `internal/scheduler` reverted to the commit before
 issue #208's repair, both of that issue's pinned regressions still fire.
 
-#### Amendment 2026-08-17: the harness's physics may not answer what no adapter can
+#### Amendment 2026-08-17: the world model may not build what the fleet cannot reach
 
 Issue #239. The first nightly sweep after ADR 0040's guest-liveness reclaim landed
 reported conservation violations on three arms at once — `TestSimFuzz` seed 96
 (tick 190), `TestSimFuzzBudgetedHost` seed 33 (tick 260), and
 `TestSimFuzzTieredPriority` seed 499 (tick 136) — each of them exactly four ticks
-after a `silent_guest` event. Like issue #216 above, the plan was right and the
-oracle was wrong, and the record is here for the same reason.
+after a `silent_guest` event.
+
+**This is a world-model defect, and it is the opposite of issue #216 above.**
+The distinction is the whole reason the record is here. In #216 the oracle
+over-reported: `feasibleDemands` called a demand admissible that a written rule
+refused, so the property was wrong about a world the fleet had built correctly.
+Here property (g) was **right about every tick it judged**. It faithfully
+reported a genuine double-charge in the world it was given — two instances really
+were holding the vector at once. What was wrong is that `simGuestProbe` had
+built a world the fleet cannot reach. `conservationChecker` is byte-identical
+across #237; the property never changed and never needed to.
+
+Getting this the right way round matters for this record specifically. After
+#220 and #226 the reflex when a property fires on a harness change is to suspect
+the property, and that reflex would have "fixed" a correct oracle here and left
+the fiction in place.
 
 `simGuestProbe` answered the probe from the harness's `silentGuest` flag alone.
 The reclaim CLEARS that flag when it powers the guest off, so one tick later the
@@ -382,8 +396,10 @@ the fiction. `world.guestLiveness` is now the single place the harness decides
 what a guest is doing, and both the probe port and the drain mirror read it, so
 they cannot drift apart again.
 
-**Which side was wrong, and how that was established.** From the records, not by
-making the harness agree with the code:
+**Which side was wrong, and how that was established.** The claim to establish is
+narrow and it is not "the property over-reported": it is that no sequence of
+production code can reach the state the world model built. From the records, not
+by making the harness agree with the code:
 
 - `daemon.execGuestProbe` classifies a fast failure as refused and only a
   successful command as alive, pinned by

@@ -803,8 +803,15 @@ func wedgedSilentGuestTrace(cfg worldConfig) simTrace {
 // alone, and the reclaim's own stop CLEARS that flag — so one tick after the stop
 // the guest read as alive, the drain aborted, and the instance came back to
 // Running holding a full vector the scheduler had already committed to a
-// replacement. That is an oracle defect, not a fleet defect, and it is asserted
-// here from both sides: the fleet must settle, and no drain may abort.
+// replacement.
+//
+// That is a WORLD-MODEL defect, not an oracle defect and not a fleet defect, and
+// the difference is worth being exact about. Property (g) was right about every
+// tick it judged: two instances really were holding the vector at once, and it
+// reported the sum it was given. The world it was given is what could not happen.
+// So this test asserts the world rather than the property — the fleet settles,
+// and no drain aborts — because a test that had relaxed the property instead
+// would have deleted a correct oracle and kept the fiction.
 func TestAStoppedGuestIsNeverProbedBackToLife(t *testing.T) {
 	t.Parallel()
 	cfg := defaultWorld()
