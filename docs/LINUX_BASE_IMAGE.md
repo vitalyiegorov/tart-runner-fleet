@@ -489,22 +489,53 @@ keyboard path. Masking the file is also unavailable — Docker 29 / runc refuses
 
 Then the console. The guest's cmdline names `console=tty1 console=ttyAMA0` while
 the VM exposes `hvc*`, so **`tart run --serial` captures nothing** and the panic
-above had to be read over netconsole. Name the console the VM actually offers:
+above had to be read over netconsole.
+
+**`GRUB_CMDLINE_LINUX_DEFAULT` does not live in `/etc/default/grub` on this
+image — editing that file is a silent no-op.** `/etc/default/grub`'s own
+`GRUB_CMDLINE_LINUX_DEFAULT` is just `"quiet splash"`; the value that reaches
+the kernel comes from a cloud-image-provided fragment,
+`/etc/default/grub.d/50-cloudimg-settings.cfg`
+(`GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=ttyAMA0"`), and
+`/etc/grub.d/00_header` sources `/etc/default/grub` **first** and every
+`/etc/default/grub.d/*.cfg` file **afterward** — so whatever the main file
+says, the fragment's value wins. Measured 2026-08-17 on mini: a `sed` against
+`/etc/default/grub` reported `console=hvc0` present in that file,
+`update-grub` ran without error, and `/proc/cmdline` after a real reboot still
+read `console=ttyAMA0` — only the post-reboot verification block below caught
+it, because the in-session assertion checks the wrong file and cannot fail
+loudly against this image no matter what it contains.
+
+Add a higher-sorting override fragment instead of editing the cloud image's
+own file, so the fix survives whatever `50-cloudimg-settings.cfg` ships and
+says what it is doing by its filename:
 
 ```sh
 "$TART" exec "$BUILD" bash -lc '
 set -euxo pipefail
 # hvc0 is what Apple Virtualization exposes to an arm64 Linux guest; ttyAMA0 is
-# inherited from the upstream image and does not exist here.
-sudo sed -i "s/console=ttyAMA0/console=hvc0/" /etc/default/grub
-grep -q "console=hvc0" /etc/default/grub
+# inherited from the upstream cloud image and does not exist here.
+# 50-cloudimg-settings.cfg sets the same variable, and grub-mkconfig sources
+# /etc/default/grub.d/*.cfg after /etc/default/grub, so an edit to the main
+# file can never win — the override must be a fragment that sorts after it.
+sudo tee /etc/default/grub.d/99-tart-runner-fleet-console.cfg >/dev/null <<CONF
+# Overrides 50-cloudimg-settings.cfg's console= for the device this VM exposes.
+GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=hvc0"
+CONF
+sudo chmod 0644 /etc/default/grub.d/99-tart-runner-fleet-console.cfg
 sudo update-grub
+grep -q "console=hvc0" /boot/grub/grub.cfg
 '
 ```
 
-If the source image ever stops carrying `console=ttyAMA0`, append
-`console=hvc0` to `GRUB_CMDLINE_LINUX_DEFAULT` instead; the assertion above
-fails loudly rather than silently doing nothing.
+Assert against the **compiled** `/boot/grub/grub.cfg`, not `/etc/default/grub`
+— a passing grep against the main file proved nothing on this image, and the
+compiled config plus the post-reboot `/proc/cmdline` check below are the only
+assertions that mean anything here. If the source image ever renames its
+console device away from `ttyAMA0`, or stops shipping a
+`50-cloudimg-settings.cfg` fragment at all, this override still applies
+unconditionally, because it is not conditioned on finding anything to
+replace.
 
 The host half is `linuxSerialLogDirectory` in `fleet.json`, which makes the
 adapter pass `tart run --serial-path <dir>/<instance>.log`. It is **off by
