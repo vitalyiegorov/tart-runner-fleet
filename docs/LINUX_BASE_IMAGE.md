@@ -524,17 +524,19 @@ GRUB_CMDLINE_LINUX_DEFAULT="console=tty1 console=hvc0"
 CONF
 sudo chmod 0644 /etc/default/grub.d/99-tart-runner-fleet-console.cfg
 sudo update-grub
-grep -q "console=hvc0" /boot/grub/grub.cfg
+sudo grep -q "console=hvc0" /boot/grub/grub.cfg
 '
 ```
 
 Assert against the **compiled** `/boot/grub/grub.cfg`, not `/etc/default/grub`
 — a passing grep against the main file proved nothing on this image, and the
 compiled config plus the post-reboot `/proc/cmdline` check below are the only
-assertions that mean anything here. If the source image ever renames its
-console device away from `ttyAMA0`, or stops shipping a
-`50-cloudimg-settings.cfg` fragment at all, this override still applies
-unconditionally, because it is not conditioned on finding anything to
+assertions that mean anything here. `/boot/grub/grub.cfg` is `0600 root:root`,
+so the grep needs `sudo` too — the same unreadable-to-the-runner-user trap
+`docs/LINUX_BASE_IMAGE.md` already names for `/etc/polkit-1/rules.d`. If the
+source image ever renames its console device away from `ttyAMA0`, or stops
+shipping a `50-cloudimg-settings.cfg` fragment at all, this override still
+applies unconditionally, because it is not conditioned on finding anything to
 replace.
 
 The host half is `linuxSerialLogDirectory` in `fleet.json`, which makes the
