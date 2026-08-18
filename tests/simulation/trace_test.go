@@ -128,8 +128,25 @@ const (
 	// generated dead guests would prove nothing about the discrimination. Its
 	// probes are INCONCLUSIVE rather than refused, its job progresses normally,
 	// and no instance carrying it may ever be reclaimed for guest death.
-	eventSaturatedGuest  eventKind = "saturated_guest"
-	eventSiblingReassign eventKind = "sibling_reassign"
+	eventSaturatedGuest eventKind = "saturated_guest"
+	// eventMisreportedPower is issue #246: the backend enumerates a genuinely
+	// running VM as powered off. Nothing about the machine is wrong — the guest is
+	// executing, the job is progressing, and the drain executor's own re-read of
+	// the same source contradicts the reading two seconds later.
+	//
+	// It is a fault of the OBSERVATION rather than of the world, which is why it
+	// cannot be expressed by writing w.vms: every other fault here makes something
+	// true, and this one makes the fleet believe something false. `tart` 2.32.1
+	// reports a VM whose configuration file it cannot open as `"Running": false` —
+	// its running() swallows the error — so a transient failure that says nothing
+	// about the machine arrives as a confident claim that the machine is off,
+	// indistinguishable from the real thing. Demonstrated on this fleet's own host
+	// by making one config.json unreadable.
+	//
+	// It decays, unlike silent_guest: the production storms lasted nine and eleven
+	// minutes and then stopped on their own.
+	eventMisreportedPower eventKind = "misreported_power"
+	eventSiblingReassign  eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
@@ -199,6 +216,15 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest,
+		// eventMisreportedPower is deliberately NOT drawn yet. It is exercised by two
+		// pinned traces in incidents_test.go, which is enough to hold the bound this
+		// PR adds; putting it in the draw additionally surfaces a SECOND and
+		// unrelated defect — a misreport that releases an instance's vector lets the
+		// scheduler admit a replacement, and when the reading corrects itself both
+		// hold it (conservation, five slots against a four-slot ceiling on
+		// geekom-linux-amd64 seed 8). That is a real fleet defect, it is not the
+		// churn this record fixes, and it is tracked on issue #247; the draw entry
+		// lands with its fix so the sweep is never knowingly red.
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
@@ -283,6 +309,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.silenceGuest()
 	case eventSaturatedGuest:
 		w.saturateGuest()
+	case eventMisreportedPower:
+		w.misreportPower(event.Count)
 	case eventSiblingReassign:
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:

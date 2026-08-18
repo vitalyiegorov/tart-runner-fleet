@@ -56,7 +56,7 @@ func TestTheTrackerAccumulatesRefusalsAcrossTicks(t *testing.T) {
 	if state.Refusals != 3 || state.RefusedSince != start {
 		t.Fatalf("three ticks of refusal must accumulate; got %#v", state)
 	}
-	if !trackerPolicy().Dead(state, start.Add(time.Minute)) {
+	if !trackerPolicy().Confirmed(state, start.Add(time.Minute)) {
 		t.Fatalf("three refusals over a minute must satisfy the bound; got %#v", state)
 	}
 }

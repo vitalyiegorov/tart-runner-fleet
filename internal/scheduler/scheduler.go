@@ -421,7 +421,13 @@ func assignmentRecoveries(now time.Time, config Config, instances []domain.Insta
 		// Absence cannot even reach here for an assigned or running instance — that
 		// observation is still host-wide unavailable (internal/app/inventory.go) — and
 		// if it ever could, no destructive operation may be derived from it.
-		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled && !lingering &&
+		//
+		// The reading it compares is already corroborated: internal/app/inventory.go
+		// reports an uncorroborated `stopped` as Unknown, so one glitched enumeration
+		// cannot reach any consumer of power at all — not this gate, and not
+		// ConsumesHostResources (issue #246, domain/corroboration.go).
+		stopped := instance.Power == domain.InstancePowerStopped
+		if !stopped && !confirmedInactive && !stalled && !lingering &&
 			!overBudget && !guestDead {
 			continue
 		}
@@ -433,7 +439,7 @@ func assignmentRecoveries(now time.Time, config Config, instances []domain.Insta
 		// only that the hold is long, while a refused transport is fresh evidence
 		// that the guest executing the job is gone — and the reclaim an operator
 		// reads must be the true one (ADR 0040).
-		safer := confirmedInactive || stalled || lingering || instance.Power == domain.InstancePowerStopped
+		safer := confirmedInactive || stalled || lingering || stopped
 		guestDead = guestDead && !safer
 		overBudget = overBudget && !safer && !guestDead
 		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
@@ -525,7 +531,7 @@ func guestUnresponsive(now time.Time, policy domain.GuestLivenessPolicy, instanc
 	if instance.State != domain.InstanceRunning || instance.Power != domain.InstancePowerRunning {
 		return false
 	}
-	return policy.Dead(instance.Guest, now)
+	return policy.Confirmed(instance.Guest, now)
 }
 
 // GuestSilence is one instance whose guest has refused an unbroken run of

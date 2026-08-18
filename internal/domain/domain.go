@@ -253,9 +253,25 @@ type Instance struct {
 	// that a VM Tart still enumerates as `running` is in fact a wedged or
 	// panicked kernel executing nothing (ADR 0040). The zero value is "never
 	// probed", which is fail-closed: it can never declare a guest dead.
-	Guest    GuestLivenessState
-	Attempts int
-	RetryAt  time.Time
+	Guest GuestLivenessState
+	// PowerRun is what the node's backend enumeration has accumulated about this
+	// instance's VM being off: how many consecutive readings said `stopped`, since
+	// when, and when one last said `running`. Power alone is a single reading, and
+	// a backend that reports its own errors as "not running" makes a single reading
+	// insufficient to destroy a runner for (issue #246); PowerStopped is the
+	// predicate that judges it. The zero value is "never corroborated", which is
+	// fail-closed.
+	PowerRun ObservationRun
+	// PowerRetracted reports that a stopped recovery of this instance has already
+	// been sent back to Running by the drain's own re-read of the power at the
+	// moment of acting. It is the fleet's record of having disproven its own
+	// premise about this machine, and it raises the bound the premise must meet
+	// before it may act again (PowerRetractedFactor). Without it a persistently
+	// wrong reading re-derives the identical operation forever, which is exactly
+	// what issue #246 measured: eighty-six drains, eighty-six aborts, nine minutes.
+	PowerRetracted bool
+	Attempts       int
+	RetryAt        time.Time
 }
 
 type InstancePower string

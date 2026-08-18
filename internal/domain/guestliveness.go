@@ -113,10 +113,14 @@ func (s GuestLivenessState) Silence(now time.Time) (time.Duration, bool) {
 	return now.Sub(s.RefusedSince), true
 }
 
-// Dead reports whether the accumulated refusals satisfy both bounds. It is
-// fail-closed on every input: a policy that states no bound, a run that was
-// never recorded, and a start instant in the future all answer false.
-func (p GuestLivenessPolicy) Dead(state GuestLivenessState, now time.Time) bool {
+// Confirmed reports whether the accumulated hostile observations satisfy both
+// bounds — for a guest probe, whether the guest is dead. It is fail-closed on
+// every input: a policy that states no bound, a run that was never recorded, and
+// a start instant in the future all answer false.
+//
+// It is named for the general question rather than for guests because a second
+// observation reuses this bound unchanged (see corroboration.go).
+func (p GuestLivenessPolicy) Confirmed(state GuestLivenessState, now time.Time) bool {
 	if !p.Enabled() || state.Refusals < p.ConsecutiveRefusals {
 		return false
 	}

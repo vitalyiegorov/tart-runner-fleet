@@ -20,12 +20,12 @@ func TestAnUnbrokenRunOfRefusalsDeclaresTheGuestDead(t *testing.T) {
 	for probe := range 5 {
 		at := panicAt.Add(time.Duration(probe) * 30 * time.Second)
 		state = policy.Observe(state, GuestLivenessRefused, at)
-		if probe < 4 && policy.Dead(state, at) {
+		if probe < 4 && policy.Confirmed(state, at) {
 			t.Fatalf("probe %d of 5 must not yet be a verdict; got %#v", probe+1, state)
 		}
 	}
 	last := panicAt.Add(4 * 30 * time.Second)
-	if !policy.Dead(state, last) {
+	if !policy.Confirmed(state, last) {
 		t.Fatalf("five refusals over 120s must satisfy a 5/90s bound; got %#v", state)
 	}
 	if state.RefusedSince != panicAt || state.LastProbe != last {
@@ -49,13 +49,13 @@ func TestAnInconclusiveProbeClearsTheRunItCannotConfirm(t *testing.T) {
 	if state.Refusals != 0 || !state.RefusedSince.IsZero() {
 		t.Fatalf("an unknown outcome must clear the run; got %#v", state)
 	}
-	if policy.Dead(state, probeNow.Add(time.Hour)) {
+	if policy.Confirmed(state, probeNow.Add(time.Hour)) {
 		t.Fatalf("a cleared run can never be a verdict; got %#v", state)
 	}
 	// Ten more inconclusive probes over an hour still establish nothing.
 	for probe := range 10 {
 		state = policy.Observe(state, GuestLivenessUnknown, probeNow.Add(time.Duration(probe)*6*time.Minute))
-		if policy.Dead(state, probeNow.Add(time.Hour)) {
+		if policy.Confirmed(state, probeNow.Add(time.Hour)) {
 			t.Fatalf("inconclusive probes must never accumulate; got %#v", state)
 		}
 	}
@@ -97,7 +97,7 @@ func TestGuestLivenessVerdictIsFailClosed(t *testing.T) {
 			state: GuestLivenessState{Refusals: 9, RefusedSince: probeNow.Add(-89 * time.Second)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if test.policy.Dead(test.state, test.now) {
+			if test.policy.Confirmed(test.state, test.now) {
 				t.Fatalf("%s must not be a verdict; got %#v against %#v", test.name, test.state, test.policy)
 			}
 		})
