@@ -2,6 +2,18 @@
 
 ## Status
 
+Accepted, and **amended by
+[ADR 0042](0042-a-destructive-premise-must-be-corroborated.md)**: measurement on
+this fleet's own host shows that `tart` 2.32.1 applies a thirty-second internal
+timeout to the control-socket connect, six times this probe's five-second
+deadline. The discrimination this record is built on is confirmed correct — a
+saturated guest really does classify `unknown` — but a *dead* guest classifies
+`unknown` too, so `GuestLivenessRefused` is unreachable for any guest tart still
+calls running, and **the verdict below cannot currently fire on node A**. The
+residual false-positive risk stated in "Consequences" is retired; a new
+inertness finding replaces it. See ADR 0042's amendment section for the measured
+table.
+
 Accepted. Closes the fleet-side half of
 [issue #236](https://github.com/vitalyiegorov/tart-runner-fleet/issues/236).
 

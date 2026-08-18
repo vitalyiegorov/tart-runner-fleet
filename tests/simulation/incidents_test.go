@@ -880,3 +880,97 @@ func (w *world) releaseTick(id string, from int) int {
 	}
 	return 0
 }
+
+// misreportedPowerTrace is the 2026-08-18 incident (issue #246): a job running
+// normally, and an enumeration that says its VM is powered off while it runs.
+//
+// Nothing about the machine is wrong. `tart` reports a VM whose configuration it
+// cannot open as `"Running": false` — its running() swallows the error — so a
+// transient failure that says nothing about the guest arrives at the fleet as a
+// confident claim that the guest is gone. On the real fleet that claim planned a
+// destructive drain, the drain's own re-read of the same source contradicted it
+// and aborted, and the pair repeated eighty-six times in nine minutes.
+//
+// The count is the longest misreport the generator can draw (faultThisTick draws
+// 1..6), so the pinned trace is the worst case the sweep also covers.
+func misreportedPowerTrace(cfg worldConfig, count int) simTrace {
+	return simTrace{Seed: 20_260_818, Ticks: 120, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		// Late enough that the instance has reached Running and its job has started,
+		// which is the state both production storms were in.
+		{Tick: 12, Kind: eventMisreportedPower, Count: count},
+		{Tick: 13, Kind: eventStopArrivals},
+	}}
+}
+
+// TestAMisreportedPowerReadingDoesNotPlanAKill is the incident with the bound in
+// place. A misreport shorter than the corroboration window is not a premise at
+// all: nothing is planned, nothing is aborted, and the job the fleet would have
+// ended runs to completion.
+func TestAMisreportedPowerReadingDoesNotPlanAKill(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, misreportedPowerTrace(cfg, 2))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("a misreported power reading must violate nothing: %s", findings[0])
+	}
+	// The harness really did lie about a running VM. A green run over a trace that
+	// misreported nothing would prove nothing at all.
+	if len(w.powerMisreport) != 1 {
+		t.Fatalf("no instance was ever misreported: %v", w.powerMisreport)
+	}
+	for id := range w.powerMisreport {
+		if !w.vms[id] && w.liveInstanceCount() > 0 {
+			t.Fatalf("%s was genuinely powered off; the fault must corrupt the reading, not the machine", id)
+		}
+		if aborts := w.drainAborts[id]; aborts != 0 {
+			t.Fatalf("%s had %d recovery drains planned and aborted; a reading held for less "+
+				"than the corroboration window must plan none", id, aborts)
+		}
+	}
+	if w.jobs[0].status != jobDone {
+		t.Fatalf("the job on the misreported instance did not complete: status %s", w.jobs[0].status)
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+}
+
+// TestARetractedPowerPremiseDoesNotRefire is the damping half. A misreport long
+// enough to satisfy the bound gets exactly one drain — and that drain's abort is
+// the fleet disproving its own premise, after which the same reading may not act
+// again until it has held for eight times as long.
+//
+// Without that, the run refills in three readings and the identical operation is
+// re-derived immediately, which is the storm: eighty-six drains over nine minutes
+// at a five-second poll.
+func TestARetractedPowerPremiseDoesNotRefire(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, misreportedPowerTrace(cfg, 6))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("a corroborated misreport must still violate nothing: %s", findings[0])
+	}
+	if len(w.powerMisreport) != 1 {
+		t.Fatalf("no instance was ever misreported: %v", w.powerMisreport)
+	}
+	for id := range w.powerMisreport {
+		// Property (i) bounds this at DrainChurnN, and asserting it here as well is
+		// deliberate: the property judges every instance in every trace, and this
+		// names the one the incident is about.
+		if aborts := w.drainAborts[id]; aborts > cfg.DrainChurnN {
+			t.Fatalf("%s had %d recovery drains aborted, above the %d-abort bound; "+
+				"a disproven premise re-fired", id, aborts, cfg.DrainChurnN)
+		}
+	}
+	// The runner survived its own reclaim being planned, which is what the abort
+	// has always guaranteed. The bound is about not planning it eighty-six times.
+	if w.jobs[0].status != jobDone {
+		t.Fatalf("the job on the misreported instance did not complete: status %s", w.jobs[0].status)
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+}

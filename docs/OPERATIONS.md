@@ -788,6 +788,51 @@ machine executing it stopped minutes before the fleet said so. The remedy is on
 the consumer side — a `--privileged` container can panic the kernel it shares,
 and the fleet cannot take that away while granting privileged at all.
 
+**On this fleet the verdict cannot currently fire at all.** `tart` 2.32.1 waits
+thirty seconds on the guest control socket before failing, six times the probe's
+five-second deadline, so a dead guest classifies `unknown` exactly like a
+saturated one and the run of refusals never starts. Measured on a probe VM on the
+Mac mini against a saturated guest, a stopped guest agent and a panicked kernel;
+see ADR 0042's amendment. Treat `guest liveness` as informational until a probe
+deadline above tart's own connect timeout ships. The discrimination itself was
+confirmed correct by the same measurement — a saturated guest really is never
+mistaken for a dead one.
+
+### A power reading nobody corroborated
+
+The fleet does not reclaim an instance because one `tart list` said its VM was
+powered off. A stopped reading must hold for **three readings over forty-five
+seconds** before it becomes a fact the fleet acts on; until then it classifies as
+unknown, and an unknown power neither authorizes a reclaim nor releases the
+instance's vector back into the admission envelope.
+
+This is the 2026-08-18 class (ADR 0042, issue #246). `tart` reports a VM whose
+`config.json` it cannot open as `"Running": false` — its `running()` swallows the
+error — so a transient failure that says nothing about the machine arrived at the
+fleet as a confident claim that the machine was off. One instance was planned for
+a destructive drain **eighty-six times in nine minutes**, and a hundred and
+fifteen times the night before; every one was caught and aborted by the drain's
+own re-read, and none of it was logged.
+
+```sh
+# the fleet destroying something, whatever the cause
+grep 'instance recovery drain planned' fleet-authority.stderr.log
+# the fleet catching itself about to destroy a live runner
+grep 'power premise retracted by its own drain' fleet-authority.stderr.log
+```
+
+`instance recovery drain planned` is never rate limited: one line per decision,
+so a storm looks like a storm. `instance power premise retracted by its own
+drain` is logged once per instance, and means the drain re-read the power at the
+moment of acting and got the opposite answer. That instance is not reclaimed for
+a power reading again until one holds for **six minutes**.
+
+There is no knob. The bound cannot end a job — it can only delay a reclaim the
+fleet would otherwise perform immediately — so an off switch could only ever make
+the fleet less safe. If retractions are frequent on a node, the backend's
+enumeration is unreliable there and that is the thing to investigate; the fleet
+is already declining to act on it.
+
 ### A base image whose runner GitHub will refuse
 
 `fleet doctor` reports `FAIL  runner version` when a base image carries an

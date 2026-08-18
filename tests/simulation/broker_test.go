@@ -63,6 +63,9 @@ func (w *world) advancePhysics() {
 	for id, remaining := range w.wedgedDrain {
 		w.wedgedDrain[id] = decay(remaining)
 	}
+	for id, remaining := range w.powerMisreport {
+		w.powerMisreport[id] = decay(remaining)
+	}
 	w.armLatchedGuestFaults()
 	w.crossSiblingAssignments()
 	w.substituteQueuedSibling()

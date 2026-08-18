@@ -416,7 +416,17 @@ func (a simTart) List(context.Context) ([]executor.Instance, error) {
 	sort.Strings(names)
 	vms := make([]executor.Instance, 0, len(names))
 	for _, name := range names {
-		vms = append(vms, executor.Instance{Name: name, Running: w.vms[name]})
+		// The misreport is applied HERE and nowhere else, because it is a fault of
+		// the reading rather than of the machine. w.vms stays true, so the guest goes
+		// on executing and its job goes on progressing, and the drain executor's own
+		// re-read below contradicts this one — which is exactly the disagreement
+		// issue #246 is about, and the reason it cannot be expressed by powering a
+		// VM off.
+		running := w.vms[name]
+		if running && w.powerMisreport[name] > 0 {
+			running = false
+		}
+		vms = append(vms, executor.Instance{Name: name, Running: running})
 	}
 	return vms, nil
 }
@@ -602,10 +612,15 @@ type world struct {
 	restLag         int
 	hostProbeStale  int
 	tartUnavailable int
-	messageDelay    int
-	delayWindow     int
-	slowBootNext    int
-	longJobNext     int
+	// powerMisreport is how many more ticks the enumeration lies about each named
+	// VM being powered off (issue #246). It is keyed per VM because both production
+	// storms hit exactly one instance while its siblings in the same `tart list`
+	// output read correctly.
+	powerMisreport map[string]int
+	messageDelay   int
+	delayWindow    int
+	slowBootNext   int
+	longJobNext    int
 	// overrunJobNext arms the issue #223 shape: the next job to start holds its
 	// runner for whole profile budgets rather than for a long suite's worth of
 	// work, so nothing but the occupancy reclaim can end it.
@@ -772,7 +787,8 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
 		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
 		silentGuest: map[string]bool{}, guestDiedAt: map[string]int{}, saturatedGuest: map[string]bool{},
-		drainAborts: map[string]int{}, known: map[string]finding{},
+		powerMisreport: map[string]int{},
+		drainAborts:    map[string]int{}, known: map[string]finding{},
 	}
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
 		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority}
@@ -790,6 +806,12 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 			// property would go green against a mechanism that never fires.
 			Guest: &app.GuestLivenessTracker{Probe: simGuestProbe{world: w},
 				Policy: cfg.Scheduler.GuestLiveness, Now: func() time.Time { return w.now }},
+			// Wired exactly as production wires it (internal/daemon/runtime.go), and
+			// unconditionally for the same reason: the bound it enforces is not a
+			// configured mechanism. Leaving it nil is the pre-#246 world, and that is
+			// how misreported_power was proved red — property (i) fires on seed 1 with
+			// two recovery drains aborted on a three-tick misreport.
+			Power: &app.PowerCorroborator{},
 		},
 	}
 	w.checkers = defaultCheckers(cfg)
@@ -1161,6 +1183,22 @@ func (w *world) saturateGuest() {
 	w.saturateNextGuest = true
 }
 
+// misreportPower makes the enumeration lie about one running instance's VM for
+// the next count ticks. The instance is chosen the way the guest faults choose
+// theirs, and for the same reason: only a Running instance has a power reading a
+// destructive recovery is derived from.
+//
+// Unlike the guest faults it does NOT latch when nothing is running. A misreport
+// with no instance to misreport about is not a deferred fault, it is no fault at
+// all — the reading it corrupts does not exist yet.
+func (w *world) misreportPower(count int) {
+	id, found := w.runningInstance()
+	if !found {
+		return
+	}
+	w.powerMisreport[id] = count
+}
+
 func (w *world) killGuest(id string) {
 	if w.silentGuest[id] {
 		return
@@ -1236,8 +1274,13 @@ func (w *world) armLatchedGuestFaults() {
 // executing a sibling. GitHub refused (`runner_busy`), the runner-keyed re-check
 // confirmed it, and the drain aborted (executor.go's deregister-refusal branch).
 //
-// The stopped and inactive recoveries key on power and registration rather than
-// on demand and are unreachable here: no fault powers a VM off.
+// The stopped recovery re-reads the power. Until issue #246 that was unreachable
+// here, and the comment this replaces said so — "no fault powers a VM off" — which
+// was true and beside the point: the production incident did not power a VM off,
+// it made the ENUMERATION say one was off while it ran. misreported_power builds
+// that, and this branch is the disagreement it produces.
+//
+// The inactive recovery keys on registration and stays unreachable.
 func (w *world) drainAbortsNow(instance operations.Instance) bool {
 	scaleSet := w.storeKeyFor(instance)
 	if scaleSet <= 0 {
@@ -1253,7 +1296,14 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 			record.Status == operations.DemandJobCompleted {
 			return true
 		}
-	case operations.DrainPhaseStoppedRecovery, operations.DrainPhaseInactiveRecovery:
+	case operations.DrainPhaseStoppedRecovery:
+		// executor.go re-reads the power through VMControl.Running at the moment of
+		// acting and aborts when the VM answers that it is running. That re-read goes
+		// to the hypervisor's truth, NOT through the misreport above: a second read of
+		// a lying enumeration would agree with the first, and the production incident
+		// is precisely that the two disagreed, eighty-six times, two seconds apart.
+		return w.vms[instance.ID]
+	case operations.DrainPhaseInactiveRecovery:
 		return false
 	case operations.DrainPhaseGuestUnresponsive:
 		// Already re-verified against a fresh probe in nextLifecycleState, ahead of

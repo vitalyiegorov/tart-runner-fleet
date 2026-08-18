@@ -53,7 +53,7 @@ type GuestLivenessTracker struct {
 	Policy domain.GuestLivenessPolicy
 	// Now must be the SAME clock the scheduler plans on. The instants this
 	// accumulator stamps are compared against the tick's instant by
-	// domain.GuestLivenessPolicy.Dead, and a run of refusals recorded on one clock
+	// domain.GuestLivenessPolicy.Confirmed, and a run of refusals recorded on one clock
 	// and judged on another is not measurable at all — it fails closed and the
 	// mechanism silently never fires. Nil is the wall clock, which is what every
 	// production node runs on.
@@ -103,6 +103,51 @@ func (t *GuestLivenessTracker) Observe(ctx context.Context, ids []string) map[st
 	return next
 }
 
+// PowerCorroborator carries the per-instance run of backend power readings
+// between ticks, so the scheduler can tell a VM the backend has said is off three
+// times running from a VM it said was off once.
+//
+// It is the power half of what GuestLivenessTracker does for probes, and it is
+// deliberately a separate object rather than a field on it: guest liveness is a
+// configured, disable-able mechanism, and this bound must hold on every node
+// whether or not that one is wired. Like the tracker its memory is in-process, so
+// a daemon restart forgets every run and starts again — fail-open in the safe
+// direction, because forgetting can only delay a reclaim, never authorize one.
+type PowerCorroborator struct {
+	mu   sync.Mutex
+	runs map[string]domain.ObservationRun
+}
+
+// Observe folds each instance's RAW power reading into its run, attaches the run,
+// and replaces the reading with the one the fleet may act on. Instances absent
+// from the slice are forgotten, so the accumulator cannot outlive what it
+// describes.
+//
+// Every consumer of Power downstream of here sees the corroborated value, which
+// is the point: a stopped reading does not only plan a kill, it also stops
+// charging the host for the instance, and an uncorroborated one must do neither.
+//
+// The instant is the caller's single observation instant rather than a fresh
+// clock read per instance, for the reason ADR 0040 records: a run stamped on one
+// clock and judged on another is not measurable at all, and the verdict then
+// fails closed forever without saying so.
+func (c *PowerCorroborator) Observe(instances []domain.Instance, now time.Time) []domain.Instance {
+	if c == nil {
+		return instances
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := make(map[string]domain.ObservationRun, len(instances))
+	for index, instance := range instances {
+		run := domain.PowerCorroboration.Observe(c.runs[instance.ID], domain.PowerSignal(instance.Power), now)
+		next[instance.ID] = run
+		instances[index].PowerRun = run
+		instances[index].Power = domain.CorroboratedPower(instance.Power, instance.State, run, instance.PowerRetracted, now)
+	}
+	c.runs = next
+	return instances
+}
+
 type RecoveryObserver interface {
 	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
 	// JobActive reports whether the durable demand bound to a Running instance
@@ -131,6 +176,11 @@ type ProductionInventory struct {
 	// stopped (ADR 0040). A nil tracker probes nothing and reports nothing, which
 	// is what a node with the mechanism disabled wants.
 	Guest *GuestLivenessTracker
+	// Power corroborates the backend's claim that a live instance's VM is off
+	// before that claim may destroy the instance (issue #246). A nil corroborator
+	// accumulates nothing, so no instance is ever corroborated stopped — which is
+	// fail-closed: it can only withhold a reclaim, never authorize one.
+	Power *PowerCorroborator
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
@@ -217,14 +267,20 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		// read UpdatedAt (ADR 0036).
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Demand: instance.Demand, Platform: instance.Platform, Profile: instance.Profile,
 			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady,
-			AssignedSince: assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
+			// A live row still carrying the stopped-recovery phase is a drain that did
+			// not complete, and the only way a stopped recovery does not complete is
+			// DrainExecutor.abort: the VM answered `running` at the moment of acting.
+			// The durable phase is therefore the fleet's own record of having disproven
+			// this instance's power reading, and it costs no query to read (issue #246).
+			PowerRetracted: instance.DrainPhase == operations.DrainPhaseStoppedRecovery,
+			AssignedSince:  assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {
 			return domain.Unavailable[[]domain.Instance]("untracked controller VM requires reconciliation"), host
 		}
 	}
-	return domain.Fresh(p.probeGuests(ctx, result), now), host
+	return domain.Fresh(p.probeGuests(ctx, p.Power.Observe(result, now)), now), host
 }
 
 // probeGuests asks every powered-on Running instance's guest whether it is still
