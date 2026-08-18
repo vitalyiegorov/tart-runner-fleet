@@ -833,6 +833,48 @@ the fleet less safe. If retractions are frequent on a node, the backend's
 enumeration is unreliable there and that is the thing to investigate; the fleet
 is already declining to act on it.
 
+### A vector that has not come back yet
+
+An instance in `draining` or `deregistering` **still charges the admission
+envelope**, even when `fleet instances` shows its VM powered off. That is
+deliberate, and it is what an operator sees when a teardown looks like it is
+holding capacity it no longer needs.
+
+The vector comes back on one of two facts and never on a reading (ADR 0043, issue
+#247):
+
+| the fleet observes | the vector |
+|---|---|
+| `draining` / `deregistering`, VM reads stopped | still held |
+| `stopping` — the fleet's own stop landed and deregistration is confirmed | released |
+| any cleanup state, VM absent from the enumeration | released |
+
+The reason is that the first row can be taken back. A drain re-reads its premise
+at the moment of acting and can abort the instance back to `running` (ADR 0033),
+and an enumeration that called a VM stopped can tell the truth on the next poll —
+while the replacement the fleet admitted into the freed capacity is already
+cloning. The simulator produced both: five slots against a four-slot ceiling, and
+eight vCPU against a four-vCPU budget.
+
+The cost is one lifecycle edge on an ordinary teardown. It is longer for the two
+reclaims that power the guest off before deregistering — the occupancy budget and
+the guest-liveness reclaim — because GitHub refuses to remove a runner it still
+considers busy until its own grace timer expires, measured at sixteen to eighteen
+minutes on this fleet. **An occupancy or guest-death reclaim whose deregistration
+GitHub is refusing holds its vector for that whole window.** If admission looks
+stalled behind a teardown, that is the shape to check:
+
+```sh
+fleet instances --endpoint "$ENDPOINT" --output json |
+  jq '.data[] | select(.state == "draining" or .state == "deregistering") |
+      {id, state, power, drainPhase}'
+fleet operations --endpoint "$ENDPOINT" --output json |
+  jq '.data[] | select(.kind == "drain" and .lastError != "") | {id, attempts, lastError}'
+```
+
+A drain stuck at the deregister stage is bounded by ADR 0007's retries and ends as
+a dischargeable dead letter; it is never released by hand.
+
 ### A base image whose runner GitHub will refuse
 
 `fleet doctor` reports `FAIL  runner version` when a base image carries an

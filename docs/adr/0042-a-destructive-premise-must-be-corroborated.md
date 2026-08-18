@@ -2,6 +2,18 @@
 
 ## Status
 
+Accepted, and **amended by
+[ADR 0043](0043-a-released-vector-cannot-be-taken-back.md)** in two places. The
+tearing-down exemption below is withdrawn as reasoning — deciding to drain an
+instance is not powering anything off, so a teardown does not corroborate a
+stopped reading, and for a stopped recovery the decision to drain *is* the
+reading. And the residual this record names as open ("A misreport can still
+over-admit the host") is closed there: a tearing-down instance's vector is no
+longer released by a reading at all. The bound below is unchanged; what changed is
+what a believed reading is allowed to do. ADR 0043 also records that this record's
+own window was **unreachable in the deterministic simulation** until it gave
+`app.PowerCorroborator` the injectable clock ADR 0040 gave the tracker beside it.
+
 Accepted. Closes
 [issue #246](https://github.com/vitalyiegorov/tart-runner-fleet/issues/246).
 

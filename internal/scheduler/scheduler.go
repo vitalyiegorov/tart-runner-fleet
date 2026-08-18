@@ -917,7 +917,7 @@ func minResources(a, b domain.Resources) domain.Resources {
 func activeRepoCounts(instances []domain.Instance) map[string]int {
 	counts := make(map[string]int)
 	for _, instance := range instances {
-		if !instance.Live() || instance.State == domain.InstanceOnlineIdle || teardownState(instance.State) {
+		if !instance.Live() || instance.State == domain.InstanceOnlineIdle || releasedItsRepositorySlot(instance.State) {
 			continue
 		}
 		counts[instance.Repo]++
@@ -925,9 +925,26 @@ func activeRepoCounts(instances []domain.Instance) map[string]int {
 	return counts
 }
 
-func teardownState(state domain.InstanceState) bool {
+// releasedItsRepositorySlot reports whether a teardown has gone far enough that
+// the instance no longer occupies one of its repository's concurrent slots.
+//
+// **Deregistration is the line, and `draining` is deliberately on the other side
+// of it.** A draining instance can be sent back to `running` by the drain's own
+// re-verification at the moment of acting (ADR 0033) with its job still
+// executing, and the slot the scheduler admitted into meanwhile cannot be
+// un-admitted — the replacement's VM is already cloning. The simulator produced
+// exactly that: three instances of a two-instance repository on
+// `geekom-linux-amd64` seed 87, the third admitted while the second was draining
+// on a power reading its own drain then disproved.
+//
+// It is the same rule `domain.ConsumesHostResources` states about the host
+// vector, on the other capacity a teardown gives back, and it commits one edge
+// earlier for a reason the states already carry: past deregistration GitHub
+// cannot hand this runner a job at all, so the repository slot is genuinely free
+// while the machine may still be executing (issue #247, ADR 0043).
+func releasedItsRepositorySlot(state domain.InstanceState) bool {
 	switch state {
-	case domain.InstanceDraining, domain.InstanceDeregistering, domain.InstanceStopping, domain.InstanceDeleted, domain.InstanceFailed:
+	case domain.InstanceDeregistering, domain.InstanceStopping, domain.InstanceDeleted, domain.InstanceFailed:
 		return true
 	default:
 		return false
