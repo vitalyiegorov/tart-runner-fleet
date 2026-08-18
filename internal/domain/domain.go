@@ -327,21 +327,44 @@ func (s InstanceState) TearingDown() bool {
 }
 
 // ConsumesHostResources distinguishes durable cleanup state from physical
-// CPU/RAM occupancy. A VM proven idle while already tearing down remains live
-// until GitHub deregistration and Tart deletion complete, but cannot execute
-// again and must not reserve the host's compute envelope forever. A VM proven
-// absent occupies strictly less than one proven stopped, so it must free the
-// vector wherever stopped does — otherwise a deleted VM would pin the host to
-// its platform harder than a live one. Unknown power and all non-cleanup states
-// remain fail-closed.
+// CPU/RAM occupancy. A tearing-down instance whose guest has stopped remains
+// live until GitHub deregistration and Tart deletion complete, but cannot
+// execute again and must not reserve the host's compute envelope forever.
+// Unknown power and all non-cleanup states remain fail-closed.
+//
+// The vector comes back on evidence the next observation cannot retract, and
+// never on a reading alone. That is the whole of issue #247. A `stopped`
+// enumeration of a draining instance is a CLAIM about a machine the fleet has
+// not yet acted on, and the fleet has two ways to find out it was wrong: the
+// drain re-reads the same source at the moment of acting and aborts back to
+// Running (ADR 0033), or the next enumeration simply tells the truth. Either way
+// the instance goes on holding the host — and the scheduler has already lent
+// that capacity to a replacement, because a released vector cannot be taken
+// back. The simulator produced exactly that on both paths: five slots against a
+// four-slot ceiling, and eight CPU against a four-CPU budget.
+//
+// Two facts are not retractable, and they are the two this reads:
+//
+//   - the VM is gone. A successful enumeration that does not list an owned VM is
+//     proven absence, and nothing brings it back. It occupies strictly less than
+//     a stopped one, so it must free the vector wherever a stop does — otherwise
+//     a deleted VM would pin the host to its platform harder than a live one.
+//   - the fleet's own stop has landed. `stopping` is entered only after the drain
+//     powered the guest off and its deregistration was confirmed, so from there
+//     the instance can never return to Running and no reading can put work back
+//     on the machine.
+//
+// The cost is one lifecycle edge of extra hold on a genuinely idle teardown,
+// which ADR 0043 measures. What it buys is that the host is never over-admitted
+// on a premise the fleet has not itself established.
 func (i Instance) ConsumesHostResources() bool {
 	if !i.Live() {
 		return false
 	}
-	if !i.Power.ProvenIdle() {
+	if !i.State.TearingDown() || !i.Power.ProvenIdle() {
 		return true
 	}
-	return !i.State.TearingDown()
+	return i.Power != InstancePowerAbsent && i.State != InstanceStopping
 }
 
 // Occupancy reports how long the instance has been holding its resource vector,

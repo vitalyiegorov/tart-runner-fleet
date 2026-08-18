@@ -99,14 +99,10 @@ const PowerRetractedFactor = 8
 // which case it is Unknown — nothing was established.
 //
 // The downgrade happens HERE, at classification, rather than at the one gate that
-// plans a kill, and that is the whole of the second half of issue #246. The
-// scheduler does not only destroy instances for a stopped power reading; it also
-// stops charging the host for them (ConsumesHostResources), and admits work into
-// the vector it thinks came back. A misreported instance therefore double-books
-// the machine — the simulator produced exactly that, a conservation violation
-// five slots over a four-slot ceiling, the first time this fault existed. One
-// rule at the classification protects every consumer; one rule at the gate would
-// have protected one of them.
+// plans a kill, and that is the whole of the second half of issue #246. A stopped
+// reading is read by more than the gate that destroys instances, so a rule at the
+// gate would have protected one consumer and a rule at the classification protects
+// every one of them.
 //
 // Unknown rather than Running is deliberate. The fleet has not established that
 // the VM is running either, and Unknown is the value that already means "nothing
@@ -115,12 +111,16 @@ const PowerRetractedFactor = 8
 // direction on both axes.
 //
 // A stopped reading is only surprising for an instance the fleet has not decided
-// to tear down, so a tearing-down instance is exempt. There the fleet's own
-// decision corroborates the reading, and requiring a second source would delay
-// releasing the vector of a VM everyone agrees is finished — on every teardown,
-// which is the capacity turnaround this fleet runs on. Holding that exemption is
-// also what keeps every corpus digest byte-identical to the merge base: no trace
-// that is never handed a misreport sees any behaviour change at all.
+// to tear down, so a tearing-down instance is exempt and its reading is reported
+// as it came. What that exemption may NOT be read as is corroboration: issue #247
+// is what happens when it is. Deciding to drain an instance does not power
+// anything off — an ordinary drain's guest executes until the drain reaches its
+// stop step, and a stopped recovery's decision to drain IS the reading — so a
+// teardown can confirm nothing about a machine the fleet has not yet acted on.
+// The vector of a tearing-down instance is therefore not released by this value
+// at all; ConsumesHostResources releases it on the fleet's own stop landing or on
+// the VM's proven absence, and this exemption now decides only what an operator
+// and the diagnostics see (ADR 0043).
 //
 // It is fail-closed on every other input: an unmeasurable run is not a
 // measurement, and a run that has not met both halves of the bound is the fleet

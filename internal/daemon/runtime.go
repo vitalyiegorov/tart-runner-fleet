@@ -350,7 +350,10 @@ func newDependencies(goos string) dependencies {
 				// Unconditional, unlike the guest tracker: the bound it enforces is not a
 				// configured mechanism but the corroboration every other destructive premise
 				// in this fleet already required, and this one did not (issue #246).
-				Power: &app.PowerCorroborator{}}
+				// The clock is stated here for the same reason the guest tracker's is:
+				// the accumulator judges its own instants, and a bound stamped on one
+				// clock and judged against another silently never fires (issue #247).
+				Power: &app.PowerCorroborator{Now: time.Now}}
 		},
 		listen:      net.Listen,
 		adminListen: adminapi.Listen,

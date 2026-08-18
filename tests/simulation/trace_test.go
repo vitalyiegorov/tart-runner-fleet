@@ -215,16 +215,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
-		eventSilentGuest, eventSaturatedGuest,
-		// eventMisreportedPower is deliberately NOT drawn yet. It is exercised by two
-		// pinned traces in incidents_test.go, which is enough to hold the bound this
-		// PR adds; putting it in the draw additionally surfaces a SECOND and
-		// unrelated defect — a misreport that releases an instance's vector lets the
-		// scheduler admit a replacement, and when the reading corrects itself both
-		// hold it (conservation, five slots against a four-slot ceiling on
-		// geekom-linux-amd64 seed 8). That is a real fleet defect, it is not the
-		// churn this record fixes, and it is tracked on issue #247; the draw entry
-		// lands with its fix so the sweep is never knowingly red.
+		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true

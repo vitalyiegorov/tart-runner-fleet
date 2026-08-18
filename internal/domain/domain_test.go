@@ -153,18 +153,29 @@ func TestHostModeDerivesFromLiveInstancesIncludingMixedCapacity(t *testing.T) {
 	}
 }
 
-func TestStoppedTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
-	for _, state := range []InstanceState{InstanceDraining, InstanceDeregistering, InstanceStopping} {
-		orphan := Instance{ID: "orphan", Platform: PlatformMacOS, State: state, Power: InstancePowerStopped}
-		if orphan.ConsumesHostResources() {
-			t.Fatalf("stopped %s instance consumed host resources", state)
-		}
-		if mode, err := DeriveHostMode([]Instance{orphan}); err != nil || mode != HostIdle {
-			t.Fatalf("stopped %s mode = %s, %v", state, mode, err)
-		}
+// A teardown gives the vector back once the fleet's own stop has landed, which is
+// what entering `stopping` means, and not one edge earlier.
+//
+// The earlier edges are the whole of issue #247. `draining` and `deregistering`
+// are states an instance can still LEAVE — the drain re-reads its premise at the
+// moment of acting and aborts back to Running (ADR 0033), and the enumeration
+// that called the VM stopped can simply tell the truth on the next tick. Either
+// way the instance goes on holding the host, and the scheduler has already
+// committed the capacity to a replacement, because a released vector cannot be
+// taken back.
+func TestATeardownReleasesItsVectorOnceTheStopHasLanded(t *testing.T) {
+	stopped := Instance{ID: "orphan", Platform: PlatformMacOS, State: InstanceStopping, Power: InstancePowerStopped}
+	if stopped.ConsumesHostResources() {
+		t.Fatal("a stopped instance past its own stop consumed host resources")
+	}
+	if mode, err := DeriveHostMode([]Instance{stopped}); err != nil || mode != HostIdle {
+		t.Fatalf("stopped-state mode = %s, %v", mode, err)
 	}
 
 	for _, instance := range []Instance{
+		// The retractable pair: a reading, and a drain that may still abort.
+		{ID: "stopped-draining", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerStopped},
+		{ID: "stopped-deregistering", Platform: PlatformMacOS, State: InstanceDeregistering, Power: InstancePowerStopped},
 		{ID: "running-drain", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerRunning},
 		{ID: "unknown-drain", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerUnknown},
 		{ID: "stopped-assigned", Platform: PlatformMacOS, State: InstanceAssigned, Power: InstancePowerStopped},
@@ -174,14 +185,24 @@ func TestStoppedTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
 			t.Fatalf("unsafe instance stopped consuming resources: %#v", instance)
 		}
 	}
+	for _, instance := range []Instance{
+		{ID: "stopped-draining", Platform: PlatformMacOS, State: InstanceDraining, Power: InstancePowerStopped},
+		{ID: "stopped-deregistering", Platform: PlatformMacOS, State: InstanceDeregistering, Power: InstancePowerStopped},
+	} {
+		if mode, err := DeriveHostMode([]Instance{instance}); err != nil || mode != HostMacOS {
+			t.Fatalf("%s mode = %s, %v; a vector still held pins its platform", instance.ID, mode, err)
+		}
+	}
 }
 
 // A VM a successful Tart enumeration proves absent occupies strictly less of the
-// host than one it proves stopped, so absence during cleanup must free the vector
-// wherever stopped already frees it — otherwise a deleted VM would pin the host
-// to its platform harder than a live one and starve the other platform. Outside a
-// cleanup state, and for an unknown power reading, the fail-closed answer is
-// unchanged (asserted above).
+// host than one it proves stopped, and — unlike a stopped reading — nothing can
+// retract it: a VM that is gone does not come back, so no later observation and
+// no aborted drain can make the fleet owe that vector again. Absence therefore
+// frees it from the first cleanup state, which is what keeps a deleted VM from
+// pinning the host to its platform harder than a live one. Outside a cleanup
+// state, and for an unknown power reading, the fail-closed answer is unchanged
+// (asserted above).
 func TestAbsentTeardownInstanceDoesNotConsumeHostCapacity(t *testing.T) {
 	for _, state := range []InstanceState{InstanceDraining, InstanceDeregistering, InstanceStopping} {
 		absent := Instance{ID: "absent", Platform: PlatformMacOS, State: state, Power: InstancePowerAbsent}

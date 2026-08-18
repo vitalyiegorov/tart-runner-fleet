@@ -1348,15 +1348,26 @@ func TestPersistentReservationBackfillRotatesAcrossRepos(t *testing.T) {
 	}
 }
 
-func TestTeardownStatesDoNotConsumeRepoAdmissionCap(t *testing.T) {
+// A teardown stops consuming its repository's admission cap once the runner is
+// deregistered, and not before.
+//
+// `draining` is on the other side of that line because a draining instance can
+// still be sent back to `running` with its job executing (ADR 0033), and a
+// repository slot lent out meanwhile cannot be recalled — issue #247, the same
+// rule domain.ConsumesHostResources states about the host vector.
+func TestTeardownStatesStopConsumingRepoAdmissionCapAtDeregistration(t *testing.T) {
 	for _, state := range []domain.InstanceState{
-		domain.InstanceDraining, domain.InstanceDeregistering, domain.InstanceStopping,
+		domain.InstanceDeregistering, domain.InstanceStopping,
 		domain.InstanceDeleted, domain.InstanceFailed,
 	} {
 		counts := activeRepoCounts([]domain.Instance{{ID: string(state), Repo: "a/repo", State: state}})
 		if counts["a/repo"] != 0 {
 			t.Fatalf("state %s consumed cap: %#v", state, counts)
 		}
+	}
+	counts := activeRepoCounts([]domain.Instance{{ID: "draining", Repo: "a/repo", State: domain.InstanceDraining}})
+	if counts["a/repo"] != 1 {
+		t.Fatalf("a drain that can still abort released its repository slot: %#v", counts)
 	}
 }
 

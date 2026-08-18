@@ -442,9 +442,34 @@ func (r simRecovery) ConfirmDeletion(_ context.Context, name string) (operations
 		ObservedAt: r.world.now}, nil
 }
 
-func (r simRecovery) JobActive(_ context.Context, instance operations.Instance) (bool, error) {
-	job := r.world.jobByRequest(instance.Demand.JobID)
-	return job != nil && job.status == jobRunning, nil
+// JobActive is the evidence a lingering-runner reclaim is derived from, and it
+// reads the DURABLE demand record — the same row, through the same status test,
+// that drainAbortsNow re-reads when the drain acts.
+//
+// Production has one object for both: `lifecycle.ControlRouter` is wired as the
+// inventory's RecoveryObserver and as the executor's Control, and both questions
+// come out of `demandStatus`. Answering the planner from the simulator's own job
+// truth instead gave the two halves different sources, and a delayed broker
+// message made them disagree PERSISTENTLY: the world knew a job had finished
+// while the durable record still said JobStarted, so the fleet planned a
+// lingering-runner reclaim the drain then disproved, again and again. Property
+// (i) reported it on `m4-mac-mini` seed 442 as two aborted recovery drains.
+//
+// That is a world-model defect of exactly #239's shape — the harness handing the
+// planner and the executor different answers to one question — and it is the
+// second one issue #247 turned up. In production the two reads can only disagree
+// if the status genuinely changed between planning and acting, which is the race
+// the abort exists for and which cannot repeat.
+func (r simRecovery) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
+	scaleSet := r.world.storeKeyFor(instance)
+	if scaleSet <= 0 {
+		return false, fmt.Errorf("no scale set for %s", instance.ID)
+	}
+	record, err := r.world.store.DemandRecord(ctx, scaleSet, instance.Demand.JobID)
+	if err != nil {
+		return false, err
+	}
+	return record.Status == operations.DemandJobStarted, nil
 }
 
 // simGuestProbe is the node's guest-liveness probe. It answers from the
@@ -811,7 +836,15 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 			// configured mechanism. Leaving it nil is the pre-#246 world, and that is
 			// how misreported_power was proved red — property (i) fires on seed 1 with
 			// two recovery drains aborted on a three-tick misreport.
-			Power: &app.PowerCorroborator{},
+			//
+			// Its clock is the harness's virtual clock for the same reason the guest
+			// tracker's is, and issue #247 is why the field exists: the inventory reads
+			// the WALL clock, so every power run in this world was stamped thirteen real
+			// days after the instants it was judged against, the forty-five second window
+			// was never met, and no misreport could reach the recovery gate at all. The
+			// bound looked green because it was unreachable — the "green no-op" shape
+			// AGENTS.md names.
+			Power: &app.PowerCorroborator{Now: func() time.Time { return w.now }},
 		},
 	}
 	w.checkers = defaultCheckers(cfg)
@@ -932,8 +965,33 @@ func (w *world) reconcile() tickObservation {
 // executeOperations claims durable outbox work and walks the real instance
 // lifecycle one legal edge per tick, validated by the durable store's own
 // transition guard.
+//
+// The claim instant is the LATER of this world's virtual clock and the wall
+// clock, and that is a world-model correction rather than a convenience.
+// `sqlite.Store.enqueueDemandDrain` — the ordinary teardown of a finished job —
+// stamps `available_at` from `time.Now()`, while everything the reconcile
+// controller plans is stamped from the injected clock. A world that claimed only
+// on the virtual instant therefore could not claim a demand-event drain **at
+// all**: its availability lay thirteen real days in the future, the operation sat
+// pending forever, and the instance sat in `draining` holding its whole vector
+// with nothing left to move it. Issue #247's sweep found it as property (p) on
+// `geekom-linux-amd64` seed 93 — a dead guest held for twenty-five ticks past its
+// release bound — and the same four-event trace reproduces it on the merge base,
+// so the generator had simply never drawn the combination before.
+//
+// Production has one clock: the worker claims with `time.Now()` and the store
+// stamps with `time.Now()`, so such an operation is available immediately. Taking
+// the later of the two instants here reproduces exactly that, and it costs
+// nothing else — this world never fails an operation, so no `available_at` is
+// ever re-stamped with a retry backoff for this to skip. That the durable store
+// reaches for the wall clock where its siblings take an injected one is a real
+// seam, and it is filed as issue #249 rather than repaired here.
 func (w *world) executeOperations() {
-	claimed, err := w.store.Claim(w.ctx, simOwner, 8, w.now, time.Hour)
+	claimAt := w.now
+	if wall := time.Now().UTC(); wall.After(claimAt) {
+		claimAt = wall
+	}
+	claimed, err := w.store.Claim(w.ctx, simOwner, 8, claimAt, time.Hour)
 	if err != nil {
 		w.record(findingStoreError, fmt.Sprintf("claim operations: %v", err))
 		return

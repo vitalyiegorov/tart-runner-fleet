@@ -158,7 +158,7 @@ func (w *simWorld) linuxRepoCount(repo string) int {
 		if instance.Platform != domain.PlatformLinux {
 			continue
 		}
-		if !instance.Live() || instance.State == domain.InstanceOnlineIdle || teardownState(instance.State) {
+		if !instance.Live() || instance.State == domain.InstanceOnlineIdle || releasedItsRepositorySlot(instance.State) {
 			continue
 		}
 		if instance.Repo == repo {
@@ -238,7 +238,7 @@ func (w *simWorld) spawnInstance(op Operation) {
 func (w *simWorld) advanceInstance(inst domain.Instance, drained bool) (domain.Instance, bool) {
 	// A scheduler drain, or a completed job, pushes an active instance into the
 	// teardown chain. Draining is the single legal entry per the domain graph.
-	if drained && inst.State != domain.InstanceDraining && !teardownState(inst.State) && inst.State.CanTransitionTo(domain.InstanceDraining) {
+	if drained && inst.State != domain.InstanceDraining && !releasedItsRepositorySlot(inst.State) && inst.State.CanTransitionTo(domain.InstanceDraining) {
 		inst.State = w.mustTransition(inst.State, domain.InstanceDraining)
 		return inst, true
 	}

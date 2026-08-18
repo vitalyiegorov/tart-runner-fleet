@@ -114,8 +114,27 @@ func (t *GuestLivenessTracker) Observe(ctx context.Context, ids []string) map[st
 // a daemon restart forgets every run and starts again — fail-open in the safe
 // direction, because forgetting can only delay a reclaim, never authorize one.
 type PowerCorroborator struct {
+	// Now must be the SAME clock the scheduler plans on, for the reason ADR 0040
+	// states about the accumulator this one reuses: a run stamped on one clock and
+	// judged against another is not measurable at all, so the bound fails closed
+	// forever and the mechanism silently never fires. Nil is the wall clock, which
+	// is what every production node runs on.
+	//
+	// It is a field rather than a parameter because the instant must be the
+	// corroborator's own on both halves of the judgement, and because the
+	// inventory's instant is the wall clock even where the fleet's is not — which
+	// is exactly how this bound was unreachable in simulation until issue #247
+	// measured it.
+	Now  func() time.Time
 	mu   sync.Mutex
 	runs map[string]domain.ObservationRun
+}
+
+func (c *PowerCorroborator) now() time.Time {
+	if c.Now == nil {
+		return time.Now().UTC()
+	}
+	return c.Now().UTC()
 }
 
 // Observe folds each instance's RAW power reading into its run, attaches the run,
@@ -127,14 +146,15 @@ type PowerCorroborator struct {
 // is the point: a stopped reading does not only plan a kill, it also stops
 // charging the host for the instance, and an uncorroborated one must do neither.
 //
-// The instant is the caller's single observation instant rather than a fresh
-// clock read per instance, for the reason ADR 0040 records: a run stamped on one
-// clock and judged on another is not measurable at all, and the verdict then
-// fails closed forever without saying so.
-func (c *PowerCorroborator) Observe(instances []domain.Instance, now time.Time) []domain.Instance {
+// The instant is read ONCE for the whole slice rather than per instance, for the
+// reason ADR 0040 records: a run stamped on one clock and judged on another is
+// not measurable at all, and the verdict then fails closed forever without
+// saying so.
+func (c *PowerCorroborator) Observe(instances []domain.Instance) []domain.Instance {
 	if c == nil {
 		return instances
 	}
+	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	next := make(map[string]domain.ObservationRun, len(instances))
@@ -280,7 +300,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 			return domain.Unavailable[[]domain.Instance]("untracked controller VM requires reconciliation"), host
 		}
 	}
-	return domain.Fresh(p.probeGuests(ctx, p.Power.Observe(result, now)), now), host
+	return domain.Fresh(p.probeGuests(ctx, p.Power.Observe(result)), now), host
 }
 
 // probeGuests asks every powered-on Running instance's guest whether it is still
