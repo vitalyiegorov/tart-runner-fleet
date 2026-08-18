@@ -61,7 +61,7 @@ func (s *Store) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int6
 		return result, fmt.Errorf("encode demand batch: %w", err)
 	}
 	digest := sha256.Sum256(encoded)
-	now := time.Now().UTC()
+	now := s.instant()
 	tx, err := s.beginTx(ctx, "inbox.begin")
 	if err != nil {
 		return result, fmt.Errorf("begin demand batch: %w", err)
@@ -434,7 +434,7 @@ func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instanc
 		return operations.Instance{}, fmt.Errorf("begin runner demand alignment: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	now := time.Now().UTC()
+	now := s.instant()
 	update := func(point string, current operations.Instance, before, after []byte) error {
 		result, updateErr := s.txExec(ctx, tx, point, `UPDATE instances SET scheduling_metadata=?,updated_at=?
 			WHERE id=? AND state=? AND version=? AND scheduling_metadata=?`, after, now.UnixNano(), current.ID, current.State, current.Version, before)
@@ -526,7 +526,7 @@ func (s *Store) rebindRunnerDemand(ctx context.Context, target operations.Instan
 	// relies on.
 	before, _ := encodeSchedulingMetadata(target)
 	after, _ := encodeSchedulingMetadata(next)
-	now := time.Now().UTC()
+	now := s.instant()
 	// The same compare-and-set the swap uses: state, version, and the exact prior
 	// metadata. A row that moved between the read and this write keeps its old
 	// binding and the next redelivery retries, which is what at-least-once
@@ -637,7 +637,7 @@ func (s *Store) projectDemandRank(ctx context.Context, instance operations.Insta
 }
 
 func (s *Store) enqueueDemandDrain(ctx context.Context, instance operations.Instance, dependencies []string) error {
-	now := time.Now().UTC()
+	now := s.instant()
 	id := "event-drain-" + instance.ID
 	_, _, err := s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
 		ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: 1,
@@ -713,7 +713,7 @@ func (s *Store) PutDemandStatistics(ctx context.Context, scaleSetID int64, stati
 	}
 	observed := statistics.ObservedAt.UTC()
 	if observed.IsZero() {
-		observed = time.Now().UTC()
+		observed = s.instant()
 	}
 	result, err := s.dbExec(ctx, "inbox.statistics", `INSERT INTO scale_set_statistics(
 		scale_set_id,message_id,available,acquired,assigned,running,registered,busy,idle,observed_at)

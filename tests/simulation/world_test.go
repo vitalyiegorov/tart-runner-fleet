@@ -515,30 +515,26 @@ func (w *world) guestLiveness(name string) domain.GuestLiveness {
 // simInstances is the durable instance reader with two substitutions, and they
 // are the ONLY places this harness rewrites a durable fact (ADR 0031).
 //
-// UpdatedAt is rewritten to the VIRTUAL instant the row entered its current
-// state. The store stamps updated_at from the process wall clock, and
-// app.ProductionInventory derives AssignedSince and RunningSince from it. Under
-// a virtual clock every row would therefore look newborn and no assignment or
-// idle-runner deadline could ever be reached, hiding exactly the recovery paths
-// ADR 0028 was written about.
+// Both are about WHICH virtual instant, not about which clock: since issue #249
+// the store takes this world's clock (sqlite.WithClock in newWorld), so every
+// durable timestamp is already virtual and neither substitution exists to
+// translate one clock into another any more.
 //
-// CreatedAt is rewritten to the VIRTUAL instant the world first held the row.
+// UpdatedAt is rewritten to the virtual instant the row entered its CURRENT
+// STATE, and that is not what updated_at means. app.ProductionInventory derives
+// AssignedSince and RunningSince from it, so those deadlines must age from the
+// state edge; the durable column ages from the last WRITE, and a write that
+// changes no state — sqlite.alignRunnerDemand rebinding a runner's metadata, for
+// one — resets it. Without this substitution such a row looks newborn and the
+// recovery paths ADR 0028 was written about would be reachable or not depending
+// on unrelated traffic.
+//
+// CreatedAt is rewritten to the virtual instant THE WORLD first held the row.
 // app.ProductionInventory derives OccupiedSince from created_at — the one
-// per-instance age that must survive a state change (ADR 0036) — so the
-// occupancy clock is the third durable timestamp this harness's virtual clock
-// has to be able to move.
-//
-// It is worth being exact about why, because the reason is NOT the same as
-// UpdatedAt's. sqlite.Advance stamps updated_at from time.Now, so without the
-// first substitution no deadline could ever be reached. created_at is stamped by
-// sqlite.ApplyPlan from plan.CreatedAt, which reconcile.Controller takes from the
-// injected clock, so today it is already virtual and the budget would fire
-// without this line. That is an implementation detail of one INSERT, not a
-// contract: the sibling write in the same file reaches for the wall clock, and
-// if created_at ever followed it the occupancy budget would become unreachable
-// in simulation, property (k) would go permanently green, and nothing in this
-// package would say so. Stating the harness's own clock here makes the property
-// independent of that choice.
+// per-instance age that must survive a state change (ADR 0036) — and the world
+// takes that instant from the earlier of the tick that claimed the provisioning
+// operation and the tick that first observed the row, which is when the vector
+// actually started being held.
 //
 // It also makes the harness's ground truth and the production derivation the
 // SAME number, which matters because property (k) deliberately measures
@@ -625,7 +621,8 @@ type world struct {
 	// createdAt records the virtual instant each instance row was created, which
 	// is when it began holding its profile's vector. It is the harness's own
 	// ground truth for occupancy: property (k) measures from it, and simInstances
-	// substitutes it for the store's wall-clock created_at.
+	// substitutes it for the store's created_at, which is stamped when the row is
+	// written rather than when the world first saw the vector held.
 	createdAt map[string]time.Time
 	// claimed maps an in-flight durable operation to the executor's progress.
 	claimed map[string]*simOperation
@@ -800,12 +797,8 @@ func (w *world) close() { _ = w.store.Close() }
 func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 	t.Helper()
 	ctx := context.Background()
-	store, err := sqlite.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatalf("open simulated store: %v", err)
-	}
 	w := &world{
-		ctx: ctx, cfg: cfg, trace: trace, store: store, now: simEpoch,
+		ctx: ctx, cfg: cfg, trace: trace, now: simEpoch,
 		nextRunID: 1_000, nextReq: 500_000, nextMsgID: 1,
 		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, createdAt: map[string]time.Time{},
 		claimed: map[string]*simOperation{}, delivered: map[int]*simMessage{},
@@ -815,6 +808,17 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		powerMisreport: map[string]int{},
 		drainAborts:    map[string]int{}, known: map[string]finding{},
 	}
+	// The durable store's clock is this world's clock (issue #249). Every
+	// timestamp the store writes on its own initiative -- an event drain's
+	// availability above all -- is therefore a virtual instant the same world
+	// claims, reads deadlines from, and judges properties against. The world is
+	// built before the store because the clock closes over it, and `now` is
+	// already `simEpoch` by the time the migrations stamp anything.
+	store, err := sqlite.Open(ctx, ":memory:", sqlite.WithClock(func() time.Time { return w.now }))
+	if err != nil {
+		t.Fatalf("open simulated store: %v", err)
+	}
+	w.store = store
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
 		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority}
 	w.engine = app.Engine{
@@ -966,32 +970,29 @@ func (w *world) reconcile() tickObservation {
 // lifecycle one legal edge per tick, validated by the durable store's own
 // transition guard.
 //
-// The claim instant is the LATER of this world's virtual clock and the wall
-// clock, and that is a world-model correction rather than a convenience.
-// `sqlite.Store.enqueueDemandDrain` — the ordinary teardown of a finished job —
-// stamps `available_at` from `time.Now()`, while everything the reconcile
-// controller plans is stamped from the injected clock. A world that claimed only
-// on the virtual instant therefore could not claim a demand-event drain **at
-// all**: its availability lay thirteen real days in the future, the operation sat
-// pending forever, and the instance sat in `draining` holding its whole vector
-// with nothing left to move it. Issue #247's sweep found it as property (p) on
-// `geekom-linux-amd64` seed 93 — a dead guest held for twenty-five ticks past its
-// release bound — and the same four-event trace reproduces it on the merge base,
-// so the generator had simply never drawn the combination before.
+// The claim instant is this world's virtual instant and nothing else, which is
+// what production does: the worker claims on the same clock the store stamps
+// availability from (`internal/daemon`, `time.Now` on both sides), so an
+// operation with no backoff is claimable the moment it is written.
 //
-// Production has one clock: the worker claims with `time.Now()` and the store
-// stamps with `time.Now()`, so such an operation is available immediately. Taking
-// the later of the two instants here reproduces exactly that, and it costs
-// nothing else — this world never fails an operation, so no `available_at` is
-// ever re-stamped with a retry backoff for this to skip. That the durable store
-// reaches for the wall clock where its siblings take an injected one is a real
-// seam, and it is filed as issue #249 rather than repaired here.
+// It could not be stated that way until issue #249. `sqlite.Store` reached for
+// the wall clock at five write sites, `enqueueDemandDrain` — the ordinary
+// teardown of a finished job — among them, so a demand-event drain's
+// `available_at` lay thirteen real days in this world's future and the operation
+// could not be claimed **at all**: it sat pending forever and its instance sat in
+// `draining` holding its whole vector with nothing left to move it. Issue #247's
+// sweep found it as property (p) on `geekom-linux-amd64` seed 93 and worked
+// around it here by claiming on the later of the two instants — a world-model
+// patch over a fleet seam. The store now takes the injected clock like every
+// sibling, the workaround is gone, and `TestIssue249OrdinaryTeardownIsClaimable`
+// pins the trace it was found on.
+//
+// Claiming on the virtual instant alone is also strictly stronger than the
+// workaround: a retry backoff re-stamps `available_at`, and under the wall-clock
+// maximum every such backoff was skipped, so no operation this world failed
+// could ever have waited.
 func (w *world) executeOperations() {
-	claimAt := w.now
-	if wall := time.Now().UTC(); wall.After(claimAt) {
-		claimAt = wall
-	}
-	claimed, err := w.store.Claim(w.ctx, simOwner, 8, claimAt, time.Hour)
+	claimed, err := w.store.Claim(w.ctx, simOwner, 8, w.now, time.Hour)
 	if err != nil {
 		w.record(findingStoreError, fmt.Sprintf("claim operations: %v", err))
 		return
