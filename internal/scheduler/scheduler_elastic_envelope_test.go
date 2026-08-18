@@ -198,12 +198,15 @@ func TestElasticEnvelopeRespectsLinuxCap(t *testing.T) {
 
 // TestElasticEnvelopeChargesOnlyConsumingLinux proves the two accounting rules
 // that decide what the Linux cap has left: a live Linux VM is charged against it,
-// and a VM that has released its host resources (drained and powered off) is not.
-// Getting the second wrong would strand capacity that no longer exists.
+// and a VM that has released its host resources (past its own stop and powered
+// off) is not. Getting the second wrong would strand capacity that no longer
+// exists.
 func TestElasticEnvelopeChargesOnlyConsumingLinux(t *testing.T) {
 	consuming := elasticLinux("trf-linux-live", "a/repo", "medium")
 	released := elasticLinux("trf-linux-drained", "b/repo", "large")
-	released.State = domain.InstanceDraining
+	// `stopping` and not `draining`: the release is the fleet's own stop landing,
+	// not an enumeration saying the VM is off (issue #247).
+	released.State = domain.InstanceStopping
 	released.Power = domain.InstancePowerStopped
 	if released.ConsumesHostResources() {
 		t.Fatal("precondition: a drained, powered-off instance must not consume host resources")

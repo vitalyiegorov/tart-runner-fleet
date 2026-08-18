@@ -16,8 +16,14 @@ func stoppedReading(id string) domain.Instance {
 
 // tick folds one round of readings at the given offset from the epoch and
 // returns what the corroborator lets through.
+//
+// The instant travels through the corroborator's OWN clock, because that is
+// where it lives: the accumulator stamps and judges on one clock or it measures
+// nothing at all, which is how this bound stayed unreachable in the deterministic
+// simulation until issue #247 measured it.
 func tick(c *PowerCorroborator, offset time.Duration, instances ...domain.Instance) []domain.Instance {
-	return c.Observe(instances, corroboratorEpoch.Add(offset))
+	c.Now = func() time.Time { return corroboratorEpoch.Add(offset) }
+	return c.Observe(instances)
 }
 
 // The production storm, at the layer that produced it. `tart list` said the VM
@@ -101,8 +107,26 @@ func TestAnAgreeingReadingResetsTheRun(t *testing.T) {
 // accumulates nothing, and it must never be the thing that authorizes a reclaim.
 func TestANilCorroboratorAccumulatesNothing(t *testing.T) {
 	var corroborator *PowerCorroborator
-	out := corroborator.Observe([]domain.Instance{stoppedReading("unwired")}, corroboratorEpoch)
+	out := corroborator.Observe([]domain.Instance{stoppedReading("unwired")})
 	if len(out) != 1 || out[0].PowerRun.Refusals != 0 {
 		t.Fatalf("a nil corroborator must pass instances through untouched; got %#v", out)
+	}
+}
+
+// An unstated clock is the wall clock, which is what every production node runs
+// on. The run still accumulates; what it cannot do is meet a forty-five second
+// window inside a test that takes microseconds, which is exactly the fail-closed
+// direction.
+func TestAnUnstatedClockIsTheWallClock(t *testing.T) {
+	corroborator := &PowerCorroborator{}
+	var out []domain.Instance
+	for range domain.PowerCorroboration.ConsecutiveRefusals {
+		out = corroborator.Observe([]domain.Instance{stoppedReading("wall")})
+	}
+	if out[0].PowerRun.Refusals != domain.PowerCorroboration.ConsecutiveRefusals {
+		t.Fatalf("the run must accumulate on the wall clock too; got %#v", out[0].PowerRun)
+	}
+	if out[0].Power != domain.InstancePowerUnknown {
+		t.Fatalf("readings inside the window must stay unknown; got %q", out[0].Power)
 	}
 }

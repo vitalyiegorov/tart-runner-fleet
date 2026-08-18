@@ -811,7 +811,15 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 			// configured mechanism. Leaving it nil is the pre-#246 world, and that is
 			// how misreported_power was proved red — property (i) fires on seed 1 with
 			// two recovery drains aborted on a three-tick misreport.
-			Power: &app.PowerCorroborator{},
+			//
+			// Its clock is the harness's virtual clock for the same reason the guest
+			// tracker's is, and issue #247 is why the field exists: the inventory reads
+			// the WALL clock, so every power run in this world was stamped thirteen real
+			// days after the instants it was judged against, the forty-five second window
+			// was never met, and no misreport could reach the recovery gate at all. The
+			// bound looked green because it was unreachable — the "green no-op" shape
+			// AGENTS.md names.
+			Power: &app.PowerCorroborator{Now: func() time.Time { return w.now }},
 		},
 	}
 	w.checkers = defaultCheckers(cfg)

@@ -881,6 +881,170 @@ func (w *world) releaseTick(id string, from int) int {
 	return 0
 }
 
+// retakenVectors names every instance that stopped charging the host and then
+// charged it again.
+//
+// It states issue #247 directly, and more sharply than the conservation oracle
+// can. Property (g) reports the moment a total exceeds a ceiling, which is one
+// tick of one consequence; this reports the CAUSE, whatever the totals happened
+// to be. The scheduler commits freed capacity on the tick it sees it, so a vector
+// that comes back is one the host is now holding twice — and the fleet has no
+// mechanism for un-admitting the replacement it lent it to.
+func (w *world) retakenVectors() []string {
+	released := map[string]bool{}
+	var retaken []string
+	for _, observation := range w.observations {
+		if !observation.InstancesUsable {
+			// An unreadable inventory is not a released vector and not a held one.
+			continue
+		}
+		for _, instance := range observation.Instances {
+			switch {
+			case !instance.ConsumesHostResources():
+				released[instance.ID] = true
+			case released[instance.ID]:
+				retaken = append(retaken, instance.ID)
+				released[instance.ID] = false
+			}
+		}
+	}
+	return retaken
+}
+
+// misreportedTeardownTrace is issue #247's nightly counterexample
+// (geekom-linux-amd64 seed 8, tick 36) reduced to the two instances and the one
+// vector it is about.
+//
+// The budgeted world is what makes the vector indivisible: one maestro is exactly
+// the 4-vCPU ceiling, so a second can never coexist with it however idle the
+// machine is and however much work is queued. The sibling arriving at tick 10
+// waits for precisely the vector the first one holds.
+//
+// The lie lands on the tick the first job ends, which is the state the nightly
+// reached: the instance is tearing down for a reason entirely its own — its work
+// is finished — and the enumeration says its VM is already off. ADR 0042 exempted
+// exactly that pair from corroboration, reasoning that a teardown the fleet
+// itself decided corroborates a stopped reading. It does not. Deciding to drain
+// is not powering anything off, and three ticks later the enumeration tells the
+// truth again while the instance is still tearing down.
+func misreportedTeardownTrace(cfg worldConfig) simTrace {
+	return simTrace{Seed: 20_260_818, Ticks: 60, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "maestro", Event: "push"},
+		{Tick: 10, Kind: eventArrive, Repo: "b/repo", Profile: "maestro", Event: "push"},
+		{Tick: 11, Kind: eventStopArrivals},
+		// Three readings: long enough for the release to be seen and the replacement
+		// admitted, short enough that the enumeration corrects itself while the
+		// instance that released it is still there to take it back.
+		{Tick: 12, Kind: eventMisreportedPower, Count: 3},
+	}}
+}
+
+// TestATearingDownInstanceDoesNotLendAVectorItStillHolds pins the defect: a
+// vector released on a reading nobody acted on is lent to a replacement, and the
+// reading is then retracted by the next enumeration.
+//
+// Before the fix this is a conservation violation two ticks after the lie: eight
+// CPU held against a four-CPU budget, by one instance that is still tearing down
+// with its guest executing and one that was admitted into the capacity it was
+// believed to have released.
+func TestATearingDownInstanceDoesNotLendAVectorItStillHolds(t *testing.T) {
+	t.Parallel()
+	cfg := budgetedWorld()
+	w := newWorld(t, cfg, misreportedTeardownTrace(cfg))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("a misreported teardown must violate nothing: %s", findings[0])
+	}
+	// The harness really did lie about a VM that was really running. A green run
+	// over a trace that misreported nothing would prove nothing at all.
+	if len(w.powerMisreport) != 1 {
+		t.Fatalf("no instance was ever misreported: %v", w.powerMisreport)
+	}
+	// The heart of it: nothing gave a vector back and then took it again.
+	if retaken := w.retakenVectors(); len(retaken) > 0 {
+		t.Fatalf("%v took back a vector the scheduler was already free to commit; "+
+			"a release the fleet cannot honour is not a release", retaken)
+	}
+	// And the queued work behind it still ran, which is what the release was for.
+	for index, job := range w.jobs {
+		if job.status != jobDone {
+			t.Fatalf("job %d did not complete: status %s", index, job.status)
+		}
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+}
+
+// abortedRecoveryTrace is issue #247's other path to the same defect, and it is
+// the one the issue states: the misreport is corroborated while the instance is
+// RUNNING, so the fleet plans the destructive recovery ADR 0042 bounds, stops
+// charging the host the moment that drain starts, admits a replacement into the
+// capacity — and then the drain's own re-read of the power at the moment of
+// acting finds the VM running and aborts back to Running (ADR 0033), holding a
+// vector that is no longer its to hold.
+//
+// The wedge makes the window observable rather than creating it. This harness
+// drives one lifecycle edge per tick, so an unwedged drain is claimed and aborted
+// on the tick it is planned; production's window is the operation's own latency,
+// which the 2026-08-18 incident measured at about two seconds, eighty-six times.
+func abortedRecoveryTrace(cfg worldConfig) simTrace {
+	// The horizon is longer than the other traces here because the long job is: the
+	// sibling that waits for its vector cannot start until it ends, and a trace that
+	// stopped before the queue drained would prove nothing about the queue.
+	return simTrace{Seed: 20_260_818, Ticks: 100, Config: cfg.Name, Events: []simEvent{
+		// The job has to outlive the recovery it triggers. Without this the drain the
+		// fleet plans is the ordinary one for a finished job, which disproves nothing
+		// and never aborts.
+		{Tick: 1, Kind: eventLongJob, Count: 6},
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "maestro", Event: "push"},
+		{Tick: 10, Kind: eventArrive, Repo: "b/repo", Profile: "maestro", Event: "push"},
+		{Tick: 11, Kind: eventStopArrivals},
+		// Ten readings: past the corroboration bound, and still lying when the drain
+		// aborts, so it is the ABORT that takes the vector back rather than the
+		// enumeration correcting itself. That is the mechanism issue #247 states.
+		{Tick: 12, Kind: eventMisreportedPower, Count: 10},
+		{Tick: 12, Kind: eventWedgedDrain, Count: 3},
+	}}
+}
+
+// TestAnAbortedRecoveryNeverLentItsVector is the same rule judged on the path the
+// issue describes: the release and the admission must not straddle the window in
+// which the drain can still disprove its own premise.
+func TestAnAbortedRecoveryNeverLentItsVector(t *testing.T) {
+	t.Parallel()
+	cfg := budgetedWorld()
+	w := newWorld(t, cfg, abortedRecoveryTrace(cfg))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("an aborted recovery must violate nothing: %s", findings[0])
+	}
+	if len(w.powerMisreport) != 1 {
+		t.Fatalf("no instance was ever misreported: %v", w.powerMisreport)
+	}
+	// The trace really reached the incident state. A corroborated misreport really
+	// did plan a destructive recovery, and that drain really did disprove its own
+	// premise at the moment of acting — which is the whole window under test.
+	for id := range w.powerMisreport {
+		if aborts := w.drainAborts[id]; aborts != 1 {
+			t.Fatalf("%s had %d aborted recovery drains, want exactly the one this "+
+				"trace is about: %v", id, aborts, w.drainAborts)
+		}
+	}
+	if retaken := w.retakenVectors(); len(retaken) > 0 {
+		t.Fatalf("%v took back a vector released by a drain that then aborted; "+
+			"the release and the abort must not straddle the same window", retaken)
+	}
+	for index, job := range w.jobs {
+		if job.status != jobDone {
+			t.Fatalf("job %d did not complete: status %s", index, job.status)
+		}
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+}
+
 // misreportedPowerTrace is the 2026-08-18 incident (issue #246): a job running
 // normally, and an enumeration that says its VM is powered off while it runs.
 //
