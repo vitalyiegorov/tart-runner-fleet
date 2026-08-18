@@ -145,6 +145,28 @@ right, the fleet was right, and the simulated world had built a state the fleet
 cannot reach. The harness claims on the later of the two instants now, and
 ordinary teardowns complete in simulation for the first time.
 
+### And one more, the same shape as #239
+
+At five hundred seeds the sweep then reported property (i) — *two recovery drains
+aborted* — on `m4-mac-mini` seed 442. `simRecovery.JobActive`, the evidence a
+lingering-runner reclaim is derived from, answered out of the simulator's own job
+truth, while `drainAbortsNow` re-read the durable demand record. Production wires
+**one** `lifecycle.ControlRouter` as the inventory's `RecoveryObserver` *and* as
+the executor's `Control`, so both questions come out of `demandStatus` — the same
+row, the same status test.
+
+A delayed broker message made the harness's two sources disagree *persistently*:
+the world knew a job had finished while the durable record still said
+`JobStarted`, so the fleet planned a reclaim its own drain disproved, and planned
+it again. In production the two reads can only disagree if the status genuinely
+changed between planning and acting, which is the race the abort exists for and
+which cannot repeat.
+
+This is #239 exactly — the harness handing the planner and the executor different
+answers to one question — and it is the reason ADR 0031's rule about mirrors is
+worth restating: **a simulated port answers from the source production answers
+from, or it is testing a different fleet.**
+
 ## Decision
 
 ### The vector comes back on evidence nothing can retract
@@ -333,32 +355,40 @@ instants, which is what production does with one clock.
 
 ## The three questions
 
-**Can I remove overengineering?** Yes: this record deletes a release path rather
-than adding a mechanism. `ConsumesHostResources` gains one comparison and loses a
-whole class of premise; there is no new state, no new field on `domain.Instance`,
-no new configuration, no new durable column and no new oracle. The three
-alternatives that would have added one are recorded above with why they were not
-taken.
+**Can I remove overengineering?** Yes: this record deletes release paths rather
+than adding a mechanism. `ConsumesHostResources` gains one comparison and
+`activeRepoCounts` loses a case; between them they lose a whole class of premise.
+There is no new state, no new field on `domain.Instance`, no new configuration, no
+new durable column and no new oracle. The four alternatives that would each have
+added one — release at `deleted`, a shadow capacity state, a phase-aware release,
+a latched release — are recorded above with why they were not taken.
 
-**Can I reduce complexity?** The rule is stated once, in the predicate every
-consumer already reads, in the same place ADR 0042 put its bound and for the same
+**Can I reduce complexity?** Each rule is stated once, in the predicate its
+consumers already read, in the same place ADR 0042 put its bound and for the same
 reason: a rule about what capacity is free must not be re-derived by each caller
-that wants some. The one genuinely new line of production code outside that
-predicate is a clock field that already existed, spelled the same way, on the
-object beside it.
+that wants some. The two predicates are deliberately not merged — they answer
+different questions ("is this machine still executing?" and "can GitHub still hand
+this runner a job?") and the states already distinguish them. The only genuinely
+new production symbol is a clock field that already existed, spelled the same way,
+on the object beside it.
 
-**Can I test this?** Both paths are pinned deterministically and both were proved
-red first: `TestATearingDownInstanceDoesNotLendAVectorItStillHolds` (the reading
-corrects itself, seed 8's shape reduced to two instances and one vector) and
-`TestAnAbortedRecoveryNeverLentItsVector` (the drain aborts, which is the path the
-issue states). Both assert the world reached the incident state — the harness
-really lied, the drain really aborted — because a green run over a trace that
-never lied would prove nothing.
+**Can I test this?** Both paths of the vector defect are pinned deterministically
+and both were proved red first: `TestATearingDownInstanceDoesNotLendAVectorItStillHolds`
+(the reading corrects itself — seed 8's shape reduced to two instances and one
+vector) and `TestAnAbortedRecoveryNeverLentItsVector` (the drain aborts, which is
+the path the issue states). Both assert the world reached the incident state — the
+harness really lied, the drain really aborted — because a green run over a trace
+that never lied would prove nothing. The repository-slot half is pinned by
+`TestTeardownStatesStopConsumingRepoAdmissionCapAtDeregistration` and was found by
+the sweep, not by inspection.
 
-The harness could not reach the second path at all until the corroborator's clock
-was stated, which is a **world-model defect** of exactly the kind #242 asks to be
-named precisely: the fleet was right, the oracle was right, and the simulated
-world could not build the state. Extending the harness was part of the fix, not an
-optional extra, and `misreported_power` now lands in the generator's draw and in
+**And the harness could not reach any of it.** Four separate world-model gaps had
+to be closed before the sweep could judge this rule at all: the corroborator's
+clock, the store's availability clock, the two mirrors reading one demand record,
+and — from ADR 0042 — the fault itself. Each was labelled by #242's taxonomy
+before it was fixed: in all four the fleet was right, the oracle was right, and the
+simulated world was the thing that could not be reached or could not be built.
+Extending the harness was part of the fix rather than an optional extra, and
+`misreported_power` now lands in the generator's draw and in
 `TestGeneratedTraceExercisesTheWholeWorld`'s required table, which is the
 acceptance test this record is judged by.
