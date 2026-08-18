@@ -52,9 +52,36 @@ func refuseMalformed(err error) error {
 
 type Store struct {
 	db          *sql.DB
+	clock       func() time.Time
 	injectFault func(string) error
 	injectRows  func(string) rowsScanner
 }
+
+// Option configures a Store at open time.
+type Option func(*Store)
+
+// WithClock replaces the clock every durable timestamp this package writes on
+// its own initiative is stamped from.
+//
+// AGENTS.md rule 3 -- "Time, I/O, randomness, and process execution enter
+// through interfaces" -- and this store is the last durable writer that did not
+// meet it. Production passes nothing and keeps time.Now, so the two clocks are
+// the same one there and always were; the deterministic simulation (ADR 0031)
+// passes its virtual clock, and until it could, an operation this store stamped
+// was thirteen real days in that world's future and therefore unclaimable in it
+// forever (issue #249). A nil clock is not a clock and leaves the wall clock in
+// place.
+func WithClock(now func() time.Time) Option {
+	return func(store *Store) {
+		if now != nil {
+			store.clock = now
+		}
+	}
+}
+
+// instant is the one place this package reads the time. Every timestamp it
+// writes without being handed one comes from here.
+func (s *Store) instant() time.Time { return s.clock().UTC() }
 
 // legacyStageDeregisterError is the exact redacted value persisted by
 // releases before migration 6. Keep it immutable: deriving this predicate
@@ -71,7 +98,7 @@ const (
 // state the scheduler rebuilds from durable demand — never authoritative data.
 const seedSchedulerState = `INSERT OR IGNORE INTO scheduler_state(singleton,version,data,reservations,drr_state,observation_cursor,updated_at) VALUES(1,0,'{}','[]','{}','',0)`
 
-func Open(ctx context.Context, path string) (*Store, error) {
+func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	if path == "" {
 		return nil, operations.ErrInvalid
 	}
@@ -91,7 +118,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, clock: time.Now}
+	for _, option := range options {
+		option(store)
+	}
 	if err := store.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -369,7 +399,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 				return fmt.Errorf("migration 1: %w", err)
 			}
 		}
-		if _, err := s.txExec(ctx, tx, "migrate.v1.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(1, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		if _, err := s.txExec(ctx, tx, "migrate.v1.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(1, ?)`, s.instant().UnixNano()); err != nil {
 			return fmt.Errorf("record migration 1: %w", err)
 		}
 	}
@@ -383,7 +413,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 				return fmt.Errorf("migration 2: %w", err)
 			}
 		}
-		if _, err := s.txExec(ctx, tx, "migrate.v2.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		if _, err := s.txExec(ctx, tx, "migrate.v2.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)`, s.instant().UnixNano()); err != nil {
 			return fmt.Errorf("record migration 2: %w", err)
 		}
 	}
@@ -397,7 +427,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		)`); err != nil {
 			return fmt.Errorf("migration 3: %w", err)
 		}
-		if _, err := s.txExec(ctx, tx, "migrate.v3.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		if _, err := s.txExec(ctx, tx, "migrate.v3.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)`, s.instant().UnixNano()); err != nil {
 			return fmt.Errorf("record migration 3: %w", err)
 		}
 	}
@@ -440,7 +470,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 				return fmt.Errorf("migration 4: %w", err)
 			}
 		}
-		if _, err := s.txExec(ctx, tx, "migrate.v4.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		if _, err := s.txExec(ctx, tx, "migrate.v4.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)`, s.instant().UnixNano()); err != nil {
 			return fmt.Errorf("record migration 4: %w", err)
 		}
 	}
@@ -448,12 +478,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if _, err := s.txExec(ctx, tx, "migrate.v5", `ALTER TABLE instances ADD COLUMN scheduling_metadata BLOB NOT NULL DEFAULT '{}'`); err != nil {
 			return fmt.Errorf("migration 5: %w", err)
 		}
-		if _, err := s.txExec(ctx, tx, "migrate.v5.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)`, time.Now().UTC().UnixNano()); err != nil {
+		if _, err := s.txExec(ctx, tx, "migrate.v5.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)`, s.instant().UnixNano()); err != nil {
 			return fmt.Errorf("record migration 5: %w", err)
 		}
 	}
 	if version < 6 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		// v0.1.69 could dead-letter a drain when an ephemeral JIT runner
 		// disappeared between the runner lookup and GitHub's DELETE. Revive
 		// only that bounded, redacted failure class and only while its owned
@@ -475,7 +505,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 7 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		// v0.1.71 still used the generic five-attempt budget for drain
 		// operations. A transient scale-set observation could therefore
 		// exhaust cleanup before GitHub converged even though the ephemeral
@@ -497,7 +527,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 8 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		if _, err := s.txExec(ctx, tx, "migrate.v8", `UPDATE operations
 			SET status=?,attempts=0,available_at=?,lease_owner='',lease_until=0,last_error='',updated_at=?
 			WHERE status=? AND kind=? AND last_error=?
@@ -514,7 +544,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 9 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		// Releases through v0.1.104 could exhaust the generic five-attempt
 		// provision budget while acquiring a JIT configuration. No external
 		// effect had been recorded, but the owned Tart VM was already reachable.
@@ -571,7 +601,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 10 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		for _, column := range []struct {
 			name  string
 			query string
@@ -626,7 +656,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 11 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		var present int
 		if err := s.txRow(ctx, tx, "migrate.v11.queue-time-exact",
 			`SELECT COUNT(*) FROM pragma_table_info('github_job_observations') WHERE name='queue_time_exact'`).Scan(&present); err != nil {
@@ -643,7 +673,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 12 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		// Ghost demand evidence (issue #113). GitHub kept advertising one
 		// acquirable job for 11 hours after the backing job was cancelled by a
 		// force-push, so the broker alone can never retract queued demand.
@@ -681,7 +711,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	if version < 13 {
-		now := time.Now().UTC().UnixNano()
+		now := s.instant().UnixNano()
 		// Broker message-id sequences are not unique for the life of a database
 		// (issue #165). GitHub restarted the sequence for scale set
 		// 8077185082566234948 on 2026-08-01T18:32Z, every redelivered id collided
@@ -755,7 +785,7 @@ func (s *Store) CreateInstance(ctx context.Context, instance operations.Instance
 	}
 	now := instance.CreatedAt.UTC()
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = s.instant()
 	}
 	metadata, _ := json.Marshal(instance.Ownership)
 	schedulingJSON, _ := encodeSchedulingMetadata(instance)
@@ -855,7 +885,7 @@ func (s *Store) Advance(ctx context.Context, change lifecycle.StateChange) (oper
 		return operations.Instance{}, fmt.Errorf("begin lifecycle advance: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	now := time.Now().UTC()
+	now := s.instant()
 	result, err := s.txExec(ctx, tx, "advance.instance", `UPDATE instances SET state=?,version=version+1,last_error=?,updated_at=? WHERE id=? AND state=? AND version=?`,
 		change.NextState, change.FailureCode, now.UnixNano(), change.InstanceID, change.ExpectedState, change.ExpectedVersion)
 	if err != nil {
@@ -1013,7 +1043,7 @@ func (s *Store) Transition(ctx context.Context, transition operations.Transition
 
 	now := transition.Operation.CreatedAt.UTC()
 	if now.IsZero() {
-		now = time.Now().UTC()
+		now = s.instant()
 	}
 	result, err := s.txExec(ctx, tx, "transition.instance", `UPDATE instances SET state=?,version=version+1,drain_phase=?,last_error=?,updated_at=? WHERE id=? AND state=? AND version=?`,
 		transition.NextState, transition.DrainPhase, transition.LastError, now.UnixNano(), transition.InstanceID, transition.ExpectedState, transition.ExpectedVersion)
@@ -1201,7 +1231,7 @@ func (s *Store) Retry(ctx context.Context, id, owner, message string, availableA
 		status = operations.OperationDead
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE operations SET status=?,attempts=attempts+1,available_at=?,lease_owner='',lease_until=0,last_error=?,updated_at=? WHERE id=? AND status=? AND lease_owner=?`,
-		status, availableAt.UTC().UnixNano(), message, time.Now().UTC().UnixNano(), id, operations.OperationClaimed, owner)
+		status, availableAt.UTC().UnixNano(), message, s.instant().UnixNano(), id, operations.OperationClaimed, owner)
 	if err != nil {
 		return fmt.Errorf("retry operation: %w", err)
 	}
@@ -1295,7 +1325,7 @@ func (s *Store) PutOwnership(ctx context.Context, resource string, ownership ope
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("load ownership: %w", err)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO ownership(resource_name,metadata,updated_at) VALUES(?,?,?)`, resource, metadata, time.Now().UTC().UnixNano())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO ownership(resource_name,metadata,updated_at) VALUES(?,?,?)`, resource, metadata, s.instant().UnixNano())
 	if err != nil {
 		return fmt.Errorf("put ownership: %w", err)
 	}

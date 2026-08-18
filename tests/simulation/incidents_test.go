@@ -46,13 +46,16 @@ import (
 func TestFindingRespawnOfALiveIncarnation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, err := sqlite.Open(ctx, ":memory:")
+	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+	// One clock for the whole incident, the store included (issue #249). Everything
+	// below judges instants against `now`, so a store stamping durable rows from
+	// the process clock would be a second world with no relation to this one.
+	store, err := sqlite.Open(ctx, ":memory:", sqlite.WithClock(func() time.Time { return now }))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
-	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
 	profile := domain.Profile{ID: "small", Platform: domain.PlatformLinux, Route: "linux-small",
 		Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}}
 	binding := app.Binding{StoreKey: 1, ScaleSetID: 1, Scope: "sim/small",

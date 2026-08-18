@@ -113,12 +113,32 @@ The code under test is production code, not a model of it:
 - **The clock.** One tick is thirty virtual seconds. `FairnessAge` is ten ticks,
   the statistics freshness budget four, the ghost-absence window thirty.
 
-One substitution is deliberate and is the only place the harness rewrites a
-durable fact: `simInstances` replaces `Instance.UpdatedAt` with the VIRTUAL
-instant the row entered its current state. The store stamps it from the process
-wall clock and `ProductionInventory` derives `AssignedSince` and `RunningSince`
-from it, so under a virtual clock every row would look newborn and no assignment
-or idle-runner deadline could ever be reached.
+**One clock, the durable store included.** `sqlite.Open` takes the harness's
+virtual clock (`sqlite.WithClock`), so every timestamp the store writes on its
+own initiative is an instant this world can reach. It did not, until
+[issue #249](https://github.com/vitalyiegorov/tart-runner-fleet/issues/249): the
+store stamped five columns from `time.Now()`, and an ordinary event drain's
+`available_at` therefore lay thirteen real days in the simulated future. That
+operation could not be claimed AT ALL — it stayed pending forever and its
+instance sat in `draining` holding its whole vector — which is the sharpest form
+of the hazard this record exists to prevent, a fleet state the simulated world
+could not build. AGENTS.md rule 3 states the general rule; a durable writer is
+not exempt from it.
+
+Two substitutions remain, and they are the only places the harness rewrites a
+durable fact. Neither translates one clock into another; both name WHICH virtual
+instant a derived age must be measured from.
+
+- `simInstances` replaces `Instance.UpdatedAt` with the instant the row entered
+  its CURRENT STATE. `ProductionInventory` derives `AssignedSince` and
+  `RunningSince` from it, so those deadlines must age from the state edge, while
+  the durable column ages from the last write — and a write that changes no
+  state resets it.
+- `simInstances` replaces `Instance.CreatedAt` with the instant THE WORLD first
+  held the row, which is the earlier of the tick that claimed the provisioning
+  operation and the tick that first observed the row. `OccupiedSince` derives
+  from it (ADR 0036), and the vector starts being held when the world can first
+  see it, not when the row was written.
 
 ### Traces, not dice
 

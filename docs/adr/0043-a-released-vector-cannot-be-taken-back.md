@@ -353,6 +353,15 @@ for `time.Now()` where its siblings take an injected clock is
 until it is closed the harness compensates by claiming on the later of the two
 instants, which is what production does with one clock.
 
+> **Closed.** Issue #249 gave `sqlite.Store` the injected clock at all five write
+> sites, the harness now claims on its virtual instant alone, and the
+> compensation above is gone. The numbers in this record were measured under the
+> compensation and are unchanged by its removal in behaviour, but the corpus
+> digests moved: the harness no longer skips a retry backoff, and a store that
+> stamps `created_at`, `updated_at`, and `available_at` on the virtual clock
+> writes different durable instants than one that stamped them thirteen days
+> ahead. See ADR 0031 for the rule the simulation now states.
+
 ## The three questions
 
 **Can I remove overengineering?** Yes: this record deletes release paths rather

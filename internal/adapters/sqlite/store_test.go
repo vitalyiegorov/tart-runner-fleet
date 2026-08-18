@@ -1084,7 +1084,7 @@ func TestMigrationFaultInjectionRollsBackEveryStage(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			store := &Store{db: db, injectFault: func(candidate string) error {
+			store := &Store{db: db, clock: time.Now, injectFault: func(candidate string) error {
 				if candidate == point {
 					return errors.New("injected " + point)
 				}
