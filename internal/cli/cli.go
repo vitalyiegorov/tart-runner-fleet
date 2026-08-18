@@ -628,6 +628,25 @@ func runHealth(ctx context.Context, client apiClient, output string, stdout, std
 // reservationDetail says what the fleet is standing capacity by for, in one
 // line, whether or not the check passes. A passing check with no detail would
 // leave the reservation exactly as unobservable as it was before issue #226.
+// runnerVersionDetail renders what each base image carries. A failing check
+// reports the reasons the daemon computed; a passing one still lists every
+// image and the floor it cleared, because the acceptance criterion of issue #206
+// is that the version in service is visible without SSH-ing into a guest, and a
+// bare "ok" would leave it exactly as invisible as it was.
+func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
+	if !check.OK {
+		return joinReasons(check)
+	}
+	if len(status.RunnerImages) == 0 {
+		return "not reported by this daemon"
+	}
+	carried := make([]string, 0, len(status.RunnerImages))
+	for _, image := range status.RunnerImages {
+		carried = append(carried, image.Platform+" "+image.Version)
+	}
+	return fmt.Sprintf("%s (floor %s)", strings.Join(carried, ", "), status.RunnerImages[0].Floor)
+}
+
 func reservationDetail(status adminapi.Status, check adminapi.Check) string {
 	if !check.OK {
 		return joinReasons(check)
@@ -666,6 +685,8 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	occupancy := status.Data.EffectiveOccupancy()
 	reservation := status.Data.EffectiveReservationCheck()
 	progress := status.Data.EffectiveProgress()
+	guests := status.Data.EffectiveGuestLiveness()
+	runners := status.Data.EffectiveRunnerVersionCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -684,6 +705,19 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// PASS occupancy, and the cause could only be read by copying the SQLite
 		// file off the host (issue #233).
 		{Name: "drain progress", OK: progress.OK, Detail: joinReasons(progress)},
+		// The guest-liveness check names an instance whose guest stopped executing
+		// while the backend still reported it running, the job that died with it,
+		// and the probe timeline. On 2026-08-16 eight runners died exactly this way
+		// and the fleet produced no artifact of any kind: the only record was a
+		// drain that followed GitHub's failure by minutes (issue #236).
+		{Name: "guest liveness", OK: guests.OK, Detail: joinReasons(guests)},
+		// The runner-version check names what actions/runner release each base
+		// image carries and the floor GitHub's minimum version enforcement judges
+		// it against. It prints the versions even when it passes, because until
+		// issue #206 the only way to learn them was to SSH into a guest — and a
+		// runner too old to register does not fail loudly, it simply stops being
+		// given jobs, which on this fleet is indistinguishable from a quiet day.
+		{Name: "runner version", OK: runners.OK, Detail: runnerVersionDetail(status.Data, runners)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {

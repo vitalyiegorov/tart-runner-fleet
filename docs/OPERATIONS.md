@@ -739,6 +739,167 @@ removing it. The ceiling is per profile, `occupancyBudgetSeconds`, and must be
 `0` (never reaped for age) or between 300 and 21600 seconds; unstated takes the
 platform default of two hours on macOS and one hour on Linux.
 
+### A guest that has stopped answering
+
+`fleet doctor` reports `FAIL  guest liveness` when an instance's guest has
+refused a whole run of liveness probes: the VM is still enumerated as `running`,
+GitHub still reports its job `in_progress`, and nothing inside it is executing
+any more.
+
+This is the 2026-08-16 class (ADR 0040, issue #236). A job's `--privileged`
+container wrote to the guest's `/proc/sysrq-trigger` and panicked the guest
+kernel; with `kernel.panic=0` the panicked kernel hung forever. Eight runners
+died that way, each holding 6 vCPU / 12 GiB until GitHub's own grace timer failed
+the job **sixteen to eighteen minutes later**, and the fleet produced no artifact
+of any kind — no log line, no metric, no doctor finding.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "guest liveness")'
+fleet status --endpoint "$ENDPOINT" --output json | jq '.data.guestSilences'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `refusals` / `requiredRefusals` | Consecutive probes refused, against the bound this node requires. |
+| `silenceSeconds` / `windowSeconds` | How long the run has lasted, against the bound. |
+| `unresponsive` | `true` once BOTH bounds are met: the fleet has declared the guest dead and is reclaiming its vector. |
+| `runId` / `jobId` | The job that died with the guest. |
+
+Only a refused **transport** counts. A guest that answers slowly, and a probe
+that runs out of its own deadline against a saturated guest, both clear the run —
+so a job using every core cannot be probed into a drain. The check fails only on
+the verdict; a partial run of refusals is the fleet watching, and is not
+actionable.
+
+The reclaim is not silent and not automatic-and-invisible. The daemon logs one
+line when a guest goes quiet and another when it is declared dead, each naming
+the instance, the vector, the probe timeline, and the job; a third names the
+reclaim itself. The drain re-probes once more before acting, and a guest that
+answers that probe is returned to `running` untouched.
+
+**If this fires and the guest was healthy**, the bound is wrong for this node, not
+the mechanism. Raise `guestLivenessRefusals` / `guestLivenessWindowSeconds`, or
+set `guestLivenessRefusals: -1` to stop probing altogether. The floors are three
+refusals and thirty seconds; the shipped default is five over ninety seconds.
+
+**If this fires and the guest really is dead**, the job is already lost: the
+machine executing it stopped minutes before the fleet said so. The remedy is on
+the consumer side — a `--privileged` container can panic the kernel it shares,
+and the fleet cannot take that away while granting privileged at all.
+
+**On this fleet the verdict cannot currently fire at all.** `tart` 2.32.1 waits
+thirty seconds on the guest control socket before failing, six times the probe's
+five-second deadline, so a dead guest classifies `unknown` exactly like a
+saturated one and the run of refusals never starts. Measured on a probe VM on the
+Mac mini against a saturated guest, a stopped guest agent and a panicked kernel;
+see ADR 0042's amendment. Treat `guest liveness` as informational until a probe
+deadline above tart's own connect timeout ships. The discrimination itself was
+confirmed correct by the same measurement — a saturated guest really is never
+mistaken for a dead one.
+
+### A power reading nobody corroborated
+
+The fleet does not reclaim an instance because one `tart list` said its VM was
+powered off. A stopped reading must hold for **three readings over forty-five
+seconds** before it becomes a fact the fleet acts on; until then it classifies as
+unknown, and an unknown power neither authorizes a reclaim nor releases the
+instance's vector back into the admission envelope.
+
+This is the 2026-08-18 class (ADR 0042, issue #246). `tart` reports a VM whose
+`config.json` it cannot open as `"Running": false` — its `running()` swallows the
+error — so a transient failure that says nothing about the machine arrived at the
+fleet as a confident claim that the machine was off. One instance was planned for
+a destructive drain **eighty-six times in nine minutes**, and a hundred and
+fifteen times the night before; every one was caught and aborted by the drain's
+own re-read, and none of it was logged.
+
+```sh
+# the fleet destroying something, whatever the cause
+grep 'instance recovery drain planned' fleet-authority.stderr.log
+# the fleet catching itself about to destroy a live runner
+grep 'power premise retracted by its own drain' fleet-authority.stderr.log
+```
+
+`instance recovery drain planned` is never rate limited: one line per decision,
+so a storm looks like a storm. `instance power premise retracted by its own
+drain` is logged once per instance, and means the drain re-read the power at the
+moment of acting and got the opposite answer. That instance is not reclaimed for
+a power reading again until one holds for **six minutes**.
+
+There is no knob. The bound cannot end a job — it can only delay a reclaim the
+fleet would otherwise perform immediately — so an off switch could only ever make
+the fleet less safe. If retractions are frequent on a node, the backend's
+enumeration is unreliable there and that is the thing to investigate; the fleet
+is already declining to act on it.
+
+### A base image whose runner GitHub will refuse
+
+`fleet doctor` reports `FAIL  runner version` when a base image carries an
+`actions/runner` release below the configured floor, or when an image declares no
+version at all. ADR 0041, issue #206.
+
+This is the only check here whose failure is **not** something the fleet did
+wrong and **not** something the fleet can fix. GitHub enforces a minimum runner
+version: 2.329.0 to register at all, and every new release must be installed
+within 30 days of its publication. Brownouts on github.com began 24 Aug 2026;
+enforcement is permanent from 25 Sep 2026. Every guest here registers from a JIT
+configuration with `DisableUpdate` set, so **no runner will ever upgrade itself** —
+the version sealed into the image is the version that runs jobs until the image
+is rebuilt.
+
+A blocked registration is silent by construction: jobs queue, nodes idle, nothing
+turns red. It looks exactly like a quiet day.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "runner version")'
+fleet status --endpoint "$ENDPOINT" --output json | jq '.data.runnerImages'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `platform` | `linux` or `macOS`. A node has one image per platform. |
+| `vm` | The base image that platform boots. |
+| `version` | The `actions/runner` release the image carries, as declared. Empty means nobody has vouched for it. |
+| `floor` | The version it is judged against: `runnerVersionFloor`, or 2.329.0. |
+| `belowFloor` | The verdict. |
+
+The check passes loudly as well as failing loudly: a passing `runner version`
+check still prints what each image carries, because the point is that the version
+in service is readable without SSH-ing into a guest.
+
+**To find out what an image really carries** — the declaration is the operator's
+word and a rebuild can invalidate it:
+
+```sh
+# Linux, from any live clone (the manifest and the binary must agree):
+tart exec "$INSTANCE" bash -lc 'cat ~/.ci-base-manifest; ~/actions-runner/bin/Runner.Listener --version'
+
+# macOS, from a base image that is not running, without booting it:
+hdiutil attach -readonly -nomount ~/.tart/vms/"$IMAGE"/disk.img   # note the APFS Data volume
+diskutil mount -mountPoint /tmp/img readOnly diskNsM
+python3 -c 'import json;print(json.load(open("/tmp/img/Users/admin/actions-runner/bin/Runner.Listener.deps.json"))["libraries"])' | tr , '\n' | grep Runner.Listener
+diskutil unmount /tmp/img && hdiutil detach diskN
+```
+
+**When it fires, the remedy is a rebuild, and only a rebuild.** Refresh the runner
+payload per [`docs/LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md) or
+[`docs/BASE_IMAGE.md`](BASE_IMAGE.md), update `runner_version=` in the image's
+`$HOME/.ci-base-manifest`, then update `baseImageRunnerVersion` in that node's
+configuration to what was actually sealed. There is no runtime fix and no
+restart that helps.
+
+**Raising the floor is an operator action, not an automatic one.** When a new
+`actions/runner` release ships, a 30-day clock starts; set `runnerVersionFloor`
+to the new release on every node so the check goes red *before* GitHub does.
+Nothing in the fleet watches GitHub's release feed — the check makes staleness
+visible, it does not make it self-correcting.
+
+**A daemon older than this check publishes no `runnerVersionCheck` at all**, and
+that renders as a pass with the detail `not reported by this daemon`. That is a
+statement about the daemon, not about the images.
+
 ### A drain that is not progressing, and a guest that will not stop
 
 `fleet doctor` reports `FAIL  drain progress` when a durable operation has failed

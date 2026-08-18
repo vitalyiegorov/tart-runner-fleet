@@ -135,6 +135,16 @@ type Linux struct {
 	// hardware-accelerated VMs of their own (KVM for Android emulators).
 	// Apple's Virtualization framework only offers this to Linux guests.
 	NestedVirtualization bool
+	// SerialLogDirectory is where each Linux guest's serial console is written on
+	// the host, one file per instance. Empty is off, which is every node today and
+	// is byte-for-byte the argument vector the adapter has always passed.
+	//
+	// It exists for issue #236: a guest kernel panicked and the panic reached
+	// nobody. Turning it on is only half the fix — the base image must also name
+	// the console the VM actually exposes, which is a rebuild — and the flag is
+	// unverified against this fleet's tart build, so a node enables it after
+	// checking `tart run --help` (ADR 0040).
+	SerialLogDirectory string
 	// BaseImageCapabilities declares what BaseVM provides beyond the guest
 	// contract this codebase already checks. ADR 0034 §4 says the canonical label
 	// cannot lie about CPU, memory, OS, and architecture because all four are
@@ -145,6 +155,11 @@ type Linux struct {
 	// repository — so it is declared, exactly like the shared-label fact beside
 	// it. Absent is a byte-for-byte no-op.
 	BaseImageCapabilities []string
+	// BaseImageRunnerVersion is the `actions/runner` version BaseVM carries. It
+	// is declared for the same reason the capabilities beside it are: the daemon
+	// never opens the image, and the image build scripts seal whatever release
+	// was newest at build time and then never touch it again. See ADR 0041.
+	BaseImageRunnerVersion string
 }
 
 // ExecutorBackend names the execution technology of this node. It is empty on
@@ -218,6 +233,10 @@ type MacOS struct {
 	// Linux one. See Linux.BaseImageCapabilities for why it is declared rather
 	// than inferred.
 	BaseImageCapabilities []string
+	// BaseImageRunnerVersion is the `actions/runner` version the macOS BaseVM
+	// carries. A node's two images are built by two different procedures and have
+	// already drifted a whole release apart, so each declares its own.
+	BaseImageRunnerVersion string
 }
 
 type Timeouts struct {
@@ -280,6 +299,85 @@ const (
 	minSessionFailureWindow         = 30 * time.Second
 	maxSessionFailureWindow         = time.Hour
 )
+
+// GuestLiveness bounds how long a `running` instance may go on holding its
+// vector after its guest has stopped answering at all.
+//
+// It exists for issue #236: a `--privileged` container panicked its guest's
+// kernel through `/proc/sysrq-trigger`, the panicked kernel hung forever, and
+// the fleet held 6 CPU / 12288 MiB per instance until GitHub's own grace timer
+// failed the job sixteen to eighteen minutes later — eight times, with no daemon
+// log line for any of them. `tart list` reported the VM `running` throughout;
+// `tart exec` was refused within seconds.
+//
+// The two bounds are what separate a dead guest from a slow one, and they are
+// operator-visible because that judgement is the whole risk of the mechanism.
+type GuestLiveness struct {
+	// ConsecutiveRefusals is how many probes in an unbroken run must be refused
+	// outright before the guest is called dead. Only a refused transport counts;
+	// a probe that answered, and one that ran out of its own deadline against a
+	// saturated guest, both clear the run.
+	ConsecutiveRefusals int
+	// Window is how long that unbroken run must have lasted, so a control loop
+	// that ticks quickly can never convert seconds of silence into a verdict.
+	Window time.Duration
+	// ProbeTimeout bounds one probe. It is deliberately short: the probe is a
+	// trivial command, and a long deadline would spend the tick waiting on a guest
+	// that has nothing to say. Exceeding it is an inconclusive observation, never
+	// a refusal.
+	ProbeTimeout time.Duration
+}
+
+const (
+	// Five refusals over ninety seconds against a twenty-second poll interval is
+	// roughly a hundred seconds to a verdict, against the sixteen to eighteen
+	// minutes GitHub took. It is far longer than any guest-agent restart and far
+	// shorter than the shortest job this fleet has ever run.
+	defaultGuestLivenessRefusals    = 5
+	defaultGuestLivenessWindow      = 90 * time.Second
+	defaultGuestLivenessProbe       = 5 * time.Second
+	minGuestLivenessRefusals        = 3
+	maxGuestLivenessRefusals        = 100
+	minGuestLivenessWindow          = 30 * time.Second
+	maxGuestLivenessWindow          = time.Hour
+	minGuestLivenessProbeTimeout    = time.Second
+	maxGuestLivenessProbeTimeout    = time.Minute
+	guestLivenessDisabledRefusals   = -1
+	guestLivenessDisabledWindowSecs = -1
+)
+
+// Enabled reports whether this node probes its guests at all. An operator
+// disables the mechanism by stating `guestLivenessRefusals: -1`, which is a
+// statement rather than an omission: an absent setting is the default bound,
+// exactly as an absent occupancy budget is the platform default (ADR 0036).
+func (g GuestLiveness) Enabled() bool {
+	return g.ConsecutiveRefusals > 0 && g.Window > 0 && g.ProbeTimeout > 0
+}
+
+// validate refuses a bound that would make the mechanism either trigger-happy or
+// useless. The floors are what stop a typo turning the fleet into a job killer:
+// fewer than three refusals is one guest-agent restart away from a false
+// positive, and a window under thirty seconds is shorter than a single tick on
+// some nodes. The ceilings are what stop a bound that can never fire being
+// mistaken for one that protects anything.
+func (g GuestLiveness) validate() error {
+	if !g.Enabled() {
+		if g.ConsecutiveRefusals != 0 || g.Window != 0 || g.ProbeTimeout != 0 {
+			return errors.New("guest liveness must state a refusal count, a window, and a probe timeout, or none of the three")
+		}
+		return nil
+	}
+	if g.ConsecutiveRefusals < minGuestLivenessRefusals || g.ConsecutiveRefusals > maxGuestLivenessRefusals {
+		return errors.New("guest liveness refusals must be between 3 and 100")
+	}
+	if g.Window < minGuestLivenessWindow || g.Window > maxGuestLivenessWindow {
+		return errors.New("guest liveness window must be between 30 and 3600 seconds")
+	}
+	if g.ProbeTimeout < minGuestLivenessProbeTimeout || g.ProbeTimeout > maxGuestLivenessProbeTimeout {
+		return errors.New("guest liveness probe timeout must be between 1 and 60 seconds")
+	}
+	return nil
+}
 
 const (
 	ScopeRepository   = "repository"
@@ -373,15 +471,27 @@ type Config struct {
 	// The zero value means unset and imposes no bound, which is today's behavior
 	// byte-for-byte: the envelope stays the physical machine (or the configured
 	// constant under the static model). Rollback is removing the setting.
-	HostBudget      Resources
-	Linux           Linux
-	Executor        Executor
-	MacOS           MacOS
-	GitHub          GitHub
-	Timeouts        Timeouts
-	Guards          Guards
-	SessionRecovery SessionRecovery
-	Targets         []Target
+	HostBudget Resources
+	// RunnerVersionFloor overrides the `actions/runner` version this node's base
+	// images are judged against. Empty means DefaultRunnerVersionFloor, which is
+	// what GitHub's minimum version enforcement announcement states. It is an
+	// override rather than a constant alone because GitHub also requires each new
+	// release be installed within 30 days of publication, so the number an
+	// operator must act on moves at least monthly and must be raisable without
+	// cutting a fleet release. See ADR 0041.
+	RunnerVersionFloor string
+	Linux              Linux
+	Executor           Executor
+	MacOS              MacOS
+	GitHub             GitHub
+	Timeouts           Timeouts
+	Guards             Guards
+	SessionRecovery    SessionRecovery
+	// GuestLiveness bounds how long an instance whose guest has stopped answering
+	// may go on holding its vector (ADR 0040). An absent block is the shipped
+	// default bound, not an absent one.
+	GuestLiveness GuestLiveness
+	Targets       []Target
 	// Priority declares which demand outranks which and how fast a waiting
 	// demand escalates (issue #224). An absent block is the fleet this code
 	// always was: one default tier and aged FIFO.
@@ -402,11 +512,16 @@ type wireConfig struct {
 	// encodes no key at all, which is what keeps this feature a byte-for-byte
 	// no-op for a release older than it decoding with DisallowUnknownFields.
 	BaseImageCapabilities []string `json:"baseImageCapabilities,omitempty"`
-	VMPrefix              string   `json:"vmPrefix"`
-	PollSeconds           int      `json:"pollSeconds"`
-	MaxLinuxWhenMacOSIdle int      `json:"maxLinuxWhenMacosIdle"`
-	MaxLinuxCPU           int      `json:"maxLinuxCpu"`
-	MaxLinuxMemoryMiB     int      `json:"maxLinuxMemoryMb"`
+	// BaseImageRunnerVersion and RunnerVersionFloor are omitted when empty for
+	// the same reason, so a node that declares neither encodes exactly the file
+	// it encoded before issue #206.
+	BaseImageRunnerVersion string `json:"baseImageRunnerVersion,omitempty"`
+	RunnerVersionFloor     string `json:"runnerVersionFloor,omitempty"`
+	VMPrefix               string `json:"vmPrefix"`
+	PollSeconds            int    `json:"pollSeconds"`
+	MaxLinuxWhenMacOSIdle  int    `json:"maxLinuxWhenMacosIdle"`
+	MaxLinuxCPU            int    `json:"maxLinuxCpu"`
+	MaxLinuxMemoryMiB      int    `json:"maxLinuxMemoryMb"`
 	// HostBudget is a pointer so an unset budget is absent from the encoded file
 	// rather than present as a zero object: a release older than this setting
 	// decodes with DisallowUnknownFields and would refuse the key outright.
@@ -418,6 +533,7 @@ type wireConfig struct {
 	// and would refuse the block outright.
 	Executor                  *wireExecutor `json:"executor,omitempty"`
 	LinuxNestedVirtualization bool          `json:"linuxNestedVirtualization,omitempty"`
+	LinuxSerialLogDirectory   string        `json:"linuxSerialLogDirectory,omitempty"`
 	MinFreeDiskGiB            int           `json:"minFreeDiskGb"`
 	MinAvailableMemoryMiB     int           `json:"minAvailableMemoryMb,omitempty"`
 	MaxSwapUsedMiB            int           `json:"maxSwapUsedMb,omitempty"`
@@ -434,13 +550,20 @@ type wireConfig struct {
 	// decodable by older strict releases.
 	GitHubSessionMaxIngestFailures    int `json:"githubSessionMaxIngestFailures,omitempty"`
 	GitHubSessionFailureWindowSeconds int `json:"githubSessionFailureWindowSeconds,omitempty"`
-	MacOSBurst                        struct {
+	// The guest-liveness bounds are omitted while they hold the shipped defaults,
+	// for the same reason: a rewritten file must stay decodable by an older strict
+	// release. A stated -1 disables the mechanism outright.
+	GuestLivenessRefusals            int `json:"guestLivenessRefusals,omitempty"`
+	GuestLivenessWindowSeconds       int `json:"guestLivenessWindowSeconds,omitempty"`
+	GuestLivenessProbeTimeoutSeconds int `json:"guestLivenessProbeTimeoutSeconds,omitempty"`
+	MacOSBurst                       struct {
 		Enabled                bool                 `json:"enabled"`
 		AdmissionPolicy        MacOSAdmissionPolicy `json:"admissionPolicy,omitempty"`
 		MixedPlatformAdmission bool                 `json:"mixedPlatformAdmission,omitempty"`
 		MixedProfileCohorts    bool                 `json:"mixedProfileCohorts,omitempty"`
 		BaseVM                 string               `json:"baseVm"`
 		BaseImageCapabilities  []string             `json:"baseImageCapabilities,omitempty"`
+		BaseImageRunnerVersion string               `json:"baseImageRunnerVersion,omitempty"`
 		VMPrefix               string               `json:"vmPrefix"`
 		Builder                Profile              `json:"builder"`
 		Maestro                Profile              `json:"maestro"`
@@ -471,21 +594,27 @@ func Decode(r io.Reader) (Config, error) {
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		HostBudget:     hostBudget(w.HostBudget),
 		Executor:       decodeExecutor(w.Executor),
+
+		RunnerVersionFloor: w.RunnerVersionFloor,
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
-			NestedVirtualization:  w.LinuxNestedVirtualization,
-			BaseImageCapabilities: append([]string(nil), w.BaseImageCapabilities...)},
+			NestedVirtualization:   w.LinuxNestedVirtualization,
+			SerialLogDirectory:     w.LinuxSerialLogDirectory,
+			BaseImageCapabilities:  append([]string(nil), w.BaseImageCapabilities...),
+			BaseImageRunnerVersion: w.BaseImageRunnerVersion},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
 			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
 			BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
 			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
-			NestedVirtualization:  w.MacOSBurst.NestedVirtualization,
-			BaseImageCapabilities: append([]string(nil), w.MacOSBurst.BaseImageCapabilities...)},
+			NestedVirtualization:   w.MacOSBurst.NestedVirtualization,
+			BaseImageCapabilities:  append([]string(nil), w.MacOSBurst.BaseImageCapabilities...),
+			BaseImageRunnerVersion: w.MacOSBurst.BaseImageRunnerVersion},
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
-		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), Targets: normalizeTargets(w.Targets),
+		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w),
+		GuestLiveness: normalizeGuestLiveness(w), Targets: normalizeTargets(w.Targets),
 		Priority: decodePriority(w.Priority),
 	}
 	if err := cfg.Validate(); err != nil {
@@ -536,12 +665,18 @@ func Encode(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	guestLiveness, err := encodeGuestLiveness(cfg.GuestLiveness)
+	if err != nil {
+		return err
+	}
 
 	wire := wireConfig{
 		BaseVM: cfg.Linux.BaseVM, VMPrefix: cfg.Linux.VMPrefix,
 		PollSeconds: pollSeconds, MaxLinuxWhenMacOSIdle: cfg.Linux.MaxInstances,
 		MaxLinuxCPU: cfg.Linux.Capacity.CPU, MaxLinuxMemoryMiB: cfg.Linux.Capacity.MemoryMiB,
 		BaseImageCapabilities:   append([]string(nil), cfg.Linux.BaseImageCapabilities...),
+		BaseImageRunnerVersion:  cfg.Linux.BaseImageRunnerVersion,
+		RunnerVersionFloor:      cfg.RunnerVersionFloor,
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
@@ -550,6 +685,9 @@ func Encode(w io.Writer, cfg Config) error {
 		GitHubTimeoutSeconds:      githubSeconds,
 		TartControlTimeoutSeconds: tartSeconds, BootTimeoutSeconds: bootSeconds, AssignedTimeoutSeconds: assignedSeconds,
 		GitHub: cfg.GitHub, Targets: normalizeTargets(cfg.Targets), Priority: priority,
+		GuestLivenessRefusals:            guestLiveness.refusals,
+		GuestLivenessWindowSeconds:       guestLiveness.windowSeconds,
+		GuestLivenessProbeTimeoutSeconds: guestLiveness.probeSeconds,
 	}
 	// Only non-default recovery bounds are emitted; see wireConfig.
 	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
@@ -575,12 +713,14 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.MixedProfileCohorts = cfg.MacOS.MixedProfileCohorts
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
 	wire.MacOSBurst.BaseImageCapabilities = append([]string(nil), cfg.MacOS.BaseImageCapabilities...)
+	wire.MacOSBurst.BaseImageRunnerVersion = cfg.MacOS.BaseImageRunnerVersion
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
 	wire.MacOSBurst.RootDiskOptions = cfg.MacOS.RootDiskOptions
 	wire.MacOSBurst.SharedDirectoryPath = cfg.MacOS.SharedDirectoryPath
 	wire.LinuxNestedVirtualization = cfg.Linux.NestedVirtualization
+	wire.LinuxSerialLogDirectory = cfg.Linux.SerialLogDirectory
 
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
@@ -589,6 +729,42 @@ func Encode(w io.Writer, cfg Config) error {
 		return fmt.Errorf("encode config: %w", err)
 	}
 	return nil
+}
+
+// wireGuestLiveness is the encoded form of the bound: the three fields that go
+// on the wire, each zero while it holds its shipped default so a rewritten file
+// stays byte-identical for a node that never stated one.
+type wireGuestLiveness struct {
+	refusals      int
+	windowSeconds int
+	probeSeconds  int
+}
+
+func encodeGuestLiveness(liveness GuestLiveness) (wireGuestLiveness, error) {
+	if !liveness.Enabled() {
+		// A disabled bound must survive a round trip as a disabled bound, so the
+		// sentinel is written rather than omitted.
+		return wireGuestLiveness{refusals: guestLivenessDisabledRefusals}, nil
+	}
+	windowSeconds, err := wholeSeconds("guest liveness window", liveness.Window)
+	if err != nil {
+		return wireGuestLiveness{}, err
+	}
+	probeSeconds, err := wholeSeconds("guest liveness probe timeout", liveness.ProbeTimeout)
+	if err != nil {
+		return wireGuestLiveness{}, err
+	}
+	encoded := wireGuestLiveness{}
+	if liveness.ConsecutiveRefusals != defaultGuestLivenessRefusals {
+		encoded.refusals = liveness.ConsecutiveRefusals
+	}
+	if liveness.Window != defaultGuestLivenessWindow {
+		encoded.windowSeconds = windowSeconds
+	}
+	if liveness.ProbeTimeout != defaultGuestLivenessProbe {
+		encoded.probeSeconds = probeSeconds
+	}
+	return encoded, nil
 }
 
 func wholeSeconds(name string, value time.Duration) (int, error) {
@@ -672,6 +848,30 @@ func normalizeSessionRecovery(w wireConfig) SessionRecovery {
 	return recovery
 }
 
+// normalizeGuestLiveness projects the three optional wire fields onto the
+// runtime bound. An omitted field is the shipped default; the sentinel -1 is an
+// operator explicitly stating that this node does not probe its guests, and it
+// disables the mechanism rather than defaulting it back on. A destructive bound
+// must be as easy to turn off as it was to leave alone.
+func normalizeGuestLiveness(w wireConfig) GuestLiveness {
+	if w.GuestLivenessRefusals == guestLivenessDisabledRefusals || w.GuestLivenessWindowSeconds == guestLivenessDisabledWindowSecs {
+		return GuestLiveness{}
+	}
+	liveness := GuestLiveness{ConsecutiveRefusals: w.GuestLivenessRefusals,
+		Window:       time.Duration(w.GuestLivenessWindowSeconds) * time.Second,
+		ProbeTimeout: time.Duration(w.GuestLivenessProbeTimeoutSeconds) * time.Second}
+	if liveness.ConsecutiveRefusals == 0 {
+		liveness.ConsecutiveRefusals = defaultGuestLivenessRefusals
+	}
+	if liveness.Window == 0 {
+		liveness.Window = defaultGuestLivenessWindow
+	}
+	if liveness.ProbeTimeout == 0 {
+		liveness.ProbeTimeout = defaultGuestLivenessProbe
+	}
+	return liveness
+}
+
 func normalizeProfiles(in []Profile) []Profile {
 	out := make([]Profile, len(in))
 	for i, p := range in {
@@ -725,6 +925,8 @@ func Default() Config {
 			MinCPUIdlePercent: defaultMinCPUIdlePercent},
 		SessionRecovery: SessionRecovery{MaxConsecutiveFailures: defaultSessionMaxIngestFailures,
 			FailureWindow: defaultSessionFailureWindow},
+		GuestLiveness: GuestLiveness{ConsecutiveRefusals: defaultGuestLivenessRefusals,
+			Window: defaultGuestLivenessWindow, ProbeTimeout: defaultGuestLivenessProbe},
 		Targets: []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
 	}
 }
@@ -793,6 +995,9 @@ func (c Config) Validate() error {
 	}
 	if c.SessionRecovery.FailureWindow < minSessionFailureWindow || c.SessionRecovery.FailureWindow > maxSessionFailureWindow {
 		return errors.New("github session failure window must be between 30 and 3600 seconds")
+	}
+	if err := c.GuestLiveness.validate(); err != nil {
+		return err
 	}
 	if c.Linux.BaseVM == "" || c.Linux.VMPrefix == "" {
 		return errors.New("linux base VM and prefix are required")
@@ -877,6 +1082,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateCapabilities(); err != nil {
+		return err
+	}
+	if err := c.validateRunnerVersions(); err != nil {
 		return err
 	}
 	// Label derivation runs last so a broken vector is reported as the vector

@@ -257,9 +257,14 @@ type dependencies struct {
 	newReaper       func(runtimeStore, config.Config) discharge.VM
 	readiness       func(config.Config) lifecycle.Readiness
 	bootstrap       func(config.Config) lifecycle.Bootstrapper
-	now             func() time.Time
-	after           func(time.Duration) <-chan time.Time
-	leaseOwner      func(config.Config) string
+	// guestProbe is the fresh re-verification a guest-liveness drain performs at
+	// the moment it acts. It is the same probe the inventory runs each tick; the
+	// drain holds its own so a standing kill order re-derives its premise from
+	// ground truth rather than trusting the observation that planned it.
+	guestProbe func(config.Config) app.GuestProbe
+	now        func() time.Time
+	after      func(time.Duration) <-chan time.Time
+	leaseOwner func(config.Config) string
 }
 
 var deps = defaultDependencies()
@@ -340,19 +345,25 @@ func newDependencies(goos string) dependencies {
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
-				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB}}
+				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB},
+				Guest:               guestLivenessTracker(node, cfg, time.Now),
+				// Unconditional, unlike the guest tracker: the bound it enforces is not a
+				// configured mechanism but the corroboration every other destructive premise
+				// in this fleet already required, and this one did not (issue #246).
+				Power: &app.PowerCorroborator{}}
 		},
 		listen:      net.Listen,
 		adminListen: adminapi.Listen,
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
-		newVM:     node.newVM,
-		newReaper: node.newReaper,
-		readiness: node.readiness,
-		bootstrap: node.bootstrap,
-		now:       time.Now,
-		after:     time.After,
+		newVM:      node.newVM,
+		newReaper:  node.newReaper,
+		readiness:  node.readiness,
+		bootstrap:  node.bootstrap,
+		guestProbe: node.guestProbe,
+		now:        time.Now,
+		after:      time.After,
 		leaseOwner: func(cfg config.Config) string {
 			owner := cfg.GitHub.SessionOwner
 			if owner == "" {
@@ -361,6 +372,24 @@ func newDependencies(goos string) dependencies {
 			return fmt.Sprintf("%s/%d", owner, os.Getpid())
 		},
 	}
+}
+
+// guestLivenessTracker builds this node's probe accumulator, or nil when either
+// half of the mechanism is absent: a configuration that states no bound, or a
+// backend with no guest to ask. Both are fail-open by construction — a nil
+// tracker probes nothing, so no instance can ever be declared dead by a node
+// that is not measuring.
+func guestLivenessTracker(node platform, cfg config.Config, now func() time.Time) *app.GuestLivenessTracker {
+	if !cfg.GuestLiveness.Enabled() || node.guestProbe == nil {
+		return nil
+	}
+	probe := node.guestProbe(cfg)
+	if probe == nil {
+		return nil
+	}
+	return &app.GuestLivenessTracker{Probe: probe, Now: now,
+		Policy: domain.GuestLivenessPolicy{ConsecutiveRefusals: cfg.GuestLiveness.ConsecutiveRefusals,
+			Window: cfg.GuestLiveness.Window}}
 }
 
 func runDaemon(ctx context.Context, opts options) error { return runWithDependencies(ctx, opts, deps) }
@@ -492,6 +521,15 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 
 	reporter := newFailureReporter(os.Stderr, d.now)
 	reporter.counter = health
+	// What runner version each base image carries is a fact about the
+	// configuration this process started with, and configuration does not change
+	// without a restart, so it is published once rather than recomputed on every
+	// tick. A refusal is said out loud: an unpublished set renders as "no image is
+	// behind", which is precisely the silence issue #206 exists to remove.
+	if err := health.SetRunnerImages(runnerImages(cfg)); err != nil {
+		reporter.logger.Warn("runner image versions were refused, so this node cannot judge its own "+
+			"brownout compliance", "error", err, "linuxBaseVm", cfg.Linux.BaseVM, "macosBaseVm", cfg.MacOS.BaseVM)
+	}
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}
@@ -614,7 +652,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
-					ConfirmationMaxAge: deletionConfirmationMaxAge, Now: d.now},
+					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -671,6 +709,21 @@ func profileDiskFloors(cfg config.Config) map[domain.ProfileID]int {
 // the scale set it was spawned for, and a profile may be exposed by more than
 // one scope, so the union across every scale set routed to it is both the
 // conservative answer and the only one derivable at this point.
+// runnerImages projects each base image this node boots into the telemetry DTO,
+// carrying the verdict internal/config computed rather than a second opinion.
+// The floor rule is stated once, as config.RunnerImage.Reason, so the metric,
+// the `fleet doctor` finding and the configuration file cannot disagree about
+// which image GitHub is about to stop accepting registrations from.
+func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
+	declared := cfg.RunnerImages()
+	images := make([]telemetry.RunnerImageMetric, 0, len(declared))
+	for _, image := range declared {
+		images = append(images, telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM,
+			Version: image.Version, Floor: image.Floor, Reason: image.Reason()})
+	}
+	return images
+}
+
 func profileCapabilities(cfg config.Config) map[domain.ProfileID][]string {
 	required := cfg.ProfileRequiredCapabilities()
 	capabilities := make(map[domain.ProfileID][]string, len(required))
@@ -890,6 +943,45 @@ func (p execReadiness) Wait(ctx context.Context, instance operations.Instance) e
 			return probeCtx.Err()
 		case <-after(retryInterval):
 		}
+	}
+}
+
+// execGuestProbe asks a running guest to execute a trivial command, and
+// classifies the three outcomes that matter. It is the same `exec <instance>
+// true` verb `execReadiness` polls at boot, on the same neutral command runner,
+// so a second backend changes the wiring rather than this code.
+//
+// The classification is the whole safety argument of ADR 0040, and it is
+// deliberately made from the probe's OWN deadline rather than from anything the
+// backend said. A command that returned before the deadline and failed could not
+// reach the guest: on Tart that is `Failed to connect to the VM using its control
+// socket`, which is what a panicked kernel produces immediately and repeatedly. A
+// command that ran out of the deadline established nothing — a guest running a
+// monorepo build at full tilt is slow, and slow is not dead. Reading a backend's
+// error text to tell those apart would put a Tart string in a layer that must not
+// know which machine it is on.
+type execGuestProbe struct {
+	Runner  executor.CommandRunner
+	Timeout time.Duration
+}
+
+func (p execGuestProbe) Probe(ctx context.Context, instanceID string) domain.GuestLiveness {
+	if p.Runner == nil || p.Timeout <= 0 || domain.ValidateInstanceName(instanceID) != nil {
+		return domain.GuestLivenessUnknown
+	}
+	attempt, cancel := context.WithTimeout(ctx, p.Timeout)
+	defer cancel()
+	_, err := p.Runner.Run(attempt, "exec", instanceID, "true")
+	switch {
+	case err == nil:
+		return domain.GuestLivenessAlive
+	case attempt.Err() != nil:
+		// The probe ran out of its own deadline, or the tick was cancelled under
+		// it. Either way nothing was established, and an unknown observation never
+		// accumulates toward a verdict.
+		return domain.GuestLivenessUnknown
+	default:
+		return domain.GuestLivenessRefused
 	}
 }
 
@@ -1345,6 +1437,151 @@ func (r *failureReporter) reportOccupancyReclaim(operation scheduler.Operation, 
 		"outcome", "the job ends as a lost-communication failure on GitHub")
 }
 
+// reportGuestSilence says out loud that an instance's guest has stopped
+// answering, while it is happening.
+//
+// It exists because issue #236 produced NO daemon log line at all, eight times.
+// The whole class was self-concealing: nothing in the guest could report its own
+// kernel panic, nothing in the workflow could run after it, and nothing on the
+// host was asking. The line below is the first artifact this fleet has ever
+// produced for that condition.
+//
+// It is rate limited per instance and per state, so a guest that goes quiet and
+// is then declared dead produces two lines rather than one per tick, while the
+// escalation to a verdict is never suppressed by the warning that preceded it.
+func (r *failureReporter) reportGuestSilence(silences []scheduler.GuestSilence) {
+	for _, silence := range silences {
+		state := "silent"
+		if silence.Unresponsive {
+			state = "unresponsive"
+		}
+		if !r.admit("guest\x00" + silence.Instance + "\x00" + state) {
+			continue
+		}
+		r.logger.Warn("instance guest "+state, "instance", silence.Instance,
+			"profile", string(silence.Profile), "repo", silence.Repo,
+			"cpu", silence.Resources.CPU, "memoryMb", silence.Resources.MemoryMB,
+			"refusals", silence.Refusals, "requiredRefusals", silence.RequiredRefusals,
+			"silent", silence.Silence.Round(time.Second).String(),
+			"window", silence.Window.Round(time.Second).String(),
+			"lastAlive", livenessInstant(silence.LastAlive),
+			"runId", silence.Demand.RunID, "jobId", silence.Demand.JobID)
+	}
+}
+
+// reportGuestReclaim names a job the fleet is about to end because the machine
+// running it stopped executing. It is never rate limited: each reclaim is a
+// distinct destructive decision, and the whole point of this record is that the
+// eight it is modelled on produced none.
+func (r *failureReporter) reportGuestReclaim(operation scheduler.Operation, silences []scheduler.GuestSilence) {
+	if !operation.GuestUnresponsive {
+		return
+	}
+	refusals, silent, lastAlive := 0, time.Duration(0), time.Time{}
+	for _, silence := range silences {
+		if silence.Instance == operation.Instance {
+			refusals, silent, lastAlive = silence.Refusals, silence.Silence, silence.LastAlive
+		}
+	}
+	r.logger.Warn("instance reclaimed because its guest stopped answering", "instance", operation.Instance,
+		"profile", string(operation.Profile), "repo", operation.Demand.Repo,
+		"runId", operation.Demand.RunID, "jobId", operation.Demand.JobID, "attempt", operation.Demand.Attempt,
+		"refusals", refusals, "silent", silent.Round(time.Second).String(),
+		"lastAlive", livenessInstant(lastAlive),
+		"outcome", "the job ends as a lost-communication failure on GitHub")
+}
+
+// reportRecovery names every destructive recovery drain the fleet has just
+// planned, and the cause it rests on.
+//
+// It exists because until issue #246 only two of the six recovery causes said
+// anything at all: the occupancy budget and the guest-liveness verdict. A stopped
+// recovery, an inactive recovery, a stalled assignment and a lingering runner
+// have each been able to destroy a runner in silence since they were written, and
+// on 2026-08-17 and 2026-08-18 a stopped recovery was planned two hundred and one
+// times across two nights without producing a single line. The whole incident had
+// to be reconstructed by re-deriving content-addressed operation identities out of
+// the durable ledger, because nothing else recorded which cause had fired.
+//
+// It is NEVER rate limited. Each of these is a distinct decision to destroy a
+// live instance, and a storm of them is precisely the artifact an operator needs
+// to see — a suppressed eighty-sixth line is the one that would have named the
+// problem.
+func (r *failureReporter) reportRecovery(operation scheduler.Operation) {
+	if !operation.Recovery {
+		return
+	}
+	cause := "vm powered off"
+	switch {
+	case operation.ConfirmedInactive:
+		cause = "runner confirmed inactive"
+	case operation.StalledAssignment:
+		cause = "assignment never started"
+	case operation.LingeringRunner:
+		cause = "runner idle past its deadline"
+	case operation.GuestUnresponsive:
+		cause = "guest stopped answering"
+	case operation.OccupancyExceeded:
+		cause = "occupancy budget exceeded"
+	}
+	r.logger.Warn("instance recovery drain planned", "instance", operation.Instance,
+		"profile", string(operation.Profile), "cause", cause,
+		"repo", operation.Demand.Repo, "runId", operation.Demand.RunID, "jobId", operation.Demand.JobID)
+}
+
+// reportRetractedPremise says out loud that the fleet has contradicted itself
+// about an instance: it planned a stopped recovery, and the drain's own re-read
+// of the power at the moment of acting sent the instance back to Running.
+//
+// An abort is the most interesting event in the whole recovery ladder — it is the
+// fleet catching itself about to destroy a live runner — and nothing has ever
+// recorded one. Two hundred and one of them happened over two nights in silence
+// (issue #246). The durable phase left behind on a Running row is that abort, and
+// it is what raises the bound the premise must meet before it may act again.
+//
+// Rate limited per instance, because the condition persists on the row for the
+// rest of the instance's life and one line per tick would bury it.
+func (r *failureReporter) reportRetractedPremise(instances []domain.Instance) {
+	for _, instance := range instances {
+		if !instance.PowerRetracted || !instance.Live() {
+			continue
+		}
+		if !r.admit("retracted\x00" + instance.ID) {
+			continue
+		}
+		r.logger.Warn("instance power premise retracted by its own drain", "instance", instance.ID,
+			"profile", string(instance.Profile), "repo", instance.Repo,
+			"power", string(instance.Power), "stoppedReadings", instance.PowerRun.Refusals,
+			"requiredWindow", (domain.PowerCorroboration.Window * domain.PowerRetractedFactor).String(),
+			"runId", instance.Demand.RunID, "jobId", instance.Demand.JobID,
+			"outcome", "this instance is not reclaimed for a power reading again until it holds for the longer window")
+	}
+}
+
+// recordRecoveries says out loud what the fleet has decided to destroy and what
+// it has already been wrong about. Both readings come from the tick the plan was
+// made on, so the log and the decision can never disagree.
+func (e engineTicker) recordRecoveries(result app.TickResult) {
+	if e.reporter == nil {
+		return
+	}
+	for _, operation := range result.Plan.Operations {
+		e.reporter.reportRecovery(operation)
+	}
+	e.reporter.reportRetractedPremise(result.Instances)
+}
+
+// livenessInstant renders a probe instant, or names its absence. A guest this
+// daemon has never seen answer is a different fact from one that answered a
+// minute ago, and a zero time rendered as a date is the kind of artifact that
+// sends an operator looking at 0001-01-01.
+func livenessInstant(at time.Time) string {
+	if at.IsZero() {
+		return "never observed"
+	}
+	return at.UTC().Format(time.RFC3339)
+}
+
 // admit is the shared rate-limit gate: one line per key per window.
 func (r *failureReporter) admit(key string) bool {
 	r.mu.Lock()
@@ -1590,6 +1827,8 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	}
 	_ = e.health.SetMode(mode)
 	e.recordOccupancy(result)
+	e.recordGuestLiveness(result)
+	e.recordRecoveries(result)
 	e.recordReservation(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
@@ -1622,6 +1861,31 @@ func (e engineTicker) recordOccupancy(result app.TickResult) {
 	e.reporter.reportOccupancy(occupancy)
 	for _, operation := range result.Plan.Operations {
 		e.reporter.reportOccupancyReclaim(operation, occupancy)
+	}
+}
+
+// recordGuestLiveness publishes every guest that has stopped answering and says
+// out loud when one is declared dead. Both readings come from
+// scheduler.GuestSilences — the same pure projection the reclaim itself is
+// planned from — so the metric, the warning, the doctor finding and the drain
+// can never disagree about a silence.
+func (e engineTicker) recordGuestLiveness(result app.TickResult) {
+	silences := scheduler.GuestSilences(result.At, e.engine.Config, result.Instances)
+	metrics := make([]telemetry.GuestSilenceMetric, 0, len(silences))
+	for _, silence := range silences {
+		metrics = append(metrics, telemetry.GuestSilenceMetric{Instance: silence.Instance,
+			Profile: string(silence.Profile), Repo: silence.Repo, CPU: silence.Resources.CPU,
+			MemoryMB: silence.Resources.MemoryMB, Refusals: silence.Refusals, Silence: silence.Silence,
+			RequiredRefusals: silence.RequiredRefusals, Window: silence.Window,
+			Unresponsive: silence.Unresponsive, RunID: silence.Demand.RunID, JobID: silence.Demand.JobID})
+	}
+	_ = e.health.SetGuestSilences(metrics)
+	if e.reporter == nil {
+		return
+	}
+	e.reporter.reportGuestSilence(silences)
+	for _, operation := range result.Plan.Operations {
+		e.reporter.reportGuestReclaim(operation, silences)
 	}
 }
 

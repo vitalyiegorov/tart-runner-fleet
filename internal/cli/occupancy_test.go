@@ -158,16 +158,25 @@ func TestDoctorFailsOnAStarvedVector(t *testing.T) {
 // older daemon omits the check entirely, and `fleet doctor` must not start
 // failing against every host that has not been upgraded yet.
 func TestDoctorPassesWhenTheDaemonNeverMeasuredOccupancy(t *testing.T) {
+	assertDoctorPasses(t, healthyStatus(), "occupancy")
+}
+
+// assertDoctorPasses drives `fleet doctor` against a status document and
+// requires the named check to PASS and the whole run to succeed. It is the other
+// half of assertDoctorNames, and it exists for two situations that must never be
+// confused with a fault: an older daemon that omits a check entirely, and a
+// condition the fleet is watching but has reached no verdict on.
+func assertDoctorPasses(t *testing.T, status adminapi.StatusEnvelope, check string) {
+	t.Helper()
 	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
-		status := healthyStatus()
 		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
 	}}
 	var stdout, stderr bytes.Buffer
 	if got := executeWith(context.Background(), []string{"doctor"}, &stdout, &stderr, deps); got != exitSuccess {
 		t.Fatalf("code=%d, want exitSuccess; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "PASS   occupancy") || !strings.Contains(stdout.String(), "RESULT PASS") {
-		t.Fatalf("doctor did not pass an unmeasured occupancy check:\n%s", stdout.String())
+	if !strings.Contains(stdout.String(), "PASS   "+check) || !strings.Contains(stdout.String(), "RESULT PASS") {
+		t.Fatalf("doctor did not pass the %s check:\n%s", check, stdout.String())
 	}
 }
 

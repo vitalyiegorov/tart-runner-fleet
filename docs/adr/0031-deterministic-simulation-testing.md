@@ -155,6 +155,7 @@ refusal.
 | m | **Monotonic escalation.** A waiting demand's effective priority tier never falls. | Per-demand high-water mark of the effective tier, recomputed by the harness from the demand and the clock. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | n | **No tier starvation.** Escalation ends every tier-based pass-over within T ticks. | Per-demand count of ticks passed over by an aged overtaker of strictly higher effective tier, against T = declared tiers x escalation ticks + K. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | o | **Bounded teardown release.** Once a drain has passed deregistration, the instance releases its resource vector within a bounded number of ticks, whatever the guest does. | Per-instance ticks since the oracle first saw the instance in `deregistering` or `stopping` while still consuming host resources, against the release bound. Scoped past deregistration deliberately: a deregistration GitHub legitimately refuses is bounded by evidence rather than by a clock, and property (i) already watches it. | Enforced (added with [ADR 0039](0039-a-drain-that-cannot-stop-its-guest-escalates.md)) |
+| p | **Bounded dead-guest release.** No instance whose GUEST has stopped executing holds its resource vector beyond the probe window plus the escalation bound. | Per-instance ticks since the harness's own virtual instant of guest death — not since the fleet first suspected it — against the release bound. Scoped to instances still consuming host resources. Counting from the death rather than from the verdict is what keeps the oracle independent of the mechanism it judges: an oracle counting from the verdict would go green however long the noticing took, and the noticing is half the defect. | Enforced (added with [ADR 0040](0040-a-guest-that-stopped-answering-is-not-running.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
 meaningful. The inventory a plan is built from cannot move before the
@@ -345,6 +346,84 @@ arms under the new oracle as under the old one, and the pull-request sweep still
 fails on its first seed. With `internal/scheduler` reverted to the commit before
 issue #208's repair, both of that issue's pinned regressions still fire.
 
+#### Amendment 2026-08-17: the world model may not build what the fleet cannot reach
+
+Issue #239. The first nightly sweep after ADR 0040's guest-liveness reclaim landed
+reported conservation violations on three arms at once — `TestSimFuzz` seed 96
+(tick 190), `TestSimFuzzBudgetedHost` seed 33 (tick 260), and
+`TestSimFuzzTieredPriority` seed 499 (tick 136) — each of them exactly four ticks
+after a `silent_guest` event.
+
+**This is a world-model defect, and it is the opposite of issue #216 above.**
+The distinction is the whole reason the record is here. In #216 the oracle
+over-reported: `feasibleDemands` called a demand admissible that a written rule
+refused, so the property was wrong about a world the fleet had built correctly.
+Here property (g) was **right about every tick it judged**. It faithfully
+reported a genuine double-charge in the world it was given — two instances really
+were holding the vector at once. What was wrong is that `simGuestProbe` had
+built a world the fleet cannot reach. `conservationChecker` is byte-identical
+across #237; the property never changed and never needed to.
+
+Getting this the right way round matters for this record specifically. After
+#220 and #226 the reflex when a property fires on a harness change is to suspect
+the property, and that reflex would have "fixed" a correct oracle here and left
+the fiction in place.
+
+`simGuestProbe` answered the probe from the harness's `silentGuest` flag alone.
+The reclaim CLEARS that flag when it powers the guest off, so one tick later the
+harness reported the guest it had just killed as **alive**. That is not a
+conservative approximation; it is the one answer the real probe can never give. A
+VM that is not running executes nothing, so `exec <instance> true` fails against
+the control socket rather than against the probe's own deadline, and
+`daemon.execGuestProbe` classifies precisely that as **refused**.
+
+The cost of the fiction was a fabricated abort. A drain held in `Draining` by a
+wedge re-enters its phase branch on the next tick, read "alive", and returned the
+instance to `Running` — with its VM powered off. `Draining` plus a proven-idle
+power is exactly what `domain.ConsumesHostResources` reads as the vector having
+come back, so the scheduler had already committed that capacity to a replacement
+spawn. The corpse then re-took it. Both instances charged the host, and property
+(g) reported the sum, correctly: the harness really had built a world holding
+11 CPU on a 10-CPU machine. What it had not done was build one the fleet could
+reach.
+
+**The rule.** The simulator's physics may be crueller than reality and may be
+simpler than reality, but it may never return an observation the production
+adapter it stands in for could not return. A harness that can answer a question
+in a way no adapter can is not testing the fleet against the world; it is testing
+it against a world that does not exist, and every property downstream inherits
+the fiction. `world.guestLiveness` is now the single place the harness decides
+what a guest is doing, and both the probe port and the drain mirror read it, so
+they cannot drift apart again.
+
+**Which side was wrong, and how that was established.** The claim to establish is
+narrow and it is not "the property over-reported": it is that no sequence of
+production code can reach the state the world model built. From the records, not
+by making the harness agree with the code:
+
+- `daemon.execGuestProbe` classifies a fast failure as refused and only a
+  successful command as alive, pinned by
+  `TestTheGuestProbeClassifiesRefusalSeparatelyFromSlowness` — including the
+  literal control-socket error a stopped VM produces.
+- The only abort in `DrainPhaseGuestUnresponsive` sits AHEAD of the stop
+  (`internal/lifecycle/executor.go`), so no vector has been released when it can
+  fire.
+- The one abort that could follow a stop — the `runner_busy` deregister refusal —
+  is explicitly withheld from the phases that stop their guest first
+  (`lifecycle.stopsItsGuestFirst`), whose comment names this exact hazard.
+
+So no sequence of production code returns a stopped-guest instance to `Running`.
+`TestAReclaimThatAlreadyStoppedItsGuestCompletesOnRetry` now pins the composition
+rather than either half, because the retry-after-stop path is where the harness
+went wrong and nothing exercised it end to end.
+
+**One dependency worth naming.** The phase re-probes at the top of every attempt
+and keeps no memory of having stopped the guest already. Its safety on a retry is
+therefore carried entirely by the probe's answer for a powered-off VM, not by an
+ordering guard. That is true today and pinned on both sides; a future change that
+made a stopped VM read as anything other than refused would reintroduce this
+defect in the fleet rather than in the harness.
+
 ## Consequences
 
 The harness found four previously unknown defects while it was being written,
@@ -436,7 +515,12 @@ into a smoke test, so the required event vocabulary is asserted directly.
   property is only worth having if it is red on the defect: once with the
   escalation ladder, where the vector comes back and the queued job runs, and
   once with the pre-#233 executor that asked the same way every time, where
-  property (o) fires and names the instance, the vector, and the hold.
+  property (o) fires and names the instance, the vector, and the hold. 2026-08-16
+  (ADR 0040) is pinned three times: once with the guest-liveness reclaim, where
+  the vector comes back on the fleet's own bound instead of GitHub's; once with
+  the bound unconfigured — the fleet of every day up to that date — where property
+  (p) fires; and once against a guest that is merely SATURATED, which must finish
+  its job untouched however many probes go unanswered.
 - `tests/simulation/findings_test.go` -- characterizations of findings 2 to 5.
 - `tests/simulation/oracle_reservation_test.go` -- the feasibility oracle asked
   directly about a held reservation: the tick of issue #216 it must stop

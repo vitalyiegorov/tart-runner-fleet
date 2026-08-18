@@ -123,7 +123,9 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 			return
 		}
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(), health.QueueHealth(), health.Occupancy(), health.Reservation(), health.Progress())
+		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(),
+			health.QueueHealth(), health.Occupancy(), health.Reservation(), health.Progress(), health.GuestLiveness(),
+			health.RunnerVersions())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
@@ -197,7 +199,8 @@ func queueTiers(snapshot Snapshot, rows []QueueTierMetrics) []adminapi.QueueTier
 }
 
 func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
-	live, ready, queueSLO, occupancy, reservation, progress HealthResult) adminapi.StatusEnvelope {
+	live, ready, queueSLO, occupancy, reservation, progress, guestLiveness, runnerVersions HealthResult,
+) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
 		metric := snapshot.Queues[profile]
@@ -237,6 +240,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	occupancyCheck := adminapi.Check{OK: occupancy.OK, Reasons: nonNilStrings(occupancy.Reasons)}
 	reservationCheck := adminapi.Check{OK: reservation.OK, Reasons: nonNilStrings(reservation.Reasons)}
 	progressCheck := adminapi.Check{OK: progress.OK, Reasons: nonNilStrings(progress.Reasons)}
+	guestLivenessCheck := adminapi.Check{OK: guestLiveness.OK, Reasons: nonNilStrings(guestLiveness.Reasons)}
+	runnerVersionCheck := adminapi.Check{OK: runnerVersions.OK, Reasons: nonNilStrings(runnerVersions.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -247,6 +252,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
 			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
+			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
+			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -275,6 +282,39 @@ func occupancyRows(snapshot Snapshot) []adminapi.Occupancy {
 			CPU: metric.CPU, MemoryMiB: metric.MemoryMiB, AgeSeconds: metric.Age.Seconds(),
 			BudgetSeconds: metric.Budget.Seconds(), Warned: metric.Warned, OverBudget: metric.OverBudget,
 			StarvesQueuedDemand: metric.StarvesQueuedDemand})
+	}
+	return rows
+}
+
+// guestSilenceRows projects every guest that has stopped answering into the
+// versioned DTO. Nil stays nil so a fleet whose guests all answer emits exactly
+// the document older clients already saw.
+func guestSilenceRows(snapshot Snapshot) []adminapi.GuestSilence {
+	if len(snapshot.GuestSilences) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.GuestSilence, 0, len(snapshot.GuestSilences))
+	for _, metric := range snapshot.GuestSilences {
+		rows = append(rows, adminapi.GuestSilence{Instance: metric.Instance, Profile: metric.Profile,
+			Repo: metric.Repo, CPU: metric.CPU, MemoryMiB: metric.MemoryMB, Refusals: metric.Refusals,
+			SilenceSeconds: metric.Silence.Seconds(), RequiredRefusals: metric.RequiredRefusals,
+			WindowSeconds: metric.Window.Seconds(), Unresponsive: metric.Unresponsive,
+			RunID: metric.RunID, JobID: metric.JobID})
+	}
+	return rows
+}
+
+// runnerImageRows projects each base image's declared runner version into the
+// versioned DTO. Nil stays nil so a daemon that has recorded nothing emits
+// exactly the document older clients already saw.
+func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
+	if len(snapshot.RunnerImages) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.RunnerImage, 0, len(snapshot.RunnerImages))
+	for _, metric := range snapshot.RunnerImages {
+		rows = append(rows, adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM,
+			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
 	}
 	return rows
 }
@@ -462,6 +502,52 @@ func renderMetrics(snapshot Snapshot) string {
 			fmt.Fprintf(&output, "fleet_instance_occupancy_starving{profile=%s,instance=%s} %d\n",
 				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance),
 				boolGauge(metric.OverBudget && metric.StarvesQueuedDemand))
+		}
+	}
+	if len(snapshot.GuestSilences) > 0 {
+		// Per-instance for the same reason occupancy is: the fault is ONE guest that
+		// stopped executing while still holding a vector. Cardinality is bounded by
+		// maxOccupancy and by the physical envelope. The demand key is deliberately
+		// not a label — it is unbounded — and travels in the status document.
+		writeHelpType("fleet_instance_guest_silence_seconds", "How long an instance's guest has been refusing its liveness probe.", "gauge")
+		for _, metric := range snapshot.GuestSilences {
+			fmt.Fprintf(&output, "fleet_instance_guest_silence_seconds{profile=%s,instance=%s} %s\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), seconds(metric.Silence))
+		}
+		// The count and the bound travel together, because the count alone is
+		// unreadable: two refusals is a hiccup against a five-refusal bound and a
+		// verdict against a two-refusal one. Zero required refusals is a node that
+		// probes nothing, never a node that declares every guest dead.
+		writeHelpType("fleet_instance_guest_probe_refusals", "Consecutive liveness probes an instance's guest has refused.", "gauge")
+		for _, metric := range snapshot.GuestSilences {
+			fmt.Fprintf(&output, "fleet_instance_guest_probe_refusals{profile=%s,instance=%s} %d\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), metric.Refusals)
+		}
+		writeHelpType("fleet_instance_guest_probe_refusals_required", "Consecutive refusals this node requires before it declares a guest dead; 0 means it probes nothing.", "gauge")
+		for _, metric := range snapshot.GuestSilences {
+			fmt.Fprintf(&output, "fleet_instance_guest_probe_refusals_required{profile=%s,instance=%s} %d\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), metric.RequiredRefusals)
+		}
+		// The alertable fact, and the one nothing published eight times: the fleet
+		// has declared this guest dead and is ending the job it was running.
+		writeHelpType("fleet_instance_guest_unresponsive", "1 when the fleet has declared an instance's guest dead and is reclaiming its vector.", "gauge")
+		for _, metric := range snapshot.GuestSilences {
+			fmt.Fprintf(&output, "fleet_instance_guest_unresponsive{profile=%s,instance=%s} %d\n",
+				prometheusLabel(metric.Profile), prometheusLabel(metric.Instance), boolGauge(metric.Unresponsive))
+		}
+	}
+	if len(snapshot.RunnerImages) > 0 {
+		// One series, one label, at most two rows per node. The version strings are
+		// deliberately NOT labels: a version changes on every image rebuild, which
+		// would churn the series and make a query for "is this node behind" depend
+		// on knowing what the answer used to be. The verdict is the metric; the
+		// versions travel in the status document, which is where an operator who
+		// needs to know WHICH release to install reads them.
+		writeHelpType("fleet_runner_image_below_floor",
+			"1 when a base image's actions/runner version is below the enforcement floor, or is not declared at all.", "gauge")
+		for _, metric := range snapshot.RunnerImages {
+			fmt.Fprintf(&output, "fleet_runner_image_below_floor{platform=%s} %d\n",
+				prometheusLabel(metric.Platform), boolGauge(metric.Reason != ""))
 		}
 	}
 	if reservation := snapshot.Reservation; reservation != nil {

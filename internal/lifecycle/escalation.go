@@ -2,6 +2,31 @@ package lifecycle
 
 import "github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 
+// stopsItsGuestFirst names the drain phases that power the guest off BEFORE
+// deregistering it, because GitHub will not remove a runner it considers to be
+// executing a job and both of these reclaims act on a job GitHub still believes
+// is running. They are also the phases a `runner_busy` refusal must not abort:
+// busy evidence is their premise rather than a refutation of it.
+func stopsItsGuestFirst(phase int) bool {
+	return phase == operations.DrainPhaseOccupancyBudget || phase == operations.DrainPhaseGuestUnresponsive
+}
+
+// derivesInactivityFromRunnerAbsence names the drain phases whose deletion
+// confirmation reads runner absence rather than waiting for a job-completion
+// event. Each of them ends, or has already lost, a job that will never publish
+// one: the job never started, its completion already passed, or the machine
+// executing it stopped answering.
+func derivesInactivityFromRunnerAbsence(phase int) bool {
+	switch phase {
+	case operations.DrainPhaseStoppedRecovery, operations.DrainPhaseStalledAssignment,
+		operations.DrainPhaseLingeringRunner, operations.DrainPhaseOccupancyBudget,
+		operations.DrainPhaseGuestUnresponsive:
+		return true
+	default:
+		return false
+	}
+}
+
 // StopForce is how hard one already-decided drain asks its guest to stop.
 //
 // It exists because repetition is not escalation. On 2026-08-10 a drain whose

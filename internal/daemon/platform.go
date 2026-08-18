@@ -60,6 +60,11 @@ type platform struct {
 	// VM on node A, an OCI reference on node B. It is the one dimension of
 	// executor.InstanceSpec whose meaning is a property of the backend.
 	linuxImage func(config.Config) string
+	// guestProbe asks a running guest whether it is still executing anything. It
+	// is the same command runner readiness polls, under a much shorter deadline,
+	// because the question is not "has it booted yet" but "is it still there"
+	// (ADR 0040).
+	guestProbe func(config.Config) app.GuestProbe
 }
 
 // platformFor reports the wiring goos implies. macOS is Tart and the `vm_stat`
@@ -86,7 +91,8 @@ func applePlatform() platform {
 				StartTimeout: cfg.Timeouts.Boot, ConfirmationMaxAge: deletionConfirmationMaxAge,
 				MacOSVMPrefixes:      []string{"trf-" + strings.ToLower(cfg.MacOS.Builder.ID) + "-", "trf-" + strings.ToLower(cfg.MacOS.Maestro.ID) + "-"},
 				MacOSRootDiskOptions: cfg.MacOS.RootDiskOptions, MacOSSharedDirectoryPath: cfg.MacOS.SharedDirectoryPath,
-				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization}
+				LinuxNestedVirtualization: cfg.Linux.NestedVirtualization,
+				LinuxSerialLogDirectory:   cfg.Linux.SerialLogDirectory}
 		},
 		// newReaper builds the discharge path's own backend port. It deliberately
 		// omits Confirmation: Reap does not consult GitHub runner evidence, because
@@ -103,6 +109,9 @@ func applePlatform() platform {
 			return lifecycle.StdinBootstrapper{Runner: lifecycle.ExecStdinRunner{Binary: "tart"}, Timeout: cfg.Timeouts.Tart}
 		},
 		linuxImage: func(cfg config.Config) string { return cfg.Linux.BaseVM },
+		guestProbe: func(cfg config.Config) app.GuestProbe {
+			return execGuestProbe{Runner: tart.ExecRunner{}, Timeout: cfg.GuestLiveness.ProbeTimeout}
+		},
 	}
 }
 
@@ -153,6 +162,16 @@ func linuxPlatform() platform {
 				return cfg.Linux.BaseVM
 			}
 			return cfg.Executor.Image
+		},
+		// A node with no execution technology has no guest to probe, and reporting
+		// an unprobed guest as a refusing one would be an unavailable observation
+		// dressed as a measurement (AGENTS.md §4).
+		guestProbe: func(cfg config.Config) app.GuestProbe {
+			if !runsContainers(cfg) {
+				return nil
+			}
+			return execGuestProbe{Runner: podman.ExecRunner{Binary: cfg.Executor.Binary},
+				Timeout: cfg.GuestLiveness.ProbeTimeout}
 		},
 	}
 }

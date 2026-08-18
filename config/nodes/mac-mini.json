@@ -1,6 +1,8 @@
 {
   "baseVm": "linux-runner-base-go",
   "baseImageCapabilities": ["container-runtime", "jdk", "node-runtime", "playwright-system-deps", "redroid-android"],
+  "baseImageRunnerVersion": "2.335.1",
+  "runnerVersionFloor": "2.336.0",
   "vmPrefix": "gha-linux",
   "pollSeconds": 20,
   "maxLinuxWhenMacosIdle": 2,
@@ -20,6 +22,7 @@
     "admissionPolicy": "shared",
     "baseVm": "macos-tartelet-base",
     "baseImageCapabilities": ["android-build-sdk", "cocoapods", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
+    "baseImageRunnerVersion": "2.335.1",
     "vmPrefix": "gha-macos",
     "builder": { "id": "macos-6x12", "label": "trf-macos-arm64-6x12", "aliases": ["macos-builder"], "cpu": 6, "memoryMb": 12288, "maxActive": 1 },
     "maestro": { "id": "macos-4x7", "label": "trf-macos-arm64-4x7", "aliases": ["macos-maestro"], "cpu": 4, "memoryMb": 7168, "maxActive": 2 }

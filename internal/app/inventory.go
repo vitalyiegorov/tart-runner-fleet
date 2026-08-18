@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -21,6 +22,132 @@ type LiveInstanceStore interface {
 type ExecutorInventory interface {
 	List(context.Context) ([]executor.Instance, error)
 }
+
+// GuestProbe answers whether one running instance's guest is still executing
+// anything at all. It is the only host-side signal that distinguishes a VM the
+// backend enumerates as `running` from a VM whose kernel has stopped scheduling
+// userspace, which is the condition issue #236's eight dead runners were in for
+// minutes before GitHub noticed (ADR 0040).
+//
+// It returns a three-valued observation rather than an error, because the caller
+// has no use for a reason: only a refused transport counts against a guest, and
+// everything else — an answered probe, a probe that ran out of its deadline
+// against a saturated guest, a probe that could not run — is either alive or
+// unknown. Collapsing those into an error and treating any error as death is
+// exactly how this mechanism would kill healthy jobs.
+type GuestProbe interface {
+	Probe(context.Context, string) domain.GuestLiveness
+}
+
+// GuestLivenessTracker carries the per-instance probe accumulator between ticks
+// and applies the node's bound to it. It is the one impure part of this
+// mechanism: the probing is I/O, the accumulation is state, and everything that
+// judges either lives in domain and scheduler.
+//
+// Its memory is deliberately in-process rather than durable. A daemon restart
+// forgets every run of refusals and starts again, which is fail-open — the same
+// dead guest is re-declared within one window, and a restart can never inherit a
+// verdict it did not observe.
+type GuestLivenessTracker struct {
+	Probe  GuestProbe
+	Policy domain.GuestLivenessPolicy
+	// Now must be the SAME clock the scheduler plans on. The instants this
+	// accumulator stamps are compared against the tick's instant by
+	// domain.GuestLivenessPolicy.Confirmed, and a run of refusals recorded on one clock
+	// and judged on another is not measurable at all — it fails closed and the
+	// mechanism silently never fires. Nil is the wall clock, which is what every
+	// production node runs on.
+	Now   func() time.Time
+	mu    sync.Mutex
+	state map[string]domain.GuestLivenessState
+}
+
+func (t *GuestLivenessTracker) now() time.Time {
+	if t.Now == nil {
+		return time.Now().UTC()
+	}
+	return t.Now().UTC()
+}
+
+// Observe probes every named instance and returns the accumulated state for each.
+// Instances absent from ids are forgotten, so the accumulator cannot outlive the
+// instances it describes.
+//
+// The probes run concurrently because they are independent waits on independent
+// guests, and a node's instance count is bounded by its own configuration. Serial
+// probing would spend one deadline per instance inside a single tick, which on a
+// saturated host is how a liveness check becomes the thing that stops the control
+// loop.
+func (t *GuestLivenessTracker) Observe(ctx context.Context, ids []string) map[string]domain.GuestLivenessState {
+	if t == nil || t.Probe == nil || !t.Policy.Enabled() || len(ids) == 0 {
+		return nil
+	}
+	now := t.now()
+	outcomes := make([]domain.GuestLiveness, len(ids))
+	var group sync.WaitGroup
+	for index, id := range ids {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			outcomes[index] = t.Probe.Probe(ctx, id)
+		}()
+	}
+	group.Wait()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	next := make(map[string]domain.GuestLivenessState, len(ids))
+	for index, id := range ids {
+		next[id] = t.Policy.Observe(t.state[id], outcomes[index], now)
+	}
+	t.state = next
+	return next
+}
+
+// PowerCorroborator carries the per-instance run of backend power readings
+// between ticks, so the scheduler can tell a VM the backend has said is off three
+// times running from a VM it said was off once.
+//
+// It is the power half of what GuestLivenessTracker does for probes, and it is
+// deliberately a separate object rather than a field on it: guest liveness is a
+// configured, disable-able mechanism, and this bound must hold on every node
+// whether or not that one is wired. Like the tracker its memory is in-process, so
+// a daemon restart forgets every run and starts again — fail-open in the safe
+// direction, because forgetting can only delay a reclaim, never authorize one.
+type PowerCorroborator struct {
+	mu   sync.Mutex
+	runs map[string]domain.ObservationRun
+}
+
+// Observe folds each instance's RAW power reading into its run, attaches the run,
+// and replaces the reading with the one the fleet may act on. Instances absent
+// from the slice are forgotten, so the accumulator cannot outlive what it
+// describes.
+//
+// Every consumer of Power downstream of here sees the corroborated value, which
+// is the point: a stopped reading does not only plan a kill, it also stops
+// charging the host for the instance, and an uncorroborated one must do neither.
+//
+// The instant is the caller's single observation instant rather than a fresh
+// clock read per instance, for the reason ADR 0040 records: a run stamped on one
+// clock and judged on another is not measurable at all, and the verdict then
+// fails closed forever without saying so.
+func (c *PowerCorroborator) Observe(instances []domain.Instance, now time.Time) []domain.Instance {
+	if c == nil {
+		return instances
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := make(map[string]domain.ObservationRun, len(instances))
+	for index, instance := range instances {
+		run := domain.PowerCorroboration.Observe(c.runs[instance.ID], domain.PowerSignal(instance.Power), now)
+		next[instance.ID] = run
+		instances[index].PowerRun = run
+		instances[index].Power = domain.CorroboratedPower(instance.Power, instance.State, run, instance.PowerRetracted, now)
+	}
+	c.runs = next
+	return instances
+}
+
 type RecoveryObserver interface {
 	ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
 	// JobActive reports whether the durable demand bound to a Running instance
@@ -44,6 +171,16 @@ type ProductionInventory struct {
 	// HostBudget is the operator's declared ceiling on this node's total
 	// admission envelope. The zero vector is unset and imposes no bound.
 	HostBudget domain.Resources
+	// Guest probes the guests of running instances and accumulates their answers,
+	// so the scheduler can tell a VM that is running from a VM whose kernel has
+	// stopped (ADR 0040). A nil tracker probes nothing and reports nothing, which
+	// is what a node with the mechanism disabled wants.
+	Guest *GuestLivenessTracker
+	// Power corroborates the backend's claim that a live instance's VM is off
+	// before that claim may destroy the instance (issue #246). A nil corroborator
+	// accumulates nothing, so no instance is ever corroborated stopped — which is
+	// fail-closed: it can only withhold a reclaim, never authorize one.
+	Power *PowerCorroborator
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
@@ -130,14 +267,48 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		// read UpdatedAt (ADR 0036).
 		result = append(result, domain.Instance{ID: instance.ID, Repo: instance.Repo, Demand: instance.Demand, Platform: instance.Platform, Profile: instance.Profile,
 			Route: instance.Route, Resources: instance.Resources, State: instance.State, Power: power, RecoveryReady: recoveryReady,
-			AssignedSince: assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
+			// A live row still carrying the stopped-recovery phase is a drain that did
+			// not complete, and the only way a stopped recovery does not complete is
+			// DrainExecutor.abort: the VM answered `running` at the moment of acting.
+			// The durable phase is therefore the fleet's own record of having disproven
+			// this instance's power reading, and it costs no query to read (issue #246).
+			PowerRetracted: instance.DrainPhase == operations.DrainPhaseStoppedRecovery,
+			AssignedSince:  assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {
 			return domain.Unavailable[[]domain.Instance]("untracked controller VM requires reconciliation"), host
 		}
 	}
-	return domain.Fresh(result, now), host
+	return domain.Fresh(p.probeGuests(ctx, p.Power.Observe(result, now)), now), host
+}
+
+// probeGuests asks every powered-on Running instance's guest whether it is still
+// executing anything, and folds the answer into that instance's accumulator.
+//
+// It is restricted to Running and powered-on for two reasons. A guest that has
+// not reached Running has nothing worth probing for this purpose — the boot
+// readiness probe and the assignment deadline already own that ground — and a VM
+// the backend reports stopped or absent is already reclaimable through a gate
+// that needs no probe at all. The probe therefore never runs against an instance
+// the fleet was about to recover anyway.
+func (p ProductionInventory) probeGuests(ctx context.Context, instances []domain.Instance) []domain.Instance {
+	candidates := make([]string, 0, len(instances))
+	for _, instance := range instances {
+		if instance.State == domain.InstanceRunning && instance.Power == domain.InstancePowerRunning {
+			candidates = append(candidates, instance.ID)
+		}
+	}
+	states := p.Guest.Observe(ctx, candidates)
+	if len(states) == 0 {
+		return instances
+	}
+	for index, instance := range instances {
+		if state, probed := states[instance.ID]; probed {
+			instances[index].Guest = state
+		}
+	}
+	return instances
 }
 
 // absenceIsReconcilable reports whether a live durable row whose owned VM a

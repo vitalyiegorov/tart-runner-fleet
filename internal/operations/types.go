@@ -195,6 +195,18 @@ const (
 	// budget — and it never aborts on busy evidence, because busy evidence is
 	// what it acts on (ADR 0036).
 	DrainPhaseOccupancyBudget = 6
+	// DrainPhaseGuestUnresponsive reclaims an instance whose guest has stopped
+	// answering the node's liveness probe altogether: a VM the backend still
+	// enumerates as `running` whose kernel has stopped scheduling userspace, so no
+	// runner agent, workflow step, `if: failure()` hook, or GitHub signal will ever
+	// end the job it holds.
+	//
+	// Like the occupancy budget it does not claim the runner is idle — GitHub goes
+	// on reporting the job in_progress for as long as its own grace timer allows —
+	// so it never aborts on busy evidence and stops the guest before deregistering.
+	// Unlike the occupancy budget its premise IS re-verifiable, and it is
+	// re-verified: a fresh probe that the guest answers aborts the drain (ADR 0040).
+	DrainPhaseGuestUnresponsive = 7
 )
 
 type Lease struct {

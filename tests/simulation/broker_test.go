@@ -63,6 +63,10 @@ func (w *world) advancePhysics() {
 	for id, remaining := range w.wedgedDrain {
 		w.wedgedDrain[id] = decay(remaining)
 	}
+	for id, remaining := range w.powerMisreport {
+		w.powerMisreport[id] = decay(remaining)
+	}
+	w.armLatchedGuestFaults()
 	w.crossSiblingAssignments()
 	w.substituteQueuedSibling()
 	w.progressJobs()
@@ -201,6 +205,13 @@ func (w *world) progressJobs() {
 			job.remaining = simJobTicks + w.longJobNext + w.overrunJobNext
 			w.longJobNext, w.overrunJobNext = 0, 0
 		case jobRunning:
+			if w.silentGuest[job.runner] {
+				// The machine executing this job stopped. Nothing advances, and nothing
+				// inside the guest will ever report that: GitHub goes on calling the
+				// job in_progress until its own grace timer expires, which is the whole
+				// sixteen-to-eighteen-minute hold of issue #236.
+				continue
+			}
 			job.remaining--
 			if job.remaining <= 0 {
 				job.status, job.finishedAt = jobDone, w.now

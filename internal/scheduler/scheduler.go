@@ -69,6 +69,12 @@ type Config struct {
 	// declared -- every demand is then rank zero and the order is aged FIFO.
 	// `fleet config validate` refuses tiers without a threshold.
 	PriorityEscalation time.Duration
+	// GuestLiveness is how much consecutive, hard probe refusal — over how long —
+	// the fleet requires before it will call a running guest dead and reclaim its
+	// vector (ADR 0040). The zero value is disabled, and a disabled policy can
+	// never declare anything dead, so an omitted setting is today's behaviour
+	// byte-for-byte.
+	GuestLiveness domain.GuestLivenessPolicy
 }
 
 type State struct {
@@ -135,6 +141,13 @@ type Operation struct {
 	// part of the content address like every other cause, so a budget reap and a
 	// lingering-runner reap of one instance are distinct attempts (ADR 0028).
 	OccupancyExceeded bool `json:"occupancyExceeded,omitempty"`
+	// GuestUnresponsive marks the reclaim whose premise is that the guest itself
+	// is gone: a VM the backend still enumerates as running whose kernel has
+	// stopped executing userspace, so no runner agent, workflow step, or GitHub
+	// signal will ever end the job it holds (ADR 0040). Like every other cause it
+	// is part of the content address, so a guest-death reclaim and a budget reap
+	// of one instance are distinct attempts (ADR 0028).
+	GuestUnresponsive bool `json:"guestUnresponsive,omitempty"`
 }
 
 type PlanStatus string
@@ -402,28 +415,40 @@ func assignmentRecoveries(now time.Time, config Config, instances []domain.Insta
 		stalled := stalledAssignment(now, config.AssignedTimeout, instance)
 		lingering := lingeringRunner(now, config.AssignedTimeout, instance)
 		overBudget := occupancyExceeded(now, config.Profiles, instance)
+		guestDead := guestUnresponsive(now, config.GuestLiveness, instance)
 		// The stopped gate is an exact power comparison, not domain.ProvenIdle: an
 		// owned VM merely missing from a Tart enumeration must never plan a kill.
 		// Absence cannot even reach here for an assigned or running instance — that
 		// observation is still host-wide unavailable (internal/app/inventory.go) — and
 		// if it ever could, no destructive operation may be derived from it.
-		if instance.Power != domain.InstancePowerStopped && !confirmedInactive && !stalled && !lingering && !overBudget {
+		//
+		// The reading it compares is already corroborated: internal/app/inventory.go
+		// reports an uncorroborated `stopped` as Unknown, so one glitched enumeration
+		// cannot reach any consumer of power at all — not this gate, and not
+		// ConsumesHostResources (issue #246, domain/corroboration.go).
+		stopped := instance.Power == domain.InstancePowerStopped
+		if !stopped && !confirmedInactive && !stalled && !lingering &&
+			!overBudget && !guestDead {
 			continue
 		}
 		// The causes are mutually exclusive in the durable phase they select, and
-		// the occupancy budget is deliberately last: every other cause is evidence
-		// that no work is happening, and each re-verifies that at execution time.
-		// A budget breach claims only that the hold is too long, so whenever a
-		// safer cause also applies it is the one that should act.
-		overBudget = overBudget && !confirmedInactive && !stalled && !lingering &&
-			instance.Power != domain.InstancePowerStopped
+		// the two that a busy runner does not disprove come last: every other cause
+		// is evidence that no work is happening, and each re-verifies that at
+		// execution time. Between those two, a dead guest outranks a long hold. Both
+		// end a job GitHub still believes is running, but a budget breach claims
+		// only that the hold is long, while a refused transport is fresh evidence
+		// that the guest executing the job is gone — and the reclaim an operator
+		// reads must be the true one (ADR 0040).
+		safer := confirmedInactive || stalled || lingering || stopped
+		guestDead = guestDead && !safer
+		overBudget = overBudget && !safer && !guestDead
 		operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
 			Recovery: true, ConfirmedInactive: confirmedInactive, StalledAssignment: stalled, LingeringRunner: lingering,
-			OccupancyExceeded: overBudget}
-		if overBudget {
-			// A budget reap ends a job that GitHub still believes is running, so the
-			// durable operation must name that job. Every other drain cause implies
-			// there is no job left to name (ADR 0036).
+			OccupancyExceeded: overBudget, GuestUnresponsive: guestDead}
+		if overBudget || guestDead {
+			// These two reclaims end a job that GitHub still believes is running, so
+			// the durable operation must name that job. Every other drain cause implies
+			// there is no job left to name (ADR 0036, ADR 0040).
 			operation.Demand = instance.Demand
 		}
 		operation.ID = stableID("op", operation)
@@ -487,6 +512,82 @@ func occupancyExceeded(now time.Time, profiles map[domain.ProfileID]domain.Profi
 	}
 	age, measured := instance.Occupancy(now)
 	return measured && age >= profile.OccupancyBudget
+}
+
+// guestUnresponsive reports whether a Running instance's guest has stopped
+// answering the node's liveness probe for long enough, and hard enough, to be
+// called dead.
+//
+// Like the occupancy budget it does NOT claim the runner is idle — the incident
+// it exists for was a job GitHub reported in_progress for another eleven minutes
+// after its kernel panicked — so it is deliberately narrow and fail-closed on
+// every input: it needs a configured bound, a Running instance, a powered-on VM,
+// and an accumulator that satisfies both halves of the bound.
+//
+// It is restricted to Running rather than also Assigned on purpose. An instance
+// that never reached Running has never had a guest worth probing for this
+// reason, and the assignment deadline already owns that ground.
+func guestUnresponsive(now time.Time, policy domain.GuestLivenessPolicy, instance domain.Instance) bool {
+	if instance.State != domain.InstanceRunning || instance.Power != domain.InstancePowerRunning {
+		return false
+	}
+	return policy.Confirmed(instance.Guest, now)
+}
+
+// GuestSilence is one instance whose guest has refused an unbroken run of
+// liveness probes, with everything an operator needs to judge it: how many
+// probes, for how long, against what bound, and which job dies with it.
+//
+// It exists because issue #236's eight production deaths left no daemon log line
+// at all. The fleet's only record of any of them was a drain that followed
+// GitHub's failure by minutes, and nothing anywhere named the instance, the job,
+// or the moment the guest went quiet.
+type GuestSilence struct {
+	Instance  string
+	Profile   domain.ProfileID
+	Repo      string
+	Demand    domain.DemandKey
+	Resources domain.Resources
+	// Refusals is the length of the current unbroken run of hard refusals, and
+	// Silence is how long it has lasted.
+	Refusals int
+	Silence  time.Duration
+	// LastAlive is the last instant the guest executed a probe, zero when it never
+	// did within this daemon's memory.
+	LastAlive time.Time
+	// RequiredRefusals and Window are the bound this silence was judged against,
+	// both zero when no bound is configured. They travel beside the measurement
+	// because the measurement alone is unreadable: two refusals is a hiccup and
+	// five is a verdict only if something says which.
+	RequiredRefusals int
+	Window           time.Duration
+	// Unresponsive is the verdict: this guest has satisfied both halves of the
+	// configured bound and the fleet has called it dead.
+	Unresponsive bool
+}
+
+// GuestSilences reports every live instance whose guest is in an unbroken run of
+// refusals, ordered by instance identity so a rendering, a metric, and a log line
+// are stable. A guest that answered its last probe is not silent and is not
+// reported; an unmeasurable silence is not reported either, because a silence
+// nobody can time is not a measurement.
+func GuestSilences(now time.Time, config Config, instances []domain.Instance) []GuestSilence {
+	reports := make([]GuestSilence, 0, len(instances))
+	for _, instance := range sortedInstances(instances) {
+		if !instance.Live() {
+			continue
+		}
+		silence, measured := instance.Guest.Silence(now)
+		if !measured {
+			continue
+		}
+		reports = append(reports, GuestSilence{Instance: instance.ID, Profile: instance.Profile, Repo: instance.Repo,
+			Demand: instance.Demand, Resources: instance.Resources, Refusals: instance.Guest.Refusals,
+			Silence: silence, LastAlive: instance.Guest.LastAlive,
+			RequiredRefusals: config.GuestLiveness.ConsecutiveRefusals, Window: config.GuestLiveness.Window,
+			Unresponsive: guestUnresponsive(now, config.GuestLiveness, instance)})
+	}
+	return reports
 }
 
 // Occupancy is one instance's hold on the resource vector its profile reserves,
