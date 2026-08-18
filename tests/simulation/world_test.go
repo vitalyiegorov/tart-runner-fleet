@@ -940,8 +940,33 @@ func (w *world) reconcile() tickObservation {
 // executeOperations claims durable outbox work and walks the real instance
 // lifecycle one legal edge per tick, validated by the durable store's own
 // transition guard.
+//
+// The claim instant is the LATER of this world's virtual clock and the wall
+// clock, and that is a world-model correction rather than a convenience.
+// `sqlite.Store.enqueueDemandDrain` — the ordinary teardown of a finished job —
+// stamps `available_at` from `time.Now()`, while everything the reconcile
+// controller plans is stamped from the injected clock. A world that claimed only
+// on the virtual instant therefore could not claim a demand-event drain **at
+// all**: its availability lay thirteen real days in the future, the operation sat
+// pending forever, and the instance sat in `draining` holding its whole vector
+// with nothing left to move it. Issue #247's sweep found it as property (p) on
+// `geekom-linux-amd64` seed 93 — a dead guest held for twenty-five ticks past its
+// release bound — and the same four-event trace reproduces it on the merge base,
+// so the generator had simply never drawn the combination before.
+//
+// Production has one clock: the worker claims with `time.Now()` and the store
+// stamps with `time.Now()`, so such an operation is available immediately. Taking
+// the later of the two instants here reproduces exactly that, and it costs
+// nothing else — this world never fails an operation, so no `available_at` is
+// ever re-stamped with a retry backoff for this to skip. That the durable store
+// reaches for the wall clock where its siblings take an injected one is a real
+// seam, and it is filed rather than repaired here.
 func (w *world) executeOperations() {
-	claimed, err := w.store.Claim(w.ctx, simOwner, 8, w.now, time.Hour)
+	claimAt := w.now
+	if wall := time.Now().UTC(); wall.After(claimAt) {
+		claimAt = wall
+	}
+	claimed, err := w.store.Claim(w.ctx, simOwner, 8, claimAt, time.Hour)
 	if err != nil {
 		w.record(findingStoreError, fmt.Sprintf("claim operations: %v", err))
 		return

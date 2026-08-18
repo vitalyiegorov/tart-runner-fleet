@@ -60,12 +60,31 @@ capacity has already been lent to somebody else. There is no mechanism in this
 control plane for un-admitting a spawn, and there should not be one: the
 replacement's VM is cloning.
 
-### Both are the same defect
+### And the same defect again, on the other capacity a teardown gives back
 
-A vector was released on a premise the fleet had not established, and a release
+With both of those closed, the sweep found it a third time on
+`geekom-linux-amd64` seed 87, tick 146: *repository c/repo holds 3 instances
+above its cap of 2*.
+
+```
+t141  power corroborated stopped -> recovery drain planned
+t142  draining -> activeRepoCounts stops charging c/repo
+t143  a third c/repo instance is admitted into the slot
+t144  the drain re-reads the power, finds the VM running, aborts to Running
+t146  three instances of a two-instance repository, all executing
+```
+
+A teardown gives back **two** capacities — the host's compute vector and the
+repository's concurrency slot (ADR 0030) — and they were released by two
+different predicates on the same retractable premise. Fixing one left the other.
+
+### They are all the same defect
+
+Capacity was released on a premise the fleet had not established, and a release
 cannot be undone. Whether the retraction comes from the next enumeration or from
-the drain's own re-verification is incidental; what matters is that a premise
-which can be retracted was allowed to free capacity that cannot be recalled.
+the drain's own re-verification, and whether the capacity is a vector or a
+repository slot, is incidental; what matters is that a premise which can be
+retracted was allowed to free capacity that cannot be recalled.
 
 This is a **fleet defect**. Property (g) judged every tick correctly, and the
 world it judged is one a real backend really produces — ADR 0042 demonstrated the
@@ -124,9 +143,25 @@ Everything else is a claim about a machine the fleet has not acted on, and it go
 on charging the host. `draining` and `deregistering` with a stopped reading are
 now exactly that: states an instance can still leave.
 
-The rule is stated once, in the one predicate every consumer already reads. No new
-state, no new field, no new configuration, no shadow capacity, no second notion of
-what is free.
+### The repository slot comes back one edge earlier, for a reason the states carry
+
+`scheduler.activeRepoCounts` stops charging a repository at **deregistration**
+rather than at the start of the drain. Past that line GitHub cannot hand the
+runner a job at all, so the slot is genuinely free — even while the machine is
+still executing, which is why this line is not the same as the vector's.
+
+Before it, `draining` is a state the instance can leave: ADR 0033's re-verification
+sends it back to `running` with its job still running, and the replacement admitted
+into the slot meanwhile is already cloning.
+
+Two capacities, two commit points, one rule: **capacity is released when the fleet
+has done the thing, not when it has decided to.** The vector needs the guest
+stopped; the slot needs the runner gone. Each is named by the state that records
+it.
+
+Both rules are stated once, in the one predicate each consumer already reads. No
+new state, no new field on `domain.Instance`, no new configuration, no shadow
+capacity, no second notion of what is free.
 
 ### The corroborator judges on its own clock
 
