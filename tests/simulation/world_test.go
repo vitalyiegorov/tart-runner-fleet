@@ -442,9 +442,34 @@ func (r simRecovery) ConfirmDeletion(_ context.Context, name string) (operations
 		ObservedAt: r.world.now}, nil
 }
 
-func (r simRecovery) JobActive(_ context.Context, instance operations.Instance) (bool, error) {
-	job := r.world.jobByRequest(instance.Demand.JobID)
-	return job != nil && job.status == jobRunning, nil
+// JobActive is the evidence a lingering-runner reclaim is derived from, and it
+// reads the DURABLE demand record — the same row, through the same status test,
+// that drainAbortsNow re-reads when the drain acts.
+//
+// Production has one object for both: `lifecycle.ControlRouter` is wired as the
+// inventory's RecoveryObserver and as the executor's Control, and both questions
+// come out of `demandStatus`. Answering the planner from the simulator's own job
+// truth instead gave the two halves different sources, and a delayed broker
+// message made them disagree PERSISTENTLY: the world knew a job had finished
+// while the durable record still said JobStarted, so the fleet planned a
+// lingering-runner reclaim the drain then disproved, again and again. Property
+// (i) reported it on `m4-mac-mini` seed 442 as two aborted recovery drains.
+//
+// That is a world-model defect of exactly #239's shape — the harness handing the
+// planner and the executor different answers to one question — and it is the
+// second one issue #247 turned up. In production the two reads can only disagree
+// if the status genuinely changed between planning and acting, which is the race
+// the abort exists for and which cannot repeat.
+func (r simRecovery) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
+	scaleSet := r.world.storeKeyFor(instance)
+	if scaleSet <= 0 {
+		return false, fmt.Errorf("no scale set for %s", instance.ID)
+	}
+	record, err := r.world.store.DemandRecord(ctx, scaleSet, instance.Demand.JobID)
+	if err != nil {
+		return false, err
+	}
+	return record.Status == operations.DemandJobStarted, nil
 }
 
 // simGuestProbe is the node's guest-liveness probe. It answers from the
