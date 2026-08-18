@@ -960,7 +960,7 @@ func (w *world) reconcile() tickObservation {
 // nothing else — this world never fails an operation, so no `available_at` is
 // ever re-stamped with a retry backoff for this to skip. That the durable store
 // reaches for the wall clock where its siblings take an injected one is a real
-// seam, and it is filed rather than repaired here.
+// seam, and it is filed as issue #249 rather than repaired here.
 func (w *world) executeOperations() {
 	claimAt := w.now
 	if wall := time.Now().UTC(); wall.After(claimAt) {
