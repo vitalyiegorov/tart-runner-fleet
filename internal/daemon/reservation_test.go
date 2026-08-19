@@ -60,10 +60,7 @@ func TestEngineTickerPublishesTheHeldReservationAndItsAxis(t *testing.T) {
 		t.Fatalf("the axis is the whole diagnosis and must come from the plan: %q", published.Axis)
 	}
 	if published.Held != 13*time.Minute || published.CPU != 6 || published.MemoryMiB != 12_288 {
-		t.Fatalf("the vector and how long it has been withheld: %#v", published)
-	}
-	if !published.LendsVector {
-		t.Fatal("ADR 0038 lends a cap-held head's vector, so this reservation is not standing capacity down")
+		t.Fatalf("the vector and how long it has been held: %#v", published)
 	}
 }
 
@@ -84,10 +81,13 @@ func TestEngineTickerClearsAReleasedReservation(t *testing.T) {
 	}
 }
 
-// TestEngineTickerPublishesAnUnjudgedReservationAsSuch covers the plan that
-// carried a reservation without judging it — a blocked observation, for
-// instance. A plan that judged nothing must not publish a judgement, and the
-// hold it carries is the expensive kind precisely because nothing explains it.
+// TestEngineTickerPublishesAnUnjudgedReservationAsSuch covers the one plan that
+// can still carry a reservation without judging it: an unusable observation.
+// A plan that judged nothing must not publish a judgement.
+//
+// Every OTHER exit used to reach here too, which is issue #235:
+// `judgeCarriedReservation` now judges a carried reservation on any tick whose
+// observation was usable, so "unjudged" means exactly one thing.
 func TestEngineTickerPublishesAnUnjudgedReservationAsSuch(t *testing.T) {
 	health := reservationHealthForTest(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -106,8 +106,5 @@ func TestEngineTickerPublishesAnUnjudgedReservationAsSuch(t *testing.T) {
 	published := health.Snapshot().Reservation
 	if published == nil || published.Axis != "" {
 		t.Fatalf("a plan that judged nothing publishes no axis: %#v", published)
-	}
-	if published.LendsVector {
-		t.Fatal("an unjudged hold cannot be claimed to lend anything")
 	}
 }

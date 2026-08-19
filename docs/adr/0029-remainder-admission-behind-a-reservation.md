@@ -83,6 +83,14 @@ its profile is eligible.
 
 ## Decision
 
+> **Condition 1 is retired** by
+> [ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md). A reservation
+> withholds ORDER and one repository slot, never a vector, on either axis. What
+> survives of condition 1 is its no-jump guarantee, stated there as an
+> unconditional predicate: nothing equal-or-larger is admitted INTO the head's
+> vector. Condition 2, as amended by ADR 0030, is untouched and is now the only
+> capacity a reservation holds.
+
 Every pass that admits work while another pass holds a reservation — the macOS
 remainder pass and the bounded handoff wave alike — admits it only when doing so
 cannot delay the reserved head. Two conditions together are the invariant:

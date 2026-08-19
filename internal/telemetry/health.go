@@ -164,10 +164,6 @@ type ReservationMetric struct {
 	Slots     int
 	Held      time.Duration
 	Axis      string
-	// LendsVector reports that ADR 0017 or ADR 0038 releases the head's vector
-	// to work it outranks rather than withholding it. A held reservation that
-	// does NOT lend is the expensive one: it is standing capacity down.
-	LendsVector bool
 }
 
 type ObservationMetric struct {
@@ -790,8 +786,13 @@ func (h *Health) Progress() HealthResult {
 // defines. It is enforced here rather than trusted, because the axis is rendered
 // as a metric LABEL and an open vocabulary there is unbounded cardinality.
 var validReservationAxis = map[string]bool{
-	"": true, "vector": true, "repository_cap": true, "both": true, "none": true,
+	"": true, "vector": true, "repository_cap": true, "both": true, reservationAxisNone: true,
 }
+
+// reservationAxisNone is scheduler.ReservationAxisNone as a string: no axis
+// refuses this head. It is named here because it is the one value this package
+// makes a JUDGEMENT about rather than merely publishing.
+const reservationAxisNone = "none"
 
 // SetReservation publishes the vector the scheduler is holding for its aged
 // head, or clears it when no reservation is held. Nil is the "nothing held"
@@ -830,33 +831,36 @@ func cloneReservation(reservation *ReservationMetric) *ReservationMetric {
 	return &copied
 }
 
-// Reservation reports whether a held reservation is standing capacity down
-// without lending it. A reservation is normal and mostly cheap: the head is
-// first in line and, on both of ADR 0017's and ADR 0038's axes, the vector it
-// cannot use is lent to work it outranks. The expensive case is the one that
-// does NOT lend, because that is an idle vector the size of the head's profile
-// for however long the blocking job runs (ADR 0029's units), and it is the shape
-// issue #226 ran in production unseen.
+// Reservation reports a reservation held for a head the fleet could have
+// started.
+//
+// It used to report a reservation that did not LEND its vector, and that check
+// could not survive its own record. ADR 0017 released the vector on one axis,
+// ADR 0038 on the other, and ADR 0045 finished the argument: a reservation
+// withholds ORDER and one repository slot, never a vector, so "does not lend"
+// stopped being a state the planner can reach. What the check actually fired on
+// was the one plan that published no judgement at all — and on the mac studio it
+// reported "has withheld 2 cpu / 4096 MiB for 1h5m0s on the unjudged axis" for a
+// head whose vector fit the free envelope exactly (issue #235).
+//
+// The true finding is the `none` axis: no axis refuses this head, so the fleet
+// is holding a turn for work it could have admitted. That is issue #125's wedge
+// wearing a reservation. A single such tick is ordinary — the tick planned the
+// other platform and the next Linux tick admits the head — so the bound is the
+// one the fleet already uses to say queued work has waited too long. No new knob
+// is introduced to ask a question the queue SLO already answers.
 func (h *Health) Reservation() HealthResult {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	reasons := []string{}
-	if reservation := h.reservation; reservation != nil && !reservation.LendsVector {
+	if reservation := h.reservation; reservation != nil &&
+		reservation.Axis == reservationAxisNone && reservation.Held >= h.queueSLO {
 		reasons = append(reasons, "reservation for "+reservation.Demand+" of profile "+reservation.Profile+
-			" has withheld "+strconv.Itoa(reservation.CPU)+" cpu / "+strconv.Itoa(reservation.MemoryMiB)+
-			" MiB for "+reservation.Held.Round(time.Second).String()+" on the "+
-			reservationAxisLabel(reservation.Axis)+" axis")
+			" has stood for "+reservation.Held.Round(time.Second).String()+
+			" for a head no axis refuses: "+strconv.Itoa(reservation.CPU)+" cpu / "+
+			strconv.Itoa(reservation.MemoryMiB)+" MiB the fleet could have started")
 	}
 	return HealthResult{OK: len(reasons) == 0, Reasons: reasons}
-}
-
-// reservationAxisLabel renders an unjudged plan's empty axis as a word rather
-// than as nothing, so a diagnosis never reads as a missing sentence.
-func reservationAxisLabel(axis string) string {
-	if axis == "" {
-		return "unjudged"
-	}
-	return axis
 }
 
 func (h *Health) SetOperations(retries, dead int) error {

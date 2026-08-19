@@ -14,7 +14,7 @@ import (
 // head that no amount of freed CPU can admit.
 func capHeldReservation() adminapi.Reservation {
 	return adminapi.Reservation{Demand: "c/repo/1009/1/500009", Repo: "c/repo", Profile: "xl",
-		CPU: 6, MemoryMiB: 12_288, Slots: 1, HeldSeconds: 780, Axis: "repository_cap", LendsVector: true}
+		CPU: 6, MemoryMiB: 12_288, Slots: 1, HeldSeconds: 780, Axis: "repository_cap"}
 }
 
 func reservationStatus(held *adminapi.Reservation, check *adminapi.Check) adminapi.StatusEnvelope {
@@ -37,24 +37,30 @@ func TestReservationSectionNamesTheHeadItsRepositoryAndTheAxis(t *testing.T) {
 	renderReservation(&buffer, capHeldReservation())
 	out := buffer.String()
 	for _, want := range []string{"HEAD", "PROFILE", "AXIS", "c/repo", "xl", "6 cpu", "12288 MiB",
-		"13m0s", "repository_cap", "c/repo/1009/1/500009", "lent to work it outranks"} {
+		"13m0s", "repository_cap", "c/repo/1009/1/500009"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("reservation section missing %q:\n%s", want, out)
 		}
 	}
 }
 
-// TestReservationSectionSaysWhenAVectorIsStandingIdle pins the expensive
-// reading. A reservation that lends the vector it cannot use costs the fleet
-// nothing but the head's own wait; one that withholds it is an idle vector the
-// size of the head's profile for as long as whatever blocks the head runs.
-func TestReservationSectionSaysWhenAVectorIsStandingIdle(t *testing.T) {
-	withholding := capHeldReservation()
-	withholding.LendsVector = false
-	var buffer bytes.Buffer
-	renderReservation(&buffer, withholding)
-	if out := buffer.String(); !strings.Contains(out, "idle") {
-		t.Fatalf("a withheld vector must read as idle:\n%s", out)
+// TestReservationSectionNamesEveryAxisIncludingTheSilentOne pins the vocabulary
+// an operator reads, including the two values that are not a feasibility term at
+// all: `none`, a turn held for work the fleet could have started, and the empty
+// axis of a plan whose observation was unusable. Issue #235 was reported to an
+// operator as the second while being the first.
+func TestReservationSectionNamesEveryAxisIncludingTheSilentOne(t *testing.T) {
+	for axis, want := range map[string]string{
+		"vector": "vector", "repository_cap": "repository_cap", "both": "both",
+		"none": "none", "": "unjudged",
+	} {
+		held := capHeldReservation()
+		held.Axis = axis
+		var buffer bytes.Buffer
+		renderReservation(&buffer, held)
+		if out := buffer.String(); !strings.Contains(out, want) {
+			t.Fatalf("axis %q must read as %q:\n%s", axis, want, out)
+		}
 	}
 }
 
@@ -74,13 +80,13 @@ func TestStatusOmitsTheReservationSectionWhenNothingIsHeld(t *testing.T) {
 // state change, not have to notice a new section.
 func TestStatusReportsAWithheldVectorAsDegraded(t *testing.T) {
 	held := capHeldReservation()
-	held.LendsVector = false
+	held.Axis = "none"
 	check := &adminapi.Check{OK: false, Reasons: []string{"reservation for c/repo/1009/1/500009 of profile xl " +
-		"has withheld 6 cpu / 12288 MiB for 13m0s on the repository_cap axis"}}
+		"has stood for 1h5m0s for a head no axis refuses"}}
 	var buffer bytes.Buffer
 	renderStatus(&buffer, reservationStatus(&held, check))
 	out := buffer.String()
-	for _, want := range []string{"DEGRADED", "reservation:", "repository_cap axis", "RESERVATION"} {
+	for _, want := range []string{"DEGRADED", "reservation:", "no axis refuses", "RESERVATION"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status missing %q:\n%s", want, out)
 		}
@@ -99,7 +105,7 @@ func TestDoctorNamesTheReservationEvenWhenItPasses(t *testing.T) {
 		t.Fatalf("a lending reservation is healthy, got exit %d: %s", code, stdout.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"reservation", "c/repo/1009/1/500009", "repository_cap", "lending its vector"} {
+	for _, want := range []string{"reservation", "c/repo/1009/1/500009", "repository_cap"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("doctor must name the reservation it passed on, missing %q:\n%s", want, out)
 		}
@@ -109,16 +115,16 @@ func TestDoctorNamesTheReservationEvenWhenItPasses(t *testing.T) {
 // TestDoctorFailsOnAVectorStandingIdle is the alertable half.
 func TestDoctorFailsOnAVectorStandingIdle(t *testing.T) {
 	held := capHeldReservation()
-	held.LendsVector = false
+	held.Axis = "none"
 	check := &adminapi.Check{OK: false, Reasons: []string{"reservation for c/repo/1009/1/500009 of profile xl " +
-		"has withheld 6 cpu / 12288 MiB for 13m0s on the repository_cap axis"}}
+		"has stood for 1h5m0s for a head no axis refuses"}}
 	client := &fakeClient{status: reservationStatus(&held, check), metrics: "fleet_up 1"}
 	var stdout, stderr bytes.Buffer
 	if code := runDoctor(context.Background(), client, "json", &stdout, &stderr); code != exitDegraded {
-		t.Fatalf("a withheld vector is a fault, got exit %d: %s", code, stdout.String())
+		t.Fatalf("a turn held for admissible work is a fault, got exit %d: %s", code, stdout.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{`"name": "reservation"`, `"ok": false`, "repository_cap"} {
+	for _, want := range []string{`"name": "reservation"`, `"ok": false`, "no axis refuses"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("doctor JSON missing %q:\n%s", want, out)
 		}

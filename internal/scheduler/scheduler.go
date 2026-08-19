@@ -199,32 +199,15 @@ const (
 	ReservationAxisRepositoryCap ReservationAxis = "repository_cap"
 	// ReservationAxisBoth is both at once.
 	ReservationAxisBoth ReservationAxis = "both"
-	// ReservationAxisNone is a reservation held for a head that neither axis
-	// refuses. The scheduler does not produce it — a reservation is minted only
-	// when `feasible` is false — so it is published for the case an operator
-	// most needs named: a fleet reserving a vector for work it could have
-	// started, which is issue #125's wedge wearing a reservation.
+	// ReservationAxisNone is the admissible answer: no axis refuses this head.
+	//
+	// `planLinux` never MINTS a reservation on it — it admits such a head — but a
+	// tick that plans another platform carries the reservation it inherited, and
+	// this is what that reservation is worth once judged. It is issue #235's own
+	// value, and issue #125's wedge wearing a reservation: a fleet holding a
+	// vector for work it could have started.
 	ReservationAxisNone ReservationAxis = "none"
 )
-
-// reservationAxis names which of `feasible`'s two terms refused the head, judged
-// in the envelope and against the occupancy `planLinux` used to decide.
-//
-// It is a diagnostic and never a decision: nothing in the planner reads it, so a
-// wrong answer here can misinform an operator but can never misplan a tick.
-func reservationAxis(config Config, resources, agedFree domain.Resources, repo string, occupied map[string]int) ReservationAxis {
-	vector := !agedFree.CanFit(resources)
-	cap := occupied[repo] >= repoCapLimit(config.RepoCaps, repo)
-	switch {
-	case vector && cap:
-		return ReservationAxisBoth
-	case vector:
-		return ReservationAxisVector
-	case cap:
-		return ReservationAxisRepositoryCap
-	}
-	return ReservationAxisNone
-}
 
 // PlanTick computes a complete plan without performing side effects.
 func PlanTick(in Input) Plan {
@@ -240,7 +223,7 @@ func PlanTick(in Input) Plan {
 	plan := Plan{Status: PlanReady, Next: in.Prior}
 	if recoveries := assignmentRecoveries(in.Now, in.Config, in.Instances.Value); len(recoveries) > 0 {
 		plan.Operations = recoveries
-		return finish(plan)
+		return finish(judgeCarriedReservation(in, plan))
 	}
 	if len(demands) == 0 {
 		plan.Next.Reservation = nil
@@ -252,7 +235,7 @@ func PlanTick(in Input) Plan {
 	ordered := priorityOrder(in, demands)
 	linux, macos := partition(ordered)
 	if in.Config.MacOSExclusive {
-		return finish(planExclusiveAdmission(in, plan, linux, macos))
+		return finish(judgeCarriedReservation(in, planExclusiveAdmission(in, plan, linux, macos)))
 	}
 	switch ordered[0].Platform {
 	case domain.PlatformMacOS:
@@ -300,7 +283,40 @@ func PlanTick(in Input) Plan {
 		}
 		plan = fillMacRemainder(in, plan, macos)
 	}
-	return finish(plan)
+	return finish(judgeCarriedReservation(in, plan))
+}
+
+// judgeCarriedReservation names the axis for a reservation this plan CARRIED
+// without judging, which is the whole of issue #235.
+//
+// A reservation is Linux-authored, and only `planLinux` judges one. Every other
+// exit of a usable tick — the macOS lane with an older macOS head, a
+// recovery-only tick, exclusive admission — carried `in.Prior` verbatim and
+// published an EMPTY axis, which `fleet doctor` rendered as "unjudged". On the
+// mac studio that silence was read as a withheld vector and reported as
+// "has withheld 2 cpu / 4096 MiB for 1h5m0s on the unjudged axis", for a head
+// whose vector fit the free envelope exactly and whose repository was one
+// instance into a cap of four — a head any tick that judged it would have
+// admitted.
+//
+// The judgement uses the same envelope and the same occupancy `planLinux` uses,
+// through the same predicate, so a carried reservation and a minted one cannot
+// be described differently. It stays a diagnostic and never a decision: nothing
+// in the planner reads the axis, so a wrong answer here can misinform an
+// operator but can never misplan a tick.
+//
+// "Unjudged" survives, and now means exactly one thing: the observation was not
+// usable, so the tick could not judge anything at all. That state has its own
+// checks and does not need this one to speak for it.
+func judgeCarriedReservation(in Input, plan Plan) Plan {
+	reservation := plan.Next.Reservation
+	if reservation == nil || plan.ReservationAxis != "" {
+		return plan
+	}
+	plan.ReservationAxis = admissionAxis(in.Config.Profiles[reservation.Profile].Resources,
+		agedLinuxEnvelope(in), reservation.Demand.Repo, activeRepoCounts(in.Instances.Value),
+		spawnedDemands(plan.Operations), in.Config.RepoCaps)
+	return plan
 }
 
 // blockedReason names which observations are unusable and their adapter
@@ -729,23 +745,20 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 	// envelope. Production owns at most four Linux VM slots even if an adapter
 	// accidentally reports a larger host slot count.
 	free.Slots = min(free.Slots, 4)
-	// Demands past the fairness age are measured against the starvation-guard
-	// envelope, which lifts only the advisory CPU-idle clamp. Young admission and
-	// backfill keep the throttled envelope: politeness stays for fresh work.
-	agedFree := linuxFreeAged(in)
-	agedFree.Slots = min(agedFree.Slots, 4)
+	agedFree := agedLinuxEnvelope(in)
 	baseCounts := activeRepoCounts(in.Instances.Value)
 
 	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok && reservationStillHeadsQueue(in, demands, reserved) {
 		profile := in.Config.Profiles[reserved.Profile]
 		// A reservation is only ever held by an aged head, so its feasibility is
 		// judged against the starvation envelope.
-		if feasible(profile.Resources, agedFree, reserved.Key.Repo, baseCounts, nil, in.Config.RepoCaps) {
+		axis := admissionAxis(profile.Resources, agedFree, reserved.Key.Repo, baseCounts, nil, in.Config.RepoCaps)
+		if axis == ReservationAxisNone {
 			plan.Operations = append(plan.Operations, spawnOperation(reserved, nil))
 			plan.Next.Reservation = nil
 		} else {
 			plan.Next.Reservation = copyReservation(in.Prior.Reservation)
-			plan.ReservationAxis = reservationAxis(in.Config, profile.Resources, agedFree, reserved.Key.Repo, baseCounts)
+			plan.ReservationAxis = axis
 			backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, nil)
 			plan.Operations = append(plan.Operations, backfill...)
 			if len(backfill) > 0 {
@@ -761,13 +774,9 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		for _, candidate := range aged {
 			profile := in.Config.Profiles[candidate.Profile]
 			selected := spawnedDemands(plan.Operations)
-			if !feasible(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps) {
+			if axis := admissionAxis(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps); axis != ReservationAxisNone {
 				plan.Next.Reservation = &domain.Reservation{Demand: candidate.Key, Profile: candidate.Profile, Resources: profile.Resources, Since: in.Now}
-				occupied := cloneCounts(baseCounts)
-				for _, chosen := range selected {
-					occupied[chosen.Key.Repo]++
-				}
-				plan.ReservationAxis = reservationAxis(in.Config, profile.Resources, agedFree, candidate.Key.Repo, occupied)
+				plan.ReservationAxis = axis
 				backfill := safeBackfill(in, demands, free, baseCounts, plan.Next.Reservation, selected)
 				plan.Operations = append(plan.Operations, backfill...)
 				if len(backfill) > 0 {
@@ -800,6 +809,20 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 
 func linuxFree(in Input) domain.Resources {
 	return freeCapacity(in, in.Instances.Value, false)
+}
+
+// agedLinuxEnvelope is what an aged demand is judged against: the starvation
+// guard envelope under the four-slot production ceiling. Demands past the
+// fairness age lift only the advisory CPU-idle clamp; young admission and
+// backfill keep the throttled envelope, because politeness stays for fresh work.
+//
+// It is a function rather than two lines at each call site so that the head a
+// carried reservation is re-judged against is the same envelope `planLinux`
+// judged it in, by construction rather than by copy.
+func agedLinuxEnvelope(in Input) domain.Resources {
+	free := linuxFreeAged(in)
+	free.Slots = min(free.Slots, 4)
+	return free
 }
 
 // linuxFreeAged is the starvation-guard envelope for demands past the fairness
@@ -1115,11 +1138,6 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 		counts[demand.Key.Repo]++
 	}
 	remainder, fits := free.Sub(reservation.Resources)
-	backfillCapacity := remainder
-	lends := !fits || reservedHeadAtRepositoryCap(in.Config, counts, reservation)
-	if lends {
-		backfillCapacity = free
-	}
 	excluded := map[domain.DemandKey]bool{reservation.Demand: true}
 	for _, demand := range alreadySelected {
 		excluded[demand.Key] = true
@@ -1129,10 +1147,11 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 		if excluded[demand.Key] {
 			continue
 		}
-		// Whatever is lent BEYOND `free - reservation` is lent only to work the
-		// head outranks. ADR 0017's queue-position guarantee is a rule here, not
-		// a by-product of the subtraction that used to imply it.
-		if lends && jumpsTheReservedHead(in.Config, reservation, remainder, fits, demand) {
+		// The head's vector is lent, so ADR 0017's queue-position guarantee is a
+		// rule here rather than a by-product of the subtraction that used to
+		// imply it. `remainder` no longer bounds admission; it only says which
+		// candidates sit BESIDE the head and are therefore not jumping it.
+		if jumpsTheReservedHead(in.Config, reservation, remainder, fits, demand) {
 			continue
 		}
 		candidates = append(candidates, demand)
@@ -1140,23 +1159,12 @@ func safeBackfill(in Input, demands []domain.Demand, free domain.Resources, base
 	// The backfill lane ranks its own candidates by the one order this package
 	// has: aged band first, priority tier inside each band.
 	ordered := priorityOrder(in, candidates)
-	selected := exactSelect(in.Now, ordered, backfillCapacity, counts, in.Config)
+	selected := exactSelect(in.Now, ordered, free, counts, in.Config)
 	operations := make([]Operation, 0, len(selected))
 	for _, demand := range selected {
 		operations = append(operations, spawnOperation(demand, nil))
 	}
 	return operations
-}
-
-// reservedHeadAtRepositoryCap reports whether the reserved head's OWN repository
-// cap is what holds it out of admission, rather than the resource envelope.
-//
-// This is the axis ADR 0017 never covered and ADR 0038 adds. The occupancy read
-// here is exactly the one `feasible` reads on the tick the head's cap slot
-// frees — live instances plus everything this plan already admits — so the two
-// predicates can never disagree about which axis is holding the head.
-func reservedHeadAtRepositoryCap(config Config, occupied map[string]int, reservation *domain.Reservation) bool {
-	return occupied[reservation.Demand.Repo] >= repoCapLimit(config.RepoCaps, reservation.Demand.Repo)
 }
 
 // takesTheReservedVector reports whether one candidate is equal to or larger
@@ -1580,17 +1588,41 @@ func cloneCounts(source map[string]int) map[string]int {
 	return result
 }
 
-func feasible(resources, free domain.Resources, repo string, base map[string]int, selected []domain.Demand, caps map[string]int) bool {
-	if !free.CanFit(resources) {
-		return false
-	}
+// admissionAxis names why a demand cannot be admitted, or ReservationAxisNone
+// when it can. It is the ONE derivation of feasibility in this package: the
+// decision and the diagnosis are the same value, so they cannot disagree and a
+// term added here cannot be left out of what an operator is told.
+//
+// That fusion is the point. Four scheduler defects came from one seam
+// re-deriving feasibility one axis at a time — identity and `maxActive` (#217),
+// the envelope (#221/#222), the repository cap (#226/#232) — and a fifth was
+// waiting in the diagnostic: `reservationAxis` used to re-state these same two
+// terms beside `feasible`, so a third term would have been refused by one and
+// unnamed by the other, published as "no axis refuses this head" while the head
+// stood refused.
+func admissionAxis(resources, free domain.Resources, repo string, base map[string]int,
+	selected []domain.Demand, caps map[string]int) ReservationAxis {
 	count := base[repo]
 	for _, demand := range selected {
 		if demand.Key.Repo == repo {
 			count++
 		}
 	}
-	return count < repoCapLimit(caps, repo)
+	vector := !free.CanFit(resources)
+	capped := count >= repoCapLimit(caps, repo)
+	switch {
+	case vector && capped:
+		return ReservationAxisBoth
+	case vector:
+		return ReservationAxisVector
+	case capped:
+		return ReservationAxisRepositoryCap
+	}
+	return ReservationAxisNone
+}
+
+func feasible(resources, free domain.Resources, repo string, base map[string]int, selected []domain.Demand, caps map[string]int) bool {
+	return admissionAxis(resources, free, repo, base, selected, caps) == ReservationAxisNone
 }
 
 // repoCapLimit is one repository's configured concurrency cap. An omitted or
@@ -1772,10 +1804,10 @@ func demandsAwaitingAdmission(demands []domain.Demand, operations []Operation) [
 // what it can spare.
 func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []domain.Demand {
 	reservation := plan.Next.Reservation
-	if reservation == nil || !reservedHeadLendsItsVector(in, reservation) {
+	if reservation == nil {
 		return demands
 	}
-	remainder, remainderExists := linuxFreeAged(in).Sub(reservation.Resources)
+	remainder, remainderExists := agedLinuxEnvelope(in).Sub(reservation.Resources)
 	kept := make([]domain.Demand, 0, len(demands))
 	for _, demand := range demands {
 		if !jumpsTheReservedHead(in.Config, reservation, remainder, remainderExists, demand) {
@@ -1828,36 +1860,15 @@ func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
 	if reservation == nil {
 		return in
 	}
-	// A lent vector is charged as nothing while the slot below still is: an
-	// instance holding no resources narrows no envelope and occupies one
-	// repository slot, which is exactly what a reserved head holds here.
-	vector := reservation.Resources
-	if reservedHeadLendsItsVector(in, reservation) {
-		vector = domain.Resources{}
-	}
 	profile := in.Config.Profiles[reservation.Profile]
 	charged := append([]domain.Instance(nil), in.Instances.Value...)
 	charged = append(charged, domain.Instance{
 		ID: "reserved-" + reservation.Demand.String(), Repo: reservation.Demand.Repo, Demand: reservation.Demand,
-		Platform: profile.Platform, Profile: reservation.Profile, Route: profile.Route, Resources: vector,
+		Platform: profile.Platform, Profile: reservation.Profile, Route: profile.Route,
 		State: domain.InstancePlanned, Power: domain.InstancePowerRunning,
 	})
 	in.Instances = domain.Fresh(charged, in.Instances.ObservedAt)
 	return in
-}
-
-// reservedHeadLendsItsVector reports whether a held reservation lends the vector
-// it names to a complementary pass instead of withholding it, on either of the
-// two axes that can hold a head out of admission.
-//
-// It is the single predicate chargeReservedHead and reservedRemainderDemands
-// both read, so the charge and the no-jump filter can never disagree about which
-// world they are in: whenever the vector is not charged, the filter is on.
-func reservedHeadLendsItsVector(in Input, reservation *domain.Reservation) bool {
-	if !linuxFreeAged(in).CanFit(reservation.Resources) {
-		return true
-	}
-	return reservedHeadAtRepositoryCap(in.Config, activeRepoCounts(in.Instances.Value), reservation)
 }
 
 // fillLinuxRemainder admits Linux work in the envelope left after the macOS head

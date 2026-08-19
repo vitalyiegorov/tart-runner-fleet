@@ -655,12 +655,8 @@ func reservationDetail(status adminapi.Status, check adminapi.Check) string {
 	if held == nil {
 		return "no reservation held"
 	}
-	lending := "lending its vector"
-	if !held.LendsVector {
-		lending = "withholding its vector"
-	}
-	return fmt.Sprintf("%s (%s) held %s on the %s axis, %s", held.Demand, held.Profile,
-		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis), lending)
+	return fmt.Sprintf("%s (%s) held %s on the %s axis", held.Demand, held.Profile,
+		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis))
 }
 
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an
