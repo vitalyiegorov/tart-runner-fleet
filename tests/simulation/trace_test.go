@@ -146,7 +146,23 @@ const (
 	// It decays, unlike silent_guest: the production storms lasted nine and eleven
 	// minutes and then stopped on their own.
 	eventMisreportedPower eventKind = "misreported_power"
-	eventSiblingReassign  eventKind = "sibling_reassign"
+	// eventUnreadablePower is issue #252: the backend can no longer determine one
+	// VM's power AT ALL, and goes on not determining it.
+	//
+	// It is the same host condition misreported_power models and a different fact
+	// about it. `tart`'s running() answers false for a configuration it could not
+	// open, so the fleet received "the machine is off" where the truth was "I could
+	// not look" — and on 2026-08-18 and 2026-08-19 that lasted eight and nine
+	// minutes against a VM executing this very sweep, planning thirty destructive
+	// drains of a live runner.
+	//
+	// It does NOT decay, and that is the whole point. ADR 0042's bound answers a
+	// reading that is wrong for less time than the window; the production reading
+	// was wrong for longer than any window, and `stoppedReadings` reached
+	// seventy-nine without a single contrary reading clearing the run. A fault
+	// that expires after six ticks cannot build that state.
+	eventUnreadablePower eventKind = "unreadable_power"
+	eventSiblingReassign eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
@@ -215,7 +231,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
-		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower,
+		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
@@ -302,6 +318,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.saturateGuest()
 	case eventMisreportedPower:
 		w.misreportPower(event.Count)
+	case eventUnreadablePower:
+		w.makePowerUnreadable()
 	case eventSiblingReassign:
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:

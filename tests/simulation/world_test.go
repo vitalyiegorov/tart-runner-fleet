@@ -416,19 +416,43 @@ func (a simTart) List(context.Context) ([]executor.Instance, error) {
 	sort.Strings(names)
 	vms := make([]executor.Instance, 0, len(names))
 	for _, name := range names {
-		// The misreport is applied HERE and nowhere else, because it is a fault of
-		// the reading rather than of the machine. w.vms stays true, so the guest goes
-		// on executing and its job goes on progressing, and the drain executor's own
-		// re-read below contradicts this one — which is exactly the disagreement
-		// issue #246 is about, and the reason it cannot be expressed by powering a
-		// VM off.
-		running := w.vms[name]
-		if running && w.powerMisreport[name] > 0 {
-			running = false
-		}
-		vms = append(vms, executor.Instance{Name: name, Running: running})
+		power, unreadable := w.enumeratedPower(name)
+		vms = append(vms, executor.Instance{Name: name, Power: power, Unreadable: unreadable})
 	}
 	return vms, nil
+}
+
+// enumeratedPower is what a `tart list` of this world reports about one VM, and
+// it is the ONE place the harness decides that — the same discipline
+// guestLiveness follows for guests, and for the same reason (#239, ADR 0043): a
+// simulated port that answers from a different source than the one production
+// reads is testing a different fleet.
+//
+// Both faults are applied HERE and nowhere else, because both are faults of the
+// READING rather than of the machine. w.vms stays true under either, so the guest
+// goes on executing and its job goes on progressing.
+//
+// The two are different lies, and issue #252 is the difference:
+//
+//   - misreported_power is a backend that CONFIDENTLY says a running VM is off.
+//     That is the fault ADR 0042 modelled, and corroboration is what bounds it.
+//   - unreadable_power is a backend that CANNOT TELL. `tart` renders exactly this
+//     as `"Running": false` — running() swallows every failure to open the VM's
+//     config.json — which is how an unavailable observation reached the fleet as a
+//     confident claim that the machine was off, twice, for eight and nine minutes.
+//     Nothing may be planned on it.
+func (w *world) enumeratedPower(name string) (domain.InstancePower, domain.PowerReadFailure) {
+	if _, unreadable := w.powerUnreadable[name]; unreadable {
+		return domain.InstancePowerUnknown, domain.PowerReadFailure{
+			Reason: domain.PowerReadDescriptors, Latency: 250 * time.Millisecond}
+	}
+	if w.vms[name] {
+		if w.powerMisreport[name] > 0 {
+			return domain.InstancePowerStopped, domain.PowerReadFailure{}
+		}
+		return domain.InstancePowerRunning, domain.PowerReadFailure{}
+	}
+	return domain.InstancePowerStopped, domain.PowerReadFailure{}
 }
 
 // simRecovery answers the two destructive-recovery evidence questions from the
@@ -639,10 +663,17 @@ type world struct {
 	// storms hit exactly one instance while its siblings in the same `tart list`
 	// output read correctly.
 	powerMisreport map[string]int
-	messageDelay   int
-	delayWindow    int
-	slowBootNext   int
-	longJobNext    int
+	// powerUnreadable names the VMs whose power the enumeration cannot determine
+	// at all (issue #252). Unlike powerMisreport it does NOT decay: the condition
+	// behind both production incidents held continuously for eight and nine
+	// minutes — `stoppedReadings` climbed to seventy-nine without one reading
+	// clearing it — and a fault that expires after six ticks cannot build the
+	// state that mattered. It is cleared only by the fleet deleting the VM.
+	powerUnreadable map[string]bool
+	messageDelay    int
+	delayWindow     int
+	slowBootNext    int
+	longJobNext     int
 	// overrunJobNext arms the issue #223 shape: the next job to start holds its
 	// runner for whole profile budgets rather than for a long suite's worth of
 	// work, so nothing but the occupancy reclaim can end it.
@@ -805,8 +836,9 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
 		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
 		silentGuest: map[string]bool{}, guestDiedAt: map[string]int{}, saturatedGuest: map[string]bool{},
-		powerMisreport: map[string]int{},
-		drainAborts:    map[string]int{}, known: map[string]finding{},
+		powerMisreport:  map[string]int{},
+		powerUnreadable: map[string]bool{},
+		drainAborts:     map[string]int{}, known: map[string]finding{},
 	}
 	// The durable store's clock is this world's clock (issue #249). Every
 	// timestamp the store writes on its own initiative -- an event drain's
@@ -1089,6 +1121,32 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		// operation is finished either way.
 		return "", true
 	case operations.StateDraining:
+		if instance.DrainPhase == operations.DrainPhaseStoppedRecovery {
+			// executor.go re-reads the power through VMControl.Power at the moment of
+			// acting, and that re-read goes through THE SAME ENUMERATION the plan came
+			// from: production wires one tart.Adapter method, Power -> find -> List, to
+			// both. The harness used to answer it from the hypervisor's truth instead,
+			// on the reasoning that "a second read of a lying enumeration would agree
+			// with the first" — which is correct, and is the whole point: it means the
+			// re-read is NOT a second source and cannot catch this class at all.
+			//
+			// That was a world-model defect of #239's exact shape (ADR 0043: a
+			// simulated port answers from the source production answers from, or it is
+			// testing a different fleet), and it concealed the 2026-08-19 incident:
+			// with the misreport sustained, all thirty drains got PAST this guard and
+			// reached the deregistration call against a live runner. Only GitHub's
+			// refusal to remove a busy runner stopped them, which is the branch below.
+			switch power, _ := w.enumeratedPower(instance.ID); power {
+			case domain.InstancePowerRunning:
+				w.drainAborts[instance.ID]++
+				return operations.StateRunning, true
+			case domain.InstancePowerStopped, domain.InstancePowerAbsent:
+				// The premise holds. Proceed.
+			default:
+				// A power the backend could not read is not permission to end a job.
+				return "", false
+			}
+		}
 		if instance.DrainPhase == operations.DrainPhaseGuestUnresponsive {
 			// executor.go's guest-liveness branch re-probes at the moment of acting,
 			// and this is the one recovery premise a fresh observation CAN disprove: a
@@ -1250,6 +1308,18 @@ func (w *world) saturateGuest() {
 // Unlike the guest faults it does NOT latch when nothing is running. A misreport
 // with no instance to misreport about is not a deferred fault, it is no fault at
 // all — the reading it corrupts does not exist yet.
+// makePowerUnreadable is the 2026-08-18/19 production fault: the enumeration can
+// no longer determine one VM's power, and goes on not determining it. The count
+// the trace carries is deliberately ignored — this fault has no duration,
+// because the one that killed two nightlies had none either.
+func (w *world) makePowerUnreadable() {
+	id, found := w.runningInstance()
+	if !found {
+		return
+	}
+	w.powerUnreadable[id] = true
+}
+
 func (w *world) misreportPower(count int) {
 	id, found := w.runningInstance()
 	if !found {
@@ -1356,12 +1426,9 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 			return true
 		}
 	case operations.DrainPhaseStoppedRecovery:
-		// executor.go re-reads the power through VMControl.Running at the moment of
-		// acting and aborts when the VM answers that it is running. That re-read goes
-		// to the hypervisor's truth, NOT through the misreport above: a second read of
-		// a lying enumeration would agree with the first, and the production incident
-		// is precisely that the two disagreed, eighty-six times, two seconds apart.
-		return w.vms[instance.ID]
+		// Handled ahead of this function, in nextLifecycleState, because the power
+		// re-read has THREE outcomes and this predicate has two.
+		return false
 	case operations.DrainPhaseInactiveRecovery:
 		return false
 	case operations.DrainPhaseGuestUnresponsive:

@@ -852,6 +852,26 @@ func TestAStoppedGuestIsNeverProbedBackToLife(t *testing.T) {
 // guestDeathReclaims names every instance a planned drain reclaimed on the
 // guest-liveness premise. It reads the scheduler's own operations, so a test can
 // assert WHICH recovery acted rather than merely that the instance went away.
+// stoppedPowerReclaims names every instance the scheduler planned a STOPPED
+// recovery drain for, which is ADR 0042's "row with no flag set": a recovery
+// whose only possible premise is `Power == InstancePowerStopped`.
+func (w *world) stoppedPowerReclaims() []string {
+	var reclaimed []string
+	for _, observation := range w.observations {
+		for _, operation := range observation.Plan.Operations {
+			if operation.Kind != scheduler.OperationDrain || !operation.Recovery {
+				continue
+			}
+			if operation.ConfirmedInactive || operation.StalledAssignment || operation.LingeringRunner ||
+				operation.GuestUnresponsive || operation.OccupancyExceeded {
+				continue
+			}
+			reclaimed = append(reclaimed, operation.Instance)
+		}
+	}
+	return reclaimed
+}
+
 func (w *world) guestDeathReclaims() []string {
 	var reclaimed []string
 	for _, observation := range w.observations {
@@ -1140,4 +1160,112 @@ func TestARetractedPowerPremiseDoesNotRefire(t *testing.T) {
 	if live := w.liveInstanceCount(); live != 0 {
 		t.Fatalf("the fleet never settled: %d live instances", live)
 	}
+}
+
+// unreadablePowerTrace is the 2026-08-18 and 2026-08-19 incidents (issue #252),
+// and it differs from misreportedPowerTrace in exactly one way: the backend does
+// not claim the VM is off, it cannot tell.
+//
+// That is the fact the fleet lost. `tart` 2.32.1 renders both as `"Running":
+// false` — running() swallows every failure to open the VM's config.json — so an
+// unavailable observation reached the scheduler as a corroborated claim that the
+// machine was powered off, and stayed that way for eight and nine minutes while
+// the nightly sweep ran on it. Thirty destructive recovery drains were planned
+// against a live runner on the second night, and eighty-six on the first.
+//
+// The trace carries no count. The production condition had no duration: seventy
+// nine consecutive readings, not one of them cleared by a contrary reading, which
+// is why ADR 0042's corroboration window — any corroboration window — cannot be
+// the answer. A premise that is wrong for longer than the bound is believed.
+func unreadablePowerTrace(cfg worldConfig) simTrace {
+	return simTrace{Seed: 20_260_819, Ticks: 200, Config: cfg.Name, Events: []simEvent{
+		{Tick: 2, Kind: eventArrive, Repo: "a/repo", Profile: "builder", Event: "push"},
+		// A long, legitimate suite — the nightly sweep is a thirty-six minute job,
+		// and the reading went unreadable a hundred seconds into its race-detector
+		// arm. The length is not decoration: an instance that finishes before the
+		// corroboration bound is met can never reach the gate this test is about,
+		// and a trace that cannot reach the gate is green for the wrong reason.
+		{Tick: 3, Kind: eventLongJob, Count: 6},
+		// Late enough that the instance has reached Running and its job has started,
+		// which is the state both production incidents were in.
+		{Tick: 12, Kind: eventUnreadablePower},
+		{Tick: 13, Kind: eventStopArrivals},
+	}}
+}
+
+// TestAnUnreadablePowerStateNeverPlansAKill is the property: no instance is
+// reclaimed on a premise the fleet never established.
+//
+// It is deliberately stated over the PLAN rather than over the abort, because the
+// abort is what the production evidence shows cannot be relied on. The drain's
+// act-time re-verification reads the same enumeration the plan read, so when that
+// enumeration cannot answer, both readings agree and the guard passes: on
+// 2026-08-19 all thirty attempts reached the deregistration call, and the only
+// thing that stopped them was GitHub refusing to remove a runner executing a job.
+// A test that asserted "the drain aborted" would have been green through the
+// whole incident.
+func TestAnUnreadablePowerStateNeverPlansAKill(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, unreadablePowerTrace(cfg))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("an unreadable power state must violate nothing: %s", findings[0])
+	}
+	// The harness really did make one VM unreadable, and really did leave it
+	// running. A green run over a world that read every VM fine proves nothing.
+	if len(w.powerUnreadable) != 1 {
+		t.Fatalf("no instance's power was ever unreadable: %v", w.powerUnreadable)
+	}
+	// The premise really did become actionable, or this trace proves nothing: the
+	// run of hostile readings has to outlast ADR 0042's bound while the instance
+	// is still Running, which is what the long job above buys.
+	if readings := w.longestUnreadableRun(); readings < 4 {
+		t.Fatalf("the unreadable reading was only observed %d times on a live instance; "+
+			"the corroboration bound was never reachable and this trace proves nothing", readings)
+	}
+	for id := range w.powerUnreadable {
+		if !w.vms[id] && w.liveInstanceCount() > 0 {
+			t.Fatalf("%s was genuinely powered off; the fault must corrupt the reading, not the machine", id)
+		}
+		for _, reclaimed := range w.stoppedPowerReclaims() {
+			if reclaimed == id {
+				t.Fatalf("%s was planned for a destructive recovery on a power state the backend "+
+					"could not read; absence of evidence is not evidence of absence", id)
+			}
+		}
+		if aborts := w.drainAborts[id]; aborts != 0 {
+			t.Fatalf("%s had %d drains aborted; nothing should have been planned to abort", id, aborts)
+		}
+	}
+	// The job the fleet would have ended runs to completion, which is the whole of
+	// what two nightlies lost.
+	if w.jobs[0].status != jobDone {
+		t.Fatalf("the job on the unreadable instance did not complete: status %s", w.jobs[0].status)
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("the fleet never settled: %d live instances", live)
+	}
+}
+
+// longestUnreadableRun counts how many ticks an instance whose power the backend
+// could not read was observed live. It is the trace's own proof that the state
+// under test was reached and held — the production run reached seventy-nine.
+func (w *world) longestUnreadableRun() int {
+	longest := map[string]int{}
+	for _, observation := range w.observations {
+		if !observation.InstancesUsable {
+			continue
+		}
+		for _, instance := range observation.Instances {
+			if _, unreadable := w.powerUnreadable[instance.ID]; unreadable && instance.Live() {
+				longest[instance.ID]++
+			}
+		}
+	}
+	best := 0
+	for _, count := range longest {
+		best = max(best, count)
+	}
+	return best
 }
