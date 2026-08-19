@@ -71,6 +71,20 @@ A digest that survives a refactor is evidence no admission, no plan, and no
 lifecycle transition moved. A digest that changes is a behaviour change, whether
 or not it was intended.
 
+A digest also changes when a new fault enters the generator's draw, because the
+draw is part of the seed's own sequence and every trace after it is a different
+world. That is a legitimate change and it is reported as its own column: run the
+branch once with the new fault out of the draw to show the code change moves
+nothing, and once with it in to show what the new worlds cost. ADR 0043 and
+ADR 0044 each carry such a table.
+
+Two faults model the same host condition and different facts about it, and the
+distinction is the whole of ADR 0044. `misreported_power` is a backend that
+CONFIDENTLY reports a running VM as powered off, and it decays; `unreadable_power`
+is a backend that cannot determine the power at all, and it never decays, because
+the production condition it is taken from held continuously for nine minutes.
+A fault that expires cannot build a premise that outlasts every bound.
+
 Every production incident must first become a failing replay. CI runs formatting,
 vet, shuffled tests, the race detector, and atomic coverage. Code generated from
 upstream schemas is excluded only if it is mechanically generated and separately
