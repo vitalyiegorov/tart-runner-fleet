@@ -163,11 +163,26 @@ free-form for the reason every classified failure in this fleet is: a bounded
 token can be logged, counted and compared without carrying a path or a home
 directory into a log line.
 
-`descriptor_exhaustion` is named first among the classes because it is the
-leading hypothesis and the only one that fits every observation: system-wide
-(`ENFILE`) or per-process (`EMFILE`) descriptor pressure under a `-race` build's
-I/O, sustained for minutes and then clearing on its own, invisible to every
-reproduction that did not run the workload.
+Resource exhaustion is the leading hypothesis — descriptor pressure or memory
+pressure under a `-race` build, sustained for minutes and then clearing on its
+own, invisible to every reproduction that did not run the workload — so it gets
+two classes rather than one, because the two point at different remedies.
+
+**Per-process descriptor exhaustion is ruled out.** Measured on this host against
+a `tart list` with two VMs genuinely running, at `ulimit -n` of 16, 12, 10 and 8:
+every run reported both running VMs correctly. `tart` does not lose the reading to
+its own file-descriptor budget, so if descriptors are the trigger it is the
+system-wide table (`ENFILE`), not the per-process one. That is the sixth failed
+reproduction and, unlike the first five, it removes a candidate.
+
+The corroboration is a **lower bound on detection**, stated plainly: it opens the
+configuration read-only, and `tart`'s own lock may open it for writing. A
+permission mode that denies write but allows read would fail `tart` and succeed
+here, and the reading would classify `stopped` exactly as it does today. Every
+resource-exhaustion and I/O failure fails both. Matching the flags exactly would
+mean guessing at `tart`'s, and guessing wrong towards write would make a
+read-only VM store report every VM unreadable — a fail-closed cost paid on every
+tick for a case nobody has seen.
 
 ### Two bounds are opened, not closed, and the sweep is why
 
