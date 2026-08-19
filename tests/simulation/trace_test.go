@@ -162,14 +162,20 @@ const (
 	// seventy-nine without a single contrary reading clearing the run. A fault
 	// that expires after six ticks cannot build that state.
 	//
-	// It is NOT YET in faultThisTick's draw, for the reason ADR 0042 gives for the
-	// same decision about misreported_power: the draw entry lands with the fix for
-	// the defect it surfaces, so the sweep is never knowingly red. Putting it in
-	// the draw is what found the two bounds this fault reopened (ADR 0044), and it
-	// then produced a world that reaches a PRE-EXISTING tier-inversion defect —
-	// reproduced unchanged on the merge base from the shrunk trace, so not this
-	// change's — tracked with its deterministic reproducer on issue #255. The entry
-	// lands there. Until then the fault is exercised by its pinned trace.
+	// It is in faultThisTick's draw as of issue #255, which is ADR 0042's rule
+	// completing its own cycle: the draw entry lands with the fix for the defect it
+	// surfaces, so the sweep is never knowingly red. #252 measured what the draw
+	// reaches and held the entry back for one PR, because it reached two bounds
+	// this fault reopened (ADR 0044) and then a tier_inversion report that
+	// reproduced unchanged on the merge base with no power fault in its trace at
+	// all. That report was an ORACLE defect -- ADR 0030's reserved repository slot,
+	// uncharged by property (l)'s counterfactual -- and it is closed, so the fault
+	// is drawn like every other one here.
+	//
+	// It cost two repairs rather than one, on opposite sides of a single boundary:
+	// tick 140 of that seed is property (l) disbelieving ADR 0030's reserved
+	// repository slot, and tick 298 -- reachable only once the first was corrected
+	// -- is the planner spending that slot on a candidate that could not use it.
 	eventUnreadablePower eventKind = "unreadable_power"
 	eventSiblingReassign eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
@@ -240,7 +246,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
-		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower,
+		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true

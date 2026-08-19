@@ -123,6 +123,58 @@ The reserved-slack arithmetic is unchanged and is now sound: a slot the head set
 aside cannot be taken by a platform that ignores the cap, because no such
 platform remains.
 
+### Amendment 2026-08-19: the slack is a budget, and it is charged where admissions happen
+
+The arithmetic above is a COUNT — *admitting up to `slack` demands from that
+repository leaves the head's slot free by construction* — and the implementation
+turned it into an ASSIGNMENT. `reservedRemainderDemands` ranked the head's
+repository by priority and handed the spare slots to the top `slack` demands
+before anything asked whether those demands could be admitted at all. A candidate
+that won a slot and could not use it spent it anyway, and every other demand of
+that repository had already been dropped from the candidate list.
+
+Deterministic simulation reached it on the tiered arm's seed 82, tick 298, the
+first time `unreadable_power` was drawn (issue #255):
+
+```
+reserved head  b/repo-equivalent `xl`, its vector withheld -> four cores left
+spare slot     1
+took it        an `ops/fleet` builder, 6 CPU, oldest of that repository
+could it fit?  no. Six cores into four.
+dropped        the `ops/fleet` maestro that fits those four cores exactly
+admitted       a maestro of ANOTHER repository, twenty minutes younger
+```
+
+That is the aged-FIFO inversion this record exists to end, committed by the guard
+that ends it — the second time, and the fourth appearance of one seam's one bug:
+**a candidate that cannot be admitted must end its own turn, never consume a
+budget and never end a pass.** `remainderMacProfile` already carries the same
+sentence about the profile target; the slack allocation did not.
+
+**The head's repository slot is now a charge rather than a pre-selection.**
+`chargeReservedHead` models it as occupancy, exactly as it already models the
+head's vector, and `appendMacSpawns` reads that occupancy against the same cap it
+already reads for every repository — SKIPPING a capped one rather than
+pre-allocating it. The bound is unchanged and provably so: admissions from the
+head's repository stop at `cap - occupied - 1` either way. What changed is that a
+demand which will not be admitted no longer spends the budget, so the slot goes to
+the highest-priority demand of that repository that can actually take it.
+
+The two capacities a reservation holds are now stated separately, and the
+asymmetry is the decision:
+
+| capacity | withheld when | why |
+| --- | --- | --- |
+| the head's **vector** | only while the head can use it | a head that does not fit is waiting for live instances to release, not for this pass to stop (ADR 0017, ADR 0038) |
+| the head's **repository slot** | always | it is what the head will need WHEN its vector frees, and an admission that takes it keeps it taken past that moment |
+
+A head its own repository cap holds out therefore lends its vector and still
+charges its slot, which is the same answer as before by arithmetic: the charge
+takes the count past the cap, so nothing from that repository may be admitted.
+
+`reservedRepoSlack` is deleted. The rule is now stated once, in the place the
+decision is made.
+
 ## Consequences
 
 The pass is strictly more permissive than ADR 0029 in exactly one direction —
@@ -155,8 +207,15 @@ behavior is byte-for-byte ADR 0029's.
   one admitted), `TestBoundedHandoffWaveAdmitsSameRepositoryWorkTheHeadCanSpare`
   (the same two answers from the second bound pass, with the handoff latch
   proving which pass decided), and
-  `TestReservedRemainderDemandsKeepsOnlyWhatTheHeadCanSpare` (the filter itself:
-  no reservation drops nothing, and scarce slack goes to the aged demand).
+  `TestTheReservedHeadsRepositorySlotBoundsWhoIsAdmitted` (the bound itself,
+  stated where it is enforced: an unconfigured cap and a last slot admit the other
+  repository, one spare slot and more admit the aged same-repository demand),
+  with `TestReservedRemainderDemandsDropsNothingWithoutAReservation` for the
+  no-reservation case.
+- `internal/scheduler/scheduler_reserved_remainder_test.go` (2026-08-19
+  amendment): `TestASameRepositoryCandidateThatCannotFitDoesNotSpendTheHeadsSpareSlot`,
+  seed 82's tick 298 reduced — red before the amendment, where the six-core
+  builder took the slot and the other repository took the vector.
 - Every ADR 0029 test is retained unchanged, including
   `TestMacRemainderNeverTakesTheReservedHeadsRepositorySlot`, which is now the
   `slack == 0` case and still passes.

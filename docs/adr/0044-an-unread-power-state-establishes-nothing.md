@@ -230,6 +230,19 @@ pinned trace, and the draw line lands on #255. The two reversals above stay: the
 were found by drawing it, and a finding is not withdrawn because the instrument
 that produced it is deferred.
 
+**Resolved on #255, and the entry has landed.** It turned out to be TWO defects
+on one seed, on opposite sides of one boundary. Tick 140 is an *oracle* defect:
+ADR 0030's `slack <= 0` clause correctly holds the reserved head's last
+repository slot, and property (l)'s counterfactual charged ADR 0012's cap without
+it. Tick 298 — reached only once the first was corrected — is a *fleet* defect:
+ADR 0030's slot is a count, and the planner had turned it into an assignment, so
+a candidate that could not fit spent the head's one spare slot and a demand of
+another repository took the vector. Both are recorded as 2026-08-19 amendments,
+to [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md) and
+[ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md) respectively.
+`unreadable_power` is now drawn like every other fault here, and the third column
+of the table below is what it costs.
+
 Both gates now read `!instance.Power.ProvenIdle()` — the predicate ADR 0022
 already wrote for "a successful observation established this VM is executing
 nothing" — so they exclude a proven stop and a proven absence, and include an
@@ -320,7 +333,7 @@ no trace that is never handed an unreadable reading — the same standard ADR 00
 set for itself. Default flags, four seeds over sixty ticks, three runs per arm,
 identical within every run, findings zero everywhere:
 
-| arm | merge base `f4be971` | this change | + `unreadable_power` drawn (on #255) |
+| arm | merge base `f4be971` | this change | + `unreadable_power` drawn (landed on #255) |
 |---|---|---|---|
 | `m4-mac-mini` | `430812a6d33a71b1` | `430812a6d33a71b1` | `666eb149486c754f` |
 | `mac-studio-4x10-budget` | `70a1bc1a0b6c8b32` | `70a1bc1a0b6c8b32` | `5a359064dcf00872` |
@@ -332,7 +345,11 @@ identical within every run, findings zero everywhere:
 The second column is this change and it moves nothing. The third is measured, and
 moves on every arm because the draw is part of each seed's own sequence, so every
 trace after the first drawn fault is a different world; it is recorded here so
-that #255 lands against a number rather than against a regeneration.
+that #255 lands against a number rather than against a regeneration. It did:
+#255 reproduced all six of those digests exactly, with findings zero on every arm
+and identical across three runs, which is what makes the third column a
+prediction the draw entry had to satisfy rather than a number regenerated to
+match whatever it produced.
 
 ## The three questions
 
