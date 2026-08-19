@@ -174,6 +174,79 @@ Both demand lanes feed the breakdown by the rule the aggregate already used: the
 broker's delivered demand and REST's complete view, whichever is larger per
 tier.
 
+### Amendment 2026-08-19: a tier orders candidates, and ADR 0030 decides who is one
+
+This decision has been corrected twice by the simulator and both corrections were
+to the RULE: a tier that reordered ADR 0004's bands was silently discarded by
+`planLinux` (§2), and a reservation made before an escalation went on being
+obeyed after `priorityOrder` had stopped agreeing with it (§4). Issue #255 looks
+like a third and is not. The rule is intact; **property (l)'s counterfactual was
+wrong**, and this amendment states the boundary the property was missing.
+
+The tiered arm's seed 82, at tick 140, reported an inversion:
+
+```
+ops/fleet/1008  xl       59m0s   effective tier 11   <- reserved head
+ops/fleet/1013  maestro  43m30s  effective tier 8    <- left waiting
+b/repo/1021     maestro   7m30s  effective tier 2    <- took the slot
+host available {CPU:5 MemoryMB:13312 Slots:4}; ops/fleet cap 2, one live instance
+```
+
+Every escalation above is exact — `0 + ⌊43.5/5⌋`, `1 + ⌊7.5/5⌋`, `0 + ⌊59/5⌋` —
+`priorityOrder` ranked the three demands 11, 8, 2, and no band was reordered
+anywhere. What decided the tick is
+[ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)'s `slack <= 0`
+clause, in its own words: *the head is waiting for the last free slot, or for one
+that is already gone. Nothing from its repository may be admitted.*
+`ops/fleet`'s cap is 2 with one live instance, so `slack = 2 - 1 - 1 = 0` and the
+tier-8 demand was **not a candidate for that slot at all**. It shares the reserved
+head's repository, and that head's slot is the one left.
+
+**A tier orders candidates; it does not create eligibility.** That is §2 read
+strictly: `priorityOrder` sorts a band, and every veto the planner already
+applied — the resource envelope, `MaxActive`, the repository cap, and the two
+conditions a held reservation imposes — still decides who reaches it. The demand
+left waiting here is waiting for `ops/fleet/1008`, which outranks it on BOTH keys
+this record orders the aged band by: effective tier 11 against 8, and 59 minutes
+against 43m30s. The pass-over serves the tier order rather than inverting it.
+
+Refusing `b/repo/1021` as well would not have advanced the tier-8 demand by one
+tick — it was ineligible on every tier — and it would have held the residual
+idle, which ADR 0004 forbids in as many words: *admission stays work-conserving:
+the order decides who is served first, never that capacity is held idle.*
+
+So the correction is to the **oracle**, and it is one term. Property (l) asks a
+counterfactual — could the waiting demand have taken the slot the chosen one
+took? — and its `capAllowsSwap` charged ADR 0012's repository cap but not
+ADR 0030's reserved slot. It now charges both. The harness had already recorded
+the gap on the other side of it: `reservedResidual` leaves that slot uncharged
+DELIBERATELY, because there the answer decides admissibility and a narrower
+answer blinds properties (a) and (b). Both are right, because the two oracles ask
+different questions; a feasibility oracle errs safely by being wide, and a
+counterfactual that ignores a written rule simply states something false.
+
+The exemption cannot hide an inverted tier. A reservation is only ever held for
+the demand `priorityOrder` ranked first in the aged band, by effective tier and
+then age (§4), and it is re-derived the moment anything outranks it — so the
+demand this term leaves waiting is always waiting for one that outranks it.
+Property (b) is untouched and still counts these pass-overs with no signature and
+no tier exemption, and property (n) still bounds every tier-based pass-over, so
+an ADR 0030 hold that never ends still fails the sweep.
+
+This is an **oracle defect** under [ADR 0043](0043-a-released-vector-cannot-be-taken-back.md)'s
+taxonomy — property (l) judged an ordering the reservation rules are entitled to
+produce — and nothing in `internal/scheduler` changes. It is recorded here rather
+than as a new record because it states the boundary of §2, which is this
+decision's own rule; ADR 0030 is unchanged and was correct throughout.
+
+It surfaced only once `unreadable_power` entered the generator's draw
+([ADR 0044](0044-an-unread-power-state-establishes-nothing.md)), which is that
+fault's second contribution and the reason the entry lands with this fix rather
+than with #252: ADR 0042's rule is that a draw entry ships with the repair for
+what it surfaces, so the sweep is never knowingly red. The fault carries no power
+event into the shrunk trace at all — it changed the history that reached the
+state, not the state.
+
 ## Consequences
 
 **A fleet that declares no tier is unchanged, byte for byte.** Every demand is
@@ -216,6 +289,17 @@ declares a tier nothing matches is inert, not broken.
   `TestExactAdmissionCannotAdmitMoreLowTierWorkAheadOfAFeasibleHighTierDemand`,
   `TestAReservationYieldsToATierThatEscalatedAboveIt`, and
   `TestAReservationSurvivesEqualTierWork`.
+- `internal/scheduler/scheduler_reserved_repo_slot_tier_test.go` (2026-08-19
+  amendment): the tick issue #255 reduces to, both directions.
+  `TestTheReservedHeadsLastRepositorySlotOutranksATierBelowIt` is seed 82's
+  tick 140 as one `PlanTick` — it produces the identical plan the sweep reported,
+  `plan-3a13529ee7cf2705e5b79331` — and
+  `TestATierTakesTheResidualAsSoonAsTheReservedHeadCanSpareTheSlot` changes one
+  number, the repository cap, and the tier-8 demand takes the residual. That
+  second test is what makes the first a statement about ADR 0030 rather than a
+  licence to ignore a tier.
+- `tests/simulation/regression255_test.go`: the whole-fleet history that reaches
+  that tick, pinned as an explicit trace on the tiered arm.
 - `tests/simulation/priority_test.go`: three new properties on a new arm
   (`tiered-release-priority`, two of four repositories declared as release work),
   plus the bound stated deterministically —
@@ -239,7 +323,7 @@ declares a tier nothing matches is inert, not broken.
 
 | id | name | statement |
 | --- | --- | --- |
-| l | `tier_inversion` | Two feasible demands of one platform, one resource vector, and one ADR 0004 lane are admitted in tier order. |
+| l | `tier_inversion` | Two feasible demands of one platform, one resource vector, and one ADR 0004 lane are admitted in tier order — where "feasible" excludes a demand ADR 0030 makes ineligible, since the amendment above. |
 | m | `escalation_regression` | A waiting demand's effective tier never falls. |
 | n | `tier_starvation` | Escalation ends every tier-based pass-over within `T` ticks. |
 

@@ -84,7 +84,10 @@ func (c worldConfig) tiered() bool { return c.Priority.Declared() }
 // young release is the fleet keeping its own repair path open -- neither is a
 // tier being ignored. The reserved head is exempt for the reason property (b)
 // exempts it: it is protected by ordering, and admission behind it is the
-// decision rather than a violation of it.
+// decision rather than a violation of it. So is the single repository slot that
+// head holds (ADR 0030; issue #255) -- a demand that exclusion removes from the
+// candidate list was never competing for the slot the tick handed out -- and
+// capAllowsSwap charges that slot beside ADR 0012's cap.
 func tierInversionChecker(cfg worldConfig) checker {
 	return func(w *world, observation tickObservation) []finding {
 		if !cfg.tiered() || w.tearingDown(observation) {
@@ -122,8 +125,33 @@ func tierInversionChecker(cfg worldConfig) checker {
 // on tier grounds -- it was refused by ADR 0012's cap, which outranks every
 // ordering question in this package. The swap frees the chosen demand's own
 // charge, because that is the admission being questioned.
+//
+// A held reservation charges one more slot of its OWN repository, and that term
+// is issue #255. ADR 0030 sets the head's future slot aside before anything else
+// may bid -- `slack = cap - occupied - 1` -- and its `slack <= 0` clause is a
+// wholesale exclusion in as many words: "the head is waiting for the last free
+// slot ... nothing from its repository may be admitted". A demand that exclusion
+// removes was never a candidate for the slot the tick handed out, so calling the
+// admission an inversion states something false about the tick.
+//
+// This is the counterfactual question, not the feasibility question, and the two
+// are allowed to differ. `reservedResidual` deliberately does NOT charge this
+// slot, because there the answer decides whether a demand is admissible at all
+// and a narrower answer BLINDS properties (a) and (b) -- they keep reporting an
+// ADR 0030 hold that never ends, with no tolerance spent on the ticks it is
+// legitimate. Here the answer decides whether one demand could have taken
+// ANOTHER'S slot, and an un-charged written rule is simply a wrong answer: the
+// property has no repeat tolerance, so it fails the build on the first tick the
+// rule binds.
+//
+// The exemption cannot hide an inverted tier, because of what the head is: a
+// reservation is only ever held for the demand `priorityOrder` ranked first in
+// the aged band, by effective tier and then by age (ADR 0037 §4), and it is
+// re-derived the moment anything outranks it. So the demand this term leaves
+// waiting is waiting for one that outranks it, and property (n) still bounds how
+// long any tier-based pass-over may last.
 func capAllowsSwap(cfg worldConfig, observation tickObservation, waiting, chosen domain.Demand) bool {
-	occupied := 0
+	occupied := reservedRepoSlot(observation, waiting.Key.Repo)
 	for _, instance := range observation.Instances {
 		if instance.ConsumesHostResources() && !instance.State.TearingDown() &&
 			instance.State != domain.InstanceOnlineIdle && instance.Repo == waiting.Key.Repo {
@@ -136,6 +164,23 @@ func capAllowsSwap(cfg worldConfig, observation tickObservation, waiting, chosen
 		}
 	}
 	return occupied < repoCap(cfg, waiting.Key.Repo)
+}
+
+// reservedRepoSlot is the `- 1` of ADR 0030's slack arithmetic: one slot of the
+// reserved head's own repository, set aside before anything else may bid. The
+// head itself never pays it, because tierInversionChecker has already excused
+// every demand holdsReservation names before it asks this question.
+//
+// It reads the reservation from the plan's own next state -- a decision the plan
+// publishes, the same fact `holdsReservation` and `reservedResidual` already
+// read -- and never from any envelope the scheduler computed, so ADR 0031's
+// independence rule holds here exactly as it does there.
+func reservedRepoSlot(observation tickObservation, repo string) int {
+	reservation := observation.Plan.Next.Reservation
+	if reservation == nil || reservation.Demand.Repo != repo {
+		return 0
+	}
+	return 1
 }
 
 // sameSlot reports whether two demands compete for one identical vector on one
