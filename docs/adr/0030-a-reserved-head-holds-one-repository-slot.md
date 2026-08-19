@@ -2,6 +2,10 @@
 
 ## Status
 
+> Unchanged by [ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md),
+> and now the only capacity a reservation holds: the head's vector is lent on
+> every axis, and its repository slot is lent on none.
+
 Accepted. Amends the repository condition of
 [ADR 0029](0029-remainder-admission-behind-a-reservation.md); everything else in
 that decision — the vector condition, the infeasible-head rule it inherits from

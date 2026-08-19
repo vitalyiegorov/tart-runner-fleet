@@ -2,7 +2,17 @@
 
 ## Status
 
-Accepted. Extends
+Accepted, and completed by
+[ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md). This record
+released the vector on the second of `feasible`'s two terms; ADR 0045 observes
+that there is no third, so the withheld branch this record left behind was
+reachable only for a reservation no tick had judged — which is issue #235.
+Clause 1 becomes unconditional and clause 2's gate on "while the head lends" is
+deleted, so the no-jump rule now binds on every candidate. Everything this record
+decides about WHY a cap-held head must lend is unchanged and is the argument
+ADR 0045 generalises.
+
+Extends
 [ADR 0017](0017-infeasible-reservation-residual-backfill.md) from the vector
 axis to the repository-cap axis, and carries that extension to the complementary
 passes of [ADR 0029](0029-remainder-admission-behind-a-reservation.md) and
