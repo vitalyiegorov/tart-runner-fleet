@@ -324,6 +324,10 @@ const (
 	// misreport that lasts minutes under a `-race` build's I/O pressure and then
 	// clears on its own.
 	PowerReadDescriptors PowerReadReason = "descriptor_exhaustion"
+	// PowerReadMemory is ENOMEM: the host could not allocate for the read. It is
+	// the other half of the resource-exhaustion hypothesis, kept distinct from
+	// descriptor exhaustion because the two point at different remedies.
+	PowerReadMemory PowerReadReason = "out_of_memory"
 	// PowerReadInterrupted is EINTR/EAGAIN: the read was interrupted rather than
 	// refused.
 	PowerReadInterrupted PowerReadReason = "interrupted"

@@ -804,6 +804,7 @@ func TestAConfigurationTartCouldNotOpenIsNotAPoweredOffVM(t *testing.T) {
 		{name: "permission", err: fs.ErrPermission, want: domain.PowerReadPermission},
 		{name: "descriptors", err: syscall.EMFILE, want: domain.PowerReadDescriptors},
 		{name: "system descriptors", err: syscall.ENFILE, want: domain.PowerReadDescriptors},
+		{name: "memory", err: syscall.ENOMEM, want: domain.PowerReadMemory},
 		{name: "interrupted", err: syscall.EINTR, want: domain.PowerReadInterrupted},
 		{name: "io", err: syscall.EIO, want: domain.PowerReadIO},
 		{name: "deadline", err: context.DeadlineExceeded, want: domain.PowerReadTimeout},

@@ -290,6 +290,8 @@ func classifyPowerRead(err error) domain.PowerReadReason {
 		return domain.PowerReadPermission
 	case errors.Is(err, syscall.EMFILE), errors.Is(err, syscall.ENFILE):
 		return domain.PowerReadDescriptors
+	case errors.Is(err, syscall.ENOMEM):
+		return domain.PowerReadMemory
 	case errors.Is(err, syscall.EINTR), errors.Is(err, syscall.EAGAIN):
 		return domain.PowerReadInterrupted
 	case errors.Is(err, syscall.EIO), errors.Is(err, syscall.ENXIO), errors.Is(err, syscall.ENODEV):
