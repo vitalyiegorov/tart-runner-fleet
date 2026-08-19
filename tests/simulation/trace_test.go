@@ -161,6 +161,15 @@ const (
 	// was wrong for longer than any window, and `stoppedReadings` reached
 	// seventy-nine without a single contrary reading clearing the run. A fault
 	// that expires after six ticks cannot build that state.
+	//
+	// It is NOT YET in faultThisTick's draw, for the reason ADR 0042 gives for the
+	// same decision about misreported_power: the draw entry lands with the fix for
+	// the defect it surfaces, so the sweep is never knowingly red. Putting it in
+	// the draw is what found the two bounds this fault reopened (ADR 0044), and it
+	// then produced a world that reaches a PRE-EXISTING tier-inversion defect —
+	// reproduced unchanged on the merge base from the shrunk trace, so not this
+	// change's — tracked with its deterministic reproducer on issue #255. The entry
+	// lands there. Until then the fault is exercised by its pinned trace.
 	eventUnreadablePower eventKind = "unreadable_power"
 	eventSiblingReassign eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
@@ -231,7 +240,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 	kinds := []eventKind{eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder,
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
-		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
+		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true

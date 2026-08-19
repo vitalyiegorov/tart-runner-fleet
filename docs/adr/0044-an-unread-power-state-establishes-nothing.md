@@ -217,6 +217,19 @@ four federated seeds, and property **(p) `dead_guest_hold`** at twenty-five tick
 against a twenty-four tick release bound on four more. Neither was hypothetical
 and neither was reachable before this fault existed.
 
+That draw entry is **not** in this change, and the reason is worth recording
+because it is a cost. With the fault drawn, a 160-seed × 320-tick sweep also
+reached a **tier-inversion defect that predates all of this** — a tier-8 demand
+left waiting forty-three minutes while a tier-2 demand of the same profile took
+an identical slot. Its shrunk trace contains no power fault at all and reproduces
+unchanged on the merge base, so it is not this change's; it is tracked with a
+transcribed, seed-independent reproducer on issue #255. ADR 0042 states the rule
+this follows — *the draw entry lands with the fix for the defect it surfaces, so
+the sweep is never knowingly red* — so `unreadable_power` is exercised here by its
+pinned trace, and the draw line lands on #255. The two reversals above stay: they
+were found by drawing it, and a finding is not withdrawn because the instrument
+that produced it is deferred.
+
 Both gates now read `!instance.Power.ProvenIdle()` — the predicate ADR 0022
 already wrote for "a successful observation established this VM is executing
 nothing" — so they exclude a proven stop and a proven absence, and include an
@@ -307,7 +320,7 @@ no trace that is never handed an unreadable reading — the same standard ADR 00
 set for itself. Default flags, four seeds over sixty ticks, three runs per arm,
 identical within every run, findings zero everywhere:
 
-| arm | merge base `f4be971` | + the fix, fault out of the draw | + `unreadable_power` drawn |
+| arm | merge base `f4be971` | this change | + `unreadable_power` drawn (on #255) |
 |---|---|---|---|
 | `m4-mac-mini` | `430812a6d33a71b1` | `430812a6d33a71b1` | `666eb149486c754f` |
 | `mac-studio-4x10-budget` | `70a1bc1a0b6c8b32` | `70a1bc1a0b6c8b32` | `5a359064dcf00872` |
@@ -316,9 +329,10 @@ identical within every run, findings zero everywhere:
 | `sequence-reset-linux-large` | `87edc71cd53c4790` | `87edc71cd53c4790` | `92a6b53d72495ccc` |
 | `tiered-release-priority` | `0aa57f34dd5dd36e` | `0aa57f34dd5dd36e` | `58054a8e0633a86c` |
 
-The third column moves on every arm because the draw is part of each seed's own
-sequence, so every trace after the first fault is a different world. That is
-attribution, not regeneration.
+The second column is this change and it moves nothing. The third is measured, and
+moves on every arm because the draw is part of each seed's own sequence, so every
+trace after the first drawn fault is a different world; it is recorded here so
+that #255 lands against a number rather than against a regeneration.
 
 ## The three questions
 

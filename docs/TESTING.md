@@ -78,6 +78,12 @@ branch once with the new fault out of the draw to show the code change moves
 nothing, and once with it in to show what the new worlds cost. ADR 0043 and
 ADR 0044 each carry such a table.
 
+A new fault is added to `faultThisTick`'s draw only once the sweep is green with
+it drawn. If it reaches a defect that is not the change's own — reproduced on the
+merge base from the shrunk trace — the fault ships exercised by its pinned trace
+and the draw line lands with that defect's fix, so the sweep is never knowingly
+red (ADR 0042, and #255 for the case that arose).
+
 Two faults model the same host condition and different facts about it, and the
 distinction is the whole of ADR 0044. `misreported_power` is a backend that
 CONFIDENTLY reports a running VM as powered off, and it decays; `unreadable_power`

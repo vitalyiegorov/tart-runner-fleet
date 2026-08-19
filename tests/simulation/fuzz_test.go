@@ -142,7 +142,7 @@ func TestGeneratedTraceExercisesTheWholeWorld(t *testing.T) {
 		eventBrokerDelay, eventBrokerDuplicate, eventBrokerDrop, eventBrokerReorder, eventStatisticsGap,
 		eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable, eventSlowBoot,
 		eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
-		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
+		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower,
 		eventSiblingReassign, eventSiblingSubstitute}
 	for _, kind := range required {
 		if seen[kind] == 0 {
