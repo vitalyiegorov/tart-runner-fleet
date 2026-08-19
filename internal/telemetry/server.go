@@ -348,7 +348,7 @@ func reservationRow(snapshot Snapshot) *adminapi.Reservation {
 	}
 	return &adminapi.Reservation{Demand: metric.Demand, Repo: metric.Repo, Profile: metric.Profile,
 		CPU: metric.CPU, MemoryMiB: metric.MemoryMiB, Slots: metric.Slots,
-		HeldSeconds: metric.Held.Seconds(), Axis: metric.Axis, LendsVector: metric.LendsVector}
+		HeldSeconds: metric.Held.Seconds(), Axis: metric.Axis}
 }
 
 // operationFailures projects the bounded failure aggregate into the versioned
@@ -563,17 +563,17 @@ func renderMetrics(snapshot Snapshot) string {
 			prometheusLabel(reservation.Profile), reservation.CPU)
 		// The axis is the diagnosis, and it is a closed vocabulary so the label
 		// cannot open a new time series: a `vector` hold ends when live instances
-		// release, and a `repository_cap` hold ends only when one of the head's own
-		// repository's instances exits (issue #226, ADR 0038).
+		// release, a `repository_cap` hold ends only when one of the head's own
+		// repository's instances exits (issue #226, ADR 0038), and `none` is the
+		// one to alert on — a turn held for work the fleet could have started
+		// (issue #235). `fleet_reservation_lends_vector` was published beside this
+		// until ADR 0045 and is gone rather than pinned to 1: on every axis there
+		// is, the head lends.
 		writeHelpType("fleet_reservation_axis", "1 for the axis holding the reserved head out of admission.", "gauge")
 		for _, axis := range reservationAxes {
 			fmt.Fprintf(&output, "fleet_reservation_axis{axis=%s} %d\n",
 				prometheusLabel(axis), boolGauge(axis == reservationAxisOrUnjudged(reservation.Axis)))
 		}
-		// 0 is the expensive state: a vector standing idle rather than lent to work
-		// the head outranks.
-		writeHelpType("fleet_reservation_lends_vector", "1 when the reserved head lends the vector it cannot use to work it outranks.", "gauge")
-		fmt.Fprintf(&output, "fleet_reservation_lends_vector %d\n", boolGauge(reservation.LendsVector))
 	}
 	if len(snapshot.OperationFailures) > 0 {
 		// The failure code is closed vocabulary, so label cardinality is bounded and

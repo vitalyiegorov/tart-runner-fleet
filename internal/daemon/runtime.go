@@ -1956,12 +1956,6 @@ func (e engineTicker) recordReservation(result app.TickResult) {
 		Profile: string(reservation.Profile), CPU: reservation.Resources.CPU,
 		MemoryMiB: reservation.Resources.MemoryMB, Slots: reservation.Resources.Slots,
 		Held: held, Axis: string(axis),
-		// ADR 0017 lends on the vector axis and ADR 0038 lends on the
-		// repository-cap axis, so every axis the planner can publish lends. A
-		// reservation that does NOT lend is capacity standing idle, and naming it
-		// as such is the whole point of this metric.
-		LendsVector: axis == scheduler.ReservationAxisVector || axis == scheduler.ReservationAxisRepositoryCap ||
-			axis == scheduler.ReservationAxisBoth,
 	})
 }
 

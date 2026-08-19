@@ -14,8 +14,7 @@ import (
 // thirteen minutes for a head no amount of freed CPU can admit.
 func capHeldReservationMetric() *ReservationMetric {
 	return &ReservationMetric{Demand: "c/repo/1009/1/500009", Repo: "c/repo", Profile: "builder",
-		CPU: 6, MemoryMiB: 12_288, Slots: 1, Held: 13 * time.Minute,
-		Axis: "repository_cap", LendsVector: true}
+		CPU: 6, MemoryMiB: 12_288, Slots: 1, Held: 13 * time.Minute, Axis: "repository_cap"}
 }
 
 // TestStatusAndMetricsPublishTheHeldReservation is the observability gap issue
@@ -42,7 +41,7 @@ func TestStatusAndMetricsPublishTheHeldReservation(t *testing.T) {
 	if held.Demand != "c/repo/1009/1/500009" || held.Repo != "c/repo" || held.Axis != "repository_cap" {
 		t.Fatalf("the head, its repository and the axis are the whole diagnosis: %#v", held)
 	}
-	if held.CPU != 6 || held.HeldSeconds != 780 || !held.LendsVector {
+	if held.CPU != 6 || held.HeldSeconds != 780 {
 		t.Fatalf("the vector and how long it has been held: %#v", held)
 	}
 
@@ -53,7 +52,6 @@ func TestStatusAndMetricsPublishTheHeldReservation(t *testing.T) {
 		`fleet_reservation_axis{axis="repository_cap"} 1`,
 		`fleet_reservation_axis{axis="vector"} 0`,
 		`fleet_reservation_axis{axis="unjudged"} 0`,
-		"fleet_reservation_lends_vector 1",
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("metrics missing %q:\n%s", want, metrics)
@@ -66,6 +64,13 @@ func TestStatusAndMetricsPublishTheHeldReservation(t *testing.T) {
 		if !strings.Contains(metrics, `fleet_reservation_axis{axis="`+axis+`"}`) {
 			t.Fatalf("the axis vocabulary must be emitted whole, missing %q:\n%s", axis, metrics)
 		}
+	}
+	// `fleet_reservation_lends_vector` was published beside these until ADR 0045.
+	// It is deleted rather than pinned to 1: a reservation withholds ORDER and one
+	// repository slot on every axis there is, so the gauge had no state left to
+	// distinguish.
+	if strings.Contains(metrics, "lends_vector") {
+		t.Fatalf("ADR 0045 deletes the lending gauge rather than pinning it:\n%s", metrics)
 	}
 	// The head's demand key and repository are unbounded cardinality and must
 	// never become labels.
@@ -97,32 +102,59 @@ func TestFleetHoldingNoReservationPublishesNoneAtAll(t *testing.T) {
 	}
 }
 
-// TestReservationCheckFailsOnlyOnAWithheldVector separates the ordinary case
-// from the incident. A reservation is normal, and on both ADR 0017's and ADR
-// 0038's axes the vector the head cannot use is lent to work it outranks. The
-// alertable case is the one standing capacity down.
-func TestReservationCheckFailsOnlyOnAWithheldVector(t *testing.T) {
-	health, _ := newTestHealth(t)
-	if err := health.SetReservation(capHeldReservationMetric()); err != nil {
-		t.Fatalf("SetReservation: %v", err)
-	}
-	if result := health.Reservation(); !result.OK {
-		t.Fatalf("a lending reservation is not a fault: %v", result.Reasons)
-	}
-
-	withholding := capHeldReservationMetric()
-	withholding.LendsVector = false
-	if err := health.SetReservation(withholding); err != nil {
-		t.Fatalf("SetReservation: %v", err)
-	}
-	result := health.Reservation()
-	if result.OK || len(result.Reasons) != 1 {
-		t.Fatalf("a withheld vector is the incident: %v", result)
-	}
-	for _, want := range []string{"c/repo/1009/1/500009", "6 cpu", "12288 MiB", "13m0s", "repository_cap"} {
-		if !strings.Contains(result.Reasons[0], want) {
-			t.Fatalf("the reason must name %q: %s", want, result.Reasons[0])
-		}
+// TestReservationCheckFailsOnAHeadNoAxisRefuses separates the ordinary case from
+// the incident, and it is the separation issue #235 corrected.
+//
+// The check used to fail on a reservation that did not LEND its vector. That
+// could not survive its own record: ADR 0017 released the vector on one axis,
+// ADR 0038 on the other, and ADR 0045 established that a reservation withholds
+// ORDER rather than a vector on either — so the only thing left that could make
+// the check fire was a plan that published no judgement at all. On the mac studio
+// it did, for an hour, and reported "has withheld 2 cpu / 4096 MiB" for a head
+// whose vector fit the free envelope exactly.
+//
+// The alertable state is `none`: no axis refuses the head, so the fleet is
+// holding a turn for work it could have started. One such tick is ordinary — the
+// tick planned the other platform — so the bound is the queue SLO the fleet
+// already carries, and no new knob is introduced.
+func TestReservationCheckFailsOnAHeadNoAxisRefuses(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		axis string
+		held time.Duration
+		ok   bool
+	}{
+		{"a cap-held head is ordinary", "repository_cap", 13 * time.Minute, true},
+		{"a vector-held head is ordinary", "vector", time.Hour, true},
+		{"an unjudged plan is not a reservation fault", "", time.Hour, true},
+		{"a head no axis refuses, inside the SLO, is one tick of ordinary lane change",
+			"none", time.Minute, true},
+		{"a head no axis refuses, past the SLO, is the incident", "none", 65 * time.Minute, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			health, _ := newTestHealth(t)
+			metric := capHeldReservationMetric()
+			metric.Axis, metric.Held = test.axis, test.held
+			if err := health.SetReservation(metric); err != nil {
+				t.Fatalf("SetReservation: %v", err)
+			}
+			result := health.Reservation()
+			if result.OK != test.ok {
+				t.Fatalf("Reservation().OK = %v, want %v: %v", result.OK, test.ok, result.Reasons)
+			}
+			if test.ok {
+				return
+			}
+			if len(result.Reasons) != 1 {
+				t.Fatalf("one reservation, one reason: %v", result.Reasons)
+			}
+			for _, want := range []string{"c/repo/1009/1/500009", "6 cpu", "12288 MiB", "1h5m0s",
+				"no axis refuses"} {
+				if !strings.Contains(result.Reasons[0], want) {
+					t.Fatalf("the reason must name %q: %s", want, result.Reasons[0])
+				}
+			}
+		})
 	}
 }
 

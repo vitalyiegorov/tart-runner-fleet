@@ -286,21 +286,11 @@ func renderObservations(output io.Writer, observations []adminapi.Observation) {
 // withheld its vector for the entire runtime of the blocking job, and nothing on
 // the fleet said so.
 func renderReservation(output io.Writer, held adminapi.Reservation) {
-	fmt.Fprintf(output, "%-24s %-10s %s\n", "HEAD", "PROFILE", "VECTOR      HELD      AXIS            VECTOR")
-	fmt.Fprintf(output, "%-24s %-10s %d cpu / %d MiB / %d slots  %-9s %-15s %s\n",
+	fmt.Fprintf(output, "%-24s %-10s %s\n", "HEAD", "PROFILE", "VECTOR      HELD      AXIS")
+	fmt.Fprintf(output, "%-24s %-10s %d cpu / %d MiB / %d slots  %-9s %s\n",
 		held.Repo, held.Profile, held.CPU, held.MemoryMiB, held.Slots,
-		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis), lendingState(held.LendsVector))
+		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis))
 	fmt.Fprintf(output, "demand %s\n", held.Demand)
-}
-
-// lendingState says whether the withheld vector is working for somebody. "idle"
-// is the expensive answer: a vector the size of the head's profile standing down
-// for as long as whatever blocks the head runs.
-func lendingState(lends bool) string {
-	if lends {
-		return "lent to work it outranks"
-	}
-	return "idle"
 }
 
 func renderCheck(output io.Writer, name string, check adminapi.Check) {

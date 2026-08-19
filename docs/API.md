@@ -180,7 +180,7 @@ by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:
 "reservation": {
   "demand": "c/repo/1009/1/500009", "repo": "c/repo", "profile": "xl",
   "cpu": 6, "memoryMiB": 12288, "slots": 1,
-  "heldSeconds": 780, "axis": "repository_cap", "lendsVector": true
+  "heldSeconds": 780, "axis": "repository_cap"
 },
 "reservationCheck": {"ok": true, "reasons": []}
 ```
@@ -189,17 +189,24 @@ by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:
 (the head's resource vector does not fit the starvation envelope, so it waits on
 live instances to release), `repository_cap` (the vector fits and the head's own
 repository is at its cap, so it waits on one of that repository's instances to
-exit and freeing CPU cannot hasten it), `both`, `none` (neither term refuses the
-head), or empty when the plan judged nothing. `lendsVector` reports that the
-vector the head cannot use is lent to work it outranks — ADR 0017 on the vector
-axis, [ADR 0038](adr/0038-a-cap-held-reserved-head-lends-its-vector.md) on the
-repository-cap axis — and `reservationCheck` fails only when it is false, which
-is a vector standing idle.
+exit and freeing CPU cannot hasten it), `both`, `none` (no axis refuses the head
+— the fleet is holding a turn for work it could have started), or empty when the
+plan judged nothing because its observation was unusable.
+
+`reservationCheck` fails on `none` held longer than the queue SLO, and on
+nothing else. A reservation costs the fleet a turn and one repository slot, never
+a vector: ADR 0017 released the vector on the resource axis,
+[ADR 0038](adr/0038-a-cap-held-reserved-head-lends-its-vector.md) on the
+repository-cap axis, and
+[ADR 0045](adr/0045-a-reservation-withholds-order-not-a-vector.md) deleted what
+was left of the withholding. `lendsVector` was published here until ADR 0045 and
+is gone rather than pinned to `true`.
 
 The same facts are exported as `fleet_reservation_held_seconds` and
-`fleet_reservation_vector_cpu` (labelled by profile), `fleet_reservation_axis`
-(labelled by the closed axis vocabulary, every value emitted on every scrape),
-and `fleet_reservation_lends_vector`. The head's demand key and repository are
+`fleet_reservation_vector_cpu` (labelled by profile) and `fleet_reservation_axis`
+(labelled by the closed axis vocabulary, every value emitted on every scrape).
+`fleet_reservation_lends_vector` is removed for the same reason. The head's
+demand key and repository are
 deliberately NOT metric labels; they travel in this document only. Both fields
 are additive and absent on daemons that published no reservation at all — which
 is the condition issue #226 ran in unobserved.
