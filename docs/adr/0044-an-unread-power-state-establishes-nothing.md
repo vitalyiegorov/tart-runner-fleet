@@ -175,6 +175,21 @@ its own file-descriptor budget, so if descriptors are the trigger it is the
 system-wide table (`ENFILE`), not the per-process one. That is the sixth failed
 reproduction and, unlike the first five, it removes a candidate.
 
+Reproduced end to end on this host, on a base-image VM directory, with ADR 0042's
+own method:
+
+```
+chmod 000 linux-runner-base-go-pre-panic-236-20260817/config.json
+tart list  -> State: "stopped"                          <- the misreport
+adapter    -> power="", reason=permission_denied,
+              readLatency=14µs                          <- the correction
+```
+
+Fourteen **microseconds**. That is the measurement the latency field exists to
+provide: a refused open fails immediately, so the next production occurrence
+separates "refused" from "starved" on the first line it prints, without a sixth
+investigation.
+
 The corroboration is a **lower bound on detection**, stated plainly: it opens the
 configuration read-only, and `tart`'s own lock may open it for writing. A
 permission mode that denies write but allows read would fail `tart` and succeed
