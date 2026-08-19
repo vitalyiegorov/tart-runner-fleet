@@ -286,6 +286,61 @@ see rather than one to tidy away.
   re-founded on the `none` axis and the queue SLO, and `lendsVector` deleted from
   every surface that carried it.
 
+### The corpus, enumerated and attributed
+
+Default flags, four seeds over sixty ticks, three runs per arm, identical within
+every run, findings zero everywhere. Five of six arms are byte-identical to the
+merge base, which is the measurement that bounds this change: it moves no trace
+that never carries a reservation into a complementary pass.
+
+| arm | merge base `36c8de4` | this change |
+|---|---|---|
+| `m4-mac-mini` | `666eb149486c754f` | `666eb149486c754f` |
+| `mac-studio-4x10-budget` | `5a359064dcf00872` | `5a359064dcf00872` |
+| `geekom-linux-amd64` | `06c9e3985961a01c` | `06c9e3985961a01c` |
+| `federated-maestro-scope` | `da1e97b9f78a344f` | `da1e97b9f78a344f` |
+| `sequence-reset-linux-large` | `92a6b53d72495ccc` | `92a6b53d72495ccc` |
+| `tiered-release-priority` | `58054a8e0633a86c` | **`22dbe1024fc5a918`** |
+
+Every merge-base number equals ADR 0044's third column, which #255 had already
+reproduced, so the baseline is a number this branch was measured against rather
+than one regenerated beside it.
+
+**The one arm that moves does so on one trace, and it is this defect being
+corrected.** Seed 3, tick 50. The reserved head is `c/repo/1015`'s `xl`
+(6 CPU / 12288 MiB) and `planLinux` judged it on the **vector** axis: after the
+tick's three Linux admissions the starvation envelope holds 9216 MiB, and the
+head needs 12288. A head on that axis lends by ADR 0017, so nothing should have
+been charged.
+
+`chargeReservedHead` charged it anyway, because it did not read the envelope
+`planLinux` had decided in — it RECOMPUTED one. `planLinux` decrements its own
+`agedFree`, which is already clamped by the measured residual, while
+`reservedHeadLendsItsVector` rebuilt `linuxFreeAged` from the augmented instance
+list and re-clamped afterwards, reaching 14336 MiB. Fourteen thousand fits
+twelve; nine does not. So the two predicates disagreed about the same head on the
+same tick, one saying "it does not fit, admit in the full residual" and the other
+saying "it fits, withhold its whole vector" — and the second won for the pass
+that was running.
+
+That is the seam's one bug for the fifth time, in the fifth place, and it is why
+this record deletes the second derivation rather than reconciling it.
+
+The correction serves one more demand one tick earlier: `b/repo/1024`'s
+`maestro` is admitted at tick 50 instead of `ops/fleet/1021`'s at tick 51. It is
+not a reordering. `b/repo/1024` has the higher effective tier — 1 + ⌊8m30s/5m⌋ =
+2 against `ops/fleet/1021`'s 0 + ⌊9m30s/5m⌋ = 1 — so ADR 0037's order puts it
+first, and property (l) agrees on every tick of the sweep. The arm ends with the
+same 54 spawns and the same 54 instances; it needs one fewer applied plan to get
+there.
+
+**Two more ticks change without moving any digest**, and they are the diagnostic
+half: seed 1 tick 59 and seed 4 tick 53 of the same arm each carried a
+reservation with an empty axis and now name `vector`. The plan identity is
+unchanged because the axis is a diagnostic and not a decision — which is exactly
+why a structural property was needed to pin it, and why the corpus alone could
+never have found issue #235.
+
 ## Not addressed here
 
 This decision does not bound how long a head may hold a reservation. ADR 0036

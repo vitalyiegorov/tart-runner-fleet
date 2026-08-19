@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -22,11 +23,11 @@ import (
 // reserved head was a `linux-2x4` — 2 CPU / 4096 MiB, which fits that envelope
 // exactly and whose repository was one instance into a cap of four.
 //
-// So the head was admissible on BOTH of `feasible`'s terms, and `unjudged` is
-// not a third axis: `reservationAxis` covers exactly the two terms `feasible`
-// folds, so a plan that judges a held head always names one of them. An empty
-// axis means the plan never judged the head at all — it carried the prior
-// reservation through a tick that planned another platform.
+// So the head was admissible on BOTH of `feasible`'s terms, and `unjudged` is not
+// a third axis: `admissionAxis` IS the decision `feasible` makes, so a plan that
+// judges a held head always names one of them. An empty axis means the plan never
+// judged the head at all — it carried the prior reservation through a tick that
+// planned another platform.
 //
 // That carried reservation is not inert. `fillMacRemainder` and
 // `planMacHandoff` charge it through `chargeReservedHead`, whose withhold branch
@@ -51,14 +52,24 @@ func studioConfig() Config {
 		MixedProfileCohorts:    true,
 		RepoCaps:               map[string]int{"budgie-at/budgie": 4, "knee-repo/knee": 4},
 		Profiles: map[domain.ProfileID]domain.Profile{
-			"linux-1x2": {ID: "linux-1x2", Platform: domain.PlatformLinux, Route: "tiered",
-				Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}},
-			"linux-2x4": {ID: "linux-2x4", Platform: domain.PlatformLinux, Route: "tiered",
-				Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}},
-			"macos-4x7": {ID: "macos-4x7", Platform: domain.PlatformMacOS, Route: "macos-maestro",
-				Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, MaxActive: 2},
+			"linux-1x2": studioProfile("linux-1x2", 1, 2_048),
+			"linux-2x4": studioProfile("linux-2x4", 2, 4_096),
+			"macos-4x7": studioProfile("macos-4x7", 4, 7_168),
 		},
 	}
+}
+
+// studioProfile builds one of the node's resource-explicit profiles (ADR 0032)
+// from its own name, which is where every other fact about it already lives: a
+// `macos-` prefix is the platform and the maestro route, and the numbers are the
+// vector.
+func studioProfile(id domain.ProfileID, cpu, memory int) domain.Profile {
+	profile := domain.Profile{ID: id, Platform: domain.PlatformLinux, Route: "tiered",
+		Resources: domain.Resources{CPU: cpu, MemoryMB: memory, Slots: 1}}
+	if strings.HasPrefix(string(id), "macos-") {
+		profile.Platform, profile.Route, profile.MaxActive = domain.PlatformMacOS, "macos-maestro", 2
+	}
+	return profile
 }
 
 func studioDemand(cfg Config, repo string, run, job int64, age time.Duration, profile domain.ProfileID) domain.Demand {
