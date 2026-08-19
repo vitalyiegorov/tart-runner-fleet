@@ -230,13 +230,16 @@ pinned trace, and the draw line lands on #255. The two reversals above stay: the
 were found by drawing it, and a finding is not withdrawn because the instrument
 that produced it is deferred.
 
-**Resolved on #255, and the entry has landed.** That tier inversion was an
-*oracle* defect, not a fleet one: the tick is ADR 0030's `slack <= 0` clause
-holding the reserved head's last repository slot, and property (l)'s
-counterfactual charged ADR 0012's cap without it. `internal/scheduler` is
-unchanged; the correction is one term in `capAllowsSwap` and it is recorded as the
-2026-08-19 amendment to
-[ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md).
+**Resolved on #255, and the entry has landed.** It turned out to be TWO defects
+on one seed, on opposite sides of one boundary. Tick 140 is an *oracle* defect:
+ADR 0030's `slack <= 0` clause correctly holds the reserved head's last
+repository slot, and property (l)'s counterfactual charged ADR 0012's cap without
+it. Tick 298 — reached only once the first was corrected — is a *fleet* defect:
+ADR 0030's slot is a count, and the planner had turned it into an assignment, so
+a candidate that could not fit spent the head's one spare slot and a demand of
+another repository took the vector. Both are recorded as 2026-08-19 amendments,
+to [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md) and
+[ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md) respectively.
 `unreadable_power` is now drawn like every other fault here, and the third column
 of the table below is what it costs.
 

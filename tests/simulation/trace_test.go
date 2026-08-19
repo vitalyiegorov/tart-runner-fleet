@@ -171,6 +171,11 @@ const (
 	// all. That report was an ORACLE defect -- ADR 0030's reserved repository slot,
 	// uncharged by property (l)'s counterfactual -- and it is closed, so the fault
 	// is drawn like every other one here.
+	//
+	// It cost two repairs rather than one, on opposite sides of a single boundary:
+	// tick 140 of that seed is property (l) disbelieving ADR 0030's reserved
+	// repository slot, and tick 298 -- reachable only once the first was corrected
+	// -- is the planner spending that slot on a candidate that could not use it.
 	eventUnreadablePower eventKind = "unreadable_power"
 	eventSiblingReassign eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED

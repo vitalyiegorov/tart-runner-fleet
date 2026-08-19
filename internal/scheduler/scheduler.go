@@ -1736,91 +1736,53 @@ func demandsAwaitingAdmission(demands []domain.Demand, operations []Operation) [
 	return result
 }
 
-// reservedRepoSlack reports how many demands in the reserved head's own
-// repository a complementary pass may still admit without ever costing the head
-// the cap slot it is waiting for.
-//
-// Resources are not the only way to delay a reserved head. Repository caps gate
-// admission too, and activeRepoCounts counts EVERY live instance regardless of
-// platform, so a macOS spawn in the reserved head's repository can consume the
-// exact cap slot the head is waiting for and block it again the moment its
-// vector frees. Remainder arithmetic cannot see that blocker.
-//
-// The answer is a count, not a veto. The occupancy is exactly the one
-// planLinux's feasible() will read on the tick the head's vector frees — live
-// instances plus everything this plan already admits (appendPlannedSpawns is how
-// both passes charge planned spawns) — and the head's own future slot is
-// subtracted before anything else may bid. What remains is genuinely spare:
-// admitting it leaves the cap answer for the head unchanged.
-func reservedRepoSlack(in Input, plan Plan, repo string) int {
-	limit := repoCapLimit(in.Config.RepoCaps, repo)
-	occupied := activeRepoCounts(appendPlannedSpawns(in.Instances.Value, in.Config, plan.Operations))
-	return limit - occupied[repo] - 1
-}
-
 // reservedRemainderDemands drops the demands a complementary pass must not
 // admit while a reservation is held, whatever the envelope says.
 //
-// Everything outside the reserved head's repository passes through untouched.
-// Inside it, reservedRepoSlack decides how many demands may bid, and the
-// highest-priority ones take those slots — aged before young, the same global
-// FIFO order every other admission obeys.
+// One rule remains here, and it binds only while the head LENDS its vector: the
+// arithmetic that used to keep an equal-or-larger peer out is gone in that case,
+// so ADR 0017's no-jump rule takes its place explicitly. Nothing that could take
+// the head's vector whole may bid for the part of it that is lent, and work that
+// still fits BESIDE the head is untouched, because it cannot delay the head at
+// all.
 //
-// A wholesale exclusion of the repository was ADR 0029's first answer and it
-// over-protected: on 2026-08-03 a head whose repository cap was 4 with one live
-// instance had three spare slots, and macOS work from that repository aged 4h39m
-// was refused the residual its own head could not use, while YOUNGER work from
-// another repository was admitted. That inverts the aged FIFO this pass exists
-// to protect. A head cannot lose a slot that is still free once its own is set
-// aside, so refusing there bought nothing and cost the queue its oldest work.
+// The reserved head's REPOSITORY slot is no longer decided here, and that is
+// issue #255's second defect. ADR 0030 states the slot as a COUNT -- "admitting
+// up to `slack` demands from that repository leaves the head's slot free by
+// construction" -- but this function turned the count into an ASSIGNMENT: it
+// ranked the head's repository by priority and handed the spare slots to the top
+// `slack` demands before anything asked whether those demands could be admitted
+// at all. A `builder` (6 CPU) that won the slot in a 4-core residual it cannot
+// fit then used none of it, and the tier-13 `maestro` that fit those four cores
+// exactly had already been dropped from the candidate list -- so the vector went
+// to a tier-10 demand of ANOTHER repository. That is the aged-FIFO inversion
+// ADR 0030 was written to end, reintroduced by the guard itself for the second
+// time, and it is the fourth appearance of this seam's one bug: a candidate that
+// cannot be admitted must end its own turn, never consume a budget or a pass.
+//
+// The count is now charged where admissions happen. chargeReservedHead models
+// the head's slot as occupancy, and appendMacSpawns already reads exactly that
+// occupancy against exactly that cap -- and SKIPS a capped repository rather than
+// pre-allocating it. The bound is identical by construction (`cap - occupied - 1`
+// admissions either way) and it can no longer be spent by a demand that will not
+// use it.
 //
 // The reservation is Linux-authored and singular, so the head's own demand is
-// never in a macOS candidate list; slack is what the head does not need, never
-// what it holds.
+// never in a macOS candidate list; what is charged is what the head holds, never
+// what it can spare.
 func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []domain.Demand {
 	reservation := plan.Next.Reservation
-	if reservation == nil {
+	if reservation == nil || !reservedHeadLendsItsVector(in, reservation) {
 		return demands
 	}
-	// When the head lends its vector instead of withholding it, the arithmetic
-	// that used to keep an equal-or-larger peer out is gone, and ADR 0017's
-	// no-jump rule takes its place explicitly: nothing that could take the head's
-	// vector whole may bid for the part of it that is lent. Work that still fits
-	// BESIDE the head is untouched, because it cannot delay the head at all.
-	if reservedHeadLendsItsVector(in, reservation) {
-		remainder, remainderExists := linuxFreeAged(in).Sub(reservation.Resources)
-		kept := make([]domain.Demand, 0, len(demands))
-		for _, demand := range demands {
-			if !jumpsTheReservedHead(in.Config, reservation, remainder, remainderExists, demand) {
-				kept = append(kept, demand)
-			}
-		}
-		demands = kept
-	}
-	var sameRepo []domain.Demand
+	remainder, remainderExists := linuxFreeAged(in).Sub(reservation.Resources)
+	kept := make([]domain.Demand, 0, len(demands))
 	for _, demand := range demands {
-		if demand.Key.Repo == reservation.Demand.Repo {
-			sameRepo = append(sameRepo, demand)
+		if !jumpsTheReservedHead(in.Config, reservation, remainder, remainderExists, demand) {
+			kept = append(kept, demand)
 		}
 	}
-	if len(sameRepo) == 0 {
-		return demands
-	}
-	slack := reservedRepoSlack(in, plan, reservation.Demand.Repo)
-	admissible := make(map[domain.DemandKey]bool, len(sameRepo))
-	for _, demand := range priorityOrder(in, sameRepo) {
-		if len(admissible) >= slack {
-			break
-		}
-		admissible[demand.Key] = true
-	}
-	result := make([]domain.Demand, 0, len(demands))
-	for _, demand := range demands {
-		if demand.Key.Repo != reservation.Demand.Repo || admissible[demand.Key] {
-			result = append(result, demand)
-		}
-	}
-	return result
+	return kept
 }
 
 // chargeReservedHead models a held reservation as occupancy for a complementary
@@ -1837,26 +1799,47 @@ func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []do
 // the head is re-checked first on every later tick, so it wins the first vector
 // large enough for it.
 //
-// A head its own REPOSITORY CAP holds out is charged nothing either, by the same
-// rule and for the same reason (ADR 0038): freeing the vector cannot admit such
-// a head, so withholding the vector protects nothing. What replaces the charge
-// is not nothing — reservedRemainderDemands drops any candidate that could take
-// the head's vector whole, which is ADR 0017's no-jump construction stated
-// rather than inherited.
+// A head its own REPOSITORY CAP holds out lends its VECTOR too, by the same rule
+// and for the same reason (ADR 0038): freeing the vector cannot admit such a
+// head, so withholding the vector protects nothing. What replaces that charge is
+// not nothing — reservedRemainderDemands drops any candidate that could take the
+// head's vector whole, which is ADR 0017's no-jump construction stated rather
+// than inherited.
+//
+// The head's REPOSITORY SLOT is charged either way, and the asymmetry is the
+// point (ADR 0030, and issue #255's second defect). The two capacities are held
+// out on different clocks: the vector is what the head cannot use NOW, and a
+// head blocked on it is waiting for live instances to release whatever this pass
+// admits — but the slot is what it will need THEN, and an admission that takes it
+// keeps it taken past the release. So lending the vector is free and lending the
+// slot is not, and only the vector is ever lent.
+//
+// Charging the slot HERE rather than pre-selecting who may bid for it is what
+// makes ADR 0030's `slack` a budget again: appendMacSpawns reads this occupancy
+// against the same cap every other pass reads and SKIPS a capped repository, so a
+// candidate that cannot be admitted consumes nothing. The bound is unchanged —
+// `cap - occupied - 1` admissions from the head's repository, either way.
 //
 // Feasibility is judged against the starvation-guard envelope, the same one
 // planLinux judges the head in, because only an aged head ever holds a
 // reservation. Judging a head as fitting is the fail-safe answer here: it
 // withholds the head's vector.
 func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
-	if reservation == nil || reservedHeadLendsItsVector(in, reservation) {
+	if reservation == nil {
 		return in
+	}
+	// A lent vector is charged as nothing while the slot below still is: an
+	// instance holding no resources narrows no envelope and occupies one
+	// repository slot, which is exactly what a reserved head holds here.
+	vector := reservation.Resources
+	if reservedHeadLendsItsVector(in, reservation) {
+		vector = domain.Resources{}
 	}
 	profile := in.Config.Profiles[reservation.Profile]
 	charged := append([]domain.Instance(nil), in.Instances.Value...)
 	charged = append(charged, domain.Instance{
 		ID: "reserved-" + reservation.Demand.String(), Repo: reservation.Demand.Repo, Demand: reservation.Demand,
-		Platform: profile.Platform, Profile: reservation.Profile, Route: profile.Route, Resources: reservation.Resources,
+		Platform: profile.Platform, Profile: reservation.Profile, Route: profile.Route, Resources: vector,
 		State: domain.InstancePlanned, Power: domain.InstancePowerRunning,
 	})
 	in.Instances = domain.Fresh(charged, in.Instances.ObservedAt)

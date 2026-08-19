@@ -180,8 +180,19 @@ This decision has been corrected twice by the simulator and both corrections wer
 to the RULE: a tier that reordered ADR 0004's bands was silently discarded by
 `planLinux` (§2), and a reservation made before an escalation went on being
 obeyed after `priorityOrder` had stopped agreeing with it (§4). Issue #255 looks
-like a third and is not. The rule is intact; **property (l)'s counterfactual was
-wrong**, and this amendment states the boundary the property was missing.
+like a third and is not. The rule is intact. What it needed was its boundary
+stated — **a tier orders candidates; it does not create eligibility** — and the
+two `tier_inversion` reports that made that necessary fall on opposite sides of
+it: one is a property judging a decision the reservation rules are entitled to
+make, and one is the reservation rules being applied wrongly.
+
+Both are on the tiered arm's seed 82, and both were reached only once
+`unreadable_power` entered the generator's draw
+([ADR 0044](0044-an-unread-power-state-establishes-nothing.md)). Neither shrunk
+trace contains a power event: the fault changed the history that reached the
+state, not the state.
+
+#### Tick 140 — an oracle defect
 
 The tiered arm's seed 82, at tick 140, reported an inversion:
 
@@ -233,19 +244,47 @@ Property (b) is untouched and still counts these pass-overs with no signature an
 no tier exemption, and property (n) still bounds every tier-based pass-over, so
 an ADR 0030 hold that never ends still fails the sweep.
 
-This is an **oracle defect** under [ADR 0043](0043-a-released-vector-cannot-be-taken-back.md)'s
-taxonomy — property (l) judged an ordering the reservation rules are entitled to
-produce — and nothing in `internal/scheduler` changes. It is recorded here rather
-than as a new record because it states the boundary of §2, which is this
-decision's own rule; ADR 0030 is unchanged and was correct throughout.
+This is an **oracle defect** under
+[ADR 0043](0043-a-released-vector-cannot-be-taken-back.md)'s taxonomy — property
+(l) judged an ordering the reservation rules are entitled to produce — and
+nothing in the planner changes for it.
 
-It surfaced only once `unreadable_power` entered the generator's draw
-([ADR 0044](0044-an-unread-power-state-establishes-nothing.md)), which is that
-fault's second contribution and the reason the entry lands with this fix rather
-than with #252: ADR 0042's rule is that a draw entry ships with the repair for
-what it surfaces, so the sweep is never knowingly red. The fault carries no power
-event into the shrunk trace at all — it changed the history that reached the
-state, not the state.
+#### Tick 298 — a fleet defect, in the rule the first one vindicated
+
+With property (l) corrected, the same seed reported a second inversion 158 ticks
+later — tier 13 waiting, tier 10 admitted — and this one is real.
+
+```
+reserved head  ops/fleet `xl`, vector withheld -> four cores left over
+ops/fleet cap  2, nothing live: exactly one spare slot behind the head
+took the slot  an ops/fleet `builder`, 6 CPU, the oldest of that repository
+could it fit?  no
+dropped        ops/fleet/1119 `maestro`, tier 13, fits the four cores exactly
+admitted       b/repo/1139 `maestro`, tier 10, another repository
+```
+
+ADR 0030 states its slot as a COUNT. `reservedRemainderDemands` had turned it
+into an ASSIGNMENT: it ranked the head's repository and gave the spare slots to
+the top `slack` demands before asking whether any of them could be admitted. The
+builder spent the budget and used none of it. That is the aged-FIFO inversion
+ADR 0030 exists to end, and with tiers declared it is a tier inversion as well.
+The slot is now charged where admissions happen, so a candidate that cannot be
+admitted spends nothing; the fix and its reduction are recorded as the 2026-08-19
+amendment to [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md).
+
+So the two reports are the same boundary read from both sides. Tick 140 is the
+scheduler obeying ADR 0030 and the oracle disbelieving it; tick 298 is the
+scheduler misapplying ADR 0030 and the oracle right to say so. **A tier orders
+candidates, and ADR 0030 decides who is one — which means ADR 0030 has to decide
+it correctly.**
+
+This amendment is recorded here rather than as a new record because it states the
+boundary of §2, which is this decision's own rule. ADR 0037's escalation
+arithmetic, its band composition and its reservation clause are all unchanged.
+
+The draw entry for `unreadable_power` lands with these fixes rather than with
+#252, which is ADR 0042's rule: a draw entry ships with the repair for what it
+surfaces, so the sweep is never knowingly red.
 
 ## Consequences
 
@@ -298,8 +337,12 @@ declares a tier nothing matches is inert, not broken.
   number, the repository cap, and the tier-8 demand takes the residual. That
   second test is what makes the first a statement about ADR 0030 rather than a
   licence to ignore a tier.
+- `internal/scheduler/scheduler_reserved_remainder_test.go` (2026-08-19
+  amendment): `TestASameRepositoryCandidateThatCannotFitDoesNotSpendTheHeadsSpareSlot`,
+  tick 298 reduced — red before the ADR 0030 amendment, where the six-core builder
+  spent the head's one spare slot and the other repository took the vector.
 - `tests/simulation/regression255_test.go`: the whole-fleet history that reaches
-  that tick, pinned as an explicit trace on the tiered arm.
+  both ticks, pinned as an explicit trace on the tiered arm.
 - `tests/simulation/priority_test.go`: three new properties on a new arm
   (`tiered-release-priority`, two of four repositories declared as release work),
   plus the bound stated deterministically —
