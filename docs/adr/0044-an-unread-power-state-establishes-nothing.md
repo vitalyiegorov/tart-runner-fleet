@@ -303,8 +303,22 @@ walks the same directory.
 
 **Every corpus digest is byte-identical to the merge base until the fault enters
 the generator's draw**, which is the evidence that the classification change moves
-no trace that is never handed an unreadable reading. See the tables in the pull
-request.
+no trace that is never handed an unreadable reading — the same standard ADR 0042
+set for itself. Default flags, four seeds over sixty ticks, three runs per arm,
+identical within every run, findings zero everywhere:
+
+| arm | merge base `f4be971` | + the fix, fault out of the draw | + `unreadable_power` drawn |
+|---|---|---|---|
+| `m4-mac-mini` | `430812a6d33a71b1` | `430812a6d33a71b1` | `666eb149486c754f` |
+| `mac-studio-4x10-budget` | `70a1bc1a0b6c8b32` | `70a1bc1a0b6c8b32` | `5a359064dcf00872` |
+| `geekom-linux-amd64` | `338662c83e821380` | `338662c83e821380` | `06c9e3985961a01c` |
+| `federated-maestro-scope` | `17cb38e275e1b042` | `17cb38e275e1b042` | `da1e97b9f78a344f` |
+| `sequence-reset-linux-large` | `87edc71cd53c4790` | `87edc71cd53c4790` | `92a6b53d72495ccc` |
+| `tiered-release-priority` | `0aa57f34dd5dd36e` | `0aa57f34dd5dd36e` | `58054a8e0633a86c` |
+
+The third column moves on every arm because the draw is part of each seed's own
+sequence, so every trace after the first fault is a different world. That is
+attribution, not regeneration.
 
 ## The three questions
 
