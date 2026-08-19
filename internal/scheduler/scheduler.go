@@ -502,12 +502,22 @@ const OccupancyWarnFraction = 0.75
 // vector past that profile's wall-clock ceiling. Unlike stalledAssignment and
 // lingeringRunner it does NOT claim the runner is idle — the incident it exists
 // for was a genuinely executing job — so it is deliberately narrow: it needs a
-// configured ceiling, a powered-on VM, and a measurable occupancy, and it stays
-// fail-closed on every one of them. An unconfigured ceiling is no ceiling, never
-// a zero one.
+// configured ceiling, a VM that is not proven idle, and a measurable occupancy,
+// and it stays fail-closed on every one of them. An unconfigured ceiling is no
+// ceiling, never a zero one.
+//
+// The VM condition is "not proven idle" rather than "powered on" since issue
+// #252. The narrowing to a powered-on VM was written for the reason every gate
+// beside it states — a stopped or absent instance is reclaimed by a cheaper gate
+// that needs no ceiling — and that reasoning does not survive a third answer. An
+// instance whose power the backend cannot read has NO cheaper gate: the stopped
+// recovery may not act on it, by construction. Leaving it out here made an
+// unreadable reading a way to hold a vector forever, which is the exact condition
+// ADR 0036 exists to bound, and the sweep found it the first time the fault was
+// drawn.
 func occupancyExceeded(now time.Time, profiles map[domain.ProfileID]domain.Profile, instance domain.Instance) bool {
 	profile, known := profiles[instance.Profile]
-	if !known || profile.OccupancyBudget <= 0 || instance.Power != domain.InstancePowerRunning {
+	if !known || profile.OccupancyBudget <= 0 || instance.Power.ProvenIdle() {
 		return false
 	}
 	age, measured := instance.Occupancy(now)
@@ -527,8 +537,15 @@ func occupancyExceeded(now time.Time, profiles map[domain.ProfileID]domain.Profi
 // It is restricted to Running rather than also Assigned on purpose. An instance
 // that never reached Running has never had a guest worth probing for this
 // reason, and the assignment deadline already owns that ground.
+//
+// The VM condition is "not proven idle" rather than "powered on" for the reason
+// the occupancy budget's is (issue #252), and here it also does something better
+// than restore a bound: the guest probe is an INDEPENDENT source. When the
+// backend enumeration cannot say whether the machine is running, the guest itself
+// still can, and a verdict built on five refused probes over ninety seconds rests
+// on evidence the unreadable enumeration never provided.
 func guestUnresponsive(now time.Time, policy domain.GuestLivenessPolicy, instance domain.Instance) bool {
-	if instance.State != domain.InstanceRunning || instance.Power != domain.InstancePowerRunning {
+	if instance.State != domain.InstanceRunning || instance.Power.ProvenIdle() {
 		return false
 	}
 	return policy.Confirmed(instance.Guest, now)

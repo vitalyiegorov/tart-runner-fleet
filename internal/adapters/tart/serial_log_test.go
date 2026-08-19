@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -81,7 +80,7 @@ func serialAdapter(t *testing.T, directory string) (*Adapter, *fakeRunner, opera
 	t.Helper()
 	adapter, runner, registry, ownership := testAdapter(time.Unix(100, 0).UTC())
 	adapter.LinuxSerialLogDirectory = directory
-	runner.vms["trf-small-1"] = executor.Instance{Name: "trf-small-1", Source: "local"}
+	runner.vms["trf-small-1"] = vm{Name: "trf-small-1", Source: "local"}
 	if err := registry.PutOwnership(context.Background(), "trf-small-1", ownership); err != nil {
 		t.Fatal(err)
 	}

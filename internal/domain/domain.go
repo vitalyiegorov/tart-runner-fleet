@@ -262,6 +262,15 @@ type Instance struct {
 	// predicate that judges it. The zero value is "never corroborated", which is
 	// fail-closed.
 	PowerRun ObservationRun
+	// PowerUnreadable is why the backend could not determine this instance's
+	// power, and how long the attempt took. Its zero value is the ordinary case:
+	// the power was read.
+	//
+	// It exists so that the fleet can SAY which failure made a reading
+	// unavailable. `tart` renders every one of them as "not running" (ADR 0042),
+	// which is why issue #246 could not name the trigger after five reproduction
+	// attempts and why two nightlies died before one could be captured.
+	PowerUnreadable PowerReadFailure
 	// PowerRetracted reports that a stopped recovery of this instance has already
 	// been sent back to Running by the drain's own re-read of the power at the
 	// moment of acting. It is the fleet's record of having disproven its own
@@ -287,6 +296,66 @@ const (
 	// no caller can confuse "gone" with "unread".
 	InstancePowerAbsent InstancePower = "absent"
 )
+
+// PowerReadReason names, in a closed vocabulary, why a backend could not
+// determine an instance's power.
+//
+// It exists because the failure that produced two nights of lost nightlies is
+// invisible by construction: `tart`'s own `running()` swallows every error from
+// opening a VM's `config.json` and answers "not running" (ADR 0042), so the one
+// fact an operator needs — WHICH failure — never reaches the fleet at all. Issue
+// #246 could not reproduce the trigger five ways; the answer has to come from the
+// next occurrence, and nothing was recording it.
+//
+// It is a closed vocabulary rather than the errno text for the reason every other
+// classified failure in this fleet is: a bounded token can be logged, counted and
+// compared across occurrences without ever carrying a path, a token, or an
+// operator's home directory into a log line.
+type PowerReadReason string
+
+const (
+	// PowerReadOK is the zero value: the backend determined the power.
+	PowerReadOK PowerReadReason = ""
+	// PowerReadPermission is EACCES/EPERM — the exact condition ADR 0042
+	// reproduced on this host with `chmod 000 config.json`.
+	PowerReadPermission PowerReadReason = "permission_denied"
+	// PowerReadDescriptors is EMFILE/ENFILE: the host ran out of file
+	// descriptors, per process or system wide. It is the leading hypothesis for a
+	// misreport that lasts minutes under a `-race` build's I/O pressure and then
+	// clears on its own.
+	PowerReadDescriptors PowerReadReason = "descriptor_exhaustion"
+	// PowerReadInterrupted is EINTR/EAGAIN: the read was interrupted rather than
+	// refused.
+	PowerReadInterrupted PowerReadReason = "interrupted"
+	// PowerReadIO is EIO and its neighbours: the storage answered with an error.
+	PowerReadIO PowerReadReason = "io_error"
+	// PowerReadTimeout is the caller's deadline expiring before the read
+	// finished, which is a slow filesystem rather than a refusing one.
+	PowerReadTimeout PowerReadReason = "timeout"
+	// PowerReadMissing is ENOENT: the backend enumerated the instance and its
+	// configuration was not there. It is a read failure rather than a proof of
+	// absence, because the enumeration that listed it disagrees.
+	PowerReadMissing PowerReadReason = "missing_configuration"
+	// PowerReadOther is every failure the classifier does not recognise. It is
+	// never absent: an unclassified failure is still a failure.
+	PowerReadOther PowerReadReason = "unclassified"
+)
+
+// PowerReadFailure is why a backend could not determine an instance's power, and
+// how long the attempt that failed took. Its zero value means the power was
+// read, so no consumer has to ask twice.
+//
+// The latency is carried beside the reason because the two hypotheses this fleet
+// cannot yet tell apart have different shapes: a refused open fails in
+// microseconds, a starved one takes as long as the host is busy. One occurrence
+// with both numbers settles it.
+type PowerReadFailure struct {
+	Reason  PowerReadReason
+	Latency time.Duration
+}
+
+// Unreadable reports whether this records a failure at all.
+func (f PowerReadFailure) Unreadable() bool { return f.Reason != PowerReadOK }
 
 // ProvenIdle reports that a successful host observation established the VM is
 // executing nothing: it was enumerated powered off, or it was not enumerated at

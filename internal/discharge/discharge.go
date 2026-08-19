@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -30,7 +31,7 @@ type Store interface {
 
 // VM is the host half: a fresh power observation and an owner-checked removal.
 type VM interface {
-	Running(context.Context, string) (bool, error)
+	Power(context.Context, string) (domain.InstancePower, error)
 	Reap(context.Context, string, operations.Ownership) error
 }
 
@@ -72,12 +73,18 @@ func (s Service) DischargeDeadLetter(ctx context.Context, request adminapi.Disch
 		return s.refuse(request, invalidCode(request))
 	}
 	if request.ReapInstance {
-		running, err := s.VM.Running(ctx, request.InstanceID)
+		power, err := s.VM.Power(ctx, request.InstanceID)
 		if err != nil {
 			return s.refuse(request, adminapi.RefusalVMUnobserved)
 		}
-		if running {
+		// Only a VM the backend proved is idle may be reaped. A power it could not
+		// read is an unobserved VM, not a stopped one, and it is refused under the
+		// code that already means exactly that (issue #252).
+		if power == domain.InstancePowerRunning {
 			return s.refuse(request, adminapi.RefusalVMRunning)
+		}
+		if !power.ProvenIdle() {
+			return s.refuse(request, adminapi.RefusalVMUnobserved)
 		}
 	}
 	outcome, err := s.Store.DischargeDeadLetter(ctx, operations.Discharge{OperationID: request.OperationID,

@@ -237,12 +237,14 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 			return domain.Unavailable[[]domain.Instance](fmt.Sprintf("owned VM %s missing from Tart", instance.ID)), host
 		}
 		delete(byName, instance.ID)
-		power := domain.InstancePowerUnknown
+		// The backend classifies its own reading, because only the backend can tell
+		// a machine it found powered off from one it could not read (issue #252).
+		// This seam used to derive Stopped from a bool that meant either, which is
+		// the premise thirty drains of a live runner rested on.
+		power, unreadable := domain.InstancePowerUnknown, domain.PowerReadFailure{}
 		switch {
-		case exists && vm.Running:
-			power = domain.InstancePowerRunning
 		case exists:
-			power = domain.InstancePowerStopped
+			power, unreadable = vm.Power, vm.Unreadable
 		case instance.State.TearingDown():
 			// The Tart read above SUCCEEDED, so this VM is proven gone rather than
 			// unread, and during cleanup that is an expected intermediate fact — see
@@ -293,7 +295,11 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 			// The durable phase is therefore the fleet's own record of having disproven
 			// this instance's power reading, and it costs no query to read (issue #246).
 			PowerRetracted: instance.DrainPhase == operations.DrainPhaseStoppedRecovery,
-			AssignedSince:  assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
+			// PowerUnreadable travels with the instance so the daemon can name WHICH
+			// failure made the reading unavailable. Nothing decides on it; it is the
+			// evidence issue #246 spent five reproduction attempts not having.
+			PowerUnreadable: unreadable,
+			AssignedSince:   assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {
@@ -315,7 +321,11 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 func (p ProductionInventory) probeGuests(ctx context.Context, instances []domain.Instance) []domain.Instance {
 	candidates := make([]string, 0, len(instances))
 	for _, instance := range instances {
-		if instance.State == domain.InstanceRunning && instance.Power == domain.InstancePowerRunning {
+		// Not proven idle, rather than powered on. A VM the backend enumerated
+		// stopped or absent is reclaimable through a gate that needs no probe; a VM
+		// it could NOT READ is reclaimable through none, and the guest is the one
+		// source left that can answer for it (issue #252).
+		if instance.State == domain.InstanceRunning && !instance.Power.ProvenIdle() {
 			candidates = append(candidates, instance.ID)
 		}
 	}

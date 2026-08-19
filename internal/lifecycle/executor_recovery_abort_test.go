@@ -2,10 +2,12 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -226,5 +228,66 @@ func TestRecoveryDrainAbortSurfacesPersistenceFailure(t *testing.T) {
 
 	if err == nil || err.Error() != "runner lifecycle failed at persist" {
 		t.Fatalf("failed rollback must surface as a persist-stage retry, got %v", err)
+	}
+}
+
+// TestAStoppedRecoveryWillNotActOnAPowerItCouldNotRead is the hole 2026-08-19
+// went through, at the guard that was supposed to close it.
+//
+// The stopped-recovery arm re-reads the power at the moment of acting and, until
+// issue #252, that re-read could only answer "running" or "not running". `tart`
+// answers "not running" for a VM whose configuration it could not open
+// (ADR 0042), and the re-read goes through the SAME `tart list` the plan came
+// from — so when that enumeration could not read the machine, BOTH readings said
+// "off", the guard agreed with the misreport, and the drain went on to deregister
+// a runner that was executing a job. Thirty times in eight minutes, on a live
+// production nightly; the only thing that stopped it was GitHub refusing to
+// remove a busy runner.
+//
+// The premise now has to be established, not merely not-contradicted. An
+// unreadable power fails the guard, which retries: if the VM really is off, the
+// next tick that can read it plans the reclaim again.
+func TestAStoppedRecoveryWillNotActOnAPowerItCouldNotRead(t *testing.T) {
+	var calls []string
+	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery)}
+	control := &fakeDrainControl{safe: true, registered: false}
+	control.calls = &calls
+	executor := drainExecutor(state, fakeVM{calls: &calls, powerUnread: true}, control)
+	err := executor.Execute(context.Background(), operations.Operation{
+		Kind: OperationDrain, ResourceID: state.instance.ID})
+	if err == nil {
+		t.Fatal("a power the backend could not read authorized a destructive drain")
+	}
+	var staged stageError
+	if !errors.As(err, &staged) || staged.stage != StageGuard {
+		t.Fatalf("failure = %v, want a guard-stage failure that retries", err)
+	}
+	if !reflect.DeepEqual(calls, []string{"power:trf-small-1"}) {
+		t.Fatalf("calls = %v; nothing may follow a power the fleet could not read", calls)
+	}
+	// The instance is left exactly where it was: not aborted to Running (nothing
+	// was disproven) and not advanced (nothing was established).
+	if state.instance.State != operations.StateDraining {
+		t.Fatalf("state = %s, want the drain still standing", state.instance.State)
+	}
+}
+
+// TestAStoppedRecoveryActsOnAProvenAbsence keeps the other end honest: a VM a
+// successful enumeration did not list at all is proven gone, and proven absence
+// is a premise.
+func TestAStoppedRecoveryActsOnAProvenAbsence(t *testing.T) {
+	var calls []string
+	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery)}
+	confirmed := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true,
+		ObservedAt: time.Unix(1000, 0).UTC()}
+	control := &fakeDrainControl{safe: true, registered: false, calls: &calls,
+		confirmations: []operations.DeletionConfirmation{confirmed, confirmed}}
+	executor := drainExecutor(state, fakeVM{calls: &calls, power: domain.InstancePowerAbsent}, control)
+	if err := executor.Execute(context.Background(), operations.Operation{
+		Kind: OperationDrain, ResourceID: state.instance.ID}); err != nil {
+		t.Fatalf("a proven absence did not complete its drain: %v", err)
+	}
+	if state.instance.State != operations.StateDeleted {
+		t.Fatalf("state = %s, want the drain finished", state.instance.State)
 	}
 }

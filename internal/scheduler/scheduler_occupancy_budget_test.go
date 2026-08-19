@@ -129,8 +129,6 @@ func TestOccupancyBudgetIsFailClosedWithoutEvidenceOrACeiling(t *testing.T) {
 			mutate: func(i *domain.Instance) { i.OccupiedSince = time.Time{} }},
 		{name: "occupancy start in the future", budget: budget, profile: "xl",
 			mutate: func(i *domain.Instance) { i.OccupiedSince = testNow.Add(time.Hour) }},
-		{name: "power unread", budget: budget, profile: "xl",
-			mutate: func(i *domain.Instance) { i.Power = domain.InstancePowerUnknown }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			instance := occupant(test.profile, occupancyProfiles(test.budget), 75*time.Minute)
@@ -209,5 +207,31 @@ func TestOccupancyReportsCountOnlyDemandThatIsGenuinelyWaiting(t *testing.T) {
 	in = occupancyInput([]domain.Instance{released, unclocked}, nil, budget)
 	if reports := Occupancies(in.Now, in.Config, in.Instances.Value, in.Demands.Value); len(reports) != 0 {
 		t.Fatalf("an unmeasurable hold must not be reported at all; got %#v", reports)
+	}
+}
+
+// TestAnUnreadablePowerStateDoesNotDisableTheCeiling is issue #252, and it
+// reverses a case this file used to assert.
+//
+// The budget was narrowed to a powered-on VM on the same reasoning every gate
+// beside it states — a stopped or absent instance is reclaimed by a cheaper gate
+// — and that reasoning does not survive a third answer. An instance whose power
+// the backend could not read has no cheaper gate at all, so excluding it here
+// made an unreadable reading a way to hold a vector past any ceiling, forever.
+// That is the exact condition ADR 0036 exists to bound, and the sweep reported it
+// as property (k) the first time `unreadable_power` was drawn.
+//
+// The ceiling never claimed the runner was idle, and it does not claim it now. It
+// is a wall-clock fact about how long a vector has been held, and how long it has
+// been held does not depend on whether the enumeration could open a config file.
+func TestAnUnreadablePowerStateDoesNotDisableTheCeiling(t *testing.T) {
+	const budget = 45 * time.Minute
+	instance := occupant("xl", occupancyProfiles(budget), 75*time.Minute)
+	instance.Power = domain.InstancePowerUnknown
+	plan := PlanTick(occupancyInput([]domain.Instance{instance}, nil, budget))
+	operation, drained := drainOf(plan, instance.ID)
+	if !drained || !operation.OccupancyExceeded {
+		t.Fatalf("an over-budget instance whose power was unreadable was never reclaimed; "+
+			"plan operations: %#v", plan.Operations)
 	}
 }

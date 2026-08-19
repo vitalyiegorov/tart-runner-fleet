@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -44,7 +45,9 @@ func (a *Adapter) Reap(ctx context.Context, name string, ownership operations.Ow
 	if err != nil {
 		return err
 	}
-	if instance.Running {
+	// Reap refuses everything it cannot prove is stopped, not merely what it
+	// proved is running (issue #252).
+	if instance.Power != domain.InstancePowerStopped {
 		return failure("reap", ErrorUncertain, operations.ErrConflict)
 	}
 	return a.remove(ctx, "reap", name, "rm", name)

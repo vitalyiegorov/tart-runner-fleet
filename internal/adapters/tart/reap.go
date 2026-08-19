@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -40,7 +41,11 @@ func (a *Adapter) Reap(ctx context.Context, name string, ownership operations.Ow
 	if err != nil {
 		return err
 	}
-	if vm.Running {
+	// Reap must refuse a running VM, so it refuses everything it cannot prove is
+	// stopped. An unreadable power state is a refusal, not a permission: the
+	// operator's authority covers a leaked registration, never a machine the node
+	// could not read (issue #252).
+	if vm.Power != domain.InstancePowerStopped {
 		return &Error{Op: "reap", Kind: ErrorUncertain, ExitCode: -1, Err: operations.ErrConflict}
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())

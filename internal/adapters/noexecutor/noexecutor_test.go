@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -49,8 +50,8 @@ func TestObservationsAreTruthfulRatherThanRefused(t *testing.T) {
 	if instances == nil || len(instances) != 0 {
 		t.Fatalf("instances = %#v, want a non-nil empty slice", instances)
 	}
-	running, err := Backend{}.Running(ctx, "trf-small-1")
-	if err != nil || running {
-		t.Fatalf("running = %v, %v", running, err)
+	power, err := Backend{}.Power(ctx, "trf-small-1")
+	if err != nil || power != domain.InstancePowerAbsent {
+		t.Fatalf("power = %v, %v; a node with no backend proves absence rather than guessing", power, err)
 	}
 }

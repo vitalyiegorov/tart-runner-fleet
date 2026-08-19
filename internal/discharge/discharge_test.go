@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -32,14 +33,32 @@ func (f *fakeStore) DischargeDeadLetter(_ context.Context, request operations.Di
 }
 
 type fakeVM struct {
-	running    bool
+	// unreadable states the reading the backend could not take. It is a separate
+	// field because InstancePowerUnknown is the empty string, and this fake's
+	// default has to stay "proven stopped" for every case that is about something
+	// other than the VM.
+	unreadable bool
+	power      domain.InstancePower
 	runningErr error
 	reapErr    error
 	reaped     []string
 	steps      *steps
 }
 
-func (f *fakeVM) Running(context.Context, string) (bool, error) { return f.running, f.runningErr }
+// Power defaults to a proven stop, because "the VM is off" is the ordinary state
+// of every case in this file that is about something other than the VM. The
+// zero InstancePower is Unknown, which since issue #252 is itself a refusal, and
+// a fake that answered it everywhere would refuse every test for the wrong
+// reason.
+func (f *fakeVM) Power(context.Context, string) (domain.InstancePower, error) {
+	if f.unreadable {
+		return domain.InstancePowerUnknown, f.runningErr
+	}
+	if f.power == "" && f.runningErr == nil {
+		return domain.InstancePowerStopped, nil
+	}
+	return f.power, f.runningErr
+}
 
 func (f *fakeVM) Reap(_ context.Context, name string, _ operations.Ownership) error {
 	f.reaped = append(f.reaped, name)
@@ -117,7 +136,7 @@ func TestDischargeRetiresTheDurableRowBeforeRemovingTheVM(t *testing.T) {
 // Discharging the operation alone never touches the host.
 func TestDischargeWithoutReapNeverTouchesTart(t *testing.T) {
 	store := &fakeStore{outcome: operations.DischargeOutcome{OperationDischarged: true}}
-	vm := &fakeVM{running: true}
+	vm := &fakeVM{power: domain.InstancePowerRunning}
 	subject, _ := service(store, vm, false)
 	subject.Authority = true
 	result, err := subject.DischargeDeadLetter(context.Background(), request(false))
@@ -169,7 +188,12 @@ func TestDischargeRefusesEveryUnsafeMutation(t *testing.T) {
 		"missing identities": {authority: true, store: &fakeStore{}, vm: &fakeVM{},
 			request: adminapi.DischargeRequest{Confirm: adminapi.DischargeConfirmation, Reason: "leak"},
 			want:    adminapi.RefusalInvalidRequest},
-		"vm is running": {authority: true, request: request(true), store: &fakeStore{}, vm: &fakeVM{running: true},
+		// A power the backend could not read is refused as an unobserved VM, not
+		// waved through as a stopped one (issue #252). The operator's authority
+		// covers a leaked registration; it does not cover a machine nobody read.
+		"vm power unreadable": {authority: true, request: request(true), store: &fakeStore{},
+			vm: &fakeVM{unreadable: true}, want: adminapi.RefusalVMUnobserved},
+		"vm is running": {authority: true, request: request(true), store: &fakeStore{}, vm: &fakeVM{power: domain.InstancePowerRunning},
 			want: adminapi.RefusalVMRunning},
 		"tart unreadable": {authority: true, request: request(true), store: &fakeStore{},
 			vm: &fakeVM{runningErr: errors.New("tart unavailable")}, want: adminapi.RefusalVMUnobserved},
@@ -213,7 +237,7 @@ func TestDischargeRefusesEveryUnsafeMutation(t *testing.T) {
 // happen behind a refusal.
 func TestRefusedMutationsNeverReachTheStore(t *testing.T) {
 	store := &fakeStore{}
-	subject, _ := service(store, &fakeVM{running: true}, true)
+	subject, _ := service(store, &fakeVM{power: domain.InstancePowerRunning}, true)
 	if _, err := subject.DischargeDeadLetter(context.Background(), request(true)); err == nil {
 		t.Fatal("running VM mutation accepted")
 	}

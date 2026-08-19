@@ -11,6 +11,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/discharge"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
@@ -27,7 +28,12 @@ type reaper struct {
 	deleted []string
 }
 
-func (r *reaper) Running(context.Context, string) (bool, error) { return r.running, nil }
+func (r *reaper) Power(context.Context, string) (domain.InstancePower, error) {
+	if r.running {
+		return domain.InstancePowerRunning, nil
+	}
+	return domain.InstancePowerStopped, nil
+}
 
 func (r *reaper) Reap(_ context.Context, name string, _ operations.Ownership) error {
 	r.deleted = append(r.deleted, name)

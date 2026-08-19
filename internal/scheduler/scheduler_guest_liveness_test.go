@@ -134,6 +134,10 @@ func TestASaturatedButAliveGuestIsNeverProbedIntoADrain(t *testing.T) {
 	}
 }
 
+// TestGuestLivenessIsFailClosedWithoutABoundOrEvidence covers every input to the
+// bound that establishes nothing. Power is deliberately not among them any more:
+// a reading the backend could not take neither authorizes this verdict nor
+// disables it, which is the reversal the test at the bottom of this file states.
 func TestGuestLivenessIsFailClosedWithoutABoundOrEvidence(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -149,8 +153,6 @@ func TestGuestLivenessIsFailClosedWithoutABoundOrEvidence(t *testing.T) {
 			mutate: func(i *domain.Instance) { i.Guest.RefusedSince = time.Time{} }},
 		{name: "silence start in the future", policy: guestPolicy(),
 			mutate: func(i *domain.Instance) { i.Guest.RefusedSince = testNow.Add(time.Hour) }},
-		{name: "power unread", policy: guestPolicy(),
-			mutate: func(i *domain.Instance) { i.Power = domain.InstancePowerUnknown }},
 		{name: "still only assigned", policy: guestPolicy(),
 			mutate: func(i *domain.Instance) { i.State = domain.InstanceAssigned }},
 	} {
@@ -272,5 +274,33 @@ func TestGuestSilencesPublishNoVerdictWithoutABound(t *testing.T) {
 	in = guestLivenessInput([]domain.Instance{future, gone}, nil, guestPolicy())
 	if reports := GuestSilences(in.Now, in.Config, in.Instances.Value); len(reports) != 0 {
 		t.Fatalf("an unmeasurable or released silence must not be reported at all; got %#v", reports)
+	}
+}
+
+// TestAnUnreadablePowerStateDoesNotDisableTheGuestVerdict is issue #252's second
+// half, and it reverses a case this file used to assert.
+//
+// The verdict was narrowed to a powered-on VM because "a stopped or absent
+// instance is reclaimed by a cheaper gate". With three-valued power that
+// reasoning stops holding: an instance whose power the backend could not read has
+// NO cheaper gate — the stopped recovery may not act on an unread premise, by
+// construction — so keeping the verdict closed made an unreadable enumeration a
+// way to hold a whole vector, with a dead guest on it, forever. The sweep found
+// exactly that the first time `unreadable_power` was drawn: property (p),
+// twenty-five ticks past a twenty-four tick release bound, on several seeds.
+//
+// The reclaim is not resting on the unread power. It rests on five refused guest
+// probes over ninety seconds — an INDEPENDENT source, and on this fleet the only
+// fast probe failure is `VM "…" is not running` (ADR 0042's measurement), so the
+// verdict corroborates from the guest exactly the fact the enumeration could not
+// read. Absence of evidence still authorizes nothing; evidence from somewhere
+// else does.
+func TestAnUnreadablePowerStateDoesNotDisableTheGuestVerdict(t *testing.T) {
+	instance := silentGuest(5, 2*time.Minute)
+	instance.Power = domain.InstancePowerUnknown
+	plan := PlanTick(guestLivenessInput([]domain.Instance{instance}, nil, guestPolicy()))
+	operation, drained := drainOf(plan, instance.ID)
+	if !drained || !operation.GuestUnresponsive {
+		t.Fatalf("a dead guest on an unreadable VM was never reclaimed; plan operations: %#v", plan.Operations)
 	}
 }
