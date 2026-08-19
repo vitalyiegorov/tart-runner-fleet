@@ -446,13 +446,21 @@ func (w *world) enumeratedPower(name string) (domain.InstancePower, domain.Power
 		return domain.InstancePowerUnknown, domain.PowerReadFailure{
 			Reason: domain.PowerReadDescriptors, Latency: 250 * time.Millisecond}
 	}
-	if w.vms[name] {
-		if w.powerMisreport[name] > 0 {
-			return domain.InstancePowerStopped, domain.PowerReadFailure{}
-		}
+	running, exists := w.vms[name]
+	switch {
+	case !exists:
+		// Not in the hypervisor at all. `simTart.List` enumerates only what exists,
+		// so this is reachable from the drain mirror alone — a VM the drain's own
+		// stop already deleted — and proven absence is what the real adapter reports
+		// for a name a successful enumeration did not list.
+		return domain.InstancePowerAbsent, domain.PowerReadFailure{}
+	case running && w.powerMisreport[name] > 0:
+		return domain.InstancePowerStopped, domain.PowerReadFailure{}
+	case running:
 		return domain.InstancePowerRunning, domain.PowerReadFailure{}
+	default:
+		return domain.InstancePowerStopped, domain.PowerReadFailure{}
 	}
-	return domain.InstancePowerStopped, domain.PowerReadFailure{}
 }
 
 // simRecovery answers the two destructive-recovery evidence questions from the
