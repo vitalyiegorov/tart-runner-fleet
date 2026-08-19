@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -40,7 +39,7 @@ func TestGracefulStopNamesAWindowInsideItsOwnDeadline(t *testing.T) {
 	adapter, runner, registry, ownership := testAdapter(now)
 	adapter.CommandTimeout = 45 * time.Second
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
 	if err := adapter.Stop(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +72,7 @@ func TestTerminateForcesTheGuestOffWithoutWaiting(t *testing.T) {
 	now := time.Unix(500, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
 	if err := adapter.Terminate(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +93,7 @@ func TestDestroyForcesThenRemovesUnderTheSameEvidenceDeleteRequires(t *testing.T
 	now := time.Unix(500, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
 	if err := adapter.Destroy(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +118,7 @@ func TestDestroyRefusesWhatDeleteRefuses(t *testing.T) {
 	now := time.Unix(500, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
 	adapter.Confirmation = fakeConfirmation{confirmation: operations.DeletionConfirmation{}}
 	if err := adapter.Destroy(context.Background(), "vm", ownership); !errors.Is(err, operations.ErrUncertain) {
 		t.Fatalf("Destroy without fresh deletion confirmation = %v", err)

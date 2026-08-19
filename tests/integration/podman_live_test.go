@@ -11,6 +11,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/podman"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -109,8 +110,8 @@ func TestPodmanBackendAgainstARealRootlessPodman(t *testing.T) {
 	if err := adapter.Create(ctx, spec); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if running, err := adapter.Running(ctx, liveInstance); err != nil || running {
-		t.Fatalf("a created container reported running=%v (err=%v); Create must leave it stopped", running, err)
+	if power, err := adapter.Power(ctx, liveInstance); err != nil || power != domain.InstancePowerStopped {
+		t.Fatalf("a created container reported power=%v (err=%v); Create must leave it stopped", power, err)
 	}
 	// Create is idempotent for the operation that made the container, and only
 	// for that operation.
@@ -126,8 +127,8 @@ func TestPodmanBackendAgainstARealRootlessPodman(t *testing.T) {
 	if err := adapter.Start(ctx, liveInstance, ownership); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if running, err := adapter.Running(ctx, liveInstance); err != nil || !running {
-		t.Fatalf("Start returned but the container is not running (running=%v err=%v)", running, err)
+	if power, err := adapter.Power(ctx, liveInstance); err != nil || power != domain.InstancePowerRunning {
+		t.Fatalf("Start returned but the container is not running (power=%v err=%v)", power, err)
 	}
 	listed, err := adapter.List(ctx)
 	if err != nil {
@@ -137,7 +138,7 @@ func TestPodmanBackendAgainstARealRootlessPodman(t *testing.T) {
 	for _, instance := range listed {
 		if instance.Name == liveInstance {
 			found = true
-			if !instance.Running || instance.Source == "" {
+			if instance.Power != domain.InstancePowerRunning || instance.Source == "" {
 				t.Errorf("List reported %#v", instance)
 			}
 		}
@@ -164,14 +165,14 @@ func TestPodmanBackendAgainstARealRootlessPodman(t *testing.T) {
 	if err := adapter.Stop(ctx, liveInstance, ownership); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if running, err := adapter.Running(ctx, liveInstance); err != nil || running {
-		t.Fatalf("Stop returned but the container is still running (running=%v err=%v)", running, err)
+	if power, err := adapter.Power(ctx, liveInstance); err != nil || power == domain.InstancePowerRunning {
+		t.Fatalf("Stop returned but the container is still running (power=%v err=%v)", power, err)
 	}
 	if err := adapter.Delete(ctx, liveInstance, ownership); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if running, err := adapter.Running(ctx, liveInstance); err != nil || running {
-		t.Fatalf("a deleted container is not running (running=%v err=%v)", running, err)
+	if power, err := adapter.Power(ctx, liveInstance); err != nil || power == domain.InstancePowerRunning {
+		t.Fatalf("a deleted container is not running (power=%v err=%v)", power, err)
 	}
 	// Every verb whose durable cleanup depends on retry treats an absent
 	// container as success.
@@ -206,8 +207,8 @@ func TestPodmanReapRefusesRunningWorkAndRemovesStoppedWork(t *testing.T) {
 	if err := adapter.Reap(ctx, liveInstance, ownership); err == nil {
 		t.Fatal("Reap removed a running container")
 	}
-	if running, err := adapter.Running(ctx, liveInstance); err != nil || !running {
-		t.Fatalf("a refused Reap stopped the container anyway (running=%v err=%v)", running, err)
+	if power, err := adapter.Power(ctx, liveInstance); err != nil || power != domain.InstancePowerRunning {
+		t.Fatalf("a refused Reap stopped the container anyway (power=%v err=%v)", power, err)
 	}
 	if err := adapter.Stop(ctx, liveInstance, ownership); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -215,8 +216,8 @@ func TestPodmanReapRefusesRunningWorkAndRemovesStoppedWork(t *testing.T) {
 	if err := adapter.Reap(ctx, liveInstance, ownership); err != nil {
 		t.Fatalf("Reap of a stopped owned container: %v", err)
 	}
-	if running, err := adapter.Running(ctx, liveInstance); err != nil || running {
-		t.Fatalf("the container survived its Reap (running=%v err=%v)", running, err)
+	if power, err := adapter.Power(ctx, liveInstance); err != nil || power == domain.InstancePowerRunning {
+		t.Fatalf("the container survived its Reap (power=%v err=%v)", power, err)
 	}
 }
 

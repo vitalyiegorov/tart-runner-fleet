@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -60,7 +63,8 @@ func (f fakeConfirmation) ConfirmDeletion(context.Context, string) (operations.D
 
 type fakeRunner struct {
 	mu            sync.Mutex
-	vms           map[string]executor.Instance
+	vms           map[string]vm
+	configErr     map[string]error
 	configs       map[string]VMConfig
 	commands      [][]string
 	lostResponse  map[string]bool
@@ -91,9 +95,15 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		if f.listOutput != nil {
 			return f.listOutput, nil
 		}
-		vms := make([]executor.Instance, 0, len(f.vms))
-		for _, vm := range f.vms {
-			vms = append(vms, vm)
+		vms := make([]vm, 0, len(f.vms))
+		for _, listed := range f.vms {
+			// tart reports a VM in the node's own store as "local"; the corroborating
+			// configuration read only applies to those, so the fake defaults to it
+			// rather than leaving every test on the uncorroborated path.
+			if listed.Source == "" {
+				listed.Source = sourceLocal
+			}
+			vms = append(vms, listed)
 		}
 		return json.Marshal(vms)
 	case "clone":
@@ -102,7 +112,7 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 			return nil, err
 		}
 		name := args[2]
-		f.vms[name] = executor.Instance{Name: name, Source: "local"}
+		f.vms[name] = vm{Name: name, Source: sourceLocal}
 		config := f.configs[args[1]]
 		if config.CPU == 0 || config.Memory == 0 {
 			config = VMConfig{CPU: 2, Memory: 4096, Disk: 20}
@@ -194,20 +204,22 @@ func (f *fakeRunner) Start(_ context.Context, args ...string) (StartedCommand, e
 	if f.startNoEffect {
 		return fakeStarted{exited: f.startExited, output: f.startOutput}, nil
 	}
-	vm := f.vms[args[1]]
-	vm.Running = true
-	f.vms[args[1]] = vm
+	started := f.vms[args[1]]
+	started.Running = true
+	f.vms[args[1]] = started
 	return fakeStarted{exited: f.startExited, output: f.startOutput}, nil
 }
 
 func testAdapter(now time.Time) (*Adapter, *fakeRunner, *memoryOwnership, operations.Ownership) {
-	runner := &fakeRunner{vms: map[string]executor.Instance{}, configs: map[string]VMConfig{}, lostResponse: map[string]bool{}, commandError: map[string]error{}}
+	runner := &fakeRunner{vms: map[string]vm{}, configs: map[string]VMConfig{}, lostResponse: map[string]bool{},
+		commandError: map[string]error{}, configErr: map[string]error{}}
 	registry := &memoryOwnership{data: map[string]operations.Ownership{}}
 	ownership := operations.Ownership{ControllerID: "controller", ResourceID: "resource", OperationID: "operation"}
 	adapter := &Adapter{
 		Runner: runner, Ownership: registry,
 		Confirmation:   fakeConfirmation{confirmation: operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}},
 		CommandTimeout: time.Second, StartTimeout: time.Second, ConfirmationMaxAge: time.Minute, Now: func() time.Time { return now },
+		ConfigReader: runner,
 	}
 	return adapter, runner, registry, ownership
 }
@@ -239,7 +251,7 @@ func TestCloneAndDeleteSuccessfulCommandResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	if err := adapter.Delete(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +315,7 @@ func TestCloneResourceReconciliationHandlesLostResponseAndFailsClosed(t *testing
 	t.Run("running drift", func(t *testing.T) {
 		adapter, runner, registry, ownership := testAdapter(now)
 		registry.data["vm"] = ownership
-		runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+		runner.vms["vm"] = vm{Name: "vm", Running: true}
 		runner.configs["vm"] = VMConfig{CPU: 2, Memory: 4096}
 		if err := adapter.Create(context.Background(), executor.InstanceSpec{Name: "vm", Image: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err == nil {
 			t.Fatal("running resource drift was accepted")
@@ -326,7 +338,7 @@ func TestCloneResourceReconciliationHandlesLostResponseAndFailsClosed(t *testing
 	t.Run("invalid configuration", func(t *testing.T) {
 		adapter, runner, registry, ownership := testAdapter(now)
 		registry.data["vm"] = ownership
-		runner.vms["vm"] = executor.Instance{Name: "vm"}
+		runner.vms["vm"] = vm{Name: "vm"}
 		runner.configs["vm"] = VMConfig{}
 		if err := adapter.Create(context.Background(), executor.InstanceSpec{Name: "vm", Image: "base", CPU: 4, MemoryMB: 8192, Ownership: ownership}); err == nil {
 			t.Fatal("invalid observed configuration was accepted")
@@ -338,7 +350,7 @@ func TestStartStopDeleteAndFailClosedConfirmation(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	if err := adapter.Start(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +361,7 @@ func TestStartStopDeleteAndFailClosedConfirmation(t *testing.T) {
 	if err := adapter.Stop(context.Background(), "vm", ownership); err != nil {
 		t.Fatalf("lost stop response: %v", err)
 	}
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	runner.lostResponse["delete"] = true
 	if err := adapter.Delete(context.Background(), "vm", ownership); err != nil {
 		t.Fatalf("lost delete response: %v", err)
@@ -357,7 +369,7 @@ func TestStartStopDeleteAndFailClosedConfirmation(t *testing.T) {
 	if err := adapter.Delete(context.Background(), "vm", ownership); err != nil {
 		t.Fatal(err)
 	}
-	runner.vms["uncertain"] = executor.Instance{Name: "uncertain"}
+	runner.vms["uncertain"] = vm{Name: "uncertain"}
 	registry.data["uncertain"] = ownership
 	adapter.Confirmation = fakeConfirmation{confirmation: operations.DeletionConfirmation{Fresh: false}}
 	if err := adapter.Delete(context.Background(), "uncertain", ownership); err == nil {
@@ -377,7 +389,7 @@ func TestOwnershipConflictListUncertaintyAndNames(t *testing.T) {
 	now := time.Unix(300, 0).UTC()
 	adapter, runner, registry, ownership := testAdapter(now)
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	other := ownership
 	other.OperationID = "other"
 	if err := adapter.Start(context.Background(), "vm", other); !errors.Is(err, operations.ErrConflict) {
@@ -398,7 +410,7 @@ func TestOwnershipConflictListUncertaintyAndNames(t *testing.T) {
 	runner.listError = nil
 	runner.commands = nil
 	registry.data["trf-maestro-1"] = ownership
-	runner.vms["trf-maestro-1"] = executor.Instance{Name: "trf-maestro-1"}
+	runner.vms["trf-maestro-1"] = vm{Name: "trf-maestro-1"}
 	adapter.MacOSVMPrefixes = []string{"trf-builder-", "trf-maestro-"}
 	adapter.MacOSRootDiskOptions = "sync=none"
 	adapter.MacOSSharedDirectoryPath = "/private/tmp/ci-shared"
@@ -417,7 +429,7 @@ func TestOwnershipConflictListUncertaintyAndNames(t *testing.T) {
 		t.Fatalf("argv mismatch: %#v", runner.commands)
 	}
 	registry.data["trf-small-1"] = ownership
-	runner.vms["trf-small-1"] = executor.Instance{Name: "trf-small-1"}
+	runner.vms["trf-small-1"] = vm{Name: "trf-small-1"}
 	runner.commands = nil
 	if err := adapter.Start(context.Background(), "trf-small-1", ownership); err != nil {
 		t.Fatal(err)
@@ -581,7 +593,7 @@ func TestAdapterStartFailureBranchesAndPolling(t *testing.T) {
 		t.Fatalf("missing start: %v", err)
 	}
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	runner.startError = errors.New("start failed")
 	if err := adapter.Start(context.Background(), "vm", ownership); err == nil {
 		t.Fatal("start command failure ignored")
@@ -619,7 +631,7 @@ func TestStartClassifiesEarlyProcessExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
 			adapter, runner, registry, ownership := testAdapter(now)
-			runner.vms["gha-macos-a"] = executor.Instance{Name: "gha-macos-a", Source: "local"}
+			runner.vms["gha-macos-a"] = vm{Name: "gha-macos-a", Source: "local"}
 			if err := registry.PutOwnership(context.Background(), "gha-macos-a", ownership); err != nil {
 				t.Fatal(err)
 			}
@@ -660,7 +672,7 @@ func TestAdapterStopFailureBranches(t *testing.T) {
 		t.Fatalf("missing stop is not idempotent: %v", err)
 	}
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	if err := adapter.Stop(context.Background(), "vm", ownership); err != nil {
 		t.Fatalf("stopped VM should be a no-op: %v", err)
 	}
@@ -669,7 +681,7 @@ func TestAdapterStopFailureBranches(t *testing.T) {
 	if err := adapter.Stop(context.Background(), "vm", other); !errors.Is(err, operations.ErrConflict) {
 		t.Fatalf("stop ownership conflict: %v", err)
 	}
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
 	runner.commandError["stop"] = errors.New("stop failed")
 	if err := adapter.Stop(context.Background(), "vm", ownership); err == nil {
 		t.Fatal("stop command error ignored")
@@ -693,7 +705,7 @@ func TestAdapterDeleteFailureBranches(t *testing.T) {
 		t.Fatalf("missing delete is not idempotent: %v", err)
 	}
 	registry.data["vm"] = ownership
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	adapter.Confirmation = nil
 	if err := adapter.Delete(context.Background(), "vm", ownership); err == nil {
 		t.Fatal("nil confirmation provider did not fail closed")
@@ -708,7 +720,7 @@ func TestAdapterDeleteFailureBranches(t *testing.T) {
 		t.Fatal("confirmation error ignored")
 	}
 	adapter.Confirmation = fakeConfirmation{confirmation: operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}}
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
 	runner.commandError["stop"] = errors.New("stop failed")
 	if err := adapter.Delete(context.Background(), "vm", ownership); err == nil {
 		t.Fatal("stop failure during delete ignored")
@@ -722,7 +734,7 @@ func TestAdapterDeleteFailureBranches(t *testing.T) {
 	if err := adapter.Delete(context.Background(), "vm", ownership); err == nil {
 		t.Fatal("second confirmation uncertainty ignored")
 	}
-	runner.vms["vm"] = executor.Instance{Name: "vm"}
+	runner.vms["vm"] = vm{Name: "vm"}
 	adapter.Confirmation = fakeConfirmation{confirmation: operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}}
 	runner.commandError["delete"] = errors.New("delete failed")
 	if err := adapter.Delete(context.Background(), "vm", ownership); err == nil {
@@ -749,22 +761,219 @@ func TestAdapterDefaultsAndInvalidList(t *testing.T) {
 	}
 }
 
-func TestRunningReportsPowerStateAndTreatsAbsentVMAsOff(t *testing.T) {
+func TestPowerReportsThreeStatesAndProvesAbsence(t *testing.T) {
 	now := time.Unix(400, 0).UTC()
 	adapter, runner, _, _ := testAdapter(now)
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: true}
-	if running, err := adapter.Running(context.Background(), "vm"); err != nil || !running {
-		t.Fatalf("Running(powered on) = %v, %v", running, err)
+	runner.vms["vm"] = vm{Name: "vm", Running: true}
+	if power, err := adapter.Power(context.Background(), "vm"); err != nil || power != domain.InstancePowerRunning {
+		t.Fatalf("Power(powered on) = %v, %v", power, err)
 	}
-	runner.vms["vm"] = executor.Instance{Name: "vm", Running: false}
-	if running, err := adapter.Running(context.Background(), "vm"); err != nil || running {
-		t.Fatalf("Running(powered off) = %v, %v", running, err)
+	runner.vms["vm"] = vm{Name: "vm", Running: false}
+	if power, err := adapter.Power(context.Background(), "vm"); err != nil || power != domain.InstancePowerStopped {
+		t.Fatalf("Power(powered off) = %v, %v", power, err)
 	}
-	if running, err := adapter.Running(context.Background(), "absent"); err != nil || running {
-		t.Fatalf("Running(absent) = %v, %v", running, err)
+	if power, err := adapter.Power(context.Background(), "absent"); err != nil || power != domain.InstancePowerAbsent {
+		t.Fatalf("Power(absent) = %v, %v", power, err)
 	}
 	runner.listError = errors.New("api unavailable")
-	if _, err := adapter.Running(context.Background(), "vm"); err == nil {
-		t.Fatal("list error swallowed")
+	if power, err := adapter.Power(context.Background(), "vm"); err == nil || power != domain.InstancePowerUnknown {
+		t.Fatalf("Power(unreadable enumeration) = %v, %v; a failed list is not a stopped VM", power, err)
 	}
+}
+
+// TestAConfigurationTartCouldNotOpenIsNotAPoweredOffVM is issue #252, at the one
+// seam where the fleet can still tell the difference.
+//
+// `tart` 2.32.1 computes its `Running` field by opening and locking the VM's
+// `config.json`, and `running()` returns false for EVERY failure to do so
+// (ADR 0042 reproduced it on this host with `chmod 000`). On 2026-08-18 and
+// 2026-08-19 that false persisted for eight and nine minutes against a VM that
+// was executing the nightly sweep the whole time, and the fleet classified it as
+// `stopped` — the premise of thirty destructive recovery drains.
+//
+// The reading is now corroborated against the same file, and a failure to read
+// it is Unknown with the errno class and the latency attached, because the
+// trigger has survived five reproduction attempts and the next occurrence has to
+// be able to answer for itself.
+func TestAConfigurationTartCouldNotOpenIsNotAPoweredOffVM(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		err  error
+		want domain.PowerReadReason
+	}{
+		{name: "permission", err: fs.ErrPermission, want: domain.PowerReadPermission},
+		{name: "descriptors", err: syscall.EMFILE, want: domain.PowerReadDescriptors},
+		{name: "system descriptors", err: syscall.ENFILE, want: domain.PowerReadDescriptors},
+		{name: "memory", err: syscall.ENOMEM, want: domain.PowerReadMemory},
+		{name: "interrupted", err: syscall.EINTR, want: domain.PowerReadInterrupted},
+		{name: "io", err: syscall.EIO, want: domain.PowerReadIO},
+		{name: "deadline", err: context.DeadlineExceeded, want: domain.PowerReadTimeout},
+		{name: "missing", err: fs.ErrNotExist, want: domain.PowerReadMissing},
+		{name: "unclassified", err: errors.New("something else entirely"), want: domain.PowerReadOther},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			adapter, runner, _, _ := testAdapter(time.Unix(400, 0).UTC())
+			runner.vms["vm"] = vm{Name: "vm", Running: false, Source: sourceLocal}
+			runner.configErr["vm"] = testCase.err
+			instances, err := adapter.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(instances) != 1 {
+				t.Fatalf("List() = %v", instances)
+			}
+			if instances[0].Power != domain.InstancePowerUnknown {
+				t.Fatalf("power = %q, want unknown: a configuration tart could not open says "+
+					"nothing about whether the machine is running", instances[0].Power)
+			}
+			if instances[0].Unreadable.Reason != testCase.want {
+				t.Fatalf("reason = %q, want %q", instances[0].Unreadable.Reason, testCase.want)
+			}
+			if !instances[0].Unreadable.Unreadable() {
+				t.Fatal("a classified failure did not report itself as unreadable")
+			}
+			if power, powerErr := adapter.Power(context.Background(), "vm"); powerErr != nil ||
+				power != domain.InstancePowerUnknown {
+				t.Fatalf("Power() = %v, %v; the drain's own re-read must agree with the enumeration", power, powerErr)
+			}
+		})
+	}
+}
+
+// TestAReadableConfigurationStillReportsAStoppedVM is the other half: the bound
+// must not cost the fleet its only fast reclaim of a genuinely powered-off VM.
+func TestAReadableConfigurationStillReportsAStoppedVM(t *testing.T) {
+	adapter, runner, _, _ := testAdapter(time.Unix(400, 0).UTC())
+	runner.vms["vm"] = vm{Name: "vm", Running: false, Source: sourceLocal}
+	instances, err := adapter.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instances[0].Power != domain.InstancePowerStopped || instances[0].Unreadable.Unreadable() {
+		t.Fatalf("power = %q (%v), want a corroborated stop", instances[0].Power, instances[0].Unreadable)
+	}
+}
+
+// TestACachedImageIsNotCorroboratedAgainstAVMConfiguration keeps the
+// corroboration off the entries that have no local configuration at all. An OCI
+// reference in `tart list` is a cached image, not a machine, and reporting every
+// one of them as unreadable would bury the signal this change exists to raise.
+func TestACachedImageIsNotCorroboratedAgainstAVMConfiguration(t *testing.T) {
+	adapter, runner, _, _ := testAdapter(time.Unix(400, 0).UTC())
+	runner.vms["ghcr.io/cirruslabs/ubuntu:latest"] = vm{Name: "ghcr.io/cirruslabs/ubuntu:latest", Source: "OCI"}
+	instances, err := adapter.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instances[0].Power != domain.InstancePowerStopped || instances[0].Unreadable.Unreadable() {
+		t.Fatalf("cached image power = %q (%v)", instances[0].Power, instances[0].Unreadable)
+	}
+}
+
+// TestHomeConfigReaderReadsTheFileTartReads pins the path, because the whole
+// corroboration is worthless if it reads a different file than tart does.
+func TestHomeConfigReaderReadsTheFileTartReads(t *testing.T) {
+	home := t.TempDir()
+	reader := HomeConfigReader{Home: home}
+	if err := reader.ReadConfig(context.Background(), "trf-small-1"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("absent configuration = %v, want a not-exist failure", err)
+	}
+	dir := filepath.Join(home, "vms", "trf-small-1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.ReadConfig(context.Background(), "trf-small-1"); err == nil {
+		t.Fatal("an empty configuration was accepted as a reading")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"CPU":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.ReadConfig(context.Background(), "trf-small-1"); err != nil {
+		t.Fatalf("readable configuration = %v", err)
+	}
+	if err := reader.ReadConfig(context.Background(), "not a valid name"); err == nil {
+		t.Fatal("an invalid instance name reached the filesystem")
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := reader.ReadConfig(cancelled, "trf-small-1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled read = %v", err)
+	}
+}
+
+// TestTheCorroboratingReaderFailsClosedWithoutAHome pins the two remaining
+// answers of the reader, both of which must be failures rather than silent
+// successes: a node whose tart home cannot be determined has not read anything.
+func TestTheCorroboratingReaderFailsClosedWithoutAHome(t *testing.T) {
+	t.Setenv("TART_HOME", "")
+	t.Setenv("HOME", "")
+	if got := TartHome(); got != "" {
+		t.Skipf("this platform still resolves a home directory as %q", got)
+	}
+	if err := (HomeConfigReader{}).ReadConfig(context.Background(), "trf-small-1"); err == nil {
+		t.Fatal("a reader with no tart home reported a readable configuration")
+	}
+}
+
+// TestClassifyPowerReadIsTotal keeps the vocabulary total. A nil error is the
+// only PowerReadOK, and every other input has a name.
+func TestClassifyPowerReadIsTotal(t *testing.T) {
+	if got := classifyPowerRead(nil); got != domain.PowerReadOK {
+		t.Fatalf("classifyPowerRead(nil) = %q", got)
+	}
+	for _, err := range []error{syscall.ENFILE, syscall.EAGAIN, syscall.ENXIO, syscall.ENODEV,
+		context.Canceled, errors.New("novel")} {
+		if got := classifyPowerRead(err); got == domain.PowerReadOK {
+			t.Fatalf("classifyPowerRead(%v) reported a successful reading", err)
+		}
+	}
+}
+
+// TestTheDefaultConfigReaderIsTheNodesOwnTartHome pins the production wiring: an
+// adapter that names no reader corroborates against the store the tart CLI uses,
+// not against nothing.
+func TestTheDefaultConfigReaderIsTheNodesOwnTartHome(t *testing.T) {
+	if _, ok := (&Adapter{}).configReader().(HomeConfigReader); !ok {
+		t.Fatalf("default configReader = %T, want the node's own tart home", (&Adapter{}).configReader())
+	}
+}
+
+// TestTartHomeFollowsTartsOwnRule pins the location rule so the corroboration
+// reads the store the CLI reads on a node that moves it.
+func TestTartHomeFollowsTartsOwnRule(t *testing.T) {
+	t.Setenv("TART_HOME", "/somewhere/else")
+	if got := TartHome(); got != "/somewhere/else" {
+		t.Fatalf("TartHome() = %q, want the configured home", got)
+	}
+	t.Setenv("TART_HOME", "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory on this machine")
+	}
+	if got := TartHome(); got != filepath.Join(home, ".tart") {
+		t.Fatalf("TartHome() = %q, want the default store", got)
+	}
+	reader := HomeConfigReader{}
+	if err := reader.ReadConfig(context.Background(), "trf-small-definitely-absent"); err == nil {
+		t.Fatal("a VM that does not exist reported a readable configuration")
+	}
+}
+
+// ReadConfig makes the fake CLI double as the configuration corroborator, which
+// is what production wires too: both answer about the same VM store. A VM the
+// fake never cloned has no configuration, and configErr injects the failure
+// `tart`'s own running() swallows (issue #252).
+func (f *fakeRunner) ReadConfig(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.configErr[name]; err != nil {
+		return err
+	}
+	if _, ok := f.vms[name]; !ok {
+		return os.ErrNotExist
+	}
+	return nil
 }

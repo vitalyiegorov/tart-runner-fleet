@@ -206,13 +206,26 @@ type container struct {
 	Labels map[string]string `json:"Labels"`
 }
 
-// running reports whether podman's textual state means the container is
-// executing. Podman reports `running` and `paused` for a live container and
-// `created`, `exited`, `stopped`, `removing`, and `dead` for one that is not; a
-// paused container still holds its resources, so it counts as running.
-func (c container) running() bool {
-	state := strings.ToLower(strings.TrimSpace(c.State))
-	return state == "running" || state == "paused"
+// power reports what podman's textual state establishes about the container.
+//
+// Podman reports `running` and `paused` for a live container and `created`,
+// `exited`, `stopped`, `removing`, and `dead` for one that is not; a paused
+// container still holds its resources, so it counts as running.
+//
+// A state this adapter does not recognise — including the empty string podman
+// prints when it could not inspect the container — establishes NOTHING, and
+// since issue #252 it says so instead of falling into "not running". The
+// unrecognised case is not hypothetical: it is one podman release away, and it is
+// the exact shape of the tart defect that cost two nightlies.
+func (c container) power() (domain.InstancePower, domain.PowerReadFailure) {
+	switch strings.ToLower(strings.TrimSpace(c.State)) {
+	case "running", "paused":
+		return domain.InstancePowerRunning, domain.PowerReadFailure{}
+	case "created", "exited", "stopped", "removing", "dead":
+		return domain.InstancePowerStopped, domain.PowerReadFailure{}
+	default:
+		return domain.InstancePowerUnknown, domain.PowerReadFailure{Reason: domain.PowerReadOther}
+	}
 }
 
 // info is the subset of `podman info --format json` that decides whether this
@@ -324,8 +337,10 @@ func (a *Adapter) List(ctx context.Context) ([]executor.Instance, error) {
 	}
 	instances := make([]executor.Instance, 0, len(containers))
 	for _, item := range containers {
+		power, unreadable := item.power()
 		for _, name := range item.Names {
-			instances = append(instances, executor.Instance{Name: name, Running: item.running(), Source: item.Image})
+			instances = append(instances, executor.Instance{Name: name, Power: power,
+				Unreadable: unreadable, Source: item.Image})
 		}
 	}
 	return instances, nil
@@ -490,14 +505,14 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 	if err != nil {
 		return err
 	}
-	if instance.Running {
+	if instance.Power == domain.InstancePowerRunning {
 		return nil
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
 	_, commandErr := a.runner().Run(commandCtx, "start", name)
 	cancel()
 	instance, observeErr := a.ownedContainer(ctx, name, ownership)
-	if observeErr == nil && instance.Running {
+	if observeErr == nil && instance.Power == domain.InstancePowerRunning {
 		return nil
 	}
 	if observeErr != nil {
@@ -542,7 +557,9 @@ func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ow
 	if errors.Is(err, operations.ErrNotFound) {
 		return nil
 	}
-	if err != nil || !instance.Running {
+	// Only a CONFIRMED stopped container needs no stop; an unreadable state is not
+	// "already off" (issue #252). The stop is idempotent either way.
+	if err != nil || instance.Power == domain.InstancePowerStopped {
 		return err
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
@@ -552,7 +569,7 @@ func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ow
 		return nil
 	}
 	instance, observeErr := a.ownedContainer(ctx, name, ownership)
-	if errors.Is(observeErr, operations.ErrNotFound) || (observeErr == nil && !instance.Running) {
+	if errors.Is(observeErr, operations.ErrNotFound) || (observeErr == nil && instance.Power == domain.InstancePowerStopped) {
 		return nil
 	}
 	if observeErr != nil {
@@ -589,7 +606,9 @@ func (a *Adapter) Delete(ctx context.Context, name string, ownership operations.
 	if !confirmation.Safe(a.now(), a.confirmationMaxAge()) {
 		return failure("rm", ErrorUncertain, operations.ErrUncertain)
 	}
-	if instance.Running {
+	// Anything not proven stopped gets the stop, for the reason Delete takes its
+	// confirmation twice: the force flag must never be what ends a live job.
+	if instance.Power != domain.InstancePowerStopped {
 		if err := a.Stop(ctx, name, ownership); err != nil {
 			return err
 		}
@@ -622,17 +641,17 @@ func (a *Adapter) remove(ctx context.Context, op, name string, args ...string) e
 	return commandErr
 }
 
-// Running reports the container's current power state; an absent container is
-// not running.
-func (a *Adapter) Running(ctx context.Context, name string) (bool, error) {
+// Power reports the container's current power state; an absent container is
+// proven not running, and a state this adapter cannot classify is Unknown.
+func (a *Adapter) Power(ctx context.Context, name string) (domain.InstancePower, error) {
 	instance, err := a.find(ctx, name)
 	if errors.Is(err, operations.ErrNotFound) {
-		return false, nil
+		return domain.InstancePowerAbsent, nil
 	}
 	if err != nil {
-		return false, err
+		return domain.InstancePowerUnknown, err
 	}
-	return instance.Running, nil
+	return instance.Power, nil
 }
 
 // ownedContainer resolves a name to a live observation only after the durable
@@ -655,7 +674,8 @@ func (a *Adapter) find(ctx context.Context, name string) (executor.Instance, err
 	if err != nil {
 		return executor.Instance{}, err
 	}
-	return executor.Instance{Name: name, Running: found.running(), Source: found.Image}, nil
+	power, unreadable := found.power()
+	return executor.Instance{Name: name, Power: power, Unreadable: unreadable, Source: found.Image}, nil
 }
 
 func (a *Adapter) findContainer(ctx context.Context, name string) (container, error) {

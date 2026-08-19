@@ -121,8 +121,8 @@ func TestOnlyARunningPoweredOnGuestIsProbed(t *testing.T) {
 
 	inv := ProductionInventory{
 		Store: fakeInstances{values: []operations.Instance{running, assigned, stopped}},
-		Executor: fakeTart{values: []executor.Instance{{Name: running.ID, Running: true},
-			{Name: assigned.ID, Running: true}, {Name: stopped.ID, Running: false}}},
+		Executor: fakeTart{values: []executor.Instance{{Name: running.ID, Power: domain.InstancePowerRunning},
+			{Name: assigned.ID, Power: domain.InstancePowerRunning}, {Name: stopped.ID, Power: domain.InstancePowerStopped}}},
 		Host:     fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4},
 		Guards:   executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2048},
@@ -150,7 +150,7 @@ func TestAnUnwiredTrackerLeavesEveryGuestUnjudged(t *testing.T) {
 	now := time.Now().UTC()
 	inv := ProductionInventory{
 		Store:    fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
-		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Power: domain.InstancePowerRunning}}},
 		Host:     fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4},
 		Guards:   executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2048},

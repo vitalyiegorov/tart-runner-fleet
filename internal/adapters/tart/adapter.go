@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -205,6 +207,100 @@ type vm struct {
 	Source  string `json:"Source"`
 }
 
+// sourceLocal is the Source `tart list` reports for a VM in the node's own VM
+// store. Everything else it enumerates is a cached image — an OCI reference with
+// no local configuration and no power to read.
+const sourceLocal = "local"
+
+// ConfigReader corroborates a backend reading that a local VM is not running,
+// against the one file that reading is computed from.
+//
+// It exists because `tart` 2.32.1 answers `"Running": false` for a VM whose
+// `config.json` it could not open — `running()` swallows the error (ADR 0042) —
+// so the fleet cannot tell a powered-off machine from an unreadable one. This
+// port asks the same question `tart` asked and reports the answer it discarded.
+type ConfigReader interface {
+	// ReadConfig opens and reads the named local VM's configuration. A nil error
+	// means the file was readable at that instant, so a "not running" reading
+	// beside it is a measurement rather than a swallowed failure.
+	ReadConfig(ctx context.Context, name string) error
+}
+
+// HomeConfigReader reads `<home>/vms/<name>/config.json`, which is where `tart`
+// keeps a local VM's configuration and therefore the exact file its own power
+// reading opens.
+type HomeConfigReader struct {
+	// Home is the tart home directory. Empty means the one the tart CLI itself
+	// would use: $TART_HOME, or ~/.tart.
+	Home string
+}
+
+// TartHome answers where this node's tart keeps its VMs, by tart's own rule.
+func TartHome() string {
+	if home := os.Getenv("TART_HOME"); home != "" {
+		return home
+	}
+	dir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, ".tart")
+}
+
+func (r HomeConfigReader) ReadConfig(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	home := r.Home
+	if home == "" {
+		home = TartHome()
+	}
+	if home == "" {
+		return errors.New("tart home is unknown")
+	}
+	if err := validateName(name); err != nil {
+		return err
+	}
+	// #nosec G304 -- the path is the node's own tart home joined with a name the
+	// fleet's instance grammar has already validated; no external value reaches it.
+	contents, err := os.ReadFile(filepath.Join(home, "vms", name, "config.json"))
+	if err != nil {
+		return err
+	}
+	if len(contents) == 0 {
+		return errors.New("empty vm configuration")
+	}
+	return nil
+}
+
+// classifyPowerRead folds a configuration-read failure into the closed
+// vocabulary an operator can compare across occurrences.
+//
+// It is total: an unrecognised failure is PowerReadOther, never PowerReadOK,
+// because "I do not know what went wrong" is still not a power reading.
+func classifyPowerRead(err error) domain.PowerReadReason {
+	switch {
+	case err == nil:
+		return domain.PowerReadOK
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return domain.PowerReadTimeout
+	case errors.Is(err, fs.ErrNotExist):
+		return domain.PowerReadMissing
+	case errors.Is(err, fs.ErrPermission):
+		return domain.PowerReadPermission
+	case errors.Is(err, syscall.EMFILE), errors.Is(err, syscall.ENFILE):
+		return domain.PowerReadDescriptors
+	case errors.Is(err, syscall.ENOMEM):
+		return domain.PowerReadMemory
+	case errors.Is(err, syscall.EINTR), errors.Is(err, syscall.EAGAIN):
+		return domain.PowerReadInterrupted
+	case errors.Is(err, syscall.EIO), errors.Is(err, syscall.ENXIO), errors.Is(err, syscall.ENODEV):
+		return domain.PowerReadIO
+	default:
+		return domain.PowerReadOther
+	}
+}
+
 type VMConfig struct {
 	Running bool `json:"Running"`
 	CPU     int  `json:"CPU"`
@@ -241,7 +337,11 @@ type Adapter struct {
 	LinuxSerialLogDirectory string
 	Now                     func() time.Time
 	Poller                  Poller
-	mu                      sync.Mutex
+	// ConfigReader corroborates a "not running" enumeration against the file the
+	// enumeration is computed from. Nil is this node's own tart home, which is
+	// what every production wiring uses.
+	ConfigReader ConfigReader
+	mu           sync.Mutex
 }
 
 // validateName applies the fleet-wide instance grammar of
@@ -268,9 +368,50 @@ func (a *Adapter) List(ctx context.Context) ([]executor.Instance, error) {
 	}
 	instances := make([]executor.Instance, 0, len(vms))
 	for _, item := range vms {
-		instances = append(instances, executor.Instance{Name: item.Name, Running: item.Running, Source: item.Source})
+		power, unreadable := a.power(ctx, item)
+		instances = append(instances, executor.Instance{Name: item.Name, Power: power,
+			Unreadable: unreadable, Source: item.Source})
 	}
 	return instances, nil
+}
+
+// power classifies one enumerated VM, and is the whole of issue #252 in this
+// adapter.
+//
+// `tart` computes its `Running` field by opening and locking the VM's
+// `config.json`, and `running()` returns false for EVERY failure to do so
+// (ADR 0042 reproduced it on this host with `chmod 000`). A false therefore means
+// either "powered off" or "I could not look", and only the first of those is a
+// premise a destructive recovery may rest on. So a false is corroborated against
+// the same file: readable means the reading is a measurement, unreadable means
+// nothing was established and the fleet says which failure it was.
+//
+// A true needs no corroboration. `tart` cannot report a VM running by failing to
+// read it — the failure path answers false — so the only reading that can be
+// manufactured out of an error is the hostile one.
+func (a *Adapter) power(ctx context.Context, item vm) (domain.InstancePower, domain.PowerReadFailure) {
+	if item.Running {
+		return domain.InstancePowerRunning, domain.PowerReadFailure{}
+	}
+	if !strings.EqualFold(item.Source, sourceLocal) {
+		// A cached OCI image is not a machine: it has no local configuration and
+		// cannot be running. Corroborating it would report every base image the node
+		// has pulled as unreadable.
+		return domain.InstancePowerStopped, domain.PowerReadFailure{}
+	}
+	started := a.poller().Now()
+	if err := a.configReader().ReadConfig(ctx, item.Name); err != nil {
+		return domain.InstancePowerUnknown, domain.PowerReadFailure{
+			Reason: classifyPowerRead(err), Latency: a.poller().Now().Sub(started)}
+	}
+	return domain.InstancePowerStopped, domain.PowerReadFailure{}
+}
+
+func (a *Adapter) configReader() ConfigReader {
+	if a.ConfigReader == nil {
+		return HomeConfigReader{}
+	}
+	return a.ConfigReader
 }
 
 // Create clones the base VM named by spec.Image and sizes it to the spec. It is
@@ -374,7 +515,7 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 	if err != nil {
 		return err
 	}
-	if vm.Running {
+	if vm.Power == domain.InstancePowerRunning {
 		return nil
 	}
 	args := []string{"run", name, "--no-graphics", "--no-audio", "--no-clipboard"}
@@ -406,7 +547,7 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 	deadline := a.poller().Now().Add(a.startTimeout())
 	for a.poller().Now().Before(deadline) {
 		vm, err = a.ownedVM(ctx, name, ownership)
-		if err == nil && vm.Running {
+		if err == nil && vm.Power == domain.InstancePowerRunning {
 			return nil
 		}
 		if err != nil {
@@ -506,7 +647,10 @@ func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ow
 	if errors.Is(err, operations.ErrNotFound) {
 		return nil
 	}
-	if err != nil || !vm.Running {
+	// Only a CONFIRMED stopped VM needs no stop. A power the backend could not
+	// read is not "already off": skipping the command there would report a drain
+	// as having stopped a guest it never asked to stop (issue #252).
+	if err != nil || vm.Power == domain.InstancePowerStopped {
 		return err
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, a.timeout())
@@ -516,7 +660,7 @@ func (a *Adapter) stop(ctx context.Context, name string, ownership operations.Ow
 		return nil
 	}
 	vm, observeErr := a.ownedVM(ctx, name, ownership)
-	if errors.Is(observeErr, operations.ErrNotFound) || (observeErr == nil && !vm.Running) {
+	if errors.Is(observeErr, operations.ErrNotFound) || (observeErr == nil && vm.Power == domain.InstancePowerStopped) {
 		return nil
 	}
 	if observeErr != nil {
@@ -547,7 +691,10 @@ func (a *Adapter) Delete(ctx context.Context, name string, ownership operations.
 	if !confirmation.Safe(now, a.confirmationMaxAge()) {
 		return &Error{Op: "delete", Kind: ErrorUncertain, ExitCode: -1, Err: operations.ErrUncertain}
 	}
-	if vm.Running {
+	// A power the backend could not read is stopped here too: Delete must not
+	// remove a VM it cannot prove is off, so it asks for the stop it would ask for
+	// if it knew the VM were running (issue #252). The stop is idempotent.
+	if vm.Power != domain.InstancePowerStopped {
 		if err := a.Stop(ctx, name, ownership); err != nil {
 			return err
 		}
@@ -572,16 +719,18 @@ func (a *Adapter) Delete(ctx context.Context, name string, ownership operations.
 	return commandErr
 }
 
-// Running reports the VM's current power state; an absent VM is not running.
-func (a *Adapter) Running(ctx context.Context, name string) (bool, error) {
+// Power reports the VM's current power state. A VM a successful enumeration did
+// not list is proven absent; a VM it listed but could not read is Unknown, which
+// is not permission to do anything.
+func (a *Adapter) Power(ctx context.Context, name string) (domain.InstancePower, error) {
 	vm, err := a.find(ctx, name)
 	if errors.Is(err, operations.ErrNotFound) {
-		return false, nil
+		return domain.InstancePowerAbsent, nil
 	}
 	if err != nil {
-		return false, err
+		return domain.InstancePowerUnknown, err
 	}
-	return vm.Running, nil
+	return vm.Power, nil
 }
 
 func (a *Adapter) existsOwned(ctx context.Context, name string, ownership operations.Ownership) (bool, error) {

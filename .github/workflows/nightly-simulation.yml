@@ -21,13 +21,26 @@ env:
 # pressure, and wedged drains across hundreds of ticks -- needs volume, and volume
 # belongs in a scheduled run. See ADR 0031.
 
+# The two arms run as SEPARATE JOBS, on separate ephemeral runners, since issue
+# #252. They used to be three steps of one job, and twice in three nights the
+# race-detector step lost its runner ten minutes in — so GitHub failed the job,
+# uploaded no log, and took the thirty-five minute sweep that had already PASSED
+# down with it. Two nights of no signal at all is a worse outcome than a nightly
+# that takes longer, and one job is what coupled them.
+#
+# It also gives the race arm a runner that has not just spent twenty-six minutes
+# thrashing a four-gigabyte guest. That the starvation is what ends the runner
+# agent's heartbeat is a hypothesis, not a measurement — see ADR 0044, which
+# rules the fleet OUT as the cause and leaves the trigger open — but a fresh,
+# larger guest costs one label and tests it for free.
+
 jobs:
-  simulation:
+  sweep:
     # Only this repository owns the self-hosted fleet these labels resolve to.
     # A fork must not schedule nightly work it cannot serve.
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'
     runs-on: [self-hosted, linux-tiered, linux-large]
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -39,6 +52,24 @@ jobs:
       # margin; widen them here rather than in `make unit`, which every job runs.
       - name: Long deterministic simulation sweep
         run: go test -count=1 -timeout 35m ./tests/simulation -run TestSimFuzz -seeds=500 -sim-ticks=320
+
+  race:
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    # `linux-xl` rather than `linux-large`: the race detector's shadow memory
+    # multiplies a sweep that already sizes its own budgets from measured
+    # throughput, and 6x12 is the largest profile this node offers.
+    runs-on: [self-hosted, linux-tiered, linux-xl]
+    timeout-minutes: 40
+    # Serialized behind the sweep on purpose. Both arms run on the same physical
+    # node, and two multi-gigabyte race-instrumented Go builds against one host is
+    # the pressure this change exists to remove, not to double.
+    needs: sweep
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: Disjoint seed range under the race detector
         run: go test -race -count=1 -timeout 15m ./tests/simulation -run TestSimFuzz -seed-base=900001 -seeds=15 -sim-ticks=200
       - name: Pinned incidents and findings repeated

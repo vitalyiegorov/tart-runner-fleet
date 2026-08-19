@@ -64,6 +64,34 @@ Use `tart list`, GitHub runner/job state, launchd, and bounded logs only to
 cross-check a specific anomaly. Never infer idle from a failed GitHub query or
 an unavailable daemon.
 
+## Read the three power lines
+
+The daemon's stderr log names every destructive recovery it plans and every
+premise it withdraws. Three lines belong to one class and are read together:
+
+```sh
+grep -E 'recovery drain planned|power premise retracted|power state unreadable'   "$STATE/fleet-authority.stderr.log"
+```
+
+- **`instance recovery drain planned`** with `cause="vm powered off"` is a
+  destructive decision resting on one backend reading. Never rate limited: a
+  storm of them is the artifact, not noise (ADR 0042).
+- **`instance power premise retracted by its own drain`** is the fleet catching
+  itself. `stoppedReadings` climbing without ever resetting means the reading is
+  sustained rather than flickering, and a sustained reading is not something a
+  corroboration window can filter.
+- **`instance power state unreadable`** is the one that names a cause. `reason`
+  is the errno class the backend hit reading the VM's configuration and
+  `readLatency` is how long it took; nothing is planned on such a reading, and
+  the instance goes on charging the host until a bound the fleet owns expires
+  (ADR 0044). A refused open fails in microseconds; a starved one takes as long
+  as the host is busy. **Capture both numbers with the host's load and open-file
+  counts (`sysctl kern.num_files kern.maxfiles`) while the condition is live** —
+  the trigger has survived three investigations and this is the evidence that
+  ends it.
+
+None of the three authorizes cleanup by hand.
+
 ## Understand the updater
 
 The updater runs once every five minutes and exits. `launchctl` showing the

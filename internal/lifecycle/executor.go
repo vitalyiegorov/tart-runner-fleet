@@ -139,10 +139,13 @@ type VMControl interface {
 	Terminate(context.Context, string, operations.Ownership) error
 	Destroy(context.Context, string, operations.Ownership) error
 	Delete(context.Context, string, operations.Ownership) error
-	// Running reports the VM's current power state; an absent VM is not
-	// running. Recovery drains re-verify their premise against this before
-	// every destructive step.
-	Running(context.Context, string) (bool, error)
+	// Power reports the VM's current power state. Recovery drains re-verify
+	// their premise against this before every destructive step, which is why it
+	// must be able to answer "I could not tell": on 2026-08-19 it answered
+	// "powered off" thirty times for a VM whose configuration the backend could
+	// not open, and every one of those answers was permission to deregister a
+	// runner executing a job (issue #252).
+	Power(context.Context, string) (domain.InstancePower, error)
 }
 
 type Readiness interface {
@@ -476,12 +479,25 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				if e.VM == nil {
 					return e.fail(ctx, instance, StageGuard)
 				}
-				running, runningErr := e.VM.Running(ctx, instance.ID)
-				if runningErr != nil {
+				power, powerErr := e.VM.Power(ctx, instance.ID)
+				if powerErr != nil {
 					return e.fail(ctx, instance, StageGuard)
 				}
-				if running {
+				switch power {
+				case domain.InstancePowerRunning:
 					return e.abort(ctx, instance)
+				case domain.InstancePowerStopped, domain.InstancePowerAbsent:
+					// The premise holds. Proceed.
+				default:
+					// A power the backend could not read is not permission to end a
+					// job, exactly as an inconclusive guest probe is not (the arm
+					// below). This is the hole 2026-08-19 went through: the re-read is
+					// the same enumeration the plan came from, so when that enumeration
+					// could not open the VM's configuration BOTH readings said "off",
+					// the guard agreed with the misreport, and all thirty drains of a
+					// live runner reached the deregistration call. Only GitHub's
+					// refusal to remove a busy runner stopped them (issue #252).
+					return e.fail(ctx, instance, StageGuard)
 				}
 				// The VM is provably powered off, so deregistration cannot
 				// interrupt work. Proceed without consulting the registration

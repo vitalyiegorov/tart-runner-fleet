@@ -1561,6 +1561,41 @@ func (r *failureReporter) reportRetractedPremise(instances []domain.Instance) {
 	}
 }
 
+// reportUnreadablePower names every live instance whose power the backend could
+// not read this tick, and WHICH failure it was.
+//
+// It exists because the trigger behind two lost nightlies has never been
+// identified. Issue #246 tried five reproductions and failed; ADR 0042 could only
+// demonstrate the mechanism (`chmod 000` a `config.json`) and had to record the
+// cause as unknown. The reason is that `tart`'s `running()` swallows the error
+// and answers "not running", so the fleet was never told there had been an error
+// at all — the one artifact that would answer the question was discarded at the
+// bottom of the stack, every time, for nine minutes a night.
+//
+// The error class and the latency are both here because the two live hypotheses
+// have different shapes: a refused open fails immediately, a starved one takes as
+// long as the host is busy. One occurrence with both numbers distinguishes them.
+//
+// Rate limited per instance and per reason, so a condition that persists for
+// minutes produces one line, and a reason that CHANGES — which would itself be
+// the finding — produces another.
+func (r *failureReporter) reportUnreadablePower(instances []domain.Instance) {
+	for _, instance := range instances {
+		if !instance.PowerUnreadable.Unreadable() || !instance.Live() {
+			continue
+		}
+		if !r.admit("unreadable\x00" + instance.ID + "\x00" + string(instance.PowerUnreadable.Reason)) {
+			continue
+		}
+		r.logger.Warn("instance power state unreadable", "instance", instance.ID,
+			"profile", string(instance.Profile), "repo", instance.Repo, "state", string(instance.State),
+			"reason", string(instance.PowerUnreadable.Reason),
+			"readLatency", instance.PowerUnreadable.Latency.Round(time.Millisecond).String(),
+			"runId", instance.Demand.RunID, "jobId", instance.Demand.JobID,
+			"outcome", "nothing is planned on this reading; the instance goes on charging the host")
+	}
+}
+
 // recordRecoveries says out loud what the fleet has decided to destroy and what
 // it has already been wrong about. Both readings come from the tick the plan was
 // made on, so the log and the decision can never disagree.
@@ -1572,6 +1607,7 @@ func (e engineTicker) recordRecoveries(result app.TickResult) {
 		e.reporter.reportRecovery(operation)
 	}
 	e.reporter.reportRetractedPremise(result.Instances)
+	e.reporter.reportUnreadablePower(result.Instances)
 }
 
 // livenessInstant renders a probe instant, or names its absence. A guest this

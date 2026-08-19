@@ -59,7 +59,7 @@ func healthySnapshot(now time.Time) executor.HostSnapshot {
 func TestProductionInventoryFreshSnapshot(t *testing.T) {
 	now := time.Now().UTC()
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
-		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}, Guards: executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2048}}
 	instances, host := inv.Observe(context.Background())
 	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].State != domain.InstanceRunning || instances.Value[0].Power != domain.InstancePowerRunning {
@@ -77,7 +77,7 @@ func TestProductionInventoryFreshSnapshot(t *testing.T) {
 func TestProductionInventoryMarksStoppedOwnedRunner(t *testing.T) {
 	now := time.Now().UTC()
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateAssigned)}},
-		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: false}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Power: domain.InstancePowerStopped}}}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	instances, _ := inv.Observe(context.Background())
 	if !instances.Usable() || len(instances.Value) != 1 || instances.Value[0].Power != domain.InstancePowerStopped {
@@ -102,7 +102,7 @@ func TestAbsentOwnedVMDuringCleanupIsPerInstanceNotHostWide(t *testing.T) {
 			healthy := inventoryInstance(operations.StateRunning)
 			healthy.ID = "trf-small-2"
 			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{absent, healthy}},
-				Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-2", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+				Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-2", Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)},
 				Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 			instances, _ := inv.Observe(context.Background())
 			if instances.State != domain.ObservationFresh || len(instances.Value) != 2 {
@@ -149,7 +149,7 @@ func TestProductionInventoryMarksRunningCompletedRunnerRecoverableFromFreshEvide
 	now := time.Now().UTC()
 	confirmation := operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: now}
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
-		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)},
 		Recovery: fakeRecoveryObserver{confirmation: confirmation}, RecoveryConfirmationMaxAge: time.Minute,
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	instances, _ := inv.Observe(context.Background())
@@ -170,7 +170,7 @@ func TestProductionInventoryObservesLingeringRunnerEvidence(t *testing.T) {
 	running.UpdatedAt = entered
 	base := func() ProductionInventory {
 		return ProductionInventory{Store: fakeInstances{values: []operations.Instance{running}},
-			Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+			Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1", Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)},
 			RecoveryConfirmationMaxAge: time.Minute, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 	}
 	for _, test := range []struct {
@@ -248,7 +248,7 @@ func TestProductionInventoryFailsClosedOnUncertainty(t *testing.T) {
 		{name: "stale host", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{}, Host: fakeHost{executor.HostSnapshot{Freshness: executor.Stale, ObservedAt: now}}}, wantState: domain.ObservationStale},
 		{name: "unavailable host", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{}, Host: fakeHost{executor.HostSnapshot{Freshness: executor.Unavailable}}}, wantState: domain.ObservationUnavailable},
 		{name: "missing vm", inv: ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
-		{name: "orphan vm", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{values: []executor.Instance{{Name: "trf-orphan", Running: true}}}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
+		{name: "orphan vm", inv: ProductionInventory{Store: fakeInstances{}, Executor: fakeTart{values: []executor.Instance{{Name: "trf-orphan", Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
 		{name: "bad metadata", inv: ProductionInventory{Store: fakeInstances{values: []operations.Instance{{ID: "trf-bad", State: operations.StatePlanned}}}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}}, wantState: domain.ObservationUnavailable},
 	}
 	for _, tt := range tests {
@@ -290,7 +290,7 @@ func TestInventoryCarriesTheOccupancyClockFromRowCreation(t *testing.T) {
 	stored.CreatedAt = now.Add(-75 * time.Minute)
 	stored.UpdatedAt = now.Add(-90 * time.Second)
 	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{stored}},
-		Executor: fakeTart{values: []executor.Instance{{Name: stored.ID, Running: true}}}, Host: fakeHost{healthySnapshot(now)},
+		Executor: fakeTart{values: []executor.Instance{{Name: stored.ID, Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)},
 		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
 
 	instances, _ := inv.Observe(context.Background())
@@ -304,5 +304,44 @@ func TestInventoryCarriesTheOccupancyClockFromRowCreation(t *testing.T) {
 	}
 	if age, measured := observed.Occupancy(now); !measured || age < 75*time.Minute {
 		t.Fatalf("occupancy = %s, measured=%t", age, measured)
+	}
+}
+
+// TestTheBackendsUnreadablePowerTravelsIntactThroughTheInventory is issue #252 at
+// the seam that used to manufacture the premise.
+//
+// This function derived `Stopped` from a bool that meant either "powered off" or
+// "I could not look", because the port had nowhere to put the second one. It now
+// carries the backend's own classification through untouched — including the
+// reason and the latency, which nothing decides on and which are the only
+// evidence an operator will have the next time the trigger appears.
+func TestTheBackendsUnreadablePowerTravelsIntactThroughTheInventory(t *testing.T) {
+	now := time.Now().UTC()
+	unreadable := domain.PowerReadFailure{Reason: domain.PowerReadDescriptors, Latency: 250 * time.Millisecond}
+	inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(operations.StateRunning)}},
+		Executor: fakeTart{values: []executor.Instance{{Name: "trf-small-1",
+			Power: domain.InstancePowerUnknown, Unreadable: unreadable}}},
+		Host: fakeHost{healthySnapshot(now)}, Power: &PowerCorroborator{},
+		Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+	instances, _ := inv.Observe(context.Background())
+	if !instances.Usable() || len(instances.Value) != 1 {
+		t.Fatalf("observation = %#v", instances)
+	}
+	got := instances.Value[0]
+	if got.Power != domain.InstancePowerUnknown {
+		t.Fatalf("power = %q; a reading the backend could not take is not a stopped VM", got.Power)
+	}
+	if got.PowerUnreadable != unreadable {
+		t.Fatalf("unreadable = %#v, want %#v", got.PowerUnreadable, unreadable)
+	}
+	// And it accumulates nothing: an unread power state must never fill the run a
+	// destructive premise is corroborated from (ADR 0042).
+	if got.PowerRun.Refusals != 0 {
+		t.Fatalf("an unreadable reading accumulated %d refusals toward a reclaim", got.PowerRun.Refusals)
+	}
+	// It also still charges the host, which is the conservative direction: the
+	// fleet has not established that this VM gave its vector back either.
+	if !got.ConsumesHostResources() {
+		t.Fatal("an instance whose power could not be read stopped charging the host")
 	}
 }

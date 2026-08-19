@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -1030,8 +1031,8 @@ func TestListReportsEveryContainerTheHostCanSee(t *testing.T) {
 		{
 			name:   "running, stopped, and untracked containers alike",
 			output: `[{"Names":["trf-small-abc"],"Image":"runner:1","State":"running"},{"Names":["someone-elses"],"Image":"other:2","State":"exited"}]`,
-			want: []executor.Instance{{Name: "trf-small-abc", Running: true, Source: "runner:1"},
-				{Name: "someone-elses", Running: false, Source: "other:2"}},
+			want: []executor.Instance{{Name: "trf-small-abc", Power: domain.InstancePowerRunning, Source: "runner:1"},
+				{Name: "someone-elses", Power: domain.InstancePowerStopped, Source: "other:2"}},
 		},
 		{
 			name:   "an empty host is an empty measurement, never nil",
@@ -1044,7 +1045,8 @@ func TestListReportsEveryContainerTheHostCanSee(t *testing.T) {
 		{
 			name:   "every alias of a multiply named container is reported",
 			output: `[{"Names":["first","second"],"Image":"runner:1","State":"created"}]`,
-			want:   []executor.Instance{{Name: "first", Source: "runner:1"}, {Name: "second", Source: "runner:1"}},
+			want: []executor.Instance{{Name: "first", Power: domain.InstancePowerStopped, Source: "runner:1"},
+				{Name: "second", Power: domain.InstancePowerStopped, Source: "runner:1"}},
 		},
 		{
 			name:   "unreadable JSON is uncertain, never an empty host",
@@ -1076,16 +1078,21 @@ func TestListReportsEveryContainerTheHostCanSee(t *testing.T) {
 	}
 }
 
-func TestRunning(t *testing.T) {
+func TestPower(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
 		host    func() *fakePodman
-		want    bool
+		want    domain.InstancePower
 		wantErr bool
 	}{
-		{name: "a running container", host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "running") }, want: true},
-		{name: "a stopped container", host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "exited") }},
-		{name: "an absent container is not running", host: newFakePodman},
+		{name: "a running container", host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "running") },
+			want: domain.InstancePowerRunning},
+		{name: "a stopped container", host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "exited") },
+			want: domain.InstancePowerStopped},
+		{name: "an absent container is proven absent", host: newFakePodman, want: domain.InstancePowerAbsent},
+		{name: "a state this adapter cannot classify establishes nothing",
+			host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "quiesced") },
+			want: domain.InstancePowerUnknown},
 		{
 			name: "an unreadable host fails rather than reporting stopped",
 			host: func() *fakePodman {
@@ -1093,16 +1100,16 @@ func TestRunning(t *testing.T) {
 				host.psError = errors.New("cannot connect to podman")
 				return host
 			},
-			wantErr: true,
+			want: domain.InstancePowerUnknown, wantErr: true,
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			running, err := adapterFor(testCase.host(), &memoryOwnership{}).Running(context.Background(), "trf-small-abc")
+			power, err := adapterFor(testCase.host(), &memoryOwnership{}).Power(context.Background(), "trf-small-abc")
 			if (err != nil) != testCase.wantErr {
-				t.Fatalf("Running() error = %v, wantErr %v", err, testCase.wantErr)
+				t.Fatalf("Power() error = %v, wantErr %v", err, testCase.wantErr)
 			}
-			if running != testCase.want {
-				t.Fatalf("Running() = %v, want %v", running, testCase.want)
+			if power != testCase.want {
+				t.Fatalf("Power() = %v, want %v", power, testCase.want)
 			}
 		})
 	}
@@ -1211,11 +1218,24 @@ func TestUnconfiguredAdapterDefaults(t *testing.T) {
 	}
 }
 
+// TestContainerStateReadsAsRunningOnlyWhenResourcesAreHeld also pins the third
+// answer: a state this adapter does not recognise, including the empty one, is
+// Unknown rather than "not running" (issue #252). The tart backend's version of
+// exactly this defaulting cost two nightlies.
 func TestContainerStateReadsAsRunningOnlyWhenResourcesAreHeld(t *testing.T) {
-	for state, want := range map[string]bool{"running": true, "paused": true, "Running": true, " running ": true,
-		"created": false, "exited": false, "stopped": false, "removing": false, "dead": false, "": false} {
-		if got := (container{State: state}).running(); got != want {
-			t.Errorf("state %q running = %v, want %v", state, got, want)
+	for state, want := range map[string]domain.InstancePower{
+		"running": domain.InstancePowerRunning, "paused": domain.InstancePowerRunning,
+		"Running": domain.InstancePowerRunning, " running ": domain.InstancePowerRunning,
+		"created": domain.InstancePowerStopped, "exited": domain.InstancePowerStopped,
+		"stopped": domain.InstancePowerStopped, "removing": domain.InstancePowerStopped,
+		"dead": domain.InstancePowerStopped,
+		"":     domain.InstancePowerUnknown, "quiesced": domain.InstancePowerUnknown} {
+		got, unreadable := (container{State: state}).power()
+		if got != want {
+			t.Errorf("state %q power = %v, want %v", state, got, want)
+		}
+		if unreadable.Unreadable() != (want == domain.InstancePowerUnknown) {
+			t.Errorf("state %q unreadable = %v beside power %v", state, unreadable, got)
 		}
 	}
 }

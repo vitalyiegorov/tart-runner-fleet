@@ -22,6 +22,15 @@ func glitched(retracted bool) domain.Instance {
 		PowerRetracted: retracted}
 }
 
+// unreadable is the 2026-08-18/19 instance as the fleet now sees it: the backend
+// could not read its power, so nothing is planned and the reason is named.
+func unreadable(reason domain.PowerReadReason) domain.Instance {
+	instance := glitched(false)
+	instance.Power = domain.InstancePowerUnknown
+	instance.PowerUnreadable = domain.PowerReadFailure{Reason: reason, Latency: 1234 * time.Millisecond}
+	return instance
+}
+
 func recoveryDrain(mutate func(*scheduler.Operation)) scheduler.Operation {
 	operation := scheduler.Operation{Kind: scheduler.OperationDrain, Instance: "trf-large-f7d1fac9141ad580",
 		Profile: "large", Recovery: true}
@@ -142,4 +151,45 @@ func TestRecordRecoveriesSpeaksAndToleratesNoReporter(t *testing.T) {
 	}
 	quiet, _ := silenceTicker(t, nil)
 	quiet.recordRecoveries(result)
+}
+
+// TestAnUnreadablePowerStateIsNamedWithItsErrnoClassAndLatency is the whole of
+// what issue #246 could not do. Five reproduction attempts failed to identify the
+// trigger, because `tart`'s running() swallows the error and the fleet was never
+// told there had been one; two nightlies then died with the answer sitting
+// unrecorded at the bottom of the stack. The next occurrence answers for itself.
+func TestAnUnreadablePowerStateIsNamedWithItsErrnoClassAndLatency(t *testing.T) {
+	reporter, logged := silenceReporter()
+
+	reporter.reportUnreadablePower([]domain.Instance{unreadable(domain.PowerReadDescriptors)})
+	reporter.reportUnreadablePower([]domain.Instance{unreadable(domain.PowerReadDescriptors)})
+
+	for _, fragment := range []string{"instance power state unreadable",
+		"instance=trf-large-f7d1fac9141ad580", "reason=descriptor_exhaustion", "readLatency=1.234s"} {
+		if !strings.Contains(logged.String(), fragment) {
+			t.Fatalf("unreadable-power log missing %q: %q", fragment, logged.String())
+		}
+	}
+	if lines := strings.Count(logged.String(), "instance power state unreadable"); lines != 1 {
+		t.Fatalf("a condition that persists for minutes must be reported once per reason, got %d", lines)
+	}
+	// A reason that CHANGES is itself the finding, so it is not suppressed.
+	reporter.reportUnreadablePower([]domain.Instance{unreadable(domain.PowerReadPermission)})
+	if !strings.Contains(logged.String(), "reason=permission_denied") {
+		t.Fatalf("a new failure class was suppressed as a repeat: %q", logged.String())
+	}
+}
+
+// Nothing is said about an instance whose power WAS read, or about one that is
+// no longer a fact about the fleet.
+func TestOnlyALiveUnreadableInstanceIsReported(t *testing.T) {
+	dead := unreadable(domain.PowerReadIO)
+	dead.State = domain.InstanceDeleted
+	for _, instance := range []domain.Instance{glitched(false), dead} {
+		reporter, logged := silenceReporter()
+		reporter.reportUnreadablePower([]domain.Instance{instance})
+		if logged.Len() != 0 {
+			t.Fatalf("instance %#v was reported: %q", instance, logged.String())
+		}
+	}
 }

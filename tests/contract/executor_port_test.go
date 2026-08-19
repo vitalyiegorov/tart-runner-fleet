@@ -75,7 +75,7 @@ func TestExecutorPortSurfaceIsExactlyTheAgreedVerbs(t *testing.T) {
 		"Terminate": "func(context.Context, string, operations.Ownership) error",
 		"Destroy":   "func(context.Context, string, operations.Ownership) error",
 		"Delete":    "func(context.Context, string, operations.Ownership) error",
-		"Running":   "func(context.Context, string) (bool, error)",
+		"Power":     "func(context.Context, string) (domain.InstancePower, error)",
 		"Reap":      "func(context.Context, string, operations.Ownership) error",
 		"List":      "func(context.Context) ([]executor.Instance, error)",
 	}
@@ -105,7 +105,12 @@ func TestInstanceSpecCarriesNoBackendSpecificField(t *testing.T) {
 		t.Fatalf("executor.InstanceSpec fields=%v, want %v", got, want)
 	}
 	instance := reflect.TypeOf(executor.Instance{})
-	wantInstance := []string{"Name", "Running", "Source"}
+	// Power replaced Running in issue #252: a bool could not carry the answer a
+	// backend gives when it could not read the machine, and a backend that
+	// answers "off" for a reading it never took is the premise a destructive
+	// recovery rests on. Unreadable carries WHY, for a trigger nobody has
+	// reproduced yet.
+	wantInstance := []string{"Name", "Power", "Source", "Unreadable"}
 	gotInstance := make([]string, 0, instance.NumField())
 	for index := range instance.NumField() {
 		gotInstance = append(gotInstance, instance.Field(index).Name)
@@ -255,7 +260,7 @@ func (b *memoryBackend) Start(_ context.Context, name string, ownership operatio
 	if err != nil {
 		return err
 	}
-	instance.Running = true
+	instance.Power = domain.InstancePowerRunning
 	b.instances[name] = instance
 	return nil
 }
@@ -268,7 +273,7 @@ func (b *memoryBackend) Stop(_ context.Context, name string, ownership operation
 		}
 		return err
 	}
-	instance.Running = false
+	instance.Power = domain.InstancePowerStopped
 	b.instances[name] = instance
 	return nil
 }
@@ -307,15 +312,19 @@ func (b *memoryBackend) Reap(_ context.Context, name string, ownership operation
 		}
 		return err
 	}
-	if instance.Running {
+	if instance.Power != domain.InstancePowerStopped {
 		return operations.ErrConflict
 	}
 	delete(b.instances, name)
 	return nil
 }
 
-func (b *memoryBackend) Running(_ context.Context, name string) (bool, error) {
-	return b.instances[name].Running, nil
+func (b *memoryBackend) Power(_ context.Context, name string) (domain.InstancePower, error) {
+	instance, ok := b.instances[name]
+	if !ok {
+		return domain.InstancePowerAbsent, nil
+	}
+	return instance.Power, nil
 }
 
 func (b *memoryBackend) List(context.Context) ([]executor.Instance, error) {
@@ -400,8 +409,9 @@ func TestABackendOfThisShapeRunsAWholeRunner(t *testing.T) {
 			if state.instance.State != operations.StateAssigned {
 				t.Fatalf("state=%s, want %s", state.instance.State, operations.StateAssigned)
 			}
-			if running, err := backend.Running(context.Background(), instance.ID); err != nil || !running {
-				t.Fatalf("the port provisioned an instance that is not running (err=%v)", err)
+			if power, err := backend.Power(context.Background(), instance.ID); err != nil ||
+				power != domain.InstancePowerRunning {
+				t.Fatalf("the port provisioned an instance whose power reads %q (err=%v)", power, err)
 			}
 			// The image is the one dimension of InstanceSpec whose meaning differs
 			// per backend, so it is asserted through the port's own report rather

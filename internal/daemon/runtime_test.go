@@ -2198,7 +2198,9 @@ func (*lifecycleVM) Stop(context.Context, string, operations.Ownership) error   
 func (*lifecycleVM) Terminate(context.Context, string, operations.Ownership) error { return nil }
 func (*lifecycleVM) Destroy(context.Context, string, operations.Ownership) error   { return nil }
 func (*lifecycleVM) Delete(context.Context, string, operations.Ownership) error    { return nil }
-func (*lifecycleVM) Running(context.Context, string) (bool, error)                 { return false, nil }
+func (*lifecycleVM) Power(context.Context, string) (domain.InstancePower, error) {
+	return domain.InstancePowerStopped, nil
+}
 
 type readyProbe struct{}
 

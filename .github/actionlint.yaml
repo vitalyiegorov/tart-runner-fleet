@@ -5,4 +5,5 @@ self-hosted-runner:
     - linux-small
     - linux-medium
     - linux-large
+    - linux-xl
     - tart-fleet-canary

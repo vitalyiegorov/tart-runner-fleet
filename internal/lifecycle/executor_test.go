@@ -50,7 +50,15 @@ type fakeVM struct {
 	terminateErr, destroyErr    error
 	deleteErr                   error
 	running                     bool
-	runningErr                  error
+	// powerUnread states the third reading the port carries since issue #252: the
+	// backend could not determine this VM's power at all. It is a separate field
+	// rather than a value of `power` because InstancePowerUnknown is the empty
+	// string, and a fake that could not tell "unset" from "unreadable" would test
+	// the wrong one of them by accident — which is the shape of the defect itself.
+	powerUnread bool
+	// power overrides `running` with an explicit reading.
+	power      domain.InstancePower
+	runningErr error
 }
 
 func (v fakeVM) Create(_ context.Context, request executor.InstanceSpec) error {
@@ -77,9 +85,24 @@ func (v fakeVM) Delete(_ context.Context, name string, _ operations.Ownership) e
 	*v.calls = append(*v.calls, "delete:"+name)
 	return v.deleteErr
 }
-func (v fakeVM) Running(_ context.Context, name string) (bool, error) {
+
+// Power answers the three-valued reading the port carries since issue #252. The
+// `running` bool stays as the ordinary two-state shorthand every existing case
+// uses; `power` states the third answer explicitly, and is the only way to build
+// the state that cost two nightlies — a backend that could not read the VM at
+// all.
+func (v fakeVM) Power(_ context.Context, name string) (domain.InstancePower, error) {
 	*v.calls = append(*v.calls, "power:"+name)
-	return v.running, v.runningErr
+	if v.powerUnread {
+		return domain.InstancePowerUnknown, v.runningErr
+	}
+	if v.power != "" {
+		return v.power, v.runningErr
+	}
+	if v.running {
+		return domain.InstancePowerRunning, v.runningErr
+	}
+	return domain.InstancePowerStopped, v.runningErr
 }
 
 type fakeReady struct {

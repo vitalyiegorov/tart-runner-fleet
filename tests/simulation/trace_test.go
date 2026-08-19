@@ -146,7 +146,32 @@ const (
 	// It decays, unlike silent_guest: the production storms lasted nine and eleven
 	// minutes and then stopped on their own.
 	eventMisreportedPower eventKind = "misreported_power"
-	eventSiblingReassign  eventKind = "sibling_reassign"
+	// eventUnreadablePower is issue #252: the backend can no longer determine one
+	// VM's power AT ALL, and goes on not determining it.
+	//
+	// It is the same host condition misreported_power models and a different fact
+	// about it. `tart`'s running() answers false for a configuration it could not
+	// open, so the fleet received "the machine is off" where the truth was "I could
+	// not look" — and on 2026-08-18 and 2026-08-19 that lasted eight and nine
+	// minutes against a VM executing this very sweep, planning thirty destructive
+	// drains of a live runner.
+	//
+	// It does NOT decay, and that is the whole point. ADR 0042's bound answers a
+	// reading that is wrong for less time than the window; the production reading
+	// was wrong for longer than any window, and `stoppedReadings` reached
+	// seventy-nine without a single contrary reading clearing the run. A fault
+	// that expires after six ticks cannot build that state.
+	//
+	// It is NOT YET in faultThisTick's draw, for the reason ADR 0042 gives for the
+	// same decision about misreported_power: the draw entry lands with the fix for
+	// the defect it surfaces, so the sweep is never knowingly red. Putting it in
+	// the draw is what found the two bounds this fault reopened (ADR 0044), and it
+	// then produced a world that reaches a PRE-EXISTING tier-inversion defect —
+	// reproduced unchanged on the merge base from the shrunk trace, so not this
+	// change's — tracked with its deterministic reproducer on issue #255. The entry
+	// lands there. Until then the fault is exercised by its pinned trace.
+	eventUnreadablePower eventKind = "unreadable_power"
+	eventSiblingReassign eventKind = "sibling_reassign"
 	// eventSiblingSubstitute is issue #123: a registered runner is given a QUEUED
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
@@ -302,6 +327,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.saturateGuest()
 	case eventMisreportedPower:
 		w.misreportPower(event.Count)
+	case eventUnreadablePower:
+		w.makePowerUnreadable()
 	case eventSiblingReassign:
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:

@@ -14,7 +14,7 @@
 // but observe while this is the backend, so those verbs are unreachable in
 // practice and the failure is a second line of defence, not the design.
 //
-// List and Running are the two verbs that observe rather than act, and they
+// List and Power are the two verbs that observe rather than act, and they
 // answer truthfully rather than fail. This is not the empty-collection-for-an
 // -unavailable-observation that AGENTS.md §4 forbids: nothing is unread here.
 // A node with no execution technology cannot hold an instance — Create is
@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -54,8 +55,11 @@ func (Backend) Delete(context.Context, string, operations.Ownership) error { ret
 
 func (Backend) Reap(context.Context, string, operations.Ownership) error { return ErrNoBackend }
 
-// Running reports the power state of an instance that cannot exist.
-func (Backend) Running(context.Context, string) (bool, error) { return false, nil }
+// Power reports the power state of an instance that cannot exist. A node with no
+// execution technology proves absence rather than guessing at it.
+func (Backend) Power(context.Context, string) (domain.InstancePower, error) {
+	return domain.InstancePowerAbsent, nil
+}
 
 // List enumerates the instances this node can see. The slice is empty and never
 // nil, so a caller ranging over it cannot tell an empty answer from a missing
