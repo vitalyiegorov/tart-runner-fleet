@@ -144,7 +144,8 @@ func TestOracleLendsACapHeldHeadsVectorToWorkItOutranks(t *testing.T) {
 //
 // So the oracle must go on judging such a peer against `free - reservation`, and
 // must NOT call the refusal a wedge. This direction was green before ADR 0038
-// only because the oracle refused everything; it is load-bearing afterwards.
+// only because the oracle refused everything; it is load-bearing afterwards, and
+// under ADR 0045 it is the ONLY thing a reservation still withholds.
 func TestOracleWithholdsACapHeldHeadsVectorFromAPeerThatCouldTakeIt(t *testing.T) {
 	t.Parallel()
 	cfg := capHeldWorld()

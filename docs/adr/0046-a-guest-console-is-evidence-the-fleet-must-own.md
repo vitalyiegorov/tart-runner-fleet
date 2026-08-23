@@ -1,4 +1,4 @@
-# ADR 0045: A guest console is evidence the fleet must own
+# ADR 0046: A guest console is evidence the fleet must own
 
 ## Status
 

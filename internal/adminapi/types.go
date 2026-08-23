@@ -304,11 +304,15 @@ type Reservation struct {
 	MemoryMiB   int     `json:"memoryMiB"`
 	Slots       int     `json:"slots"`
 	HeldSeconds float64 `json:"heldSeconds"`
-	Axis        string  `json:"axis"`
-	// LendsVector reports that the withheld vector is lent to work the head
-	// outranks (ADR 0017 on the vector axis, ADR 0038 on the repository-cap
-	// axis). False is the expensive case: capacity standing idle.
-	LendsVector bool `json:"lendsVector"`
+	// Axis names why the head is not admitted: `vector`, `repository_cap`,
+	// `both`, `none`, or empty for a plan that judged nothing because its
+	// observation was unusable. `none` is the expensive one — a reservation held
+	// for a head the fleet could have started (issue #235).
+	//
+	// `lendsVector` was published here until ADR 0045 and is gone rather than
+	// pinned to true: a reservation withholds ORDER and one repository slot, on
+	// every axis, so there is no longer a state for it to distinguish.
+	Axis string `json:"axis"`
 }
 
 type Queue struct {

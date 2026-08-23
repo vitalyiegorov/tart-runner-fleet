@@ -231,79 +231,64 @@ func TestTakesTheReservedVectorIsTheNoJumpRuleItself(t *testing.T) {
 	}
 }
 
-// TestReservedHeadAtRepositoryCapReadsTheSameOccupancyFeasibleWill pins the
-// other predicate against the one it must never disagree with. If this count
-// ever diverged from `feasible`'s, the scheduler could lend a vector on the
-// grounds that the cap holds the head while `feasible` was about to admit it.
-func TestReservedHeadAtRepositoryCapReadsTheSameOccupancyFeasibleWill(t *testing.T) {
-	cfg := capHeldConfig()
-	reservation := &domain.Reservation{Demand: domain.DemandKey{Repo: "c/repo"}, Profile: "xl",
-		Resources: cfg.Profiles["xl"].Resources}
-	unconfigured := &domain.Reservation{Demand: domain.DemandKey{Repo: "z/repo"}, Profile: "xl",
-		Resources: cfg.Profiles["xl"].Resources}
-
-	for _, test := range []struct {
-		name        string
-		reservation *domain.Reservation
-		occupied    map[string]int
-		want        bool
-	}{
-		{"under cap", reservation, map[string]int{"c/repo": 1}, false},
-		{"at cap", reservation, map[string]int{"c/repo": 2}, true},
-		{"no live instance at all", reservation, map[string]int{}, false},
-		// An unconfigured repository caps at one, exactly as `feasible` reads it
-		// through the same `repoCapLimit`, so a single live instance holds it.
-		{"an unconfigured repository caps at one", unconfigured, map[string]int{"z/repo": 1}, true},
-	} {
-		got := reservedHeadAtRepositoryCap(cfg, test.occupied, test.reservation)
-		if got != test.want {
-			t.Fatalf("%s: reservedHeadAtRepositoryCap = %v, want %v", test.name, got, test.want)
-		}
-		// The predicate is the head's own half of `feasible`: whenever it says
-		// the cap holds the head, `feasible` must refuse the head on that term.
-		admissible := feasible(test.reservation.Resources, cfg.LinuxCapacity,
-			test.reservation.Demand.Repo, test.occupied, nil, cfg.RepoCaps)
-		if got && admissible {
-			t.Fatalf("%s: the cap predicate and feasible() disagree about the same occupancy", test.name)
-		}
-	}
-}
-
-// TestReservationAxisNamesWhichTermRefusedTheHead pins the diagnostic issue #226
-// was invisible for want of.
+// TestAdmissionAxisNamesWhichTermRefusedTheHead pins the diagnostic issue #226
+// was invisible for want of, and the fusion issue #235 made of it.
 //
 // Nothing published on a live fleet named the held reservation, its repository,
-// or which of `feasible`'s two terms was holding it, so a defect that stranded a
-// vector for the whole runtime of a blocking job left no artifact at all — only
-// a simulator found it. The axis is what an operator needs: a `vector` hold ends
+// or which of the two terms was holding it, so a defect that stranded a vector
+// for the whole runtime of a blocking job left no artifact at all — only a
+// simulator found it. The axis is what an operator needs: a `vector` hold ends
 // when live instances release, and a `repository_cap` hold ends only when one of
 // the head's OWN repository's instances exits, which no amount of freed CPU can
 // hasten.
 //
-// `none` is the row worth keeping. The planner cannot produce it, because a
-// reservation is minted only where `feasible` is false — but it is the state an
-// operator most needs named if it ever appears, since a fleet reserving a vector
-// for work it could have started is issue #125's wedge wearing a reservation.
-func TestReservationAxisNamesWhichTermRefusedTheHead(t *testing.T) {
+// There is now ONE derivation of feasibility. `feasible` used to be a boolean
+// beside a `reservationAxis` that re-stated the same two terms, and this test
+// used to need a companion asserting the two could not disagree. They cannot
+// disagree because they are the same value: `feasible` IS `admissionAxis ==
+// none`, asserted here on every row so a third term can never be refused by one
+// and unnamed by the other.
+//
+// `none` is no longer the unreachable row. The planner still never MINTS a
+// reservation on it, but a tick that plans another platform carries the one it
+// inherited, and `none` is what that reservation is worth once judged — issue
+// #235's own answer, and issue #125's wedge wearing a reservation.
+func TestAdmissionAxisNamesWhichTermRefusedTheHead(t *testing.T) {
 	cfg := capHeldConfig()
 	vector := cfg.Profiles["xl"].Resources
 	roomy := domain.Resources{CPU: 12, MemoryMB: 32_768, Slots: 4}
 	tight := domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 4}
+	selected := []domain.Demand{capHeldDemand(cfg, "c/repo", 1, time.Minute, "small")}
 
 	for _, test := range []struct {
 		name     string
-		agedFree domain.Resources
+		repo     string
+		free     domain.Resources
 		occupied map[string]int
+		selected []domain.Demand
 		want     ReservationAxis
 	}{
-		{"the envelope refuses it", tight, map[string]int{"c/repo": 0}, ReservationAxisVector},
-		{"its repository cap refuses it", roomy, map[string]int{"c/repo": 2}, ReservationAxisRepositoryCap},
-		{"both refuse it", tight, map[string]int{"c/repo": 2}, ReservationAxisBoth},
-		{"neither refuses it", roomy, map[string]int{"c/repo": 0}, ReservationAxisNone},
+		{"the envelope refuses it", "c/repo", tight, map[string]int{"c/repo": 0}, nil, ReservationAxisVector},
+		{"its repository cap refuses it", "c/repo", roomy, map[string]int{"c/repo": 2}, nil, ReservationAxisRepositoryCap},
+		{"both refuse it", "c/repo", tight, map[string]int{"c/repo": 2}, nil, ReservationAxisBoth},
+		{"neither refuses it", "c/repo", roomy, map[string]int{"c/repo": 0}, nil, ReservationAxisNone},
+		{"no live instance at all", "c/repo", roomy, map[string]int{}, nil, ReservationAxisNone},
+		// This tick's own admissions count against the cap exactly as live
+		// instances do, which is the occupancy the head will be judged against
+		// on the tick its slot frees.
+		{"this tick's own admission fills the last slot", "c/repo", roomy, map[string]int{"c/repo": 1}, selected, ReservationAxisRepositoryCap},
+		// An unconfigured repository caps at one, through the same repoCapLimit
+		// every admission path reads.
+		{"an unconfigured repository caps at one", "z/repo", roomy, map[string]int{"z/repo": 1}, nil, ReservationAxisRepositoryCap},
 	} {
-		got := reservationAxis(cfg, vector, test.agedFree, "c/repo", test.occupied)
+		got := admissionAxis(vector, test.free, test.repo, test.occupied, test.selected, cfg.RepoCaps)
 		if got != test.want {
-			t.Fatalf("%s: reservationAxis = %q, want %q", test.name, got, test.want)
+			t.Fatalf("%s: admissionAxis = %q, want %q", test.name, got, test.want)
+		}
+		admissible := feasible(vector, test.free, test.repo, test.occupied, test.selected, cfg.RepoCaps)
+		if admissible != (test.want == ReservationAxisNone) {
+			t.Fatalf("%s: feasible = %v while the axis is %q; the decision and the diagnosis have drifted apart",
+				test.name, admissible, got)
 		}
 	}
 }

@@ -2,7 +2,16 @@
 
 ## Status
 
-Accepted. Amends [ADR 0005](0005-bounded-drain-backfill.md) and the residual
+Accepted, and completed by
+[ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md), which retires
+this record's remaining `free - reservation` branch: a reservation withholds
+order and one repository slot on every axis, never a vector. The decision below
+is unchanged in what it protects — "the reservation contract is preserved by
+**ordering, not by idleness**" is the sentence ADR 0045 finishes — and its
+no-jump guarantee is now stated as an unconditional predicate rather than
+inherited from the fit test.
+
+Amends [ADR 0005](0005-bounded-drain-backfill.md) and the residual
 admission rules in [ADR 0012](0012-shared-cross-platform-capacity.md); both
 remain accepted everywhere else. Extended by
 [ADR 0029](0029-remainder-admission-behind-a-reservation.md), which carries this

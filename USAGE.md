@@ -283,7 +283,7 @@ the host while it runs, which is the only artifact that survives a guest kernel
 dying mid-job. `fleet doctor` fails its `guest console` check when a node boots
 Linux guests with this unset — issues #236, #258, and #259 all ended without a
 root cause because it was. Verify `tart run --help` advertises `--serial-path`
-on the node first; see [`ADR 0045`](docs/adr/0045-a-guest-console-is-evidence-the-fleet-must-own.md)
+on the node first; see [`ADR 0046`](docs/adr/0046-a-guest-console-is-evidence-the-fleet-must-own.md)
 and [`docs/LINUX_BASE_IMAGE.md`](docs/LINUX_BASE_IMAGE.md).
 
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set

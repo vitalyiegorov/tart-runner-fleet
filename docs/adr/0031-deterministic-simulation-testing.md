@@ -160,7 +160,7 @@ refusal.
 
 | | Property | Oracle | Status |
 |---|---|---|---|
-| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. On a tick whose plan holds a reservation for a head that FITS the oracle's own free envelope and is UNDER its repository cap, every other demand is judged against `free - reservation`. When the head's own repository cap is what holds it, only a demand that could take the head's whole vector is judged against `free - reservation`; everything else is judged against `free`. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; the reserved-vector refinement 2026-08-09, issue #216; the repository-cap axis 2026-08-10, issue #226 and [ADR 0038](0038-a-cap-held-reserved-head-lends-its-vector.md)) |
+| a | **Liveness / no wedge.** A tick with a demand that definitely fits must lead to an admission within K ticks. | Consecutive ticks with a feasible demand and no spawn, excluding ticks with an unusable observation or a teardown in flight. On a tick whose plan holds a reservation, only a demand that could take the head's whole vector is judged against `free - reservation`; everything else, including the head itself, is judged against `free`. | Enforced (issue #208's remainder-pass wedge fixed 2026-08-05; the reserved-vector refinement 2026-08-09, issue #216; the repository-cap axis 2026-08-10, issue #226 and [ADR 0038](0038-a-cap-held-reserved-head-lends-its-vector.md); the withholding retired 2026-08-19, issue #235 and [ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md)) |
 | b | **Bounded starvation.** An aged feasible demand may not be passed over by younger work more than N times. | Pass-over count per (demand, CAUSE) against the youngest demand admitted ahead of it. | Enforced with three documented exemptions (findings 4, 5, and the ADR 0017 reserved head); finding 3 fixed 2026-08-03 and issue #208's stale reservation 2026-08-05, both in [ADR 0004](0004-bounded-control-plane-priority.md) |
 | c | **Plans always apply.** A ready plan is never refused. | Commit error or `applied == false` on a ready plan with operations. Dumps the plan, the demands, the instances, and the host. | Enforced |
 | d | **Identity uniqueness.** No identity is used twice in flight. | Repeated operation identity within a plan; two live instances incarnating one demand. | Enforced |
@@ -175,6 +175,7 @@ refusal.
 | m | **Monotonic escalation.** A waiting demand's effective priority tier never falls. | Per-demand high-water mark of the effective tier, recomputed by the harness from the demand and the clock. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | n | **No tier starvation.** Escalation ends every tier-based pass-over within T ticks. | Per-demand count of ticks passed over by an aged overtaker of strictly higher effective tier, against T = declared tiers x escalation ticks + K. | Enforced (added with [ADR 0037](0037-a-declared-tier-orders-a-band-escalation-bounds-it.md)) |
 | o | **Bounded teardown release.** Once a drain has passed deregistration, the instance releases its resource vector within a bounded number of ticks, whatever the guest does. | Per-instance ticks since the oracle first saw the instance in `deregistering` or `stopping` while still consuming host resources, against the release bound. Scoped past deregistration deliberately: a deregistration GitHub legitimately refuses is bounded by evidence rather than by a clock, and property (i) already watches it. | Enforced (added with [ADR 0039](0039-a-drain-that-cannot-stop-its-guest-escalates.md)) |
+| q | **A plan that decided publishes the judgement its decision rests on.** A ready plan holding a reservation names the axis holding its head. | The plan's own `ReservationAxis` against its own `Next.Reservation`. It is structural rather than modelled: it compares the plan with itself, so no envelope, cap, or occupancy of the harness's own reaches it. An unusable observation is exempt, and that is the only thing an unnamed axis may mean. | Enforced (added with [ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md)) |
 | p | **Bounded dead-guest release.** No instance whose GUEST has stopped executing holds its resource vector beyond the probe window plus the escalation bound. | Per-instance ticks since the harness's own virtual instant of guest death — not since the fleet first suspected it — against the release bound. Scoped to instances still consuming host resources. Counting from the death rather than from the verdict is what keeps the oracle independent of the mechanism it judges: an oracle counting from the verdict would go green however long the noticing took, and the noticing is half the defect. | Enforced (added with [ADR 0040](0040-a-guest-that-stopped-answering-is-not-running.md)) |
 
 The single-writer, strictly sequential design is what makes property (c)
@@ -365,6 +366,38 @@ infeasible-head branch mutated back to issue #125's behaviour, the corpus over
 arms under the new oracle as under the old one, and the pull-request sweep still
 fails on its first seed. With `internal/scheduler` reverted to the commit before
 issue #208's repair, both of that issue's pinned regressions still fire.
+
+#### Amendment 2026-08-19: the oracle stops withholding, and (q) pins the judgement
+
+Issue #235, [ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md). The
+2026-08-09 refinement above taught this oracle that a reservation withholds its
+head's whole vector, and ADR 0038 narrowed that to the vector axis. ADR 0045
+retires it entirely: a reservation withholds ORDER and one repository slot, so
+the only demand still judged against `free - reservation` is the peer that could
+take the head's vector whole.
+
+The correction goes the same way the previous two did, and that is the pattern
+worth recording rather than the arithmetic. **Withholding is the narrowing
+direction in an oracle.** It makes the harness agree with a refusal instead of
+questioning it, and a harness that agrees does not merely permit a defect — it
+certifies the fleet as correct while the defect runs. Each of the three
+corrections has WIDENED what is reported, and each was found only because
+something outside the harness disagreed with it: a nightly seed, a production
+`fleet doctor` line, a maintainer refusing to accept "no seed reproduces it" as
+evidence of absence.
+
+Property (q) is added, and it is deliberately of a different kind from every
+other property here. It models nothing — it compares one plan's published axis
+with its own held reservation — because what failed in issue #235 was not the
+fleet's arithmetic but its account of itself. The mac studio held a reservation
+for a head it could have admitted and reported it as "has withheld 2 cpu /
+4096 MiB on the unjudged axis", and every capacity oracle in this file agreed
+with the fleet, correctly, because the capacity was not the defect. A diagnostic
+needs a structural pin, and (q) is it.
+
+Mutation evidence: with `judgeCarriedReservation` removed from the scheduler and
+nothing else changed, seed 1 of `m4-mac-mini` fails (q) at tick 191 on a
+recovery-only tick carrying an `xl` reservation with no judgement.
 
 #### Amendment 2026-08-17: the world model may not build what the fleet cannot reach
 
