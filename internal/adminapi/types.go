@@ -66,14 +66,22 @@ type Status struct {
 	// not answer the question at all, on either node, and a runner too old to
 	// register looks exactly like a healthy idle fleet. An older daemon published
 	// none of it, which is why EffectiveRunnerVersionCheck exists.
-	RunnerImages       []RunnerImage    `json:"runnerImages,omitempty"`
-	RunnerVersionCheck *Check           `json:"runnerVersionCheck,omitempty"`
-	Queues             []Queue          `json:"queues"`
-	Instances          []Instance       `json:"instances"`
-	ScopeQueues        []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations       []Observation    `json:"observations"`
-	Operations         OperationSummary `json:"operations"`
-	HostPressure       HostPressure     `json:"hostPressure"`
+	RunnerImages       []RunnerImage `json:"runnerImages,omitempty"`
+	RunnerVersionCheck *Check        `json:"runnerVersionCheck,omitempty"`
+	// GuestConsole is an additive fleet.v1 field: whether this node boots Linux
+	// guests and whether their serial consoles are written somewhere durable.
+	// It exists because #236, #258 and #259 each ended at *trigger unidentified*
+	// for one reason: the dead guest's own console across the death did not
+	// exist. An older daemon published none of it, which is why
+	// EffectiveGuestConsoleCheck exists.
+	GuestConsole      *GuestConsole    `json:"guestConsole,omitempty"`
+	GuestConsoleCheck *Check           `json:"guestConsoleCheck,omitempty"`
+	Queues            []Queue          `json:"queues"`
+	Instances         []Instance       `json:"instances"`
+	ScopeQueues       []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations      []Observation    `json:"observations"`
+	Operations        OperationSummary `json:"operations"`
+	HostPressure      HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.
@@ -255,6 +263,28 @@ func (s Status) EffectiveReservationCheck() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.ReservationCheck
+}
+
+// EffectiveGuestConsoleCheck is the handoff accessor for the guest-console
+// judgement, on the same terms as every Effective accessor above: an older
+// daemon that never published the field never looked, and an unspecified fact
+// must not render as a measured failure.
+func (s Status) EffectiveGuestConsoleCheck() Check {
+	if s.GuestConsoleCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.GuestConsoleCheck
+}
+
+// GuestConsole is this node's answer to one question: when a Linux guest's
+// kernel dies mid-job, will there be anything to read afterwards? BootsLinuxGuests
+// is false on a node whose backend boots nothing of the kind, and the pair is
+// then trivially satisfied. SerialLogConfigured is the whole point: false means
+// the node is silent by construction about exactly the class #236 and #258 and
+// #259 died in.
+type GuestConsole struct {
+	BootsLinuxGuests    bool `json:"bootsLinuxGuests"`
+	SerialLogConfigured bool `json:"serialLogConfigured"`
 }
 
 // Reservation is the aged head the fleet is standing capacity by for.

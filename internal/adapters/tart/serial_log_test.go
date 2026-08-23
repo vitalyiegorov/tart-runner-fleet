@@ -46,6 +46,24 @@ func TestAnUnconfiguredConsoleSinkChangesNothing(t *testing.T) {
 	}
 }
 
+// This fleet's own tart build (2.32.1) refuses `tart run --serial-path` with
+// "Failed to open PTY" unless the sink file already exists — verified by
+// enabling the sink on a scratch clone before touching production (issue
+// #259). A directory without its per-instance file is therefore not half a
+// configured sink; it is every instance start failing on the node.
+func TestTheConsoleSinkFileExistsBeforeTartRunReadsIt(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "serial")
+	adapter, _, ownership := serialAdapter(t, directory)
+	if err := adapter.Start(context.Background(), "trf-small-1", ownership); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(directory, "trf-small-1.log")
+	info, err := os.Stat(want)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("tart run must find this instance's console sink already created; stat = %v %v", info, err)
+	}
+}
+
 // A macOS guest never gets the flag, for the same reason it never gets
 // --nested: the setting is a Linux-guest fact and the base image that fixes the
 // console is the Linux one.

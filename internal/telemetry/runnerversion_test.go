@@ -121,7 +121,7 @@ func TestRunnerImagesReachTheStatusDocumentAndTheMetrics(t *testing.T) {
 	}
 	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
 		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
-		HealthResult{OK: true}, health.RunnerVersions())
+		HealthResult{OK: true}, health.RunnerVersions(), health.GuestConsole())
 	rows := envelope.Data.RunnerImages
 	if len(rows) != 2 || rows[0].Version != "2.335.1" || !rows[0].BelowFloor || rows[0].Reason != reason {
 		t.Fatalf("the behind image must reach the document intact: %#v", rows)
@@ -154,7 +154,7 @@ func TestRunnerImagesAreAbsentUntilPublished(t *testing.T) {
 	health := runnerVersionHealth(t)
 	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
 		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
-		HealthResult{OK: true}, health.RunnerVersions())
+		HealthResult{OK: true}, health.RunnerVersions(), health.GuestConsole())
 	if envelope.Data.RunnerImages != nil {
 		t.Fatalf("nil must stay nil; got %#v", envelope.Data.RunnerImages)
 	}

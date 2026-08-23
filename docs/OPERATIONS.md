@@ -942,6 +942,26 @@ visible, it does not make it self-correcting.
 that renders as a pass with the detail `not reported by this daemon`. That is a
 statement about the daemon, not about the images.
 
+### A dead guest with no console to leave behind
+
+`fleet doctor` reports `FAIL  guest console` when a node boots Linux guests and
+`linuxSerialLogDirectory` is unset — meaning a guest kernel that dies mid-job
+leaves no evidence of why. Issues #236, #258, and #259 each ended at *trigger
+unidentified* for exactly this reason. ADR 0045.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "guest console")'
+```
+
+The check passes loudly too: it prints `serial console captured`,
+`serial console NOT captured`, or `no Linux guests booted on this node`. The
+remedy is operational, not a rebuild: verify `tart run --help` advertises
+`--serial-path` on that node's tart build, set `linuxSerialLogDirectory` in
+`fleet.json`, reload the daemon, and confirm the next instance start creates a
+`.log` file there — see [`docs/LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md) for
+the image-side `console=hvc0` half, which the #236 rollout already shipped.
+
 ### A drain that is not progressing, and a guest that will not stop
 
 `fleet doctor` reports `FAIL  drain progress` when a durable operation has failed

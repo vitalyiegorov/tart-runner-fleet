@@ -647,6 +647,27 @@ func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
 	return fmt.Sprintf("%s (floor %s)", strings.Join(carried, ", "), status.RunnerImages[0].Floor)
 }
 
+// guestConsoleDetail states the node's posture in one line, whether or not the
+// check passes, on the same terms as runnerVersionDetail: a bare "ok" would
+// leave the question — can a dead guest leave evidence? — as invisible as it
+// was before issue #259.
+func guestConsoleDetail(status adminapi.Status, check adminapi.Check) string {
+	if !check.OK {
+		return joinReasons(check)
+	}
+	console := status.GuestConsole
+	if console == nil {
+		return "not reported by this daemon"
+	}
+	if !console.BootsLinuxGuests {
+		return "no Linux guests booted on this node"
+	}
+	if !console.SerialLogConfigured {
+		return "serial console NOT captured"
+	}
+	return "serial console captured"
+}
+
 func reservationDetail(status adminapi.Status, check adminapi.Check) string {
 	if !check.OK {
 		return joinReasons(check)
@@ -683,6 +704,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	progress := status.Data.EffectiveProgress()
 	guests := status.Data.EffectiveGuestLiveness()
 	runners := status.Data.EffectiveRunnerVersionCheck()
+	console := status.Data.EffectiveGuestConsoleCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -714,6 +736,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// runner too old to register does not fail loudly, it simply stops being
 		// given jobs, which on this fleet is indistinguishable from a quiet day.
 		{Name: "runner version", OK: runners.OK, Detail: runnerVersionDetail(status.Data, runners)},
+		// The guest-console check says whether a Linux guest's kernel can leave
+		// evidence when it dies mid-job. Three incidents (#236, #258, #259) ended
+		// at *trigger unidentified* because the serial sink was off on every node,
+		// so the lapse itself is now a doctor finding rather than an operator's
+		// memory. It prints its posture even when it passes.
+		{Name: "guest console", OK: console.OK, Detail: guestConsoleDetail(status.Data, console)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {
