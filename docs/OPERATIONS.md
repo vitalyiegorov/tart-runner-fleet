@@ -1075,7 +1075,9 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `recreated_after_failures` | The failure could not be classified, so the bounded escalation discarded the session. | None, unless it repeats — then treat it as a broker or credential fault. |
 | `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
-| `message_poll_failed` | Ordinary long-poll failure. | None if transient. |
+| `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
+| `rate_limited` | GitHub answered with its primary or a secondary rate limit. | None if occasional. A count that climbs across hours means this node polls too aggressively — widen the poll interval before GitHub widens it for you. |
+| `server_error` | GitHub answered 5xx: the fault is GitHub's own, not this node's network or credentials. | Wait it out; escalate only if it persists across regions or outlives GitHub's status page. |
 | `demand_commit_conflict` | The durable store refused a broker message. This is not a network condition and redelivering the same message cannot clear it: the fleet holds state the message contradicts. | Read the `binding ingest failure` warning for the scope, profile, and scale set, then see [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md). A restarted message-id sequence resolves itself on the next colliding delivery; anything else is a genuine durable contradiction and needs the demand rows read. |
 | `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out. | Check API reachability and rate limits. |
 | `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |

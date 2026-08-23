@@ -28,6 +28,16 @@ const (
 	ReasonRecreatedAfterFailures = "recreated_after_failures"
 	// ReasonMessagePollFailed marks an ordinary long-poll failure.
 	ReasonMessagePollFailed = "message_poll_failed"
+	// ReasonRateLimited marks a failure GitHub answered with its primary or a
+	// secondary rate limit. The remedy is backoff, and a count that climbs
+	// means this node polls too aggressively — a different operator response
+	// from every other transient, which is why it stopped degrading into
+	// ReasonMessagePollFailed (issue #259 measured ~70 unattributable ingest
+	// failures a day reaching stderr as one reason).
+	ReasonRateLimited = "rate_limited"
+	// ReasonServerError marks a 5xx GitHub answered with: the network path and
+	// credentials are fine and the fault is GitHub's own.
+	ReasonServerError = "server_error"
 	// ReasonQueueObservationFailed marks an unavailable REST queue observation.
 	ReasonQueueObservationFailed = "queue_observation_failed"
 	// ReasonQueueObservationStale marks a REST queue observation that is
@@ -51,7 +61,8 @@ const (
 func ValidFailureReason(reason string) bool {
 	switch reason {
 	case ReasonSessionExpired, ReasonSessionReleaseFailed, ReasonSessionCreateFailed,
-		ReasonRecreatedAfterFailures, ReasonMessagePollFailed, ReasonQueueObservationFailed,
+		ReasonRecreatedAfterFailures, ReasonMessagePollFailed, ReasonRateLimited,
+		ReasonServerError, ReasonQueueObservationFailed,
 		ReasonQueueObservationStale, ReasonQueueReconcileFailed, ReasonDemandCommitConflict:
 		return true
 	default:
@@ -135,6 +146,20 @@ func IngestFailureDetail(err error) string {
 	}
 	if errors.Is(err, operations.ErrConflict) {
 		return ReasonDemandCommitConflict
+	}
+	// A rate limit and a server error are different conditions with different
+	// remedies, and the kinds already existed on APIError — the same judgement
+	// SessionTerminal makes one branch above. A secondary limit arrives as an
+	// Authorization kind carrying a Retry-After, which is how this fleet's own
+	// adapter classifies it for retry purposes.
+	var api *APIError
+	if errors.As(err, &api) {
+		if api.Kind == RateLimited || (api.Kind == Authorization && api.RetryAfter > 0) {
+			return ReasonRateLimited
+		}
+		if api.Kind == Server {
+			return ReasonServerError
+		}
 	}
 	return ReasonMessagePollFailed
 }

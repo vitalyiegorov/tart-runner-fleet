@@ -141,6 +141,21 @@ func TestIngestFailureDetailOnlyEmitsClosedVocabulary(t *testing.T) {
 			err:    fmt.Errorf("%s: %w", brokerSecret, scaleset.MessageQueueTokenExpiredError),
 			detail: ReasonSessionExpired},
 		{name: "unclassified transient failure", err: errors.New(brokerSecret), detail: ReasonMessagePollFailed},
+		// A rate limit and a server error are different conditions an operator
+		// responds to differently — backoff tuning versus waiting GitHub out —
+		// and ~70 ingest failures a day were reaching stderr as one
+		// indistinguishable reason (issue #259's follow-up). The kinds already
+		// existed on APIError; the detail now names them instead of degrading
+		// both into the generic poll failure.
+		{name: "github rate limit",
+			err:    &APIError{Kind: RateLimited, Status: 403},
+			detail: ReasonRateLimited},
+		{name: "github secondary rate limit",
+			err:    &APIError{Kind: Authorization, Status: 403, RetryAfter: 30 * time.Second},
+			detail: ReasonRateLimited},
+		{name: "github server error",
+			err:    &APIError{Kind: Server, Status: 502},
+			detail: ReasonServerError},
 		// A durable commit conflict is the fleet refusing the message, not the
 		// network failing to deliver it. Reporting it as a poll failure is what
 		// hid a three-day outage (issue #165).
