@@ -577,6 +577,12 @@ func (a *Adapter) Start(ctx context.Context, name string, ownership operations.O
 // keep a panic trace and is not keeping one has a fact its operator needs, and
 // discovering that after the next panic is the whole failure mode this exists to
 // end.
+//
+// The per-instance file is created too, and for a harder reason than the
+// directory: this fleet's own tart build refuses `--serial-path` with "Failed
+// to open PTY" unless the path already exists, verified on a scratch clone
+// before any node enabled the sink (issue #259). The append mode keeps an
+// instance's earlier console across a daemon-driven restart of its VM.
 func (a *Adapter) serialLogPath(name string) (string, error) {
 	if a.LinuxSerialLogDirectory == "" {
 		return "", nil
@@ -584,7 +590,19 @@ func (a *Adapter) serialLogPath(name string) (string, error) {
 	if err := os.MkdirAll(a.LinuxSerialLogDirectory, 0o750); err != nil {
 		return "", &Error{Op: "run", Kind: ErrorPermission, ExitCode: -1, Err: err}
 	}
-	return filepath.Join(a.LinuxSerialLogDirectory, name+".log"), nil
+	path := filepath.Join(a.LinuxSerialLogDirectory, name+".log")
+	// #nosec G304 -- the directory is the operator's own configuration and the
+	// basename is this instance's validated name; both are trusted inputs.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err == nil {
+		// Nothing was written: the open only reserves the path this tart build
+		// demands, so a failed close leaves nothing to roll back.
+		err = file.Close()
+	}
+	if err != nil {
+		return "", &Error{Op: "run", Kind: ErrorPermission, ExitCode: -1, Err: err}
+	}
+	return path, nil
 }
 
 func (a *Adapter) isMacOSVM(name string) bool {
