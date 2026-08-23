@@ -46,3 +46,23 @@ func TestGuestConsolePassesUnpublishedForAnOlderDaemon(t *testing.T) {
 		t.Fatalf("an unpublished metric is an unspecified check, not a failure, got %+v", result)
 	}
 }
+
+// TestTheEnvelopeCarriesThePostureRow keeps the projection honest in both
+// directions: a node that published nothing emits no field at all, and one
+// that has publishes exactly the two booleans the doctor check reads.
+func TestTheEnvelopeCarriesThePostureRow(t *testing.T) {
+	health := runnerVersionHealth(t)
+	envelope := statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true})
+	if envelope.Data.GuestConsole != nil {
+		t.Fatalf("an unpublished posture must be absent from the document, got %#v", envelope.Data.GuestConsole)
+	}
+	health.SetGuestConsole(GuestConsoleMetric{BootsLinuxGuests: true, SerialLogConfigured: true})
+	envelope = statusEnvelope(health.Snapshot(), "v", "authority", HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true},
+		HealthResult{OK: true}, HealthResult{OK: true}, HealthResult{OK: true})
+	if envelope.Data.GuestConsole == nil || !envelope.Data.GuestConsole.BootsLinuxGuests || !envelope.Data.GuestConsole.SerialLogConfigured {
+		t.Fatalf("the published posture must travel verbatim, got %#v", envelope.Data.GuestConsole)
+	}
+}

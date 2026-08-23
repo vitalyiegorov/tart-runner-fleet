@@ -47,6 +47,18 @@ func TestDoctorPassesOnANodeThatBootsNoLinuxGuests(t *testing.T) {
 	status.Data.GuestConsole = &adminapi.GuestConsole{}
 	status.Data.GuestConsoleCheck = &adminapi.Check{OK: true}
 	assertDoctorPasses(t, status, "guest console")
+	// The pass must still say WHY it is not a lapse: a node with no Linux
+	// guests has no console to lose.
+	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
+		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
+	}}
+	var stdout bytes.Buffer
+	if got := executeWith(context.Background(), []string{"doctor", "--output", "json"}, &stdout, &bytes.Buffer{}, deps); got != exitSuccess {
+		t.Fatalf("code=%d; stdout=%q", got, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "no Linux guests booted on this node") {
+		t.Fatalf("doctor did not state the posture on a pass:\n%s", stdout.String())
+	}
 }
 
 // TestDoctorPassesUnpublishedForAnOlderDaemon keeps the handoff rule: an older
