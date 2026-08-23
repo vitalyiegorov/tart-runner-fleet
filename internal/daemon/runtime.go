@@ -538,8 +538,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// incidents (#236, #258, #259) ended at *trigger unidentified* because the
 	// serial sink was off on every node; publishing the posture once here is what
 	// makes the lapse a doctor finding instead of an operator's memory.
-	health.SetGuestConsole(telemetry.GuestConsoleMetric{BootsLinuxGuests: cfg.Linux.BaseVM != "",
-		SerialLogConfigured: cfg.Linux.SerialLogDirectory != ""})
+	health.SetGuestConsole(guestConsole(runtime.GOOS, cfg))
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}
@@ -732,6 +731,20 @@ func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
 			Version: image.Version, Floor: image.Floor, Reason: image.Reason()})
 	}
 	return images
+}
+
+// guestConsole is the node's answer to the doctor check's one question: does
+// this machine boot Linux guests through Tart, and are their consoles captured?
+//
+// BootsLinuxGuests asks about the OPERATING SYSTEM as well as the base image,
+// and that is not incidental. `linux.baseVm` is a Tart base VM name, but the
+// schema keeps it in every node's file — an observe-only Linux node or a podman
+// container node carries one it will never clone (ADR 0034) — so a predicate on
+// the field alone would fail every Linux node in CI and in production for a
+// console no such node can lose.
+func guestConsole(goos string, cfg config.Config) telemetry.GuestConsoleMetric {
+	return telemetry.GuestConsoleMetric{BootsLinuxGuests: goos == "darwin" && cfg.Linux.BaseVM != "",
+		SerialLogConfigured: cfg.Linux.SerialLogDirectory != ""}
 }
 
 func profileCapabilities(cfg config.Config) map[domain.ProfileID][]string {
