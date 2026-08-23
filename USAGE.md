@@ -278,6 +278,14 @@ a guest here registers with `DisableUpdate` set and can never upgrade itself, so
 an image nobody has vouched for is one nobody can vouch for. See
 [`ADR 0041`](docs/adr/0041-a-base-image-declares-its-runner-version.md).
 
+`linuxSerialLogDirectory` writes each Linux guest's serial console to a file on
+the host while it runs, which is the only artifact that survives a guest kernel
+dying mid-job. `fleet doctor` fails its `guest console` check when a node boots
+Linux guests with this unset — issues #236, #258, and #259 all ended without a
+root cause because it was. Verify `tart run --help` advertises `--serial-path`
+on the node first; see [`ADR 0045`](docs/adr/0045-a-guest-console-is-evidence-the-fleet-must-own.md)
+and [`docs/LINUX_BASE_IMAGE.md`](docs/LINUX_BASE_IMAGE.md).
+
 `macosBurst.admissionPolicy` controls cross-platform admission. Omit it or set
 it to `"shared"` for the behavior above. Set it to `"macos-exclusive"` for an
 experiment that must fill one macOS profile cohort without admitting new Linux

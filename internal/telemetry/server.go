@@ -125,7 +125,7 @@ func statusHandler(health *Health, controllerVersion, controllerMode string) htt
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
 		envelope := statusEnvelope(snapshot, controllerVersion, controllerMode, health.Live(), health.Ready(),
 			health.QueueHealth(), health.Occupancy(), health.Reservation(), health.Progress(), health.GuestLiveness(),
-			health.RunnerVersions())
+			health.RunnerVersions(), health.GuestConsole())
 		if err := json.NewEncoder(response).Encode(envelope); err != nil {
 			return
 		}
@@ -199,7 +199,7 @@ func queueTiers(snapshot Snapshot, rows []QueueTierMetrics) []adminapi.QueueTier
 }
 
 func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
-	live, ready, queueSLO, occupancy, reservation, progress, guestLiveness, runnerVersions HealthResult,
+	live, ready, queueSLO, occupancy, reservation, progress, guestLiveness, runnerVersions, guestConsole HealthResult,
 ) adminapi.StatusEnvelope {
 	queues := make([]adminapi.Queue, 0, len(snapshot.Queues))
 	for _, profile := range sortedKeys(snapshot.Queues) {
@@ -242,6 +242,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	progressCheck := adminapi.Check{OK: progress.OK, Reasons: nonNilStrings(progress.Reasons)}
 	guestLivenessCheck := adminapi.Check{OK: guestLiveness.OK, Reasons: nonNilStrings(guestLiveness.Reasons)}
 	runnerVersionCheck := adminapi.Check{OK: runnerVersions.OK, Reasons: nonNilStrings(runnerVersions.Reasons)}
+	guestConsoleCheck := adminapi.Check{OK: guestConsole.OK, Reasons: nonNilStrings(guestConsole.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -254,6 +255,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
+			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -317,6 +319,17 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
 	}
 	return rows
+}
+
+// guestConsoleRow projects the node's guest-console posture into the versioned
+// DTO. Nil stays nil so a daemon that has published nothing emits exactly the
+// document older clients already saw.
+func guestConsoleRow(snapshot Snapshot) *adminapi.GuestConsole {
+	if snapshot.GuestConsole == nil {
+		return nil
+	}
+	return &adminapi.GuestConsole{BootsLinuxGuests: snapshot.GuestConsole.BootsLinuxGuests,
+		SerialLogConfigured: snapshot.GuestConsole.SerialLogConfigured}
 }
 
 // stalledRows projects the operations that will not finish and the instances

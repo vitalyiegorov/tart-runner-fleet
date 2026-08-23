@@ -533,6 +533,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		reporter.logger.Warn("runner image versions were refused, so this node cannot judge its own "+
 			"brownout compliance", "error", err, "linuxBaseVm", cfg.Linux.BaseVM, "macosBaseVm", cfg.MacOS.BaseVM)
 	}
+	// Whether a Linux guest's kernel can leave evidence behind when it dies is
+	// also a fact about the configuration this process started with. Three
+	// incidents (#236, #258, #259) ended at *trigger unidentified* because the
+	// serial sink was off on every node; publishing the posture once here is what
+	// makes the lapse a doctor finding instead of an operator's memory.
+	health.SetGuestConsole(telemetry.GuestConsoleMetric{BootsLinuxGuests: cfg.Linux.BaseVM != "",
+		SerialLogConfigured: cfg.Linux.SerialLogDirectory != ""})
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}
