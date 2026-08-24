@@ -64,6 +64,28 @@ Use `tart list`, GitHub runner/job state, launchd, and bounded logs only to
 cross-check a specific anomaly. Never infer idle from a failed GitHub query or
 an unavailable daemon.
 
+## When a guest dies, look at the host's crash reports first
+
+`instance guest silent` / `instance guest unresponsive` /
+`instance reclaimed because its guest stopped answering` mean the node's
+liveness probe was refused repeatedly and the fleet reclaimed the vector. Since
+issue #264 the first reflex is not the guest — it is Apple's per-VM host
+process. On every episode between 2026-08-17 and 2026-08-24,
+`com.apple.Virtualization.VirtualMachine` crashed (SIGTRAP,
+`EXC_BREAKPOINT`, identical offset `0x3a75f8`) seconds before the probes began
+refusing, killing the VM with zero guest-side output.
+
+```sh
+ls -lt ~/Library/Logs/DiagnosticReports/com.apple.Virtualization.VirtualMachine-*.ips | head
+```
+
+A `.ips` whose timestamp falls inside the silence window is the root cause;
+attach it to the incident and stop investigating the guest. The serial console
+(`linuxSerialLogDirectory`, ADR 0046) is what exonerates the guest: a kernel
+panic or OOM prints to `hvc0`, and an absent trace plus a matching crash report
+closes the question. The fleet's reclaim itself needs no post-mortem — it acted
+on genuine evidence within one liveness window.
+
 ## Read the three power lines
 
 The daemon's stderr log names every destructive recovery it plans and every
