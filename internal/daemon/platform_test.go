@@ -51,8 +51,14 @@ func TestAppleNodesRunTartAndTheMacosProbe(t *testing.T) {
 	if _, ok := node.readiness(cfg).(execReadiness); !ok {
 		t.Errorf("readiness = %T", node.readiness(cfg))
 	}
-	if node.bootstrap(cfg) == nil {
-		t.Error("nil bootstrapper")
+	bootstrapper, ok := node.bootstrap(cfg).(lifecycle.StdinBootstrapper)
+	if !ok {
+		t.Fatalf("bootstrapper = %T", node.bootstrap(cfg))
+	}
+	// A Tart guest is a virtual machine: it has systemd and a power switch, and
+	// ADR 0010's poweroff contract is unchanged for it (issue #273).
+	if bootstrapper.ContainerGuest {
+		t.Error("an Apple node's guests are VMs and must be bootstrapped as VMs")
 	}
 }
 
@@ -135,6 +141,11 @@ func TestAConfiguredContainerNodeWiresPodmanEverywhere(t *testing.T) {
 	}
 	if runner, isExec := bootstrapper.Runner.(lifecycle.ExecStdinRunner); !isExec || runner.Binary != "/usr/bin/podman" {
 		t.Errorf("JIT bootstrap runs %#v, want the configured podman binary", bootstrapper.Runner)
+	}
+	// Issue #273: this file is the one place that knows the guest is a container,
+	// so it is the one place that can tell the guest helper (ADR 0010 amendment).
+	if !bootstrapper.ContainerGuest {
+		t.Error("a podman node's guests are containers and the bootstrap helper was not told so")
 	}
 
 	adapter, ok := node.newVM(nil, cfg, nil).(*podman.Adapter)

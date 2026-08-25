@@ -482,6 +482,97 @@ func TestExecLauncherMovesSupervisorIntoManagedScopeWithoutJITInArguments(t *tes
 	t.Fatal("managed supervisor did not survive through runner completion and guest shutdown request")
 }
 
+// TestExecLauncherRunsAContainerGuestWithoutSystemdOrPoweroff is issue #273. A
+// container has no init system to hand the runner to and no machine to power
+// off, and the geekom image proves that "does the binary exist" cannot decide
+// this: Playwright's dependency closure installs the systemd package, so both
+// probes pass and `systemd-run --scope` then dies on a guest that was never
+// booted by systemd. Told it is a container, the launcher runs the supervisor
+// directly and never reads the wrapper, the sudo, or the shutdown path.
+func TestExecLauncherRunsAContainerGuestWithoutSystemdOrPoweroff(t *testing.T) {
+	root := t.TempDir()
+	runnerMarker := filepath.Join(root, "runner-finished")
+	wrapperMarker := filepath.Join(root, "wrapper-ran")
+	wrapper := filepath.Join(root, "systemd-run")
+	runner := filepath.Join(root, "run.sh")
+	for path, body := range map[string]string{
+		wrapper: "#!/bin/sh\nprintf ran > \"$WRAPPER_MARKER\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+		runner:  "#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log, err := os.OpenFile(filepath.Join(root, "log"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	// Deliberately absent: a container image carries neither, and a launcher that
+	// still probed for them would fail exactly where the geekom node failed.
+	launcher := ExecLauncher{
+		SystemdRunPath: &wrapper,
+		ShellPath:      "/bin/sh",
+		SudoPath:       filepath.Join(root, "absent-sudo"),
+		ShutdownPath:   filepath.Join(root, "absent-shutdown"),
+	}
+	process, err := launcher.Start(context.Background(), ProcessSpec{
+		Container: true,
+		Path:      runner,
+		Dir:       root,
+		Env:       append(os.Environ(), "RUNNER_MARKER="+runnerMarker, "WRAPPER_MARKER="+wrapperMarker),
+		Log:       log,
+	})
+	if err != nil || process == nil {
+		t.Fatalf("start container supervisor = %v, %v", process, err)
+	}
+	if err := process.Release(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if result, readErr := os.ReadFile(runnerMarker); readErr == nil && string(result) == "finished" {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("detached container supervisor never ran the runner")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, statErr := os.Stat(wrapperMarker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a container guest was launched through systemd-run: %v", statErr)
+	}
+
+	// The same launcher against a VM guest still enforces ADR 0010's poweroff
+	// dependencies: container mode relaxes them for containers and nothing else.
+	if _, err := launcher.Start(context.Background(), ProcessSpec{
+		Path: runner, Dir: root, Env: os.Environ(), Log: log,
+	}); !errors.Is(err, ErrStart) {
+		t.Fatalf("a VM guest with no sudo and no shutdown started anyway: %v", err)
+	}
+}
+
+// TestBootstrapTellsTheLauncherWhatKindOfGuestThisIs pins the one path the
+// signal travels: the daemon's flag becomes a Config field, and the Config field
+// becomes the process spec the launcher decides from.
+func TestBootstrapTellsTheLauncherWhatKindOfGuestThisIs(t *testing.T) {
+	config := bootstrapConfig(t)
+	launcher := &fakeLauncher{process: &fakeProcess{}}
+	if err := (Bootstrap{Launcher: launcher}).Run(context.Background(), strings.NewReader("jit"), config); err != nil {
+		t.Fatal(err)
+	}
+	if launcher.spec.Container {
+		t.Fatal("a guest that was never told it is a container must stay a VM")
+	}
+	config.Container = true
+	if err := (Bootstrap{Launcher: launcher}).Run(context.Background(), strings.NewReader("jit"), config); err != nil {
+		t.Fatal(err)
+	}
+	if !launcher.spec.Container {
+		t.Fatal("the container guest signal did not reach the launcher")
+	}
+}
+
 func TestExecLauncherFailsClosedWhenManagedScopeNeverStartsSupervisor(t *testing.T) {
 	root := t.TempDir()
 	boundary := filepath.Join(root, "systemd-run")
@@ -574,7 +665,9 @@ func TestExecLauncherValidationCancellationAndStartFailure(t *testing.T) {
 		"missing systemd-run":  {SystemdRunPath: stringPointer("/definitely/missing-systemd-run")},
 		"relative shell":       {ShellPath: "bin/sh"},
 		"missing shell":        {ShellPath: "/definitely/missing-shell"},
+		"relative sudo":        {SudoPath: "usr/bin/sudo"},
 		"missing sudo":         {SudoPath: "/definitely/missing-sudo"},
+		"relative shutdown":    {ShutdownPath: "sbin/shutdown"},
 		"missing shutdown":     {ShutdownPath: "/definitely/missing-shutdown"},
 	} {
 		t.Run(name, func(t *testing.T) {

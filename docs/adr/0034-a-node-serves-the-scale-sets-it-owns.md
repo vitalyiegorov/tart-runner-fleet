@@ -746,16 +746,18 @@ be read as the constant that became per-node. It is the default, not the answer.
 **Whether the container adapter works against a real container runtime is not
 proved by any automated gate yet.** Its verbs, error classification, wiring, and
 sufficiency for the whole runner lifecycle are covered on every commit; that
-podman accepts these argument vectors and prints this JSON is covered by
+podman accepts these argument vectors, prints this JSON, and lets the guest
+helper start a runner inside a container (issue #273) is covered by
 `scripts/podman-smoke.sh`, which CI can only skip because the fleet's own Linux
 runners are Tart guests with no container runtime. The node B bring-up checklist
 in `docs/MULTI_NODE_PLAN.md` requires that script to pass before any job is
 routed there, and that requirement is the mitigation.
 
 **How a base image reaches a node, and what is in it.** The runner image must
-carry the JIT bootstrap helper and start the runner without `systemd-run`, which
-a container does not have. That is image work on node B, and it is per-node
-operator work until measurement says otherwise.
+carry the JIT bootstrap helper; how that helper starts the runner is no longer
+an image question, because a container guest is now told it is one and launches
+without `systemd-run` (ADR 0010, amendment 2026-08-25, issue #273). Delivering
+the image is still per-node operator work until measurement says otherwise.
 
 **Simulation stays single-node and needs no change.** `tests/simulation` models
 one host because ADR 0031 says so, and under this record one host is still one

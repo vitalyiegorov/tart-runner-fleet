@@ -309,13 +309,18 @@ between jobs. It contradicts ADR 0010 and is not considered further.
   needs one after the Android migration — the only user was `suuudokuuu`'s
   Redroid step. If one appears, the escape hatch is a per-profile privileged
   flag, not a fleet-wide daemon socket mount.
-- `internal/guestbootstrap/systemd_linux.go` launches the runner with
-  `systemd-run`, which is not present in an ordinary container. **Carried into
-  the image contract by issue #139:** the daemon's side of the bootstrap is
-  `podman exec -i <name> /usr/local/libexec/tart-runner-fleet-bootstrap` with the
-  JIT configuration on stdin, unchanged from mac-mini, so it is the helper *inside
-  the runner image* that must detach without `systemd-run`. Building that image
-  is geekom bring-up work, not adapter work, and the checklist below names it.
+- ~~`internal/guestbootstrap/systemd_linux.go` launches the runner with
+  `systemd-run`, which is not present in an ordinary container, so it is the
+  helper *inside the runner image* that must detach without it: image work, not
+  adapter work.~~ **Resolved by issue #273, and the diagnosis was wrong.** It
+  could not be image work: an image cannot tell whether its own `systemd-run`
+  will function, and the geekom image proved it by carrying a working-looking
+  binary that fails at runtime with "not booted with systemd as init system".
+  The daemon now says which kind of guest it made — `podman exec -i <name>
+  /usr/local/libexec/tart-runner-fleet-bootstrap --container` — and the helper
+  launches the runner directly, with no `systemd-run`, no `sudo`, and no
+  `shutdown`. See [ADR 0010's 2026-08-25
+  amendment](adr/0010-ephemeral-guest-shutdown.md).
 - `/dev/kvm` is granted to the Android profile only, not to every profile.
   Issue #139 made that a validated configuration key, `executor.kvmProfiles`,
   and the adapter reads the profile off the `trf-<profile>-` instance-name
@@ -537,9 +542,9 @@ adapter. Do not start Part B before Phase 2 is green on geekom in observe mode.
       Start from [`LINUX_BASE_IMAGE.md`](LINUX_BASE_IMAGE.md), which is the
       same package set built and verified on arm64 — its "Adapting this for
       geekom" section lists what changes for amd64 and for containers.
-      The helper must launch the runner and **detach without `systemd-run`**,
-      which an ordinary container does not have; this is the one item of Phase 2
-      that is image work rather than adapter work.
+      The helper detaches **without `systemd-run`** when the daemon invokes it
+      with `--container`, which a podman node always does (issue #273), so the
+      image needs no shim and must not be stripped of systemd to compensate.
 - [ ] **Run the real-podman acceptance test, and require it to pass:**
       `TRF_PODMAN_SMOKE=required ./scripts/podman-smoke.sh`, with
       `TRF_PODMAN_IMAGE` set to the runner image. This is the gap CI cannot
