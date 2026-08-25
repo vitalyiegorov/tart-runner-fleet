@@ -716,6 +716,31 @@ content is "an operation fails at a stage" would test the harness rather than th
 fleet.
 
 
+## Amendment 2026-08-25: §4 is built, as `guestArch` (issue #269)
+
+§4 said the architecture component of a canonical label "stops being the
+constant `arm64` in `internal/config/labels.go:23` and becomes a property of the
+node's configuration". Until issue #269 it had not, and the gap was load-bearing
+rather than cosmetic: node B could not declare the `trf-linux-amd64-*` labels
+this record, #139, and `docs/MULTI_NODE_PLAN.md` all assume, because the
+derivation answered `arm64` for every profile and refused a configured
+`trf-linux-amd64-2x4` as a label describing a vector it does not have.
+`config/nodes/geekom.json` shipped with plain `linux-amd64-*` aliases to work
+around it.
+
+It is now the optional top-level `guestArch` key, absent meaning `arm64`, with
+its vocabulary and its two refusals — an unknown spelling, and `macosBurst` on a
+node that is not Apple silicon — recorded in the amendment of the same date on
+[ADR 0032](0032-resource-explicit-runner-labels.md), whose §1 was the text that
+had gone stale. Nothing in this record changes: §4 is realized exactly as
+written, the ownership rule of §2 and the parity rule of *Amendment 2026-08-04c*
+are untouched, and a node still learns nothing about another node.
+
+The Evidence entry above — "`internal/config/labels.go:19-23, 41, 105-114` — the
+canonical grammar and the `arm64` constant that becomes per-node" — should now
+be read as the constant that became per-node. It is the default, not the answer.
+
+
 ## Not addressed here
 
 **Whether the container adapter works against a real container runtime is not

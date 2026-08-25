@@ -480,13 +480,25 @@ type Config struct {
 	// operator must act on moves at least monthly and must be raisable without
 	// cutting a fleet release. See ADR 0041.
 	RunnerVersionFloor string
-	Linux              Linux
-	Executor           Executor
-	MacOS              MacOS
-	GitHub             GitHub
-	Timeouts           Timeouts
-	Guards             Guards
-	SessionRecovery    SessionRecovery
+	// GuestArch is the architecture of every guest this node boots, and so the
+	// architecture component of every canonical label it derives (ADR 0032 §1,
+	// ADR 0034 §4). Empty means arm64, which is what every Apple-silicon node the
+	// fleet has ever run boots, so an absent declaration derives exactly the
+	// labels those nodes already advertise. An x86_64 node declares `amd64` and
+	// derives `trf-linux-amd64-*` (issue #269).
+	//
+	// It is declared rather than probed for the same reason the base image's
+	// capabilities beside it are: `fleet config validate` decodes a file and
+	// never touches a host, and a node's configuration is written, rendered, and
+	// checked on machines other than the one that will run it.
+	GuestArch       string
+	Linux           Linux
+	Executor        Executor
+	MacOS           MacOS
+	GitHub          GitHub
+	Timeouts        Timeouts
+	Guards          Guards
+	SessionRecovery SessionRecovery
 	// GuestLiveness bounds how long an instance whose guest has stopped answering
 	// may go on holding its vector (ADR 0040). An absent block is the shipped
 	// default bound, not an absent one.
@@ -517,11 +529,14 @@ type wireConfig struct {
 	// it encoded before issue #206.
 	BaseImageRunnerVersion string `json:"baseImageRunnerVersion,omitempty"`
 	RunnerVersionFloor     string `json:"runnerVersionFloor,omitempty"`
-	VMPrefix               string `json:"vmPrefix"`
-	PollSeconds            int    `json:"pollSeconds"`
-	MaxLinuxWhenMacOSIdle  int    `json:"maxLinuxWhenMacosIdle"`
-	MaxLinuxCPU            int    `json:"maxLinuxCpu"`
-	MaxLinuxMemoryMiB      int    `json:"maxLinuxMemoryMb"`
+	// GuestArch is omitted when empty for the same reason: an Apple-silicon node
+	// declares nothing and encodes the file it encoded before issue #269.
+	GuestArch             string `json:"guestArch,omitempty"`
+	VMPrefix              string `json:"vmPrefix"`
+	PollSeconds           int    `json:"pollSeconds"`
+	MaxLinuxWhenMacOSIdle int    `json:"maxLinuxWhenMacosIdle"`
+	MaxLinuxCPU           int    `json:"maxLinuxCpu"`
+	MaxLinuxMemoryMiB     int    `json:"maxLinuxMemoryMb"`
 	// HostBudget is a pointer so an unset budget is absent from the encoded file
 	// rather than present as a zero object: a release older than this setting
 	// decodes with DisallowUnknownFields and would refuse the key outright.
@@ -596,6 +611,7 @@ func Decode(r io.Reader) (Config, error) {
 		Executor:       decodeExecutor(w.Executor),
 
 		RunnerVersionFloor: w.RunnerVersionFloor,
+		GuestArch:          w.GuestArch,
 		Linux: Linux{BaseVM: w.BaseVM, VMPrefix: w.VMPrefix, MaxInstances: w.MaxLinuxWhenMacOSIdle,
 			Capacity: Resources{CPU: w.MaxLinuxCPU, MemoryMiB: w.MaxLinuxMemoryMiB}, Profiles: normalizeProfiles(w.LinuxProfiles),
 			NestedVirtualization:   w.LinuxNestedVirtualization,
@@ -677,6 +693,7 @@ func Encode(w io.Writer, cfg Config) error {
 		BaseImageCapabilities:   append([]string(nil), cfg.Linux.BaseImageCapabilities...),
 		BaseImageRunnerVersion:  cfg.Linux.BaseImageRunnerVersion,
 		RunnerVersionFloor:      cfg.RunnerVersionFloor,
+		GuestArch:               cfg.GuestArch,
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
@@ -1085,6 +1102,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateRunnerVersions(); err != nil {
+		return err
+	}
+	if err := c.validateGuestArch(); err != nil {
 		return err
 	}
 	// Label derivation runs last so a broken vector is reported as the vector

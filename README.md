@@ -188,6 +188,10 @@ priority — the scheduler reads the vector, never the name.
 | `trf-macos-arm64-6x12` | 6 vCPU / 12 GiB, `maxActive: 1` | `macos-builder` |
 | `trf-macos-arm64-4x7` | 4 vCPU / 7 GiB, `maxActive: 2` | `macos-maestro` |
 
+The `arch` component is the node's own: it is `arm64` unless the node declares
+`"guestArch": "amd64"`, so an x86_64 node serves the same vectors under
+`trf-linux-amd64-*` names.
+
 Profiles are configuration, not built-ins:
 [`config/fleet.example.json`](config/fleet.example.json) ships this matrix, and
 each scope exposes only the variants it wants. Every scale set also advertises

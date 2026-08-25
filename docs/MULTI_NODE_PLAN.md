@@ -701,9 +701,14 @@ the *legacy* single-scope authority path still requires Keychain fields
 
 ## Phase 3 — arch-floating labels and per-repository migration
 
-geekom's canonical labels are `trf-linux-amd64-*`; the arch component stops
-being the `arm64` constant at `internal/config/labels.go:23` and becomes a
-node property, still derived and still unable to lie (about 150 lines).
+geekom's canonical labels are `trf-linux-amd64-*`. The code half of this is
+**done, issue #269**: the arch component is no longer the `arm64` constant in
+`internal/config/labels.go`, it is the node's optional top-level `guestArch`
+key — absent means `arm64`, so both Macs are untouched — still derived from the
+configured vector and still unable to lie. `config/nodes/geekom.json` declares
+`"guestArch": "amd64"` and names its two profiles `trf-linux-amd64-2x4` and
+`trf-linux-amd64-4x8` today. What remains in this phase is the migration below:
+provisioning those labels on geekom and auditing each consumer.
 
 Consumers then fall into two groups.
 

@@ -2,6 +2,7 @@
   "baseVm": "linux-runner-base-amd64",
   "baseImageRunnerVersion": "2.336.0",
   "runnerVersionFloor": "2.336.0",
+  "guestArch": "amd64",
   "vmPrefix": "gha-linux",
   "pollSeconds": 20,
   "maxLinuxWhenMacosIdle": 3,
@@ -14,8 +15,8 @@
   "tartControlTimeoutSeconds": 45,
   "bootTimeoutSeconds": 180,
   "linuxProfiles": [
-    { "id": "linux-2x4", "label": "linux-amd64-2x4", "cpu": 2, "memoryMb": 4096, "diskGb": 50 },
-    { "id": "linux-4x8", "label": "linux-amd64-4x8", "cpu": 4, "memoryMb": 8192, "diskGb": 50 }
+    { "id": "linux-2x4", "label": "trf-linux-amd64-2x4", "cpu": 2, "memoryMb": 4096, "diskGb": 50 },
+    { "id": "linux-4x8", "label": "trf-linux-amd64-4x8", "cpu": 4, "memoryMb": 8192, "diskGb": 50 }
   ],
   "executor": {
     "backend": "podman",
