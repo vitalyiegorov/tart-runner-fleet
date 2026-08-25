@@ -11,9 +11,9 @@ import (
 )
 
 // TestExecuteAcceptsOnlyTheCapabilityFlag keeps the helper's argument vector as
-// closed as it has always been. Exactly one optional flag exists; anything else
-// is still a usage error, so a guest cannot be talked into doing something the
-// daemon did not ask for.
+// closed as it has always been. Two optional flags exist; anything else is still
+// a usage error, so a guest cannot be talked into doing something the daemon did
+// not ask for.
 func TestExecuteAcceptsOnlyTheCapabilityFlag(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -43,6 +43,55 @@ func TestExecuteAcceptsOnlyTheCapabilityFlag(t *testing.T) {
 			}
 			if code := execute(test.args, strings.NewReader("jit"), &stderr, run); code != test.wantCode {
 				t.Fatalf("execute(%v) = %d, want %d (stderr %q)", test.args, code, test.wantCode, stderr.String())
+			}
+			if strings.Join(seen, ",") != strings.Join(test.wantSeen, ",") {
+				t.Fatalf("required capabilities = %v, want %v", seen, test.wantSeen)
+			}
+		})
+	}
+}
+
+// TestExecuteReadsTheContainerFlag is issue #273's daemon-to-guest signal. The
+// guest is told what it is running inside rather than left to guess from a
+// binary that exists but cannot work, and the flag composes with the capability
+// flag in either order because the daemon assembles both.
+func TestExecuteReadsTheContainerFlag(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantCode      int
+		wantContainer bool
+		wantSeen      []string
+	}{
+		{name: "no arguments is a virtual machine", wantCode: 0},
+		{name: "the container flag alone", args: []string{guestbootstrap.ContainerFlag}, wantCode: 0, wantContainer: true},
+		{name: "after the capability flag",
+			args:     []string{guestbootstrap.CapabilityFlag + "=jvm", guestbootstrap.ContainerFlag},
+			wantCode: 0, wantContainer: true, wantSeen: []string{"jvm"}},
+		{name: "before the capability flag",
+			args:     []string{guestbootstrap.ContainerFlag, guestbootstrap.CapabilityFlag + "=jvm"},
+			wantCode: 0, wantContainer: true, wantSeen: []string{"jvm"}},
+		{name: "repeated", args: []string{guestbootstrap.ContainerFlag, guestbootstrap.ContainerFlag}, wantCode: 2},
+		{name: "repeated capability flag",
+			args:     []string{guestbootstrap.CapabilityFlag + "=jvm", guestbootstrap.CapabilityFlag + "=maestro-cli"},
+			wantCode: 2},
+		{name: "with a value", args: []string{guestbootstrap.ContainerFlag + "=true"}, wantCode: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			var seen []string
+			container := false
+			run := func(_ context.Context, _ io.Reader, config guestbootstrap.Config) error {
+				seen = config.RequiredCapabilities
+				container = config.Container
+				return nil
+			}
+			if code := execute(test.args, strings.NewReader("jit"), &stderr, run); code != test.wantCode {
+				t.Fatalf("execute(%v) = %d, want %d (stderr %q)", test.args, code, test.wantCode, stderr.String())
+			}
+			if container != test.wantContainer {
+				t.Fatalf("container guest = %v, want %v", container, test.wantContainer)
 			}
 			if strings.Join(seen, ",") != strings.Join(test.wantSeen, ",") {
 				t.Fatalf("required capabilities = %v, want %v", seen, test.wantSeen)

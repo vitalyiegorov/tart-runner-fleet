@@ -21,6 +21,20 @@ const (
 	defaultMaxJIT  = 1 << 20
 )
 
+// ContainerFlag is how the daemon tells a guest what it is running inside. Its
+// absence is a virtual machine, so every guest that predates the flag is invoked
+// with exactly the argument vector it always was.
+//
+// The guest is told rather than left to work it out. A container image built
+// from the Linux base carries `/usr/bin/systemd-run` and `/sbin/shutdown`
+// whether or not it has an init system — Playwright's dependency closure
+// installs the systemd package — so probing for the binaries answers a question
+// nobody asked, and `systemd-run --scope` then fails at runtime with "system has
+// not been booted with systemd as init system (PID 1)" long after the daemon
+// stopped being able to explain it (issue #273). Only the side that created the
+// guest knows what it created, and that side is `internal/daemon`.
+const ContainerFlag = "--container"
+
 var (
 	ErrInput      = errors.New("invalid runner bootstrap input")
 	ErrFilesystem = errors.New("runner bootstrap filesystem validation failed")
@@ -43,6 +57,12 @@ type Config struct {
 	// ever uses; the field exists so the check is testable without writing to an
 	// absolute system path.
 	CapabilityManifestPath string
+	// Container is what kind of guest this is, as stated by the daemon that made
+	// it (ContainerFlag). False is a virtual machine: an init system to place the
+	// runner under and a power switch to press when it exits, which is ADR 0010.
+	// True is a container: neither exists, so the runner is started directly and
+	// the supervisor's own exit is the whole of the teardown.
+	Container bool
 }
 
 func (c Config) capabilityManifestPath() string {
@@ -58,6 +78,9 @@ type ProcessSpec struct {
 	Args []string
 	Env  []string
 	Log  *os.File
+	// Container carries Config.Container to the launcher, which is the only thing
+	// in this package that acts on the difference.
+	Container bool
 }
 
 type Process interface{ Release() error }
@@ -93,10 +116,11 @@ func (b Bootstrap) Run(ctx context.Context, stdin io.Reader, config Config) erro
 	defer func() { _ = log.Close() }()
 
 	process, err := b.Launcher.Start(ctx, ProcessSpec{
-		Path: validated.RunnerPath,
-		Dir:  validated.WorkDir,
-		Env:  childEnvironment(jit),
-		Log:  log,
+		Path:      validated.RunnerPath,
+		Dir:       validated.WorkDir,
+		Env:       childEnvironment(jit),
+		Log:       log,
+		Container: validated.Container,
 	})
 	if err != nil || process == nil {
 		return ErrStart
