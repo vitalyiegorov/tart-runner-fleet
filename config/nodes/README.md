@@ -39,7 +39,7 @@ result. That step is **not built**. When it lands, its rendered files belong in
 this directory, and the contract test above starts guarding them on the same
 commit with no edit to the test.
 
-## The two files here today
+## The three files here today
 
 `mac-mini.json` and `mac-studio.json` are hand-written examples that model the
 real topology: two nodes that both advertise `linux-xl` and `macos-maestro`,
@@ -64,6 +64,33 @@ its own floor on purpose: `fleet doctor` fails the `runner version` check there
 until the image is refreshed. Raising the floor is what an operator does when a
 new `actions/runner` release ships; it is stated per node so it can be raised
 without cutting a fleet release.
+
+`geekom.json` is node B — a GEEKOM A9 (Ryzen AI 9 HX 470, 12c/24t, ~27 GiB
+usable, x86_64) running Omarchy 4 — and it is the one file here that describes a
+machine that exists but is not yet serving anything. It is [`Phase 1 Part A` of
+`docs/MULTI_NODE_PLAN.md`](../../docs/MULTI_NODE_PLAN.md#part-a--the-day-the-geekom-arrives)
+written down: `macosBurst.enabled: false`, `hostBudget` stated explicitly, the
+Linux profile matrix, `executor.backend: podman` with `/dev/kvm` granted to the
+Android profile alone, and **no `github.scopes` entries at all**. The empty scope
+list is the point rather than an omission: ADR 0034 §2 gives a
+`(scope, scale-set name)` pair exactly one owner, mac-mini still owns every Linux
+scale set, and the migration that moves them (issue #200) is gated on the Android
+question of
+[`docs/MULTI_NODE_PLAN.md`](../../docs/MULTI_NODE_PLAN.md#android-is-the-load-bearing-migration).
+A node that owns nothing advertises nothing, so it can be committed today without
+racing mac-mini for a label.
+
+Two of its values are worth reading as the placeholders they are. Its
+`baseImageRunnerVersion` is the release the runner image *will* be built from —
+that image does not exist yet, so unlike the two Macs' it is aspirational rather
+than measured, and it must be re-measured the day the image is sealed. Its
+profile labels are ordinary aliases spelling `linux-amd64-<cpu>x<ramGiB>` rather
+than the canonical `trf-linux-amd64-*` names ADR 0034 §4 promises, because
+`config.guestArch` is still the package constant `arm64`: the canonical label
+derived for any profile today says `arm64`, and a configured
+`trf-linux-amd64-2x4` is refused as a label describing a vector it does not have.
+Giving that constant a per-node answer is code work Part B needs and this
+directory cannot do.
 
 The capability vocabulary these files draw from is documented at the seal step of
 [`docs/LINUX_BASE_IMAGE.md`](../../docs/LINUX_BASE_IMAGE.md) and

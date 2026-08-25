@@ -1,0 +1,33 @@
+{
+  "baseVm": "linux-runner-base-amd64",
+  "baseImageRunnerVersion": "2.336.0",
+  "runnerVersionFloor": "2.336.0",
+  "vmPrefix": "gha-linux",
+  "pollSeconds": 20,
+  "maxLinuxWhenMacosIdle": 3,
+  "maxLinuxCpu": 6,
+  "maxLinuxMemoryMb": 16384,
+  "hostBudget": { "cpu": 6, "memoryMb": 16384 },
+  "linuxReservationAgeSeconds": 300,
+  "minFreeDiskGb": 60,
+  "githubTimeoutSeconds": 15,
+  "tartControlTimeoutSeconds": 45,
+  "bootTimeoutSeconds": 180,
+  "linuxProfiles": [
+    { "id": "linux-2x4", "label": "linux-amd64-2x4", "cpu": 2, "memoryMb": 4096, "diskGb": 50 },
+    { "id": "linux-4x8", "label": "linux-amd64-4x8", "cpu": 4, "memoryMb": 8192, "diskGb": 50 }
+  ],
+  "executor": {
+    "backend": "podman",
+    "image": "ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08",
+    "kvmProfiles": ["linux-4x8"]
+  },
+  "macosBurst": { "enabled": false },
+  "github": {
+    "sessionOwner": "geekom",
+    "app": { "clientId": "", "keychainService": "", "keychainAccount": "" },
+    "installations": [{ "name": "personal", "installationId": 0 }],
+    "scopes": []
+  },
+  "targets": []
+}
