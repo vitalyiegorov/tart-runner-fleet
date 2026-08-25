@@ -328,12 +328,38 @@ func TestPodmanBootstrapsARunnerInAContainerWithNoInitSystem(t *testing.T) {
 		[]byte("#!/bin/sh\nprintf started > \"$(dirname \"$0\")/runner-started\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	started := filepath.Join(work, "runner-started")
+
+	// The guest helper resolves its work dir from os.UserHomeDir(), which reads
+	// $HOME inside the container exactly as podman set it for the image's own
+	// default user — /root for alpine, but /home/runner for the real runner
+	// image (USER runner, ENV HOME). Mounting the guest home anywhere else
+	// proves nothing about the image under test; it proves the test agrees
+	// with itself (issue #278).
+	guestHome, guestUID, guestGID := liveGuestIdentity(ctx, t, liveImage())
+	guestStarted := guestHome + "/actions-runner/runner-started"
+	// Rootless podman maps a non-root container user to a subordinate host UID
+	// that owns nothing this test just created on the host side, so that user
+	// cannot write into the bind-mounted home until it owns it. `podman
+	// unshare` performs the chown inside the same user namespace the container
+	// itself will run in, which is the one place host and container UIDs agree
+	// on what "the image's own user" means. That reassignment also strips this
+	// process's own access to the tree (alpine's root maps back to this host
+	// user; the runner image's non-root user does not), so cleanup and every
+	// later read of the guest's files go through podman, not the os package.
+	if output, err := exec.CommandContext(ctx, "podman", "unshare", "chown", "--recursive",
+		guestUID+":"+guestGID, home).CombinedOutput(); err != nil {
+		t.Fatalf("give the image's own user ownership of the guest home before mounting it: %v: %s", err, output)
+	}
+	t.Cleanup(func() {
+		if output, err := exec.Command("podman", "unshare", "rm", "-rf", home).CombinedOutput(); err != nil {
+			t.Errorf("clean up the guest home this test reassigned to the image's user: %v: %s", err, output)
+		}
+	})
 
 	removeLeftovers(t, liveBootstrapInstance)
 	t.Cleanup(func() { removeLeftovers(t, liveBootstrapInstance) })
 	create := exec.CommandContext(ctx, "podman", "run", "--detach", "--name", liveBootstrapInstance,
-		"--volume", home+":/root", "--volume", helper+":"+liveHelperPath+":ro",
+		"--volume", home+":"+guestHome, "--volume", helper+":"+liveHelperPath+":ro",
 		liveImage(), "sleep", "600")
 	if output, err := create.CombinedOutput(); err != nil {
 		t.Fatalf("start an idling container to bootstrap into: %v: %s", err, output)
@@ -345,8 +371,9 @@ func TestPodmanBootstrapsARunnerInAContainerWithNoInitSystem(t *testing.T) {
 	if err := execBootstrap(ctx); err == nil {
 		t.Error("a VM-mode bootstrap claimed success in a container with no init system")
 	}
-	if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("a refused bootstrap started the runner anyway: %v", err)
+	if err := exec.CommandContext(ctx, "podman", "exec", liveBootstrapInstance, "test", "-e",
+		guestStarted).Run(); err == nil {
+		t.Error("a refused bootstrap started the runner anyway")
 	}
 
 	if err := execBootstrap(ctx, guestbootstrap.ContainerFlag); err != nil {
@@ -354,7 +381,9 @@ func TestPodmanBootstrapsARunnerInAContainerWithNoInitSystem(t *testing.T) {
 	}
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if content, err := os.ReadFile(started); err == nil && string(content) == "started" {
+		output, err := exec.CommandContext(ctx, "podman", "exec", liveBootstrapInstance, "cat",
+			guestStarted).Output()
+		if err == nil && string(output) == "started" {
 			return
 		}
 		if !time.Now().Before(deadline) {
@@ -372,6 +401,41 @@ func execBootstrap(ctx context.Context, args ...string) error {
 	return lifecycle.ExecStdinRunner{Binary: podman.DefaultBinary}.Run(ctx,
 		strings.NewReader("not-a-real-jit-configuration\n"),
 		append([]string{"exec", "-i", liveBootstrapInstance, liveHelperPath}, args...)...)
+}
+
+// liveGuestIdentity asks the image itself which user it runs as and where
+// that user's home is, the same way the container this test is about to
+// build from it will resolve them: podman derives a fresh container's $HOME
+// and default user from the image's own USER and ENV directives, not from
+// anything this test could assume. A throwaway container from the same image
+// answers with podman's own resolution rather than this test re-implementing
+// the USER/ENV/passwd merge. A probe that cannot answer (no shell, pull
+// failure, unparseable output) defaults to the alpine-shaped identity, root
+// at /root, which is the one every image in this file used before issue #278.
+func liveGuestIdentity(ctx context.Context, t *testing.T, image string) (home, uid, gid string) {
+	t.Helper()
+	output, err := exec.CommandContext(ctx, "podman", "run", "--rm", "--entrypoint", "", image,
+		"sh", "-c", "echo \"$HOME\" && id -u && id -g").Output()
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if len(lines) == 3 && filepath.IsAbs(lines[0]) && filepath.Clean(lines[0]) == lines[0] &&
+			isDecimal(lines[1]) && isDecimal(lines[2]) {
+			return lines[0], lines[1], lines[2]
+		}
+	}
+	return "/root", "0", "0"
+}
+
+func isDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // buildBootstrapHelper builds the guest helper from this working tree, so the
