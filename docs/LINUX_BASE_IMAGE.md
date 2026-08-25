@@ -92,6 +92,11 @@ Every item is a code contract, not a preference. The file is the citation.
 | Locale is `C.UTF-8` | `runnerLocale("linux")` |
 | Root filesystem at least the profile's `diskGb` floor (50 GB by default) | [ADR 0006](adr/0006-per-profile-disk-floors.md) |
 
+The three rows about `sudo`, `shutdown`, and `systemd-run` are requirements of a
+**VM** guest. A container guest is bootstrapped with `--container` and requires
+none of them — see [Adapting this for geekom](#adapting-this-for-geekom-amd64-containers)
+and [ADR 0010's 2026-08-25 amendment](adr/0010-ephemeral-guest-shutdown.md).
+
 ### The daemon replaces PATH outright
 
 As on macOS, the runner process does not inherit the guest's login `PATH`.
@@ -1113,17 +1118,22 @@ Changes for amd64:
 
 Changes for containers, which are the substantive ones:
 
-- **`systemd-run` and the polkit rule do not apply.** An ordinary container has
-  no systemd. `MULTI_NODE_PLAN.md` already flags this as the one item of
-  Phase 2 that is image work rather than adapter work: the helper must launch
-  the runner and detach **without** `systemd-run`. Until that lands,
-  `internal/guestbootstrap/process.go`'s Linux default of
-  `/usr/bin/systemd-run` has to be made absent — `SystemdRunPath` is already a
-  `*string` for exactly this reason, and the launcher skips the wrapper when it
-  is empty.
+- **`systemd-run` and the polkit rule do not apply, and the image needs no shim
+  to say so.** An ordinary container has no systemd. This was once described
+  here as image work; it is not, and it never could have been. The daemon
+  invokes the helper as `podman exec -i <name>
+  /usr/local/libexec/tart-runner-fleet-bootstrap --container`, and that flag is
+  the whole of it: the launcher runs the runner directly, and neither
+  `systemd-run`, `sudo`, nor `shutdown` is required, probed, or executed. Do
+  **not** purge systemd from the image to try to reach this state — that was the
+  workaround before issue #273 and it fails the other way, because the launcher's
+  existence probes then refuse to start at all. Leave whatever
+  `playwright install-deps` installed exactly where it is; a container guest
+  never reads it.
 - **`sudo -n /sbin/shutdown -h now` has no meaning in a container.** ADR 0010's
   poweroff is a VM contract; the container equivalent is the supervisor exiting
-  and the runtime reaping the container.
+  and the daemon's drain and deletion reaping the container. No passwordless
+  `sudo` rule and no polkit rule belong in this image.
 - ADR 0006's `diskGb` floor is a Tart concept. A container's writable layer is
   bounded differently.
 - The image is built with a `Containerfile` and pinned by digest in a registry,

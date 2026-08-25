@@ -65,6 +65,40 @@ func TestBootstrapArgumentVectorIsUnchangedWithoutCapabilities(t *testing.T) {
 	}
 }
 
+// TestAContainerGuestIsToldSoOnItsArgumentVector is issue #273. A guest that has
+// no init system and no power switch cannot be asked to use either, and it is
+// the daemon — the only side that knows what it created — that says so. A guest
+// nobody told stays a virtual machine, byte for byte.
+func TestAContainerGuestIsToldSoOnItsArgumentVector(t *testing.T) {
+	tests := []struct {
+		name         string
+		container    bool
+		capabilities []string
+		wantArgs     []string
+	}{
+		{name: "a vm is invoked exactly as it always was",
+			wantArgs: []string{"exec", "-i", "trf-small-1", bootstrapHelper}},
+		{name: "a container", container: true,
+			wantArgs: []string{"exec", "-i", "trf-small-1", bootstrapHelper, guestbootstrap.ContainerFlag}},
+		{name: "a container that must also prove a capability", container: true,
+			capabilities: []string{"redroid-android"},
+			wantArgs: []string{"exec", "-i", "trf-small-1", bootstrapHelper,
+				guestbootstrap.CapabilityFlag + "=redroid-android", guestbootstrap.ContainerFlag}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &captureStdin{}
+			if err := (StdinBootstrapper{Runner: runner, ContainerGuest: test.container}).Bootstrap(
+				context.Background(), "trf-small-1", jitSecret(), test.capabilities); err != nil {
+				t.Fatalf("Bootstrap() = %v", err)
+			}
+			if strings.Join(runner.args, " ") != strings.Join(test.wantArgs, " ") {
+				t.Fatalf("argv = %q, want %q", runner.args, test.wantArgs)
+			}
+		})
+	}
+}
+
 // TestGuestCapabilityFailuresCarryAClosedReason is the ADR 0020 half: the guest
 // answered, the answer was no, and the durable operation says which of the two
 // opposite repairs the operator needs — without echoing a byte the child wrote.

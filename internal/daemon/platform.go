@@ -154,8 +154,16 @@ func linuxPlatform() platform {
 			// The JIT configuration is piped into `podman exec -i <name> <helper>`
 			// on stdin and never appears in argv or environment, exactly as it is
 			// piped into `tart exec` on node A.
+			//
+			// What does differ is the guest: a container has no init system to place
+			// the runner under and no machine to power off, so this node tells the
+			// helper so. Nothing else can. The guest cannot answer the question from
+			// its own filesystem — an image that installed the systemd package has
+			// both binaries and still no PID 1 to use them (issue #273) — and no
+			// layer between here and the guest is allowed to know what backend made
+			// it (ADR 0034).
 			return lifecycle.StdinBootstrapper{Runner: lifecycle.ExecStdinRunner{Binary: podmanBinary(cfg)},
-				Timeout: cfg.Timeouts.Tart}
+				Timeout: cfg.Timeouts.Tart, ContainerGuest: true}
 		},
 		linuxImage: func(cfg config.Config) string {
 			if !runsContainers(cfg) {
