@@ -778,6 +778,60 @@ macOS is unaffected: the LaunchAgent twins express no sandbox, and a Tart guest
 is started by a `tart` process the agent forks the same way.
 
 
+## Amendment 2026-08-25c: `/dev/shm` is part of the vector the profile charges (issue #284)
+
+*Amendment 2026-08-04* said the container's argument vector is the whole of what
+a job is allowed to do, and it sized that vector with `--cpus` and `--memory`
+from the profile. It sized one resource by omission: `/dev/shm`. Podman mounts a
+64 MB tmpfs there whatever the profile says, and that number is a Docker default
+from 2013 that every browser vendor has since outgrown. A Chromium renderer puts
+its shared buffers in `/dev/shm`; when it runs out, the browser does not degrade,
+it loses the renderer, and the job sees `Protocol error
+(Runtime.callFunctionOn): Internal server error, session closed`. Measured:
+suuudokuuu's Playwright chromium suite failed that way on node B on both the
+attempt and the retry while the identical job was green six consecutive times on
+`ubuntu-latest`. Every browser suite in the wave-1 migration — suuudokuuu
+`web-e2e`, `knee-doctor`, `hotel-provence` — sits behind it.
+
+The rule: **a container's `/dev/shm` is a quarter of the memory its profile was
+charged, and never smaller than the default it replaces.**
+
+It is derived and not configured, for the same reason ADR 0032 derives a
+canonical label rather than accepting one: a second place to state the same
+memory is a second place for it to be wrong. A quarter, because `/dev/shm` is
+not free memory the fleet found lying around — tmpfs pages are charged to the
+container's own memory cgroup, so a job that fills a `/dev/shm` sized at the
+whole vector is OOM-killed instead of told it ran out of shared memory. The
+quarter leaves three for the processes doing the filling, and it scales with the
+shape the workflow asked for by name: `trf-linux-amd64-2x4` gets 1 GiB,
+`4x8` gets 2 GiB, `8x16` gets 4 GiB. The floor is podman's own 64 MB, so a
+vector too small to have a usable quarter cannot end up worse off than one this
+adapter never sized at all.
+
+Nothing about the host envelope changes. `hostBudget` (§6) already counts this
+memory, because the container's limit already counted it; what changes is only
+how much of its own limit a job may spend on shared memory instead of heap. The
+scheduler reads the configured vector and continues to; no admission rule, no
+label, and no capacity arithmetic learns a new field.
+
+`internal/adapters/podman.shmSizeMB` is the one statement of the rule, the create
+vector audit in `internal/adapters/podman/podman_test.go` pins it in argv, and
+`tests/integration/podman_live_test.go` proves against a real rootless podman
+that the tmpfs inside the container is the size the vector implies — the last
+being the assertion no fake can make, and the one that fails if podman ever
+reinterprets the flag.
+
+**Not fixed here, and it is workflow-side.** `playwright install --with-deps`
+cannot work in these containers: it shells `sudo`, and the container the fleet
+creates refuses to grant privileges (the same `no_new_privileges` property that
+*Amendment 2026-08-25b* describes as the isolation boundary). Consumer workflows
+must install browsers without `--with-deps`; the image already carries the
+system dependencies, and chromium and webkit were verified to launch from it
+once `/dev/shm` is adequate. That is a repository-side change in the migrating
+workflows, not a fleet defect, and it is recorded here so the next migration
+does not rediscover it as an outage.
+
+
 ## Not addressed here
 
 **Whether the container adapter works against a real container runtime is not

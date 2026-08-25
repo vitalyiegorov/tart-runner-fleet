@@ -643,11 +643,11 @@ for a machine that has not arrived.
 
 | Claim | Covered by | Where it runs |
 | --- | --- | --- |
-| Every verb's argument vector, every error classification, every re-observation after a failed command, the no-adoption rule, the `/dev/kvm` grant by name prefix | table-driven unit tests over a fake `executor.CommandRunner` | every machine, every commit |
+| Every verb's argument vector, every error classification, every re-observation after a failed command, the no-adoption rule, the `/dev/kvm` grant by name prefix, the `/dev/shm` size derived from the profile's memory | table-driven unit tests over a fake `executor.CommandRunner` | every machine, every commit |
 | The adapter is sufficient to provision and drain a whole runner through the real `ProvisionExecutor` and `DrainExecutor` | the executor-port conformance harness in `tests/contract`, which drives every shipped backend | every machine, every commit |
 | The wiring: a Linux node with an `executor` block gets Podman in all five constructors, and one without it stays observe-only | `internal/daemon/platform_test.go` | every machine, every commit |
 | A configured-but-absent runtime refuses to start the node | `internal/daemon` startup preflight test | every machine, every commit |
-| **That podman accepts these argument vectors, prints this JSON, reports these states, carries a secret in over `podman exec -i`, and honours `--device /dev/kvm`** | `scripts/podman-smoke.sh` driving `tests/integration/podman_live_test.go` | **nowhere automatically, today** |
+| **That podman accepts these argument vectors, prints this JSON, reports these states, carries a secret in over `podman exec -i`, honours `--device /dev/kvm`, and mounts the `/dev/shm` the vector asked for** | `scripts/podman-smoke.sh` driving `tests/integration/podman_live_test.go` | **nowhere automatically, today** |
 
 The last row is the gap. The fleet's own CI runs on its Linux scale sets, which
 are Tart guests whose image ships no container runtime, and installing one per

@@ -1134,6 +1134,15 @@ Changes for containers, which are the substantive ones:
   existence probes then refuse to start at all. Leave whatever
   `playwright install-deps` installed exactly where it is; a container guest
   never reads it.
+- **`playwright install --with-deps` cannot run in the container, and does not
+  need to.** The flag shells `sudo`, and the container the fleet creates grants
+  no new privileges, so the step fails rather than installing anything. The
+  system dependencies are already in the image (`playwright-system-deps`), so a
+  migrating workflow installs browsers with a plain
+  `npx playwright install chromium` and nothing is missing. Chromium and WebKit
+  were verified to launch from this image once `/dev/shm` is sized from the
+  profile rather than left at podman's 64 MB default (ADR 0034, amendment
+  2026-08-25c, issue #284).
 - **`sudo -n /sbin/shutdown -h now` has no meaning in a container.** ADR 0010's
   poweroff is a VM contract; the container equivalent is the supervisor exiting
   and the daemon's drain and deletion reaping the container. No passwordless
