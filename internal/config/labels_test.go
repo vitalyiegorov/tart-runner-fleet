@@ -14,7 +14,7 @@ func TestCanonicalLabelDescribesTheVectorAndNothingElse(t *testing.T) {
 		{ID: "linux-8x16", Label: "trf-linux-arm64-8x16", CPU: 8, MemoryMiB: 16384},
 	}
 	for _, profile := range linux {
-		set, err := profile.labelSet(canonicalLinuxOS)
+		set, err := profile.labelSet(canonicalLinuxOS, defaultGuestArch)
 		if err != nil {
 			t.Fatalf("labelSet(%s) = %v", profile.ID, err)
 		}
@@ -26,7 +26,7 @@ func TestCanonicalLabelDescribesTheVectorAndNothingElse(t *testing.T) {
 		}
 	}
 	macOS := Profile{ID: "macos-4x7", Label: "trf-macos-arm64-4x7", CPU: 4, MemoryMiB: 7168, MaxActive: 2}
-	set, err := macOS.labelSet(canonicalMacOS)
+	set, err := macOS.labelSet(canonicalMacOS, defaultGuestArch)
 	if err != nil || set.Canonical != "trf-macos-arm64-4x7" {
 		t.Fatalf("macOS canonical label = %q, %v", set.Canonical, err)
 	}
@@ -35,7 +35,7 @@ func TestCanonicalLabelDescribesTheVectorAndNothingElse(t *testing.T) {
 func TestLegacyLabelBecomesAnAliasOfTheCanonicalLabel(t *testing.T) {
 	profile := Profile{ID: "large", Label: "linux-large", Aliases: []string{"linux-burst", "LINUX-LARGE"},
 		CPU: 4, MemoryMiB: 8192}
-	set, err := profile.labelSet(canonicalLinuxOS)
+	set, err := profile.labelSet(canonicalLinuxOS, defaultGuestArch)
 	if err != nil {
 		t.Fatalf("labelSet() = %v", err)
 	}
@@ -82,7 +82,7 @@ func TestConfigurationCannotNameAShapeItDoesNotProvision(t *testing.T) {
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := test.profile.labelSet(canonicalLinuxOS)
+			_, err := test.profile.labelSet(canonicalLinuxOS, defaultGuestArch)
 			if err == nil || !strings.Contains(err.Error(), test.fragment) {
 				t.Fatalf("labelSet() error = %v, want one mentioning %q", err, test.fragment)
 			}
@@ -202,6 +202,117 @@ func TestScopeExposesOnlyTheVariantsItLists(t *testing.T) {
 	if err := cfg.ValidateAuthority(); err != nil {
 		t.Fatalf("ValidateAuthority() = %v, want a canonical route label to be accepted", err)
 	}
+}
+
+func TestANodeNamesItsShapesInTheArchitectureItBoots(t *testing.T) {
+	cfg := amd64LinuxNode()
+	// The node writes the canonical label it expects to advertise. Before the
+	// architecture was declarable this was refused as a label describing a
+	// vector it does not have, which is what issue #269 reported.
+	cfg.Linux.Profiles[1].Label = "trf-linux-amd64-2x4"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want an amd64 node to be allowed to name its own shapes", err)
+	}
+	sets := cfg.ProfileLabelSets()
+	want := map[string]string{
+		"small": "trf-linux-amd64-1x2", "medium": "trf-linux-amd64-2x4", "large": "trf-linux-amd64-4x8",
+	}
+	for id, canonical := range want {
+		set, exists := sets[id]
+		if !exists || set.Canonical != canonical {
+			t.Fatalf("profile %s canonical label = %#v, want %q", id, set, canonical)
+		}
+	}
+	if aliases := sets["medium"].Aliases; len(aliases) != 0 {
+		t.Fatalf("a canonically named profile needs no alias, got %#v", aliases)
+	}
+}
+
+func TestAnUndeclaredGuestArchitectureIsTheAppleSiliconOneEveryNodeHadBefore(t *testing.T) {
+	cfg := Default()
+	if cfg.GuestArch != "" || cfg.GuestArchOrDefault() != guestArchARM64 {
+		t.Fatalf("guest architecture = %q / %q, want an absent declaration to mean arm64",
+			cfg.GuestArch, cfg.GuestArchOrDefault())
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	sets := cfg.ProfileLabelSets()
+	if sets["medium"].Canonical != "trf-linux-arm64-2x4" || sets["maestro"].Canonical != "trf-macos-arm64-4x7" {
+		t.Fatalf("label sets = %#v, want the arm64 names this fleet already advertises", sets)
+	}
+}
+
+func TestGuestArchitectureIsAClosedVocabulary(t *testing.T) {
+	tests := map[string]struct {
+		mutate   func(*Config)
+		fragment string
+	}{
+		// One spelling per architecture, because an arch-pinned consumer names a
+		// label: a node spelling it `x86_64` would publish a second name for one
+		// machine and no workflow could ask for both.
+		"another spelling of the same machine": {
+			mutate:   func(c *Config) { c.GuestArch = "x86_64" },
+			fragment: `guest architecture "x86_64" is not one of "arm64" or "amd64"`,
+		},
+		"a guest architecture nothing boots": {
+			mutate:   func(c *Config) { c.GuestArch = "riscv64" },
+			fragment: "is not one of",
+		},
+		// A macOS guest runs on Apple's Virtualization framework and is Apple
+		// silicon by construction, so `trf-macos-amd64-*` would be a name for a
+		// machine that cannot exist.
+		"macOS burst on a node that is not Apple silicon": {
+			mutate:   func(c *Config) { c.GuestArch = guestArchAMD64; c.MacOS.Enabled = true },
+			fragment: "macOS guest is Apple silicon",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			cfg := amd64LinuxNode()
+			test.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), test.fragment) {
+				t.Fatalf("Validate() error = %v, want one mentioning %q", err, test.fragment)
+			}
+		})
+	}
+}
+
+func TestGuestArchitectureSurvivesDecodeEncodeAndClone(t *testing.T) {
+	cfg := amd64LinuxNode()
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode() = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"guestArch": "amd64"`) {
+		t.Fatalf("encoded configuration dropped the declared architecture:\n%s", encoded.String())
+	}
+	round, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode(Encode()) = %v", err)
+	}
+	if round.GuestArch != guestArchAMD64 || round.Clone().GuestArch != guestArchAMD64 {
+		t.Fatalf("round-tripped architecture = %q", round.GuestArch)
+	}
+	// A node that declares none encodes no key at all, so a release older than
+	// this one still decodes the file it has always decoded.
+	var arm bytes.Buffer
+	if err := Encode(&arm, Default()); err != nil {
+		t.Fatalf("Encode() = %v", err)
+	}
+	if strings.Contains(arm.String(), "guestArch") {
+		t.Fatalf("an undeclared architecture wrote a key:\n%s", arm.String())
+	}
+}
+
+// amd64LinuxNode is node B of ADR 0034: an x86_64 machine that boots Linux
+// guests and no macOS ones.
+func amd64LinuxNode() Config {
+	cfg := Default()
+	cfg.GuestArch = guestArchAMD64
+	cfg.MacOS.Enabled = false
+	return cfg
 }
 
 func decodeExampleConfig(t *testing.T) Config {
