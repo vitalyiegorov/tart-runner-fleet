@@ -251,3 +251,83 @@ ADRs listed under Status.
   canonical label and aliases attached to the scale-set spec.
 - `internal/app`: a binding built from a role-named configuration matches jobs
   requesting either name, and refuses a shape it does not serve.
+
+## Amendment 2026-08-25: the architecture component is declared, not constant (issue #269)
+
+§1 of this record says `arch` "is `arm64`, because Tart builds on Apple's
+Virtualization framework and runs only on Apple silicon". That was true of every
+node the fleet had when it was written, and it stopped being true the day node B
+arrived: a GEEKOM A9 running Linux guests on x86_64 through the container
+backend of ADR 0034's *Amendment 2026-08-04*.
+
+[ADR 0034](0034-a-node-serves-the-scale-sets-it-owns.md) §4 already decided what
+happens then — the architecture "stops being the constant `arm64` in
+`internal/config/labels.go:23` and becomes a property of the node's
+configuration, still derived and still unable to lie" — and this amendment
+records that it is now built, because it is *this* record's §1 whose text was
+wrong until it was.
+
+### What changed
+
+A node declares one optional top-level key:
+
+```json
+"guestArch": "amd64"
+```
+
+It names the architecture of every guest that node boots, and it is the `arch`
+component of every canonical label the node derives. Absent means `arm64`, so
+mac-mini and mac-studio derive exactly the labels they already advertise and
+their files encode byte-for-byte what they encoded before. Node B declares
+`amd64` and derives `trf-linux-amd64-2x4` and `trf-linux-amd64-4x8` — the names
+`docs/MULTI_NODE_PLAN.md` has assumed since #139, and which were unwritable
+until now: a configured `trf-linux-amd64-2x4` was refused as a label describing
+a vector it does not have, which is what issue #269 reported and what
+`config/nodes/geekom.json` worked around with plain `linux-amd64-*` aliases.
+
+Nothing else about the derivation moves. The label is still computed from the
+configured vector, an alias that matches the canonical grammar must still equal
+the derived label, and the scheduler still reads the vector and never a name.
+
+### Two things the key may not say
+
+- **The vocabulary is closed: `arm64` or `amd64`, one spelling each.** An
+  arch-pinned consumer asks for a canonical label *by name*, so a node spelling
+  the same machine `x86_64` would publish a second name for one architecture and
+  no workflow could ask for both. A value outside the vocabulary is a
+  configuration error, not a new name.
+- **A node that boots macOS guests must declare `arm64`.** Tart's macOS guests
+  run on Apple's Virtualization framework and are Apple silicon by construction,
+  so `macosBurst.enabled` on a node declaring `amd64` is refused: `trf-macos-amd64-*`
+  would name a machine that cannot exist. This is the same rule as the vector
+  check — a derived label may not describe something the node does not provision.
+
+### Why declared rather than probed
+
+`runtime.GOARCH` is available in the daemon and is *not* what the label should
+read. `fleet config validate` decodes a file and never touches a host, node
+configurations are written, rendered, and checked on machines other than the one
+that will run them (ADR 0034 §5), and the deterministic simulation has no host
+at all. A probed value would make one node's labels underivable anywhere else,
+which is exactly the property the render step and the cross-node parity gate of
+ADR 0034's *Amendment 2026-08-04c* depend on. The declaration is checked the way
+every other declaration in that amendment is: by a gate over `config/nodes/`,
+not by asking the machine.
+
+The residual risk is stated plainly: an operator who declares `amd64` on an
+Apple-silicon node gets labels that lie about architecture, and no configuration
+gate can catch it. It is the same class of risk as `baseImageCapabilities`, and
+smaller — a node's architecture is not a thing that drifts after an image
+rebuild.
+
+### Evidence
+
+- `internal/config`: an amd64 node derives `trf-linux-amd64-*` for every profile
+  and accepts the configured canonical label that used to be refused; an absent
+  declaration still derives `trf-linux-arm64-*` for both platforms; a spelling
+  outside the vocabulary and a macOS burst on a non-Apple-silicon node are both
+  rejected; the declaration survives decode, encode, and clone, and a node that
+  declares none writes no key.
+- `tests/contract`: every file in `config/nodes/` derives canonical labels in the
+  architecture that node declares, which is live over `geekom.json` today and
+  goes on holding when ADR 0034 §5's render step writes the rest.

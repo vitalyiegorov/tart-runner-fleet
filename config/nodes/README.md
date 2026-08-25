@@ -80,17 +80,19 @@ question of
 A node that owns nothing advertises nothing, so it can be committed today without
 racing mac-mini for a label.
 
-Two of its values are worth reading as the placeholders they are. Its
+One of its values is worth reading as the placeholder it is: its
 `baseImageRunnerVersion` is the release the runner image *will* be built from —
 that image does not exist yet, so unlike the two Macs' it is aspirational rather
-than measured, and it must be re-measured the day the image is sealed. Its
-profile labels are ordinary aliases spelling `linux-amd64-<cpu>x<ramGiB>` rather
-than the canonical `trf-linux-amd64-*` names ADR 0034 §4 promises, because
-`config.guestArch` is still the package constant `arm64`: the canonical label
-derived for any profile today says `arm64`, and a configured
-`trf-linux-amd64-2x4` is refused as a label describing a vector it does not have.
-Giving that constant a per-node answer is code work Part B needs and this
-directory cannot do.
+than measured, and it must be re-measured the day the image is sealed.
+
+Its `guestArch` is `amd64`, which is what makes its profile labels the canonical
+`trf-linux-amd64-2x4` and `trf-linux-amd64-4x8` that ADR 0034 §4 promises. The
+key is new (issue #269, ADR 0032's amendment of 2026-08-25); before it, the
+architecture component was the package constant `arm64` and a configured
+`trf-linux-amd64-2x4` was refused as a label describing a vector it does not
+have, so this file shipped with plain `linux-amd64-*` aliases instead. Omitting
+the key means `arm64`, which is why `mac-mini.json` and `mac-studio.json` do not
+carry it.
 
 The capability vocabulary these files draw from is documented at the seal step of
 [`docs/LINUX_BASE_IMAGE.md`](../../docs/LINUX_BASE_IMAGE.md) and

@@ -105,6 +105,17 @@ Aliases are the retired role and tier names. They resolve to the same profile
 and are advertised on the same scale set, so a workflow that still asks for
 `linux-large` keeps routing while it migrates to `trf-linux-arm64-4x8`.
 
+`guestArch` is the `arch` component of every label this node derives: the
+architecture of the guests it actually boots. Omit it for `arm64`, which is what
+an Apple-silicon node running Tart boots and what the matrix above shows. An
+x86_64 node declares `"guestArch": "amd64"` at the top level and derives
+`trf-linux-amd64-2x4` for the same 2×4 vector. The vocabulary is exactly `arm64`
+and `amd64` — one spelling per architecture, because a workflow asks for a
+canonical label by name — and a node that declares `amd64` may not enable
+`macosBurst`, since a macOS guest is Apple silicon by construction. See
+[`ADR 0032`](docs/adr/0032-resource-explicit-runner-labels.md) and
+[`ADR 0034`](docs/adr/0034-a-node-serves-the-scale-sets-it-owns.md) §4.
+
 Linux and macOS share one CPU, memory, slot, repository, and host-pressure
 envelope. A 4×7 macOS VM may therefore run beside Linux jobs when their combined
 resource vectors fit, and two of them may run together. Values come from

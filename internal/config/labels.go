@@ -16,11 +16,25 @@ import (
 // therefore to the same scale set (ADR 0032).
 const canonicalLabelPrefix = "trf"
 
-// guestArch is the architecture component of every canonical label. Tart builds
-// on Apple's Virtualization framework and runs only on Apple silicon, so every
-// guest it boots is arm64. The component is spelled out anyway so a host of a
-// different architecture could never advertise its shapes under these names.
-const guestArch = "arm64"
+// guestArchARM64 and guestArchAMD64 are the architecture component of every
+// canonical label, and the whole vocabulary a node may declare. ADR 0032 spelled
+// the component out "so a host of another architecture could never advertise its
+// shapes under these names", and ADR 0034 §4 made it a property of the node: a
+// Tart host builds on Apple's Virtualization framework and boots arm64 guests, a
+// container node on x86_64 runs amd64 ones.
+//
+// The vocabulary is closed on purpose. An arch-pinned consumer asks for a
+// canonical label by name, so a node spelling the same machine `x86_64` would
+// publish a second name for one architecture and no workflow could ask for both.
+const (
+	guestArchARM64 = "arm64"
+	guestArchAMD64 = "amd64"
+)
+
+// defaultGuestArch is what a node that declares nothing boots. It is arm64
+// because every node this fleet has ever run is Apple silicon, so an absent
+// declaration keeps deriving the labels those nodes already advertise.
+const defaultGuestArch = guestArchARM64
 
 // canonicalLinuxOS and canonicalMacOS are the operating-system components of a
 // canonical label. They are lower-case and stable; `runs-on` matching is
@@ -102,24 +116,49 @@ func (s LabelSet) Contains(label string) bool {
 // canonicalLabel derives the one label that describes a vector exactly. Memory
 // must be a whole number of GiB: a label that rounded would be a label that
 // lies, and every shape the fleet has ever shipped is already GiB-aligned.
-func canonicalLabel(operatingSystem string, resources Resources) (string, error) {
+func canonicalLabel(operatingSystem, architecture string, resources Resources) (string, error) {
 	if resources.CPU <= 0 || resources.MemoryMiB <= 0 {
 		return "", errors.New("a profile needs a positive CPU and memory vector before it can be named")
 	}
 	if resources.MemoryMiB%mibPerGiB != 0 {
 		return "", fmt.Errorf("memory %d MiB is not a whole GiB, so no canonical label describes it exactly", resources.MemoryMiB)
 	}
-	return fmt.Sprintf("%s-%s-%s-%dx%d", canonicalLabelPrefix, operatingSystem, guestArch,
+	return fmt.Sprintf("%s-%s-%s-%dx%d", canonicalLabelPrefix, operatingSystem, architecture,
 		resources.CPU, resources.MemoryMiB/mibPerGiB), nil
+}
+
+// GuestArchOrDefault is the architecture of every guest this node boots, and so
+// the architecture component of every label it derives. It is always populated:
+// a node that declares nothing boots Apple silicon, which is what every node
+// this fleet has run does.
+func (c Config) GuestArchOrDefault() string {
+	if arch := strings.TrimSpace(c.GuestArch); arch != "" {
+		return arch
+	}
+	return defaultGuestArch
+}
+
+// validateGuestArch refuses an architecture no node boots and a macOS burst on a
+// node that is not Apple silicon. Both are the same rule as the vector check
+// below: a derived label may not name a machine that does not exist.
+func (c Config) validateGuestArch() error {
+	arch := c.GuestArchOrDefault()
+	if arch != guestArchARM64 && arch != guestArchAMD64 {
+		return fmt.Errorf("guest architecture %q is not one of %q or %q", c.GuestArch, guestArchARM64, guestArchAMD64)
+	}
+	if c.MacOS.Enabled && arch != guestArchARM64 {
+		return fmt.Errorf("a macOS guest is Apple silicon by construction, so a node booting %s guests cannot enable macosBurst", arch)
+	}
+	return nil
 }
 
 // labelSet derives one profile's complete label set and proves the
 // configuration is not lying about its shape. The configured `label` is the
 // first alias, so an existing file keeps routing exactly as it did while the
 // canonical label is attached beside it.
-func (p Profile) labelSet(operatingSystem string) (LabelSet, error) {
+func (p Profile) labelSet(operatingSystem, architecture string) (LabelSet, error) {
 	profile := p.normalized()
-	canonical, err := canonicalLabel(operatingSystem, profile.Resources)
+	canonical, err := canonicalLabel(operatingSystem, architecture, profile.Resources)
 	if err != nil {
 		return LabelSet{}, fmt.Errorf("profile %s: %w", profile.ID, err)
 	}
@@ -166,8 +205,9 @@ func (c Config) ProfileLabelSets() map[string]LabelSet {
 func (c Config) profileLabelSets() (map[string]LabelSet, error) {
 	sets := make(map[string]LabelSet, len(c.Linux.Profiles)+2)
 	claimed := make(map[string]string, len(c.Linux.Profiles)+2)
+	arch := c.GuestArchOrDefault()
 	for _, profile := range c.Linux.Profiles {
-		if err := addLabelSet(sets, claimed, canonicalLinuxOS, profile); err != nil {
+		if err := addLabelSet(sets, claimed, canonicalLinuxOS, arch, profile); err != nil {
 			return sets, err
 		}
 	}
@@ -175,7 +215,7 @@ func (c Config) profileLabelSets() (map[string]LabelSet, error) {
 		return sets, nil
 	}
 	for _, profile := range []Profile{c.MacOS.Builder, c.MacOS.Maestro} {
-		if err := addLabelSet(sets, claimed, canonicalMacOS, profile); err != nil {
+		if err := addLabelSet(sets, claimed, canonicalMacOS, arch, profile); err != nil {
 			return sets, err
 		}
 	}
@@ -185,8 +225,9 @@ func (c Config) profileLabelSets() (map[string]LabelSet, error) {
 // addLabelSet records one profile's labels and rejects a vocabulary collision.
 // Two profiles that answer to the same name would make routing ambiguous long
 // before GitHub ever saw the duplicate.
-func addLabelSet(sets map[string]LabelSet, claimed map[string]string, operatingSystem string, profile Profile) error {
-	set, err := profile.labelSet(operatingSystem)
+func addLabelSet(sets map[string]LabelSet, claimed map[string]string, operatingSystem, architecture string,
+	profile Profile) error {
+	set, err := profile.labelSet(operatingSystem, architecture)
 	if err != nil {
 		return err
 	}

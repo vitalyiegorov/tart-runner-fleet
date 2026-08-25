@@ -164,8 +164,10 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 		"./cmd/tart-runner-fleet-bootstrap",
 		"tart-runner-fleet-bootstrap-darwin-arm64.cdx.json",
 		"tart-runner-fleet-bootstrap-linux-arm64.cdx.json",
+		"tart-runner-fleet-bootstrap-linux-amd64.cdx.json",
 		"tart-runner-fleet-bootstrap-darwin-arm64",
 		"tart-runner-fleet-bootstrap-linux-arm64",
+		"tart-runner-fleet-bootstrap-linux-amd64",
 		"com.vitalyiegorov.tart-runner-fleet.authority.plist",
 		"com.vitalyiegorov.tart-runner-fleet.canary.plist",
 		"com.vitalyiegorov.tart-runner-fleet.shadow.plist",
@@ -197,6 +199,19 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 			t.Errorf("release must publish the linux/amd64 node's generation: missing %q", required)
 		}
 	}
+	// Issue #272: the geekom image build (docs/LINUX_BASE_IMAGE.md) installs the
+	// guest bootstrap helper from a released, checksummed
+	// `tart-runner-fleet-bootstrap-linux-amd64` asset, so the matrix that builds
+	// the other two bootstrap variants must build this one too, from the same
+	// double-build compare and in both archives' shared bootstrap set.
+	for _, required := range []string{
+		"tart-runner-fleet-bootstrap-linux-amd64",
+		"tart-runner-fleet-bootstrap-linux-amd64.cdx.json",
+	} {
+		if !strings.Contains(string(buildScript), required) {
+			t.Errorf("release must build and archive the geekom guest bootstrap helper: missing %q", required)
+		}
+	}
 
 	mainRelease, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
@@ -205,8 +220,10 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 	for _, required := range []string{
 		"tart-runner-fleet-bootstrap-darwin-arm64",
 		"tart-runner-fleet-bootstrap-linux-arm64",
+		"tart-runner-fleet-bootstrap-linux-amd64",
 		"tart-runner-fleet-bootstrap-darwin-arm64.cdx.json",
 		"tart-runner-fleet-bootstrap-linux-arm64.cdx.json",
+		"tart-runner-fleet-bootstrap-linux-amd64.cdx.json",
 		"com.vitalyiegorov.tart-runner-fleet.authority.plist",
 		"com.vitalyiegorov.tart-runner-fleet.canary.plist",
 		"com.vitalyiegorov.tart-runner-fleet.shadow.plist",

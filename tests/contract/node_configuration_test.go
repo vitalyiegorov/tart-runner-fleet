@@ -100,6 +100,31 @@ func TestEveryNodeDeclaresTheRunnerVersionItsImagesCarry(t *testing.T) {
 	}
 }
 
+// TestEveryNodeNamesItsShapesInTheArchitectureItBoots is the repository half of
+// ADR 0032's amendment of 2026-08-25: the `arch` component of a canonical label
+// is the node's declaration, so a node that boots x86_64 guests advertises
+// `trf-linux-amd64-*` and an Apple-silicon node goes on advertising
+// `trf-linux-arm64-*`.
+//
+// Like the rules above it, this reads whatever `config/nodes/` holds, so the day
+// ADR 0034 §5's render step writes real files here it starts guarding them with
+// no edit.
+func TestEveryNodeNamesItsShapesInTheArchitectureItBoots(t *testing.T) {
+	nodes := loadNodeConfigs(t, filepath.Join(documentationRoot(t), "config", "nodes"))
+	if len(nodes) == 0 {
+		t.Skip("config/nodes holds no node configurations yet")
+	}
+	for _, node := range nodes {
+		arch := node.Config.GuestArchOrDefault()
+		for id, set := range node.Config.ProfileLabelSets() {
+			if !strings.Contains(set.Canonical, "-"+arch+"-") {
+				t.Errorf("%s profile %s is named %q, which does not state the %s guests the node boots",
+					node.Node, id, set.Canonical, arch)
+			}
+		}
+	}
+}
+
 // TestSharedLabelWithUnequalCapabilitiesIsRejected replays the 2026-08-04
 // incident as configuration.
 //
