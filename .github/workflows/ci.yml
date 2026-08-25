@@ -49,7 +49,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, linux-tiered, linux-small]
+    runs-on: [self-hosted, trf-linux-amd64-2x4]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -72,7 +72,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, linux-tiered, linux-medium]
+    runs-on: [self-hosted, trf-linux-amd64-2x4]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
