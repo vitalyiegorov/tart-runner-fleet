@@ -144,6 +144,14 @@ the two stages of the bring-up.
 | `kvmProfiles` | The profile IDs whose containers get `--device /dev/kvm`. Per ADR 0034 this is the Android emulator profile and nothing else; a profile named here that the node does not declare is a refused configuration. |
 | `holdCommand` | Optional. What keeps a created container alive and idle until the JIT bootstrap runs inside it; the default is `sleep infinity`. |
 
+A container's resources are the profile's and are never configured twice here.
+`--cpus` and `--memory` come from the profile's vector, and so does `/dev/shm`:
+it is a quarter of that memory, floored at podman's own 64 MB default. Podman
+would otherwise mount 64 MB whatever the profile says, which is where a Chromium
+renderer dies mid-test (ADR 0034, amendment 2026-08-25c, issue #284). A profile
+that needs a larger `/dev/shm` asks for it by being a larger profile: a
+`runs-on` of `trf-linux-amd64-4x8` gets 2 GiB of it.
+
 The runtime must be **rootless**. The daemon shells `podman info` before it
 starts in any mutating mode and refuses a runtime that is absent, unusable, or
 running as root — approved third-party code executes in these containers, and a

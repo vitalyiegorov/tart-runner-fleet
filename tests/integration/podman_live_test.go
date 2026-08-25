@@ -239,6 +239,37 @@ func TestPodmanReapRefusesRunningWorkAndRemovesStoppedWork(t *testing.T) {
 	}
 }
 
+// TestPodmanSizesSharedMemoryFromTheVector is the /dev/shm rule against a real
+// runtime, and the assertion no fake can make: that podman accepts the flag and
+// that the tmpfs inside the container is actually the size the vector implies.
+// Podman's unsized default is 64 MB, where the Chromium renderers of issue #284
+// die; a quarter of this spec's 2048 MiB is 512 MiB, which /proc/mounts reports
+// in kibibytes.
+func TestPodmanSizesSharedMemoryFromTheVector(t *testing.T) {
+	adapter := liveAdapter(t)
+	ctx := context.Background()
+	removeLeftovers(t, liveInstance)
+	t.Cleanup(func() { removeLeftovers(t, liveInstance) })
+
+	ownership := liveOwnership(liveInstance)
+	if err := adapter.Create(ctx, executor.InstanceSpec{Name: liveInstance, Image: liveImage(), CPU: 1,
+		MemoryMB: 2048, DiskGB: 50, Ownership: ownership}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := adapter.Start(ctx, liveInstance, ownership); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	mounted, err := exec.CommandContext(ctx, "podman", "exec", liveInstance,
+		"sh", "-c", "grep ' /dev/shm ' /proc/mounts").Output()
+	if err != nil {
+		t.Fatalf("read /dev/shm from inside the container: %v", err)
+	}
+	if want := "size=524288k"; !strings.Contains(string(mounted), want) {
+		t.Fatalf("/dev/shm mounted as %q, want a tmpfs with %s — a 2048 MiB profile gets a 512 MiB /dev/shm",
+			strings.TrimSpace(string(mounted)), want)
+	}
+}
+
 // TestPodmanGrantsKvmOnlyToTheNamedProfile is the ADR 0034 device rule against a
 // real runtime, and the one assertion no fake can make: that podman accepts the
 // grant and that the device is actually inside the container. It runs only where
