@@ -35,32 +35,38 @@ func guestConfigForHome(home string) (guestbootstrap.Config, error) {
 
 type runBootstrap func(context.Context, io.Reader, guestbootstrap.Config) error
 
-// withCapabilities applies the one optional argument this helper accepts. The
-// value form `--require-capabilities=a,b` is the whole grammar: a single token
-// keeps the parser trivial and keeps the daemon's argument vector fixed-length.
-func withCapabilities(base guestbootstrap.Config, args []string) (guestbootstrap.Config, error) {
-	if len(args) == 0 {
-		return base, nil
+// withArguments applies the two optional arguments this helper accepts: what the
+// daemon expected of this image, and what kind of guest it made. Each may appear
+// at most once, in either order, and anything else is a usage error — the daemon
+// assembles this vector itself, so a token it did not write means the caller is
+// not the daemon or the daemon is broken, and neither deserves a runner.
+func withArguments(base guestbootstrap.Config, args []string) (guestbootstrap.Config, error) {
+	for _, arg := range args {
+		if arg == guestbootstrap.ContainerFlag {
+			if base.Container {
+				return base, guestbootstrap.ErrInput
+			}
+			base.Container = true
+			continue
+		}
+		value, found := strings.CutPrefix(arg, guestbootstrap.CapabilityFlag+"=")
+		if !found || base.RequiredCapabilities != nil {
+			return base, guestbootstrap.ErrInput
+		}
+		capabilities, err := guestbootstrap.ParseCapabilityList(value)
+		if err != nil {
+			return base, err
+		}
+		base.RequiredCapabilities = capabilities
 	}
-	if len(args) > 1 {
-		return base, guestbootstrap.ErrInput
-	}
-	value, found := strings.CutPrefix(args[0], guestbootstrap.CapabilityFlag+"=")
-	if !found {
-		return base, guestbootstrap.ErrInput
-	}
-	capabilities, err := guestbootstrap.ParseCapabilityList(value)
-	if err != nil {
-		return base, err
-	}
-	base.RequiredCapabilities = capabilities
 	return base, nil
 }
 
 func execute(args []string, stdin io.Reader, stderr io.Writer, run runBootstrap) int {
-	config, err := withCapabilities(guestConfig, args)
+	config, err := withArguments(guestConfig, args)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "usage: tart-runner-fleet-bootstrap ["+guestbootstrap.CapabilityFlag+"=name[,name...]]")
+		_, _ = fmt.Fprintln(stderr, "usage: tart-runner-fleet-bootstrap ["+guestbootstrap.CapabilityFlag+
+			"=name[,name...]] ["+guestbootstrap.ContainerFlag+"]")
 		return 2
 	}
 	if run == nil {

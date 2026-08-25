@@ -13,6 +13,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/guestbootstrap"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -865,6 +866,14 @@ func (r ExecStdinRunner) Run(ctx context.Context, stdin io.Reader, args ...strin
 type StdinBootstrapper struct {
 	Runner  StdinRunner
 	Timeout time.Duration
+	// ContainerGuest states what the node's execution technology makes: false is a
+	// virtual machine, which has an init system to place the runner under and a
+	// power switch to press when it exits (ADR 0010), and true is a container,
+	// which has neither. It is set in internal/daemon, the one package allowed to
+	// know which backend it wired (ADR 0034), and this package only forwards it —
+	// the guest cannot be left to infer it, because a container image can carry
+	// both binaries and still have no init system (issue #273).
+	ContainerGuest bool
 }
 
 func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret,
@@ -880,6 +889,9 @@ func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *g
 	args, err := capabilityArguments([]string{"exec", "-i", name, bootstrapHelper}, capabilities)
 	if err != nil {
 		return operations.ErrInvalid
+	}
+	if b.ContainerGuest {
+		args = append(args, guestbootstrap.ContainerFlag)
 	}
 	timeout := b.Timeout
 	if timeout <= 0 {

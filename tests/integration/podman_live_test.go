@@ -3,8 +3,10 @@ package integration
 import (
 	"context"
 	"errors"
+	"go/build"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/guestbootstrap"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -37,6 +40,14 @@ const (
 	defaultLiveImg  = "docker.io/library/alpine:3.20"
 	liveInstance    = "trf-livesmoke-0000000000000000"
 	liveKVMInstance = "trf-livekvm-0000000000000000"
+	// liveBootstrapInstance is the container the guest helper is exercised in. It
+	// is created with `podman run` rather than through the adapter because it
+	// needs two bind mounts — a guest home and the helper binary — and the
+	// executor port has no volumes: an image supplies both on a real node.
+	liveBootstrapInstance = "trf-livebootstrap-0000000000000000"
+	// liveHelperPath is where every image must install the helper, and where
+	// internal/lifecycle invokes it.
+	liveHelperPath = "/usr/local/libexec/tart-runner-fleet-bootstrap"
 )
 
 func liveImage() string {
@@ -50,11 +61,18 @@ func liveImage() string {
 // a real SQLite ownership registry underneath it: the only thing this test
 // substitutes is the deletion confirmation, which is GitHub's answer and not
 // podman's.
-func liveAdapter(t *testing.T) *podman.Adapter {
+// liveOnly is the opt-in gate. Every test in this file is skipped on a machine
+// that has not asked for a real container runtime.
+func liveOnly(t *testing.T) {
 	t.Helper()
 	if os.Getenv(liveEnvironment) == "" {
 		t.Skipf("%s is unset; run scripts/podman-smoke.sh to exercise a real rootless podman", liveEnvironment)
 	}
+}
+
+func liveAdapter(t *testing.T) *podman.Adapter {
+	t.Helper()
+	liveOnly(t)
 	store, err := sqlite.Open(context.Background(), t.TempDir()+"/fleet.db")
 	if err != nil {
 		t.Fatalf("open the durable ownership registry: %v", err)
@@ -282,4 +300,91 @@ func TestPodmanReadinessProbeIsTheOneTheDaemonWires(t *testing.T) {
 	if err := stdin.Run(ctx, strings.NewReader("payload\n"), "exec", "-i", liveInstance, "cat"); err != nil {
 		t.Fatalf("the neutral stdin runner cannot bootstrap a container: %v", err)
 	}
+}
+
+// TestPodmanBootstrapsARunnerInAContainerWithNoInitSystem is issue #273
+// against the runtime that found it, and it closes this file's one remaining
+// gap: every assertion above proves the daemon can reach into a container, and
+// none of them proves the guest helper can start a runner once it is there —
+// which is exactly why the geekom node smoke-tested clean and then failed on its
+// first real job.
+//
+// The image is the plainest container there is: no systemd, no `sudo`, no
+// `shutdown`. The two invocations differ by one flag and nothing else, so the
+// flag is provably what makes the difference, and the runner really runs.
+func TestPodmanBootstrapsARunnerInAContainerWithNoInitSystem(t *testing.T) {
+	liveOnly(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	helper := buildBootstrapHelper(t)
+	home := t.TempDir()
+	work := filepath.Join(home, "actions-runner")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The stand-in for `run.sh`: an ephemeral listener that records that it ran
+	// and exits, which is the whole of what the launcher is responsible for.
+	if err := os.WriteFile(filepath.Join(work, "run.sh"),
+		[]byte("#!/bin/sh\nprintf started > \"$(dirname \"$0\")/runner-started\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(work, "runner-started")
+
+	removeLeftovers(t, liveBootstrapInstance)
+	t.Cleanup(func() { removeLeftovers(t, liveBootstrapInstance) })
+	create := exec.CommandContext(ctx, "podman", "run", "--detach", "--name", liveBootstrapInstance,
+		"--volume", home+":/root", "--volume", helper+":"+liveHelperPath+":ro",
+		liveImage(), "sleep", "600")
+	if output, err := create.CombinedOutput(); err != nil {
+		t.Fatalf("start an idling container to bootstrap into: %v: %s", err, output)
+	}
+
+	// A guest nobody told is a virtual machine, and a virtual machine's launcher
+	// cannot start here: there is no `sudo` and no `shutdown` to power off a
+	// machine that does not exist. It must also leave the runner unstarted.
+	if err := execBootstrap(ctx); err == nil {
+		t.Error("a VM-mode bootstrap claimed success in a container with no init system")
+	}
+	if _, err := os.Stat(started); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused bootstrap started the runner anyway: %v", err)
+	}
+
+	if err := execBootstrap(ctx, guestbootstrap.ContainerFlag); err != nil {
+		t.Fatalf("container-mode bootstrap: %v", err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if content, err := os.ReadFile(started); err == nil && string(content) == "started" {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("the container-mode supervisor never ran the runner")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// execBootstrap is the daemon's own bootstrap call, argument for argument, with
+// a JIT configuration that is syntactically acceptable and useless: the runner
+// stand-in never contacts GitHub, and a real one would fail long after the
+// launch this test is about.
+func execBootstrap(ctx context.Context, args ...string) error {
+	return lifecycle.ExecStdinRunner{Binary: podman.DefaultBinary}.Run(ctx,
+		strings.NewReader("not-a-real-jit-configuration\n"),
+		append([]string{"exec", "-i", liveBootstrapInstance, liveHelperPath}, args...)...)
+}
+
+// buildBootstrapHelper builds the guest helper from this working tree, so the
+// binary under test is the one this commit produces rather than whatever an
+// image happens to carry.
+func buildBootstrapHelper(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "tart-runner-fleet-bootstrap")
+	command := exec.Command(filepath.Join(build.Default.GOROOT, "bin", "go"), "build", "-trimpath",
+		"-o", binary, "github.com/vitalyiegorov/tart-runner-fleet/cmd/tart-runner-fleet-bootstrap")
+	command.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build the guest bootstrap helper: %v: %s", err, output)
+	}
+	return binary
 }
