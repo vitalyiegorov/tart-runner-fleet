@@ -1,0 +1,62 @@
+name: Node B proof
+
+# Proves that node B (geekom, ADR 0034's x86_64 Linux node) serves the scale
+# sets it owns. Nothing else in this repository targets `trf-linux-amd64-*`
+# yet, so without this workflow node B's promotion has no queued job to answer
+# and its labels cannot be shown to route.
+#
+# Manual only, exactly like `fleet-canary.yml`: a promotion proof is an
+# operator action with an operator watching it, never a scheduled or
+# push-triggered one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kvm:
+        description: Also prove the KVM profile on trf-linux-amd64-4x8
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-b-proof
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    name: Prove node B serves trf-linux-amd64-2x4
+    # Only this repository owns the fleet these labels resolve to. A fork would
+    # queue a job that can never be served.
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    runs-on: [self-hosted, trf-fleet-linux-amd64-2x4]
+    timeout-minutes: 10
+    steps:
+      - name: Report the machine this job landed on
+        run: |
+          set -euo pipefail
+          uname -a
+          nproc
+          head -2 /etc/os-release
+          node --version
+          java -version
+
+  kvm:
+    name: Prove the KVM profile on trf-linux-amd64-4x8
+    # The KVM profile is the one node B exists for: `/dev/kvm` on an x86_64
+    # kernel is what no Apple-silicon node can ever provide (ADR 0034). It is
+    # dispatch-gated so the cheap identity proof above can be re-run alone.
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      inputs.kvm
+    runs-on: [self-hosted, trf-fleet-linux-amd64-4x8]
+    timeout-minutes: 10
+    steps:
+      - name: Report the accelerator this profile was given
+        run: |
+          set -euo pipefail
+          uname -a
+          nproc
+          emulator -accel-check
+          ls -la /dev/kvm
