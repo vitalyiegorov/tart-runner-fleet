@@ -70,10 +70,12 @@ jobs:
             fleet-linux-amd64 \
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
+            tart-runner-fleet-bootstrap-linux-amd64 \
             fleet.cdx.json \
             fleet-linux-amd64.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
             tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-amd64.cdx.json \
             com.vitalyiegorov.tart-runner-fleet.plist \
             com.vitalyiegorov.tart-runner-fleet.shadow.plist \
             com.vitalyiegorov.tart-runner-fleet.canary.plist \
@@ -99,8 +101,10 @@ jobs:
             BUILDINFO.txt RELEASE_VERSION fleet fleet.cdx.json \
             tart-runner-fleet-bootstrap-darwin-arm64 \
             tart-runner-fleet-bootstrap-linux-arm64 \
+            tart-runner-fleet-bootstrap-linux-amd64 \
             tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
-            tart-runner-fleet-bootstrap-linux-arm64.cdx.json)"
+            tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-amd64.cdx.json)"
           EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n%s\n' "$COMMON" "$(printf '%s\n' \
             com.vitalyiegorov.tart-runner-fleet.plist \
             com.vitalyiegorov.tart-runner-fleet.shadow.plist \
@@ -140,10 +144,12 @@ jobs:
             dist/fleet-linux-amd64
             dist/tart-runner-fleet-bootstrap-darwin-arm64
             dist/tart-runner-fleet-bootstrap-linux-arm64
+            dist/tart-runner-fleet-bootstrap-linux-amd64
             dist/fleet.cdx.json
             dist/fleet-linux-amd64.cdx.json
             dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
             dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json
+            dist/tart-runner-fleet-bootstrap-linux-amd64.cdx.json
             dist/com.vitalyiegorov.tart-runner-fleet.plist
             dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist
             dist/com.vitalyiegorov.tart-runner-fleet.canary.plist
