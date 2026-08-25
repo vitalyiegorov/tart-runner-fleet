@@ -1107,7 +1107,11 @@ Transfers unchanged:
   three Yarn versions, and `playwright install-deps chromium webkit`;
 - `$HOME/actions-runner/run.sh` as the only runner location;
 - `/usr/local/libexec/tart-runner-fleet-bootstrap` — but the
-  **`tart-runner-fleet-bootstrap-linux-amd64` asset**, not the arm64 one;
+  **`tart-runner-fleet-bootstrap-linux-amd64` asset**, not the arm64 one, and
+  from a release at or after issue #273: a container node always passes
+  `--container`, and a helper that predates the flag rejects it as a usage error.
+  ADR 0010 already requires the helper and the controller to come from the same
+  verified release; this is what that rule buys;
 - the daemon `PATH` contract, which is architecture-independent.
 
 Changes for amd64:
