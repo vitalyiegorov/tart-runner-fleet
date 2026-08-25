@@ -27,6 +27,9 @@ Nice=10
 IOSchedulingClass=idle
 StandardOutput=append:__STATE_DIR__/update.stdout.log
 StandardError=append:__STATE_DIR__/update.stderr.log
+# Sandboxed for the same reason as tart-runner-fleet-updater.service, and safe
+# to sandbox for the same reason: the generation swap forks no guest runtime
+# (issue #277).
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

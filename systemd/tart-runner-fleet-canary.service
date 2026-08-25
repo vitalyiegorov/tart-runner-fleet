@@ -29,14 +29,21 @@ Nice=5
 IOSchedulingClass=idle
 StandardOutput=append:__STATE_DIR__/fleet.stdout.log
 StandardError=append:__STATE_DIR__/fleet.stderr.log
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-ProtectKernelTunables=yes
-RestrictSUIDSGID=yes
-# ProtectProc and ProcSubset are deliberately NOT set: the host probe reads
-# /proc/meminfo, /proc/vmstat, /proc/stat and /proc/loadavg, and hiding them
-# would turn every admission decision into an unavailable observation.
+# This unit is deliberately not sandboxed, for two unrelated reasons.
+#
+# NoNewPrivileges, PrivateTmp, ProtectSystem, ProtectKernelTunables and
+# RestrictSUIDSGID: the controller forks the node's execution technology, which
+# on Linux is rootless podman, and podman execs /usr/bin/newuidmap
+# (cap_setuid=ep) to write a subuid map. NoNewPrivileges, and RestrictSUIDSGID
+# which implies it, make that execve acquire no file capability at all; the
+# three namespacing directives make an unprivileged `systemd --user` manager
+# build their mount namespace inside a user namespace whose uid map holds this
+# uid alone, leaving no subuid to map. Either way podman cannot create its pause
+# process and the node never reaches ready (issue #277).
+#
+# ProtectProc and ProcSubset: the host probe reads /proc/meminfo, /proc/vmstat,
+# /proc/stat and /proc/loadavg, and hiding them would turn every admission
+# decision into an unavailable observation.
 
 [Install]
 WantedBy=default.target
