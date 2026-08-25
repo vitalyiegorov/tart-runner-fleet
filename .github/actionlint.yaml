@@ -7,3 +7,10 @@ self-hosted-runner:
     - linux-large
     - linux-xl
     - tart-fleet-canary
+    # Node B (geekom, x86_64 Linux) advertises the scale-set name as a label
+    # alongside the canonical shape label, so a proof job can name one node's
+    # set exactly while ordinary work keeps naming the shape (ADR 0032, 0034).
+    - trf-fleet-linux-amd64-2x4
+    - trf-fleet-linux-amd64-4x8
+    - trf-linux-amd64-2x4
+    - trf-linux-amd64-4x8
