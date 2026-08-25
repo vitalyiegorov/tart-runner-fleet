@@ -570,7 +570,11 @@ adapter. Do not start Part B before Phase 2 is green on geekom in observe mode.
 - [x] Install the `systemd --user` units (the `launchd` plist equivalents) and
       the renderer, shipped in `systemd/` beside `launchd/` and published in the
       release archive. Install the controller unit only; see the correction
-      above for why the updater timer stays disabled.
+      above for why the updater timer stays disabled. The controller unit is
+      deliberately unsandboxed — a `systemd --user` unit that sets
+      `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem`, `ProtectKernelTunables`
+      or `RestrictSUIDSGID` starves rootless podman of the subuid map it needs
+      (issue #277, ADR 0034 amendment 2026-08-25b).
 - [ ] Copy the GitHub App private key to
       `~/.local/share/tart-runner-fleet/credentials/github-app.pem`, mode `0600`,
       owner `fleet`.

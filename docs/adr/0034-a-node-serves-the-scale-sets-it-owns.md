@@ -741,6 +741,43 @@ canonical grammar and the `arm64` constant that becomes per-node" — should now
 be read as the constant that became per-node. It is the default, not the answer.
 
 
+## Amendment 2026-08-25b: a unit may not sandbox the runtime it forks (issue #277)
+
+*Amendment 2026-08-04* made rootless podman node B's execution technology. The
+`systemd --user` units rendered for issue #138 predate that decision and
+hardened the controller with `NoNewPrivileges=yes`, `PrivateTmp=yes`,
+`ProtectSystem=full`, `ProtectKernelTunables=yes` and `RestrictSUIDSGID=yes`.
+The two are not merely in tension; they are exclusive, by two distinct
+mechanisms. Rootless podman execs `/usr/bin/newuidmap`, an unprivileged binary
+carrying the `cap_setuid=ep` file capability, to write a subuid map. A process
+under `PR_SET_NO_NEW_PRIVS` gains no capability from any file it executes, and
+`RestrictSUIDSGID=` implies `NoNewPrivileges=` per systemd.exec(5), so those two
+disarm `newuidmap` outright. The other three need a mount namespace, and an
+unprivileged user manager can only build one inside a user namespace — measured
+on systemd 261, a transient user unit given `PrivateTmp=yes`, `ProtectSystem=`
+or `ProtectKernelTunables=` runs with `/proc/self/uid_map` reading
+`1000 1000 1`, where a bare one reads `0 0 4294967295`. One uid mapped is no
+subuid to map. Node B failed with `newuidmap: Could not set caps`, and each
+attempt also tore down the rootless pause process, so the damage outlived the
+unit: a node with an `executor` block could never reach ready, and
+`podmanPreflight` would have refused every mode above observe.
+
+The rule this record now carries: **a unit that forks the node's execution
+technology may not sandbox itself.** The four controller templates set none of
+the five directives and state the constraint in a comment; `internal/config`
+asserts their absence in every controller template and in a rendered unit. The
+two updater units keep the sandbox, because the release transaction forks no
+guest runtime and is the one process on the node that unpacks and runs a
+downloaded artifact. What confines the controller is what always did: an
+ExecStart owned by the release, `UMask=0077`, and the single unprivileged
+account of *Why rootless specifically* that owns the daemon, the runtime, and
+every container. The isolation boundary for third-party code was never the
+controller's own sandbox — it is the container's user namespace.
+
+macOS is unaffected: the LaunchAgent twins express no sandbox, and a Tart guest
+is started by a `tart` process the agent forks the same way.
+
+
 ## Not addressed here
 
 **Whether the container adapter works against a real container runtime is not

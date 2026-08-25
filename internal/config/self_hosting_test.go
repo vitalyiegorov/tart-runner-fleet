@@ -356,6 +356,28 @@ func TestVersionedLaunchdModesRenderWithoutAdHocPlistEdits(t *testing.T) {
 	}
 }
 
+// A `systemd --user` manager holds no privileges of its own, so each directive
+// below defeats rootless podman one of two ways: NoNewPrivileges, and
+// RestrictSUIDSGID which implies it per systemd.exec(5), leave the execve of
+// `/usr/bin/newuidmap` without its `cap_setuid=ep` file capability, and the
+// three namespacing ones run the unit inside a user namespace mapping this uid
+// alone, where there is no subuid left to map. A controller unit carrying any
+// of them is a Linux node that can never start a container guest, so none of
+// them may come back to one (#277).
+var rootlessPodmanHostileSandbox = []string{
+	"NoNewPrivileges=", "PrivateTmp=", "ProtectSystem=",
+	"ProtectKernelTunables=", "RestrictSUIDSGID=",
+}
+
+func assertNoRootlessPodmanHostileSandbox(t *testing.T, name, body string) {
+	t.Helper()
+	for _, directive := range rootlessPodmanHostileSandbox {
+		if strings.Contains(body, directive) {
+			t.Errorf("%s sets %s, which starves the controller's rootless podman of CAP_SETUID", name, directive)
+		}
+	}
+}
+
 // TestVersionedSystemdModesRenderWithoutAdHocUnitEdits is the Linux twin of the
 // launchd assertion above. ADR 0034's second node boots from `systemd --user`,
 // and issue #138 requires its three services — the controller, the five-minute
@@ -381,9 +403,16 @@ func TestVersionedSystemdModesRenderWithoutAdHocUnitEdits(t *testing.T) {
 		if strings.HasSuffix(name, ".service") {
 			// The host probe reads /proc, so a unit that hid it would turn every
 			// admission decision on the node into an unavailable observation.
-			required = append(required, `"__RELEASE_DIR__/fleet"`, "NoNewPrivileges=yes")
+			required = append(required, `"__RELEASE_DIR__/fleet"`)
 			if strings.Contains(body, "ProcSubset=") || strings.Contains(body, "ProtectProc=") {
 				t.Errorf("%s hides /proc from the host probe", name)
+			}
+			if strings.Contains(name, "updater") {
+				// The release transaction forks no guest runtime, so it keeps the
+				// sandbox the controller cannot afford.
+				required = append(required, "NoNewPrivileges=yes")
+			} else {
+				assertNoRootlessPodmanHostileSandbox(t, name, body)
 			}
 		}
 		for _, token := range required {
@@ -428,6 +457,9 @@ func TestVersionedSystemdModesRenderWithoutAdHocUnitEdits(t *testing.T) {
 	if strings.Contains(string(unit), "__") {
 		t.Error("rendered canary unit retains a template placeholder")
 	}
+	// The rendered file is what the manager executes, so the sandbox rule is
+	// asserted on it and not only on the template it came from.
+	assertNoRootlessPodmanHostileSandbox(t, "rendered canary unit", string(unit))
 
 	// The immutable root is derived from the release path, so the updater is
 	// pointed at the tree the release actually lives in.
