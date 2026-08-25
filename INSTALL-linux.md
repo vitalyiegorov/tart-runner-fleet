@@ -153,6 +153,8 @@ later.
 
 ```sh
 sudo apt install podman uidmap slirp4netns fuse-overlayfs
+# Arch-based (e.g. Omarchy): sudo pacman -S --needed podman passt fuse-overlayfs
+# Omarchy's update guard blocks a direct pacman transaction unless OMARCHY_ALLOW_DIRECT_PACMAN=1 is set; `omarchy update` also works.
 podman info --format '{{.Host.Security.Rootless}}'   # must print: true
 podman pull ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08
 ```
@@ -224,11 +226,14 @@ admission decision on the node into an unavailable observation.
 
 ```sh
 ENDPOINT="unix://$ROOT/state/fleetd.sock"
-FLEET="$ROOT/current/fleet"
 systemctl --user status tart-runner-fleet.service
 "$RELEASE_DIR/fleet" status --endpoint "$ENDPOINT" --require-ready --output json
 "$RELEASE_DIR/fleet" doctor --endpoint "$ENDPOINT" --output json
 ```
+
+`$ROOT/current` does not exist yet at this step — step 7's upgrade bridge is
+what first creates it. Run these commands against `$RELEASE_DIR/fleet`, the
+same release directory step 2 downloaded into.
 
 Success means the unit is `active (running)`, the daemon reports the exact
 installed version in `observe` mode, the `scheduler` observation is `fresh`, and
