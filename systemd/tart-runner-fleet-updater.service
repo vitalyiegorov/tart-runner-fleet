@@ -23,6 +23,10 @@ Nice=10
 IOSchedulingClass=idle
 StandardOutput=append:__STATE_DIR__/update.stdout.log
 StandardError=append:__STATE_DIR__/update.stderr.log
+# The updater keeps the sandbox the controller unit had to give up: it forks no
+# guest runtime, so nothing under it needs a file capability or a uid map wider
+# than this uid (issue #277). It is also the one process on the node that
+# unpacks and runs a downloaded artifact, which is the process worth confining.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full

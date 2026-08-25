@@ -222,6 +222,23 @@ without killing processes it has already handed work to. It deliberately does
 **not** set `ProtectProc` or `ProcSubset`: hiding `/proc` would turn every
 admission decision on the node into an unavailable observation.
 
+It is also deliberately **not sandboxed** — no `NoNewPrivileges`, `PrivateTmp`,
+`ProtectSystem`, `ProtectKernelTunables`, or `RestrictSUIDSGID`. The controller
+forks rootless podman, which execs `/usr/bin/newuidmap` (`cap_setuid=ep`) to
+write a subuid map. `NoNewPrivileges`, and `RestrictSUIDSGID` which implies it,
+leave that `execve` with no file capability; the other three make the
+unprivileged `systemd --user` manager run the unit inside a user namespace
+mapping this uid alone, with no subuid left to map. Either way podman cannot
+create its pause process and a node with an `executor` block never reaches
+ready. Do not add them back by hand. The rendered updater units keep the sandbox
+because the release transaction forks no guest runtime.
+
+```sh
+# Must print `NoNewPrivileges=no`. Anything else, and podman will fail with
+# "newuidmap: Could not set caps" the first time the node starts a container.
+systemctl --user show tart-runner-fleet.service -p NoNewPrivileges
+```
+
 ## 6. Prove the observe steady state
 
 ```sh
