@@ -48,10 +48,12 @@ reproducible='fleet
 fleet-linux-amd64
 tart-runner-fleet-bootstrap-darwin-arm64
 tart-runner-fleet-bootstrap-linux-arm64
+tart-runner-fleet-bootstrap-linux-amd64
 fleet.cdx.json
 fleet-linux-amd64.cdx.json
 tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
-tart-runner-fleet-bootstrap-linux-arm64.cdx.json'
+tart-runner-fleet-bootstrap-linux-arm64.cdx.json
+tart-runner-fleet-bootstrap-linux-amd64.cdx.json'
 
 launchd_files='com.vitalyiegorov.tart-runner-fleet.plist
 com.vitalyiegorov.tart-runner-fleet.shadow.plist
@@ -79,7 +81,9 @@ for pass in one two; do
     go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap-darwin-arm64" ./cmd/tart-runner-fleet-bootstrap
   CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
     go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap-linux-arm64" ./cmd/tart-runner-fleet-bootstrap
-  for binary in fleet fleet-linux-amd64 tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -buildvcs=true -ldflags="$ldflags" -o "$pass_dir/tart-runner-fleet-bootstrap-linux-amd64" ./cmd/tart-runner-fleet-bootstrap
+  for binary in fleet fleet-linux-amd64 tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64 tart-runner-fleet-bootstrap-linux-amd64; do
     ./scripts/run-tool.sh cyclonedx-gomod bin -json -std -noserial -notimestamp \
       -version "$version" -output "$pass_dir/$binary.cdx.json" "$pass_dir/$binary"
   done
@@ -116,15 +120,18 @@ archive() {
   cp "$staging/$buildinfo" "$assembly/BUILDINFO.txt"
   cp "$staging/RELEASE_VERSION" "$assembly/RELEASE_VERSION"
   for shared in tart-runner-fleet-bootstrap-darwin-arm64 tart-runner-fleet-bootstrap-linux-arm64 \
-    tart-runner-fleet-bootstrap-darwin-arm64.cdx.json tart-runner-fleet-bootstrap-linux-arm64.cdx.json; do
+    tart-runner-fleet-bootstrap-linux-amd64 tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
+    tart-runner-fleet-bootstrap-linux-arm64.cdx.json tart-runner-fleet-bootstrap-linux-amd64.cdx.json; do
     cp "$staging/$shared" "$assembly/$shared"
   done
   members='fleet
 fleet.cdx.json
 tart-runner-fleet-bootstrap-darwin-arm64
 tart-runner-fleet-bootstrap-linux-arm64
+tart-runner-fleet-bootstrap-linux-amd64
 tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
 tart-runner-fleet-bootstrap-linux-arm64.cdx.json
+tart-runner-fleet-bootstrap-linux-amd64.cdx.json
 BUILDINFO.txt
 RELEASE_VERSION'
   printf '%s\n' "$definitions" | while IFS= read -r file; do
