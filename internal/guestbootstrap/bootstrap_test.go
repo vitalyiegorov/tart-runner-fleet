@@ -129,10 +129,19 @@ func TestDarwinRunnerEnvironmentProvidesAndroidSDK(t *testing.T) {
 		}
 	}
 
+	// On Linux the parent environment is the sealed runner image, so the
+	// image's own ANDROID_HOME/ANDROID_SDK_ROOT declaration passes through
+	// instead of being replaced by a platform constant.
 	linux := childEnvironmentForOS("jit", "linux")
-	for _, name := range []string{"ANDROID_HOME", "ANDROID_SDK_ROOT"} {
-		if countEnvironment(linux, name) != 0 {
-			t.Fatalf("linux runner unexpectedly defines %s", name)
+	for name, want := range map[string]string{
+		"ANDROID_HOME":     "/stale/android-home",
+		"ANDROID_SDK_ROOT": "/stale/android-sdk-root",
+	} {
+		if got := environmentValue(linux, name); got != want {
+			t.Fatalf("linux runner %s=%q want=%q", name, got, want)
+		}
+		if countEnvironment(linux, name) != 1 {
+			t.Fatalf("duplicate %s environment", name)
 		}
 	}
 }

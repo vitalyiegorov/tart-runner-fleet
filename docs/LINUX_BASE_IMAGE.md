@@ -100,9 +100,9 @@ and [ADR 0010's 2026-08-25 amendment](adr/0010-ephemeral-guest-shutdown.md).
 ### The daemon replaces PATH outright
 
 As on macOS, the runner process does not inherit the guest's login `PATH`.
-`childEnvironmentForOS` strips `PATH`, `LANG`, `LC_ALL`, and the two Android
-variables from the parent environment and substitutes fixed values. On Linux
-the substituted `PATH` is exactly:
+`childEnvironmentForOS` strips `PATH`, `LANG`, and `LC_ALL` from the parent
+environment and substitutes fixed values. On Linux the substituted `PATH` is
+exactly:
 
 ```
 /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -114,9 +114,16 @@ from a version manager. The macOS recipe needs explicit `/usr/local/bin`
 symlinks for the same reason; on Linux, apt already puts everything in the
 right place, and no symlink is required.
 
-Unlike macOS, Linux guests get **no** `ANDROID_HOME` or `ANDROID_SDK_ROOT`:
-`childEnvironmentForOS` adds those only when `goos == "darwin"`. A Linux job
-that needs an Android SDK must set the variable itself.
+The two Android variables split by platform. On macOS the parent is an
+uncontrolled VM login shell, so `childEnvironmentForOS` strips any inherited
+value and substitutes the fixed `/Users/admin/android-sdk`. On Linux the
+parent environment **is** the sealed runner image, so an `ENV ANDROID_HOME`
+/ `ENV ANDROID_SDK_ROOT` the image declares passes through to the job
+untouched — that is how an Android job finds the baked SDK, and how
+`android-actions/setup-android` and `reactivecircus/android-emulator-runner`
+locate it instead of downloading a fresh one into an ephemeral container. An
+image that declares no SDK gives its jobs no Android variables, exactly as
+before.
 
 ### `systemd-run --scope` is the requirement nobody would guess
 
