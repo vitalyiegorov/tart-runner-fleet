@@ -448,6 +448,12 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 	args := []string{"create", "--name", spec.Name,
 		"--cpus", strconv.Itoa(spec.CPU),
 		"--memory", strconv.Itoa(spec.MemoryMB) + "m",
+		// /dev/shm is memory, and it is memory the vector already pays for: a
+		// tmpfs page is charged to the container's own cgroup, so sizing it from
+		// the profile neither lends the job memory it was not granted nor takes
+		// any away. Podman's default is 64 MB whatever the vector says, which is
+		// where a Chromium renderer dies (issue #284).
+		"--shm-size", strconv.Itoa(shmSizeMB(spec.MemoryMB)) + "m",
 		// The runner process is the container's reason to exist; when the job's
 		// container is stopped nothing about it is worth restarting, and ADR 0010
 		// says an ephemeral guest never comes back.
@@ -467,6 +473,28 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 	}
 	args = append(args, spec.Image)
 	return append(args, a.holdCommand()...)
+}
+
+// podmanDefaultShmMB is the size podman gives /dev/shm when nothing asks: 64 MB,
+// i.e. the 62.5 MiB a `df -h /dev/shm` reports inside an unsized container.
+const podmanDefaultShmMB = 64
+
+// shmSizeMB is the whole rule for a container's /dev/shm: a quarter of the
+// memory its profile was charged, and never less than the default it replaces.
+//
+// A quarter is the ratio, because the same tmpfs pages are also the job's heap
+// budget — a browser suite that fills /dev/shm past the container's memory limit
+// is OOM-killed, so the vector must still hold the processes that fill it.
+// Nothing here is configurable: ADR 0032 made a profile's name its resource
+// vector, and a second knob would be a second source of truth about the same
+// memory. The floor is podman's own 64 MB: a vector too small to have a usable
+// quarter must not end up with a /dev/shm smaller than one this adapter never
+// sized at all.
+func shmSizeMB(memoryMB int) int {
+	if quarter := memoryMB / 4; quarter > podmanDefaultShmMB {
+		return quarter
+	}
+	return podmanDefaultShmMB
 }
 
 // ownershipLabels renders the durable ownership triple as container labels, in a

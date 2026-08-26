@@ -7,9 +7,10 @@ set -eu
 # It is the acceptance evidence for issue #139 that no fake can produce: the
 # argument vectors podman actually accepts, the JSON it actually prints, the
 # container states it actually reports, `podman exec -i` carrying a JIT secret in
-# on stdin, `--device /dev/kvm` being a grant the runtime honours, and — since
-# issue #273 — the guest bootstrap helper actually starting a runner inside a
-# container that has no init system to place it under. Everything
+# on stdin, `--device /dev/kvm` being a grant the runtime honours, the `/dev/shm`
+# tmpfs actually being the quarter of the vector issue #284 sized it to, and —
+# since issue #273 — the guest bootstrap helper actually starting a runner inside
+# a container that has no init system to place it under. Everything
 # else about the adapter is covered by table-driven unit tests against a fake
 # command runner, and by the executor-port conformance harness in
 # tests/contract, both of which run on every machine.

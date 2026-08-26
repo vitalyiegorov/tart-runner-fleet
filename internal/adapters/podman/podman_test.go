@@ -300,21 +300,21 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 		{
 			name: "an ordinary profile gets no device", instance: "trf-small-abc",
 			kvm: []string{"trf-android-"},
-			want: "create --name trf-small-abc --cpus 2 --memory 4096m --restart no --init " +
+			want: "create --name trf-small-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"ghcr.io/example/runner:1 sleep infinity",
 		},
 		{
 			name: "the android profile gets /dev/kvm", instance: "trf-android-abc",
 			kvm: []string{"", "trf-android-"},
-			want: "create --name trf-android-abc --cpus 2 --memory 4096m --restart no --init " +
+			want: "create --name trf-android-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"--device /dev/kvm ghcr.io/example/runner:1 sleep infinity",
 		},
 		{
 			name: "a configured hold command replaces the default", instance: "trf-small-abc",
 			hold: []string{"/usr/bin/tail", "-f", "/dev/null"},
-			want: "create --name trf-small-abc --cpus 2 --memory 4096m --restart no --init " +
+			want: "create --name trf-small-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"ghcr.io/example/runner:1 /usr/bin/tail -f /dev/null",
 		},
@@ -332,6 +332,44 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 			}
 			if host.state(testCase.instance) != "created" {
 				t.Fatalf("container state = %q, want created", host.state(testCase.instance))
+			}
+		})
+	}
+}
+
+// TestCreateSizesSharedMemoryFromTheVectorItWasCharged pins the /dev/shm rule.
+// Podman's default is 64 MB, which is below what a Chromium-based test suite
+// needs to start a renderer: issue #284 is a Playwright chromium shard dying
+// with `Protocol error (Runtime.callFunctionOn): Internal server error` on node
+// B while the same job is green on a hosted runner. The size is a quarter of
+// the profile's own memory, so the shape a workflow asked for by name is the
+// only thing that decides it, and never below the default it replaces — a
+// container whose /dev/shm is zero bytes would be worse off than one this
+// adapter never sized at all.
+func TestCreateSizesSharedMemoryFromTheVectorItWasCharged(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		memoryMB int
+		want     string
+	}{
+		{name: "linux-1x2", memoryMB: 2048, want: "--shm-size 512m"},
+		{name: "linux-2x4", memoryMB: 4096, want: "--shm-size 1024m"},
+		{name: "linux-4x8", memoryMB: 8192, want: "--shm-size 2048m"},
+		{name: "linux-8x16", memoryMB: 16384, want: "--shm-size 4096m"},
+		{name: "a vector too small to have a quarter keeps podman's default", memoryMB: 1, want: "--shm-size 64m"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			host := newFakePodman()
+			adapter := adapterFor(host, &memoryOwnership{records: map[string]operations.Ownership{}})
+			instance := spec("trf-small-abc")
+			instance.MemoryMB = testCase.memoryMB
+			if err := adapter.Create(context.Background(), instance); err != nil {
+				t.Fatalf("Create() = %v", err)
+			}
+			commands := host.commands()
+			created := commands[len(commands)-1]
+			if !strings.Contains(created, testCase.want) {
+				t.Fatalf("create vector =\n%s\nwant it to contain %q", created, testCase.want)
 			}
 		})
 	}

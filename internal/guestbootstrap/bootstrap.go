@@ -196,11 +196,21 @@ func childEnvironmentForOS(jit, goos string) []string {
 	parent := os.Environ()
 	environment := make([]string, 0, len(parent)+6)
 	for _, value := range parent {
-		if !strings.HasPrefix(value, jitPrefix) && !strings.HasPrefix(value, pathPrefix) &&
-			!strings.HasPrefix(value, langPrefix) && !strings.HasPrefix(value, lcAllPrefix) &&
-			!strings.HasPrefix(value, androidHomePrefix) && !strings.HasPrefix(value, androidSDKRootPrefix) {
-			environment = append(environment, value)
+		if strings.HasPrefix(value, jitPrefix) || strings.HasPrefix(value, pathPrefix) ||
+			strings.HasPrefix(value, langPrefix) || strings.HasPrefix(value, lcAllPrefix) {
+			continue
 		}
+		// The two Android variables split by platform. On macOS the parent is
+		// an uncontrolled VM login shell, so any inherited value is stale by
+		// definition: strip here, and re-add the fixed SDK path below. On
+		// Linux the parent IS the sealed runner image — its ENV is the image's
+		// declaration of where the baked SDK lives — so erasing it here would
+		// leave an Android job no way to find an SDK the image audit promised.
+		if (strings.HasPrefix(value, androidHomePrefix) || strings.HasPrefix(value, androidSDKRootPrefix)) &&
+			goos != "linux" {
+			continue
+		}
+		environment = append(environment, value)
 	}
 	locale := runnerLocale(goos)
 	environment = append(environment,
