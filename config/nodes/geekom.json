@@ -20,7 +20,7 @@
   ],
   "executor": {
     "backend": "podman",
-    "image": "ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08",
+    "image": "ghcr.io/vitalyiegorov/trf-runner-amd64:2026-08.1",
     "kvmProfiles": ["linux-4x8"]
   },
   "macosBurst": { "enabled": false },
