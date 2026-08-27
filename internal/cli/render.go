@@ -68,6 +68,16 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
 		pressure.FreeDiskGiB, pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pagingState(pressure),
 		pressure.CPUIdlePercent, pressure.LoadAverage, admissionState(pressure.AdmissionAllowed), pressure.AdmissionReason)
+	// A withdrawn node prints why above its queues, because the queues are the
+	// thing that looks normal while it is not serving (#292).
+	if yield := status.Data.SessionYield; yield != nil && yield.Yielded {
+		reason := yield.Reason
+		if reason == "" {
+			reason = "admission refused"
+		}
+		fmt.Fprintf(output, "\nSESSIONS WITHDRAWN\n%d of %d scale-set sessions released (%s); GitHub binds new jobs elsewhere\n",
+			yield.Withdrawn, yield.Bindings, reason)
+	}
 	fmt.Fprintln(output, "\nQUEUES")
 	renderQueues(output, status.Data.Queues)
 	fmt.Fprintln(output, "\nINSTANCES")

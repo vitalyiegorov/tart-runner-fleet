@@ -292,12 +292,38 @@ type SessionRecovery struct {
 	FailureWindow time.Duration
 }
 
+// SessionYield bounds when a node that cannot admit stops holding the scale-set
+// sessions GitHub binds jobs to.
+//
+// GitHub binds a queued job to one scale set, and ADR 0034 gives that set one
+// session, so a blocked node is not idle — it is holding work its sibling is
+// not allowed to take. Withdrawing the session is the node-local half of the
+// placement ADR 0036 will own: it cannot move a job already bound, only stop
+// being chosen for the next one, which is why the blocked bound is minutes.
+type SessionYield struct {
+	// Enabled is whether this node may withdraw at all. A node that is the only
+	// one advertising its labels loses nothing by withdrawing — the jobs it
+	// cannot run wait either way — but an operator may still want it off.
+	Enabled bool
+	// BlockedFor is how long admission must be continuously refused, with no
+	// live instance and no operation retrying, before withdrawing.
+	BlockedFor time.Duration
+	// HealthyFor is how long admission must be continuously allowed before
+	// rejoining. Both bounds are hysteresis: a node on the edge of its disk
+	// reserve must not flap sessions.
+	HealthyFor time.Duration
+}
+
 const (
 	defaultSessionMaxIngestFailures = 5
 	defaultSessionFailureWindow     = 5 * time.Minute
 	maxSessionMaxIngestFailures     = 100
 	minSessionFailureWindow         = 30 * time.Second
 	maxSessionFailureWindow         = time.Hour
+	defaultSessionYieldBlockedFor   = 10 * time.Minute
+	defaultSessionYieldHealthyFor   = 2 * time.Minute
+	minSessionYieldBound            = 30 * time.Second
+	maxSessionYieldBound            = time.Hour
 )
 
 // GuestLiveness bounds how long a `running` instance may go on holding its
@@ -499,6 +525,7 @@ type Config struct {
 	Timeouts        Timeouts
 	Guards          Guards
 	SessionRecovery SessionRecovery
+	SessionYield    SessionYield
 	// GuestLiveness bounds how long an instance whose guest has stopped answering
 	// may go on holding its vector (ADR 0040). An absent block is the shipped
 	// default bound, not an absent one.
@@ -565,6 +592,13 @@ type wireConfig struct {
 	// decodable by older strict releases.
 	GitHubSessionMaxIngestFailures    int `json:"githubSessionMaxIngestFailures,omitempty"`
 	GitHubSessionFailureWindowSeconds int `json:"githubSessionFailureWindowSeconds,omitempty"`
+	// SessionYield* express the withdrawal policy of the same broker sessions.
+	// Disabled is the explicit off switch: omitting every field ships the
+	// policy on, because a node hoarding jobs it cannot run is the failure this
+	// defaults against.
+	SessionYieldDisabled          bool `json:"sessionYieldDisabled,omitempty"`
+	SessionYieldBlockedForSeconds int  `json:"sessionYieldBlockedForSeconds,omitempty"`
+	SessionYieldHealthyForSeconds int  `json:"sessionYieldHealthyForSeconds,omitempty"`
 	// The guest-liveness bounds are omitted while they hold the shipped defaults,
 	// for the same reason: a rewritten file must stay decodable by an older strict
 	// release. A stated -1 disables the mechanism outright.
@@ -629,7 +663,7 @@ func Decode(r io.Reader) (Config, error) {
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
-		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w),
+		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), SessionYield: normalizeSessionYield(w),
 		GuestLiveness: normalizeGuestLiveness(w), Targets: normalizeTargets(w.Targets),
 		Priority: decodePriority(w.Priority),
 	}
@@ -677,6 +711,14 @@ func Encode(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	yieldBlockedSeconds, err := wholeSeconds("session yield blocked bound", cfg.SessionYield.BlockedFor)
+	if err != nil {
+		return err
+	}
+	yieldHealthySeconds, err := wholeSeconds("session yield healthy bound", cfg.SessionYield.HealthyFor)
+	if err != nil {
+		return err
+	}
 	priority, err := encodePriority(cfg.Priority)
 	if err != nil {
 		return err
@@ -712,6 +754,15 @@ func Encode(w io.Writer, cfg Config) error {
 	}
 	if cfg.SessionRecovery.FailureWindow != defaultSessionFailureWindow {
 		wire.GitHubSessionFailureWindowSeconds = sessionWindowSeconds
+	}
+	if !cfg.SessionYield.Enabled {
+		wire.SessionYieldDisabled = true
+	}
+	if cfg.SessionYield.BlockedFor != defaultSessionYieldBlockedFor {
+		wire.SessionYieldBlockedForSeconds = yieldBlockedSeconds
+	}
+	if cfg.SessionYield.HealthyFor != defaultSessionYieldHealthyFor {
+		wire.SessionYieldHealthyForSeconds = yieldHealthySeconds
 	}
 	if cfg.HostBudget != (Resources{}) {
 		budget := cfg.HostBudget
@@ -853,6 +904,19 @@ func hostBudget(budget *Resources) Resources {
 	return *budget
 }
 
+func normalizeSessionYield(w wireConfig) SessionYield {
+	yield := SessionYield{Enabled: !w.SessionYieldDisabled,
+		BlockedFor: time.Duration(w.SessionYieldBlockedForSeconds) * time.Second,
+		HealthyFor: time.Duration(w.SessionYieldHealthyForSeconds) * time.Second}
+	if yield.BlockedFor == 0 {
+		yield.BlockedFor = defaultSessionYieldBlockedFor
+	}
+	if yield.HealthyFor == 0 {
+		yield.HealthyFor = defaultSessionYieldHealthyFor
+	}
+	return yield
+}
+
 func normalizeSessionRecovery(w wireConfig) SessionRecovery {
 	recovery := SessionRecovery{MaxConsecutiveFailures: w.GitHubSessionMaxIngestFailures,
 		FailureWindow: time.Duration(w.GitHubSessionFailureWindowSeconds) * time.Second}
@@ -942,6 +1006,8 @@ func Default() Config {
 			MinCPUIdlePercent: defaultMinCPUIdlePercent},
 		SessionRecovery: SessionRecovery{MaxConsecutiveFailures: defaultSessionMaxIngestFailures,
 			FailureWindow: defaultSessionFailureWindow},
+		SessionYield: SessionYield{Enabled: true, BlockedFor: defaultSessionYieldBlockedFor,
+			HealthyFor: defaultSessionYieldHealthyFor},
 		GuestLiveness: GuestLiveness{ConsecutiveRefusals: defaultGuestLivenessRefusals,
 			Window: defaultGuestLivenessWindow, ProbeTimeout: defaultGuestLivenessProbe},
 		Targets: []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
@@ -1012,6 +1078,12 @@ func (c Config) Validate() error {
 	}
 	if c.SessionRecovery.FailureWindow < minSessionFailureWindow || c.SessionRecovery.FailureWindow > maxSessionFailureWindow {
 		return errors.New("github session failure window must be between 30 and 3600 seconds")
+	}
+	if c.SessionYield.BlockedFor < minSessionYieldBound || c.SessionYield.BlockedFor > maxSessionYieldBound {
+		return errors.New("session yield blocked bound must be between 30 and 3600 seconds")
+	}
+	if c.SessionYield.HealthyFor < minSessionYieldBound || c.SessionYield.HealthyFor > maxSessionYieldBound {
+		return errors.New("session yield healthy bound must be between 30 and 3600 seconds")
 	}
 	if err := c.GuestLiveness.validate(); err != nil {
 		return err

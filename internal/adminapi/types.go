@@ -74,8 +74,16 @@ type Status struct {
 	// for one reason: the dead guest's own console across the death did not
 	// exist. An older daemon published none of it, which is why
 	// EffectiveGuestConsoleCheck exists.
-	GuestConsole      *GuestConsole    `json:"guestConsole,omitempty"`
-	GuestConsoleCheck *Check           `json:"guestConsoleCheck,omitempty"`
+	GuestConsole      *GuestConsole `json:"guestConsole,omitempty"`
+	GuestConsoleCheck *Check        `json:"guestConsoleCheck,omitempty"`
+	// SessionYield is an additive fleet.v1 field: whether this node has released
+	// the scale-set sessions GitHub binds jobs to, because it concluded it
+	// cannot admit. A node that withdrew and a node that is merely idle are
+	// otherwise identical from outside, which is what let one node hold a
+	// sibling's work for eleven hours (#292, #297). An older daemon publishes
+	// none of it, which is why EffectiveSessionYieldCheck exists.
+	SessionYield      *SessionYield    `json:"sessionYield,omitempty"`
+	SessionYieldCheck *Check           `json:"sessionYieldCheck,omitempty"`
 	Queues            []Queue          `json:"queues"`
 	Instances         []Instance       `json:"instances"`
 	ScopeQueues       []ScopeQueue     `json:"scopeQueues,omitempty"`
@@ -276,6 +284,15 @@ func (s Status) EffectiveGuestConsoleCheck() Check {
 	return *s.GuestConsoleCheck
 }
 
+// EffectiveSessionYieldCheck reads the yield check an older daemon does not
+// publish. Absence is a pass: a controller that cannot withdraw has not.
+func (s Status) EffectiveSessionYieldCheck() Check {
+	if s.SessionYieldCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.SessionYieldCheck
+}
+
 // GuestConsole is this node's answer to one question: when a Linux guest's
 // kernel dies mid-job, will there be anything to read afterwards? BootsLinuxGuests
 // is false on a node whose backend boots nothing of the kind, and the pair is
@@ -285,6 +302,17 @@ func (s Status) EffectiveGuestConsoleCheck() Check {
 type GuestConsole struct {
 	BootsLinuxGuests    bool `json:"bootsLinuxGuests"`
 	SerialLogConfigured bool `json:"serialLogConfigured"`
+}
+
+// SessionYield reports whether this node currently holds the sessions behind
+// its scale sets. Bindings and Withdrawn differ only while a release GitHub
+// refused is being retried.
+type SessionYield struct {
+	Yielded   bool      `json:"yielded"`
+	Reason    string    `json:"reason,omitempty"`
+	Since     time.Time `json:"since,omitzero"`
+	Bindings  int       `json:"bindings,omitempty"`
+	Withdrawn int       `json:"withdrawn,omitempty"`
 }
 
 // Reservation is the aged head the fleet is standing capacity by for.

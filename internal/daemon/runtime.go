@@ -65,6 +65,10 @@ type recoveringScaleSetSource struct {
 	open    scaleSetSourceFactory
 	limiter chan struct{}
 	closed  bool
+	// suspended is a session this node gave up on purpose, not one that broke.
+	// A suspended source holds no session at all, which is what makes GitHub
+	// stop binding new jobs to the scale set behind it (issue #297).
+	suspended bool
 	// released records that the broker no longer owns the current session, so a
 	// later replacement must not try to delete it again. Without this, a
 	// successful release followed by a failed open pins the binding to a session
@@ -219,6 +223,61 @@ func (s *recoveringScaleSetSource) Deregister(ctx context.Context, name string) 
 	}
 	defer release()
 	return source.Deregister(ctx, name)
+}
+
+// Suspend releases this binding's session without ending the source. It is the
+// difference between a node that is idle and a node that has stopped competing
+// for work it cannot run: the scale set survives, and GitHub binds its next job
+// to a sibling advertising the same labels instead.
+//
+// A close GitHub refuses is reported rather than assumed: the caller retries,
+// because a session this node believes it dropped while the broker still holds
+// it is exactly the state that would strand the jobs this exists to free.
+func (s *recoveringScaleSetSource) Suspend(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.suspended {
+		return nil
+	}
+	if s.source != nil && !s.released {
+		closeCtx, cancel := context.WithTimeout(ctx, scaleSetCloseTimeout)
+		err := s.source.Close(closeCtx)
+		cancel()
+		if err != nil {
+			return err
+		}
+		s.released = true
+	}
+	s.suspended = true
+	s.source = nil
+	return nil
+}
+
+// Resume opens a fresh session through the same factory the failure path uses,
+// so rejoining the fleet and recovering from a broken session are one mechanism
+// with one set of conflict semantics.
+func (s *recoveringScaleSetSource) Resume(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || !s.suspended {
+		return nil
+	}
+	replacement, err := s.open(ctx)
+	if err != nil {
+		return errScaleSetOpen
+	}
+	s.source = replacement
+	s.released = false
+	s.suspended = false
+	s.failures = githubscaleset.SessionFailureState{}
+	return nil
+}
+
+// Suspended reports whether this binding is currently withdrawn.
+func (s *recoveringScaleSetSource) Suspended() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.suspended
 }
 
 func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
@@ -542,6 +601,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}
+	// One state for the whole node: withdrawal is a property of the machine's
+	// ability to admit, not of any single binding, and the ingesters must read
+	// the same conclusion the controller acts on.
+	yieldState := newSessionYieldState(sessionYieldPolicy{Enabled: cfg.SessionYield.Enabled,
+		BlockedFor: cfg.SessionYield.BlockedFor, HealthyFor: cfg.SessionYield.HealthyFor})
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
@@ -600,7 +664,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				closers = append(closers, source)
 				ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
-					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey), reporter: reporter})
+					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey), reporter: reporter,
+					yield: yieldState})
 				for _, target := range bindingTargets(binding, cfg.Targets) {
 					key := lifecycle.SourceKey{Repo: target, Profile: binding.Profile.ID}
 					if _, duplicate := controls[key]; duplicate {
@@ -646,9 +711,10 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
+	yield := newSessionYieldController(yieldState, closers, reporter)
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
-		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter}
+		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1189,6 +1255,11 @@ type boundIngester struct {
 	health      *telemetry.Health
 	observation string
 	reporter    *failureReporter
+	// yield is the node's own withdrawal. A suspended binding has no session to
+	// poll, and polling it anyway would report a session failure this node
+	// caused on purpose — which is how a deliberate withdrawal would come to
+	// look like the broker outage it is not.
+	yield *sessionYieldState
 }
 
 type restQueueIngester struct {
@@ -1296,6 +1367,15 @@ func (b boundIngester) Ingest(ctx context.Context) error {
 }
 
 func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
+	if b.yield.Yielded() {
+		// Stale, not fresh: this node observed nothing. Stale, not unavailable:
+		// nothing failed. The detail names the cause so the freshness column is
+		// never the only thing an operator has to interpret.
+		if b.health != nil && b.observation != "" {
+			_ = b.health.RecordObservationDetail(b.observation, telemetry.ObservationStale, "session_yielded")
+		}
+		return false, nil
+	}
 	changed, err := b.coordinator.IngestOnceResult(ctx, b.binding, b.source)
 	// The detail is closed vocabulary. It explains why one binding's ingestion
 	// failed without exposing a token, a JIT configuration, or an upstream
@@ -1388,6 +1468,20 @@ func (r *failureReporter) reportBinding(binding app.Binding, reason string) {
 	}
 	r.logger.Warn("binding ingest failure", "scope", binding.Scope, "profile", string(binding.Profile.ID),
 		"scaleSet", binding.ScaleSetID, "observation", fmt.Sprintf("github-%d", binding.StoreKey), "reason", reason)
+}
+
+// reportSessionYield records that this node stopped, or resumed, competing for
+// the jobs GitHub binds to its scale sets. It is not a failure and it is not
+// rate-limited away: a withdrawal is rare, deliberate, and the single fact that
+// explains an otherwise healthy node with an empty queue (#292, #297).
+func (r *failureReporter) reportSessionYield(action, reason string, failures int) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	if reason == "" {
+		reason = "admission refused"
+	}
+	r.logger.Warn("scale-set sessions "+action, "reason", reason, "unreleased", failures)
 }
 
 // reportSequenceReset records that a broker restarted its message-id sequence
@@ -1667,6 +1761,10 @@ type engineTicker struct {
 	// reporter carries the occupancy warning. A nil reporter publishes the metric
 	// and says nothing, which is what an observe-mode harness wants.
 	reporter *failureReporter
+	// yield decides whether this node keeps competing for the jobs GitHub binds
+	// to its scale sets. A nil controller never withdraws, which is every mode
+	// that owns no sessions.
+	yield *sessionYieldController
 }
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
@@ -1705,6 +1803,7 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	_ = e.health.RecordObservationDetail("scheduler", freshness, detail)
 	if err == nil {
 		e.recordMetrics(result)
+		busy, counted := 0, false
 		if e.operationCounts != nil {
 			retrying, dead, countErr := e.operationCounts(ctx)
 			failures, failureErr := e.operationFailureMetrics(ctx)
@@ -1722,10 +1821,41 @@ func (e engineTicker) Tick(ctx context.Context) error {
 				_ = e.health.SetDeadLetters(letters)
 				_ = e.health.SetStalled(stalled)
 				_ = e.health.RecordObservation("operations", telemetry.ObservationFresh)
+				busy = retrying
+				counted = true
 			}
+		}
+		// Withdrawal is decided on the same tick's facts the scheduler admitted
+		// on, and only when the operation aggregate was readable: an unknown
+		// number of retrying operations is not proof of an idle node, and Rule 4
+		// forbids treating an unreadable count as zero.
+		if counted {
+			e.applySessionYield(ctx, result, busy)
 		}
 	}
 	return err
+}
+
+// applySessionYield folds this tick into the yield policy and publishes the
+// result. The metric is published every tick, not only on a transition, so a
+// node that withdrew an hour ago still says so.
+func (e engineTicker) applySessionYield(ctx context.Context, result app.TickResult, busy int) {
+	if e.yield == nil {
+		return
+	}
+	live := 0
+	for _, instance := range result.Instances {
+		if instance.Live() {
+			live++
+		}
+	}
+	pressure := result.Host.Pressure
+	facts := sessionYieldFacts{At: result.At, AdmissionAllowed: pressure.AdmissionAllowed,
+		LiveInstances: live, BusyOperations: busy}
+	yielded := e.yield.Apply(ctx, facts, pressure.AdmissionReason)
+	bindings, withdrawn := e.yield.Bindings()
+	e.health.SetSessionYield(telemetry.SessionYieldMetric{Yielded: yielded, Reason: pressure.AdmissionReason,
+		Since: e.yield.Since(), Bindings: bindings, Withdrawn: withdrawn})
 }
 
 // operationFailureMetrics converts the durable failure aggregate into telemetry
