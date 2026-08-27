@@ -212,6 +212,7 @@ type Snapshot struct {
 	GuestSilences      []GuestSilenceMetric
 	RunnerImages       []RunnerImageMetric
 	GuestConsole       *GuestConsoleMetric
+	SessionYield       *SessionYieldMetric
 	Reservation        *ReservationMetric
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
@@ -257,6 +258,7 @@ type Health struct {
 	guestSilences      []GuestSilenceMetric
 	runnerImages       []RunnerImageMetric
 	guestConsole       *GuestConsoleMetric
+	sessionYield       *SessionYieldMetric
 	reservation        *ReservationMetric
 	hostPressure       HostPressureMetric
 	revision           uint64
@@ -930,6 +932,7 @@ func (h *Health) Snapshot() Snapshot {
 		GuestSilences:     append([]GuestSilenceMetric(nil), h.guestSilences...),
 		RunnerImages:      append([]RunnerImageMetric(nil), h.runnerImages...),
 		GuestConsole:      h.guestConsole,
+		SessionYield:      h.sessionYield,
 		Reservation:       cloneReservation(h.reservation),
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}

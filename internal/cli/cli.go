@@ -651,6 +651,16 @@ func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
 // check passes, on the same terms as runnerVersionDetail: a bare "ok" would
 // leave the question — can a dead guest leave evidence? — as invisible as it
 // was before issue #259.
+func sessionYieldDetail(status adminapi.Status, check adminapi.Check) string {
+	if !check.OK {
+		return joinReasons(check)
+	}
+	if status.SessionYield == nil {
+		return "not reported by this daemon"
+	}
+	return "holding its scale-set sessions"
+}
+
 func guestConsoleDetail(status adminapi.Status, check adminapi.Check) string {
 	if !check.OK {
 		return joinReasons(check)
@@ -705,6 +715,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	guests := status.Data.EffectiveGuestLiveness()
 	runners := status.Data.EffectiveRunnerVersionCheck()
 	console := status.Data.EffectiveGuestConsoleCheck()
+	yield := status.Data.EffectiveSessionYieldCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -742,6 +753,10 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// so the lapse itself is now a doctor finding rather than an operator's
 		// memory. It prints its posture even when it passes.
 		{Name: "guest console", OK: console.OK, Detail: guestConsoleDetail(status.Data, console)},
+		// A node that withdrew its sessions is not broken and not serving. It was
+		// indistinguishable from a healthy idle one for the eleven hours of #292,
+		// so it says so here whichever way it reads.
+		{Name: "session yield", OK: yield.OK, Detail: sessionYieldDetail(status.Data, yield)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {

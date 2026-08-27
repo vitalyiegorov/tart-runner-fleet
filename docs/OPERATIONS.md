@@ -1166,6 +1166,33 @@ run that was already `queued` needs an operator-driven cancel and re-run. Those
 jobs stay visible in `queues` and still breach the queue SLO, so they are not
 silent — but the controller must never cancel a user workflow itself.
 
+### A node that withdrew its sessions
+
+`fleet status` prints `SESSIONS WITHDRAWN` above the queues, `fleet doctor`
+fails its `session yield` check, and `fleet_session_yielded` is 1. This is not a
+fault: the node concluded it cannot admit — the check names the admission
+reason — and released the sessions behind its scale sets so GitHub binds new
+jobs to a sibling advertising the same labels instead of to a node that will
+not run them ([ADR 0047](adr/0047-a-node-that-cannot-admit-yields-its-sessions.md)).
+
+It rejoins by itself once admission has been allowed for
+`sessionYieldHealthyForSeconds` (default 120). The operator's job is the cause,
+not the withdrawal: read `admission` in `HOST PRESSURE` and clear whatever it
+names, usually free disk against `minFreeDiskGb` or load against
+`maxLoadAverage`.
+
+Two facts matter while a node is withdrawn. Its bindings report `stale`
+observations detailed `session_yielded`, so it reports NOT READY on purpose —
+it is holding no session and observing nothing. And jobs bound to its scale
+sets *before* it withdrew do not migrate: like a discarded session above, they
+need a cancel and re-run. Withdrawal prevents a backlog; it does not drain one.
+
+`sessionYieldBlockedForSeconds` (default 600) and
+`sessionYieldHealthyForSeconds` (default 120) tune the bounds in `fleet.json`,
+and `sessionYieldDisabled: true` turns the behaviour off for a node that should
+hold its sessions regardless. All three are omitted from a rewritten file while
+they hold the defaults.
+
 ### A breached queue SLO while the host still has free capacity
 
 `queue_slo_breached` with `admissionAllowed: true` and idle cores is normally

@@ -243,6 +243,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	guestLivenessCheck := adminapi.Check{OK: guestLiveness.OK, Reasons: nonNilStrings(guestLiveness.Reasons)}
 	runnerVersionCheck := adminapi.Check{OK: runnerVersions.OK, Reasons: nonNilStrings(runnerVersions.Reasons)}
 	guestConsoleCheck := adminapi.Check{OK: guestConsole.OK, Reasons: nonNilStrings(guestConsole.Reasons)}
+	yield := sessionYieldResult(snapshot.SessionYield)
+	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -256,6 +258,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
+			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -319,6 +322,18 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
 	}
 	return rows
+}
+
+// sessionYieldRow projects the node's yield posture into the versioned surface.
+// A daemon that never published one reports nothing rather than a false "still
+// serving".
+func sessionYieldRow(snapshot Snapshot) *adminapi.SessionYield {
+	if snapshot.SessionYield == nil {
+		return nil
+	}
+	return &adminapi.SessionYield{Yielded: snapshot.SessionYield.Yielded, Reason: snapshot.SessionYield.Reason,
+		Since: snapshot.SessionYield.Since, Bindings: snapshot.SessionYield.Bindings,
+		Withdrawn: snapshot.SessionYield.Withdrawn}
 }
 
 // guestConsoleRow projects the node's guest-console posture into the versioned
@@ -638,6 +653,10 @@ func renderMetrics(snapshot Snapshot) string {
 	fmt.Fprintf(&output, "fleet_host_load_average %s\n", strconv.FormatFloat(snapshot.HostPressure.LoadAverage, 'f', -1, 64))
 	writeHelpType("fleet_host_admission_allowed", "Whether latest host pressure permits new VM admission.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_admission_allowed %d\n", boolGauge(snapshot.HostPressure.AdmissionAllowed))
+	if snapshot.SessionYield != nil {
+		fmt.Fprintf(&output, "fleet_session_yielded %d\n", boolGauge(snapshot.SessionYield.Yielded))
+		fmt.Fprintf(&output, "fleet_session_bindings_withdrawn %d\n", snapshot.SessionYield.Withdrawn)
+	}
 
 	writeHelpType("fleet_observation_fresh", "Whether a bounded critical observation is fresh.", "gauge")
 	writeHelpType("fleet_observation_age_seconds", "Age of a bounded critical observation.", "gauge")
