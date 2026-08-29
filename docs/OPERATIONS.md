@@ -1242,19 +1242,26 @@ they hold the defaults.
 ### A breached queue SLO while the host still has free capacity
 
 `queue_slo_breached` with `admissionAllowed: true` and idle cores is normally
-head-of-line blocking, not a fault. The aged global-FIFO head reserves its exact
-vector, and admission behind that reservation is bounded on purpose. The
-reservation is scheduler state and is not exposed by `fleet.v1`, so reconstruct
-it: the reserved head is the oldest queued job past the fairness age, and what
-is free is the host less every live instance.
+head-of-line blocking, not a fault. The aged global-FIFO head reserves its turn,
+and admission behind that reservation is bounded on purpose.
+
+Both halves of the answer are published. Do not reconstruct them:
 
 ```sh
 fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
-  jq '{queues: .data.queues, live: .data.instances, pressure: .data.hostPressure}'
+  jq '{reservation: .data.reservation, envelope: .data.envelope, queues: .data.queues}'
 ```
 
-Compare the head profile's configured vector against the host capacity less the
-`live` vectors, then read the two cases:
+`reservation.axis` says WHY the head is refused; `envelope` says what it was
+refused AGAINST. **Read a `vector` hold against `agedCpu`/`agedMemoryMiB`/
+`agedSlots`, never against `cpu`/`memoryMiB`/`slots`** — the two differ by the
+advisory CPU-idle clamp, which aged work does not pay, and comparing the head to
+the young vector is how issue #263 spent hours proving an impossibility.
+
+An older daemon omits `envelope`, and a tick whose observation was unusable
+publishes none; only then fall back to deriving it from `instances` and
+`hostPressure`. Reading the head's configured vector against the published
+envelope, there are two cases:
 
 - The reserved head **does not fit** what is free: it is waiting for a live
   instance to exit, not for the queue behind it to stay idle, so work that fits
@@ -1277,6 +1284,21 @@ Compare the head profile's configured vector against the host capacity less the
 Neither case is repaired by restarting the daemon. Both clear when the blocking
 instance finishes; the reserved head is re-checked first on every tick and takes
 the first vector large enough for it.
+
+If the arithmetic says the head fits and it is still not admitted, the fault is
+one level up from the scheduler and the envelope will look unremarkable. Check
+that this node's config carries the keys its peers carry — `mixedPlatformAdmission`
+above all, whose absence sends every tick with an infeasible macOS head into
+`planMacHandoff`, which drains an aged *Linux* instance and plans nothing when
+there is none. That is the whole of issue #263: the studio stalled Linux
+admission behind every long macOS build for weeks because one node had the key
+and the other did not, and nothing compares two nodes' configurations. Until
+something does, compare them by hand after any config change:
+
+```sh
+fleet config validate ./state/fleet.json /path/to/peer-fleet.json
+diff <(jq -S .macosBurst ./state/fleet.json) <(jq -S .macosBurst /path/to/peer-fleet.json)
+```
 
 ## Recovery
 

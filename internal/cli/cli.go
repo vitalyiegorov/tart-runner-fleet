@@ -697,10 +697,36 @@ func reservationDetail(status adminapi.Status, check adminapi.Check) string {
 	}
 	held := status.Reservation
 	if held == nil {
-		return "no reservation held"
+		return "no reservation held" + envelopeSuffix(status)
 	}
-	return fmt.Sprintf("%s (%s) held %s on the %s axis", held.Demand, held.Profile,
-		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis))
+	return fmt.Sprintf("%s (%s) held %s on the %s axis%s", held.Demand, held.Profile,
+		renderSeconds(held.HeldSeconds), axisOrUnjudged(held.Axis), envelopeSuffix(status))
+}
+
+// envelopeSuffix names the capacity the axis was decided against, so the line an
+// operator reads is a complete argument rather than half of one.
+//
+// It is the aged vector that is quoted, because that is the envelope a
+// reservation's axis is judged in. The young vector follows only when the two
+// differ — they differ by exactly the advisory CPU-idle clamp, so on a quiet
+// host they are equal and repeating the same numbers would be noise. Issue #263
+// is what a missing suffix costs: a `vector` hold whose head demonstrably fitted
+// every published number, argued over SSH for hours, because the envelope the
+// tick actually used was never written down.
+func envelopeSuffix(status adminapi.Status) string {
+	envelope := status.Envelope
+	if envelope == nil {
+		return ""
+	}
+	suffix := fmt.Sprintf(", envelope %s", renderVector(envelope.AgedCPU, envelope.AgedMemoryMiB, envelope.AgedSlots))
+	if envelope.AgedCPU != envelope.CPU || envelope.AgedMemoryMiB != envelope.MemoryMiB || envelope.AgedSlots != envelope.Slots {
+		suffix += fmt.Sprintf(" aged, %s young", renderVector(envelope.CPU, envelope.MemoryMiB, envelope.Slots))
+	}
+	return suffix
+}
+
+func renderVector(cpu, memoryMiB, slots int) string {
+	return fmt.Sprintf("%d cpu / %d MiB / %d slots", cpu, memoryMiB, slots)
 }
 
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an

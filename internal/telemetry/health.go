@@ -166,6 +166,30 @@ type ReservationMetric struct {
 	Axis      string
 }
 
+// EnvelopeMetric is the admission capacity the scheduler's last tick computed:
+// what it was willing to hand out to young work, and what it judged an aged head
+// against.
+//
+// It is the companion to ReservationMetric and exists for the other half of the
+// same question. The axis says WHY a head was refused; this says what it was
+// refused AGAINST. Without it, "the head is 2 CPU / 4096 MiB and the box has 6"
+// is not an argument an operator can finish: the real envelope is the host
+// budget, the Linux-when-macOS-idle cap, the static-or-elastic model, the guard
+// clamps and the live cohort folded together, and on 2026-08-23 reconstructing
+// it by hand over SSH took hours and reached the wrong conclusion (issue #263).
+//
+// The two vectors differ in exactly one term — aged work escapes the advisory
+// CPU-idle clamp — and that term is the one that makes the arithmetic look
+// impossible from outside.
+type EnvelopeMetric struct {
+	CPU           int
+	MemoryMiB     int
+	Slots         int
+	AgedCPU       int
+	AgedMemoryMiB int
+	AgedSlots     int
+}
+
 type ObservationMetric struct {
 	Freshness  ObservationFreshness
 	ObservedAt time.Time
@@ -215,6 +239,7 @@ type Snapshot struct {
 	SessionYield       *SessionYieldMetric
 	UpdateDrain        *UpdateDrainMetric
 	Reservation        *ReservationMetric
+	Envelope           EnvelopeMetric
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
@@ -262,6 +287,7 @@ type Health struct {
 	sessionYield       *SessionYieldMetric
 	updateDrain        *UpdateDrainMetric
 	reservation        *ReservationMetric
+	envelope           EnvelopeMetric
 	hostPressure       HostPressureMetric
 	revision           uint64
 }
@@ -800,6 +826,24 @@ var validReservationAxis = map[string]bool{
 // makes a JUDGEMENT about rather than merely publishing.
 const reservationAxisNone = "none"
 
+// SetEnvelope publishes the admission capacity the last tick computed.
+//
+// A negative component is refused for the same reason SetReservation refuses
+// one: a mangled envelope must never masquerade as a real reading, because the
+// whole point of the field is that an operator can do arithmetic on it without
+// checking it first.
+func (h *Health) SetEnvelope(envelope EnvelopeMetric) error {
+	if envelope.CPU < 0 || envelope.MemoryMiB < 0 || envelope.Slots < 0 ||
+		envelope.AgedCPU < 0 || envelope.AgedMemoryMiB < 0 || envelope.AgedSlots < 0 {
+		return errInvalidMetric
+	}
+	h.mu.Lock()
+	h.revision++
+	h.envelope = envelope
+	h.mu.Unlock()
+	return nil
+}
+
 // SetReservation publishes the vector the scheduler is holding for its aged
 // head, or clears it when no reservation is held. Nil is the "nothing held"
 // value and is published as an ABSENCE rather than as a zero row, so a fleet
@@ -937,6 +981,7 @@ func (h *Health) Snapshot() Snapshot {
 		SessionYield:      h.sessionYield,
 		UpdateDrain:       h.updateDrain,
 		Reservation:       cloneReservation(h.reservation),
+		Envelope:          h.envelope,
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }

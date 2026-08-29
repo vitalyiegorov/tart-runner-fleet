@@ -211,6 +211,36 @@ deliberately NOT metric labels; they travel in this document only. Both fields
 are additive and absent on daemons that published no reservation at all — which
 is the condition issue #226 ran in unobserved.
 
+`envelope` is the admission capacity that same tick computed, and it is the other
+half of the reservation's diagnosis: the axis says WHY a head was refused, and
+this says what it was refused AGAINST.
+
+```json
+"envelope": {"cpu": 2, "memoryMiB": 9216, "slots": 3,
+             "agedCpu": 6, "agedMemoryMiB": 9216, "agedSlots": 4}
+```
+
+`cpu`/`memoryMiB`/`slots` is what young work is offered. `agedCpu`/`agedMemoryMiB`/
+`agedSlots` is what a demand past the fairness age is judged against, and it is
+larger by exactly the advisory CPU-idle clamp that aged work does not pay. **A
+`vector` hold is read against the aged vector, never the young one.**
+
+The field is additive and absent both on daemons that predate it and on a tick
+whose observation was unusable — a tick that judged nothing publishes no
+envelope, because a zero row would read as "no capacity" when the truth is "not
+judged". It is diagnostic only: nothing reads it back, and it is excluded from
+the plan identity, so publishing it moves no ADR 0031 corpus digest.
+
+It exists because issue #263 was six configuration knobs of archaeology. The mac
+studio held a `vector` reservation for 75 minutes for a 2 CPU / 4096 MiB head
+that, by every published number, fitted. Reconstructing the real envelope by hand
+over SSH needed `hostBudget`, `maxLinuxWhenMacosIdle`, the static-or-elastic
+capacity model, the guard clamps and the live cohort — and still reached the
+wrong conclusion. The true cause was one level up (a missing
+`mixedPlatformAdmission` on that node sent every tick down a lane that planned
+nothing), which the envelope alone would not have named — but it would have ended
+the arithmetic argument in one line instead of hours.
+
 `operations.deadLetters` names the individual operations that have stopped
 retrying, because a count is not actionable: discharging one requires its
 identity. `parked` reports that nothing will advance the resource without an

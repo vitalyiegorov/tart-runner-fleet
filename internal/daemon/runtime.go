@@ -2062,6 +2062,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordGuestLiveness(result)
 	e.recordRecoveries(result)
 	e.recordReservation(result)
+	e.recordEnvelope(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
@@ -2133,6 +2134,21 @@ func (e engineTicker) recordGuestLiveness(result app.TickResult) {
 //
 // The axis comes from the plan that decided it rather than being recomputed
 // here, so the diagnosis an operator reads is the one the scheduler acted on.
+// recordEnvelope publishes the admission capacity the tick computed, alongside
+// the reservation row and for the other half of the same question: the axis says
+// why a head was refused, and this says what it was refused against (issue #263).
+//
+// It is taken from the plan rather than recomputed here, exactly as the axis is,
+// so the numbers an operator reads are the numbers the scheduler decided on.
+func (e engineTicker) recordEnvelope(result app.TickResult) {
+	envelope := result.Plan.Envelope
+	_ = e.health.SetEnvelope(telemetry.EnvelopeMetric{
+		CPU: envelope.Free.CPU, MemoryMiB: envelope.Free.MemoryMB, Slots: envelope.Free.Slots,
+		AgedCPU: envelope.AgedFree.CPU, AgedMemoryMiB: envelope.AgedFree.MemoryMB,
+		AgedSlots: envelope.AgedFree.Slots,
+	})
+}
+
 func (e engineTicker) recordReservation(result app.TickResult) {
 	reservation := result.Plan.Next.Reservation
 	if reservation == nil {
