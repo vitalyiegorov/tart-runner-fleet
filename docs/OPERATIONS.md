@@ -319,6 +319,35 @@ never boots out itself. The plist on disk and launchd's cached
 `ProgramArguments` therefore advance together, and a later timer invocation,
 login, or reboot cannot regress to an older updater.
 
+**Every `apply-latest` also collects superseded generations**, and it does so
+whether or not that run adopted anything. The ordering is the point. The updater
+downloads and verifies a release *before* the quiescence gate decides whether to
+adopt it, so a node that never reaches quiescence downloads forever and adopts
+nothing: on 2026-08-25 the mac studio held **26 generations** (v0.1.461 through
+v0.1.487, several GiB) while refusing every job for a 2 GiB disk-reserve
+shortfall (issue #287). A collector that only ran after a successful adoption
+would have freed nothing there.
+
+Four things are kept, and nothing else:
+
+| Kept | Why |
+| --- | --- |
+| The running generation | Deleting it unlinks the live process's own binary. |
+| The `current` symlink target | Between the commit's symlink swap and the service restart these differ, and that window is when a prune would strand the boot path. |
+| The newest version present | It is the pending candidate the next adoption takes (`fleet doctor` reports it as a pending update). |
+| The **2** newest generations *older* than running | Rollback headroom. Counted among older versions only — rolling back to a version the node has never run is not a rollback. |
+
+Everything else goes, oldest first, including generations *newer* than running
+that are not the newest: the updater resolves `releases/latest` on every run, so
+an intermediate download is superseded before anything can adopt it. Names that
+are not versions — the updater's own `.generation-*` staging directories — are
+never touched.
+
+The line to look for is `pruned N superseded release(s): …`. Collection is
+best-effort and never fails the update: reclaiming disk is an errand performed
+on the way to updating, and failing an update because a stale directory is busy
+would turn a disk-space problem into an availability one.
+
 Activation and rollback use bounded launchd bootstrap recovery for the brief
 unload-to-load transition. Production allows a five-minute readiness budget so
 all configured Scale Set sessions can start sequentially on a busy control

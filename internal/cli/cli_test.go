@@ -809,3 +809,74 @@ func TestAtomicWriteConfigFailsClosedAtEveryDurabilityStep(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyLatestCollectsSupersededReleases is issue #287 at the command an
+// operator's timer actually runs.
+//
+// The mac studio held 26 downloaded generations, several GiB, while refusing
+// every job for a 2 GiB disk-reserve shortfall. They accumulated because the
+// updater downloads and verifies a release BEFORE the quiescence gate decides
+// whether to adopt it, and that node never reached quiescence — so the
+// collection has to happen on the download path, not only after a successful
+// adoption.
+func TestApplyLatestCollectsSupersededReleases(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	agents := filepath.Join(root, "LaunchAgents")
+	for _, dir := range []string{state, agents} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := makeUpdateRelease(t, root)
+	configPath := filepath.Join(state, "fleet.json")
+	if err := os.WriteFile(configPath, []byte(`{"valid":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(agents, autoupdate.CanonicalPlist)
+	if err := os.WriteFile(canonical, []byte(`<string>`+release+`/fleet</string><string>--mode=authority</string>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Four superseded downloads beneath the running v2, which is what the studio
+	// looked like in miniature.
+	superseded := []string{"v0.0.1", "v0.0.2", "v0.0.3", "v0.0.4"}
+	for _, name := range superseded {
+		if err := os.MkdirAll(filepath.Join(root, "releases", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	command := &fakeUpdateCommand{}
+	deps := dependencies{command: command}
+	common := []string{"--root", root, "--state-dir", state, "--launch-agents-dir", agents,
+		"--config", configPath, "--endpoint", "unix:///state/fleetd.sock", "--domain", "gui/501",
+		"--repo", "owner/repo", "--mode", "authority"}
+	var stdout, stderr bytes.Buffer
+	adopt := append(append([]string{"update", "adopt"}, common...), "--release-dir", release,
+		"--confirm", "adopt-current-generation")
+	if code := executeWith(context.Background(), adopt, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("adopt code=%d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	args := append(append([]string{"update", "apply-latest"}, common...), "--confirm", "automatic-release-update")
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("apply-latest code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "pruned") {
+		t.Fatalf("the collection must say what it took: %q", stdout.String())
+	}
+	// Two of rollback headroom survive; the two oldest go. The running generation
+	// is never a candidate.
+	for _, gone := range []string{"v0.0.1", "v0.0.2"} {
+		if _, err := os.Stat(filepath.Join(root, "releases", gone)); !os.IsNotExist(err) {
+			t.Fatalf("%s should have been collected: %v", gone, err)
+		}
+	}
+	for _, kept := range []string{"v0.0.3", "v0.0.4", "v2"} {
+		if _, err := os.Stat(filepath.Join(root, "releases", kept)); err != nil {
+			t.Fatalf("%s must survive: %v", kept, err)
+		}
+	}
+}
