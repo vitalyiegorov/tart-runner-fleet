@@ -1370,7 +1370,7 @@ func TestFailureReporterNamesTheBindingAndItsAdoptedGeneration(t *testing.T) {
 	binding := app.Binding{StoreKey: 8077185082566234948, ScaleSetID: 2, Scope: "knee-repo",
 		Profile: domain.Profile{ID: "large", Route: "linux-large", Platform: domain.PlatformLinux}}
 
-	reporter.reportBinding(binding, githubscaleset.ReasonDemandCommitConflict)
+	reporter.reportBinding(binding, githubscaleset.DescribeIngestFailure(operations.ErrConflict))
 	line := buffer.String()
 	for _, fragment := range []string{"binding ingest failure", "scope=knee-repo", "profile=large", "scaleSet=2",
 		"observation=github-8077185082566234948", "reason=" + githubscaleset.ReasonDemandCommitConflict} {
@@ -1379,14 +1379,14 @@ func TestFailureReporterNamesTheBindingAndItsAdoptedGeneration(t *testing.T) {
 		}
 	}
 	// Rate limited per binding and reason, like the component line it complements.
-	reporter.reportBinding(binding, githubscaleset.ReasonDemandCommitConflict)
+	reporter.reportBinding(binding, githubscaleset.DescribeIngestFailure(operations.ErrConflict))
 	if got := strings.Count(buffer.String(), "binding ingest failure"); got != 1 {
 		t.Fatalf("in-window binding lines = %d: %q", got, buffer.String())
 	}
 	// A reason outside the closed vocabulary is withheld rather than rendered:
 	// this line is fed by an error classifier, and upstream text must never reach
 	// it.
-	reporter.reportBinding(binding, "Bearer AAABBBCCC")
+	reporter.reportBinding(binding, githubscaleset.IngestFailure{Reason: "Bearer AAABBBCCC"})
 	if strings.Contains(buffer.String(), "Bearer") {
 		t.Fatalf("unclassified reason reached the log: %q", buffer.String())
 	}
@@ -2359,5 +2359,63 @@ func TestEngineTickerPublishesThePriorityTierBreakdown(t *testing.T) {
 	}
 	if rows[0].Tiers[0].Tier != "release" || rows[0].Tiers[0].Rank != 1 || rows[0].Tiers[1].Count != 2 {
 		t.Fatalf("published tiers = %#v", rows[0].Tiers)
+	}
+}
+
+// TestABindingFailureLineNamesWhatGitHubAnswered is issue #292's ask 2 at the
+// artifact an operator actually reads.
+//
+// 2,065 warnings between July and 2026-08 read `reason=message_poll_failed` and
+// carried no status, no correlation id and no phase. The line has to separate a
+// throttle from a broker outage from a dead session, because those call for
+// three different responses and looked identical.
+func TestABindingFailureLineNamesWhatGitHubAnswered(t *testing.T) {
+	var buffer bytes.Buffer
+	now := time.Date(2026, 8, 26, 1, 50, 0, 0, time.UTC)
+	reporter := newFailureReporter(&buffer, func() time.Time { return now })
+	binding := app.Binding{StoreKey: 42, ScaleSetID: 7, Scope: "rnw-repo",
+		Profile: domain.Profile{ID: "small", Route: "linux-small", Platform: domain.PlatformLinux}}
+
+	reporter.reportBinding(binding, githubscaleset.DescribeIngestFailure(&githubscaleset.SessionFailure{
+		Reason: githubscaleset.ReasonSessionReleaseFailed,
+		Poll:   githubscaleset.ReasonRateLimited,
+		Cause: &githubscaleset.APIError{Kind: githubscaleset.RateLimited, Status: 403,
+			RequestID: "C4A2:1F3D", RetryAfter: 60 * time.Second}}))
+
+	line := buffer.String()
+	for _, fragment := range []string{
+		"reason=" + githubscaleset.ReasonSessionReleaseFailed,
+		"phase=" + githubscaleset.PhaseRelease,
+		"status=403",
+		"requestId=C4A2:1F3D",
+		"retryAfter=1m0s",
+		"pollReason=" + githubscaleset.ReasonRateLimited,
+	} {
+		if !strings.Contains(line, fragment) {
+			t.Fatalf("binding failure line missing %q: %q", fragment, line)
+		}
+	}
+}
+
+// A failure that never reached an HTTP response says so by omission. `status=0`
+// reads as a status GitHub sent, and a line that looks like information and is
+// not is the whole complaint behind issue #292.
+func TestABindingFailureLineOmitsFactsItDoesNotHave(t *testing.T) {
+	var buffer bytes.Buffer
+	now := time.Date(2026, 8, 26, 1, 50, 0, 0, time.UTC)
+	reporter := newFailureReporter(&buffer, func() time.Time { return now })
+	binding := app.Binding{StoreKey: 43, ScaleSetID: 8, Scope: "rnw-repo",
+		Profile: domain.Profile{ID: "small", Route: "linux-small", Platform: domain.PlatformLinux}}
+
+	reporter.reportBinding(binding, githubscaleset.DescribeIngestFailure(errors.New("dial tcp: refused")))
+
+	line := buffer.String()
+	for _, absent := range []string{"status=", "requestId=", "retryAfter=", "pollReason="} {
+		if strings.Contains(line, absent) {
+			t.Fatalf("line invented %q it does not have: %q", absent, line)
+		}
+	}
+	if !strings.Contains(line, "phase="+githubscaleset.PhasePoll) {
+		t.Fatalf("every failure has a phase: %q", line)
 	}
 }
