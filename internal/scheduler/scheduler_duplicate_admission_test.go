@@ -195,7 +195,7 @@ func TestRemainderPassesShareTheSameGuard(t *testing.T) {
 
 	claimed := Plan{Status: PlanReady, Operations: []Operation{spawnOperation(macJob, nil)}}
 
-	filled := fillMacRemainder(in, claimed, []domain.Demand{macJob})
+	filled := fillMacRemainder(in, claimed, []domain.Demand{macJob}, nil)
 
 	if got := duplicateSpawns(filled); len(got) > 0 {
 		t.Fatalf("fillMacRemainder re-admitted %#v the plan already spawns: %#v", got, filled.Operations)

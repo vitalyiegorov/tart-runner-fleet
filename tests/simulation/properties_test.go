@@ -92,6 +92,13 @@ const (
 	// had panicked, and the fleet's only reaction was to the failure GitHub
 	// eventually reported -- there was no bound at all on the fleet's side.
 	findingDeadGuestHold findingKind = "dead_guest_hold"
+	// findingCrossPlatformInversion is property (r): a demand must not take the
+	// whole vector an older, aged demand of the OTHER platform is waiting for
+	// when it could not have been admitted beside it instead. Property (l) is
+	// confined to one platform by construction, so before this oracle existed
+	// nothing in the harness compared two demands across the boundary at all --
+	// which is how issue #225 ran in production for two hours.
+	findingCrossPlatformInversion findingKind = "cross_platform_inversion"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -309,6 +316,13 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// delivered are each the CAUSE of a queue whose order looks wrong, and
 		// property (b) would report the symptom (issue #224).
 		tierInversionChecker(cfg),
+		// (r) sits with (l) because it is the same question asked across the one
+		// boundary (l) cannot cross. It precedes bounded starvation for the same
+		// causal reason the tier oracles do: a demand whose vector was handed to
+		// the other platform is the CAUSE of a queue that will not drain, and
+		// property (b) would report it as the symptom -- if it reported it at all,
+		// which for two hours on 2026-08-09 it did not (issue #225).
+		crossPlatformInversionChecker(cfg),
 		escalationChecker(cfg),
 		tierStarvationChecker(cfg),
 		boundedStarvationChecker(cfg),
@@ -1048,7 +1062,6 @@ func occupiedVector(observation tickObservation, id string) domain.Resources {
 // which vectors this tick may hand out, so an envelope that ignores it does not
 // measure admissibility -- see reservedResidual.
 func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Demand {
-	live := domain.Resources{}
 	repos := map[string]int{}
 	macProfiles := map[domain.ProfileID]int{}
 	incarnated := map[domain.DemandKey]bool{}
@@ -1060,7 +1073,6 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 		if !instance.ConsumesHostResources() {
 			continue
 		}
-		live = live.Add(instance.Resources)
 		if instance.Platform == domain.PlatformMacOS {
 			macProfiles[instance.Profile]++
 		}
@@ -1072,12 +1084,10 @@ func feasibleDemands(cfg worldConfig, observation tickObservation) []domain.Dema
 			repos[instance.Repo]++
 		}
 	}
-	headroom, ok := cfg.hostCeiling().Sub(live)
+	free, ok := tickFreeEnvelope(cfg, observation, false)
 	if !ok {
 		return nil
 	}
-	free := domain.Resources{CPU: min(headroom.CPU, observation.Host.Available.CPU),
-		MemoryMB: min(headroom.MemoryMB, observation.Host.Available.MemoryMB), Slots: headroom.Slots}
 	hold := reservedResidual(cfg, observation, free)
 	var feasible []domain.Demand
 	for _, demand := range observation.Demands {
