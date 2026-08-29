@@ -1166,6 +1166,24 @@ run that was already `queued` needs an operator-driven cancel and re-run. Those
 jobs stay visible in `queues` and still breach the queue SLO, so they are not
 silent — but the controller must never cancel a user workflow itself.
 
+### `controller authority lost: renew lease` in the daemon log
+
+The daemon exits and its supervisor restarts it. The restart is the expensive
+part: the successor re-establishes every scale-set session, on a host that was
+already struggling when the renewal failed.
+
+The renewal itself is a single small `UPDATE` with a five-second budget, and it
+now runs on **its own SQLite connection**. The shared connection is capped at
+one, so before that change a renewal queued behind whatever the scheduler and
+the operations worker were doing and could spend its whole budget without ever
+reaching the database (issue #295; the same shape as the 2026-08-01 incident of
+three exits in seventy minutes).
+
+If this line still appears, the cause is no longer queueing behind scheduling.
+Look for a host so saturated that a small write cannot complete at all, or for
+`ErrLeaseLost` — a second controller holding the same lease name, which is a
+real fencing loss and not a blip.
+
 ### A node draining toward its own update
 
 `fleet status` prints an `UPDATE DRAIN` block above the queues, `fleet doctor`
