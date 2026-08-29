@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -480,6 +481,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	if closeErr != nil {
 		return fmt.Errorf("close config: %w", closeErr)
 	}
+	// Where the configuration was found is where this node keeps its state, and a
+	// backend that must materialise a file needs somewhere it owns. Derived here
+	// rather than decoded, because it is a fact about this process's invocation
+	// and not about the document.
+	cfg.StateDir = filepath.Dir(opts.ConfigPath)
 	if opts.Mode != reconcile.Observe {
 		// A node with no execution technology may observe and nothing else. Shadow,
 		// canary and authority all exist to act on a machine this build cannot act

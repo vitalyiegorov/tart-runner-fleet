@@ -282,3 +282,17 @@ func TestDefaultDependenciesFollowTheRunningMachine(t *testing.T) {
 		t.Fatal("a configured container node did not execute")
 	}
 }
+
+// The narrowed `/proc` view a container is shown lives in the node's own state
+// directory (ADR 0050). A configuration whose origin is unknown — every unit
+// test that wires a backend from a bare document — disables the narrowing rather
+// than guessing a path, and its containers see the host exactly as they did
+// before the record.
+func TestTheVectorViewLivesInTheNodesStateDirectory(t *testing.T) {
+	if got := vectorViewDir(config.Config{}); got != "" {
+		t.Fatalf("an unknown state directory must disable the narrowing, got %q", got)
+	}
+	if got := vectorViewDir(config.Config{StateDir: "/var/lib/trf/state"}); got != "/var/lib/trf/state/vectorview" {
+		t.Fatalf("vectorViewDir = %q", got)
+	}
+}
