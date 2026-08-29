@@ -43,8 +43,11 @@ type Status struct {
 	// older daemon omitted it entirely, which is why EffectiveReservationCheck
 	// exists. Issue #226 ran in production unobserved precisely because none of
 	// this was published.
-	Reservation      *Reservation `json:"reservation,omitempty"`
-	ReservationCheck *Check       `json:"reservationCheck,omitempty"`
+	Reservation *Reservation `json:"reservation,omitempty"`
+	// Envelope is an additive fleet.v1 field: the admission capacity the last
+	// tick computed (issue #263). Absent from a daemon that predates it.
+	Envelope         *Envelope `json:"envelope,omitempty"`
+	ReservationCheck *Check    `json:"reservationCheck,omitempty"`
 	// Stalled is an additive fleet.v1 field: the durable operations that are
 	// still retrying and the instances still held in a cleanup state, with the
 	// step, the attempt count, and the elapsed time an operator needs to name a
@@ -369,6 +372,27 @@ type Reservation struct {
 	// pinned to true: a reservation withholds ORDER and one repository slot, on
 	// every axis, so there is no longer a state for it to distinguish.
 	Axis string `json:"axis"`
+}
+
+// Envelope is the admission capacity the scheduler's last tick computed.
+//
+// It is the companion to Reservation: the axis names WHY a head was refused, and
+// this names what it was refused AGAINST. `cpu`/`memoryMiB`/`slots` is what
+// young work is offered; `agedCpu`/`agedMemoryMiB`/`agedSlots` is what a demand
+// past the fairness age is judged against, which is larger by exactly the
+// advisory CPU-idle clamp that aged work does not pay. A `vector` hold is read
+// against the aged vector, never the young one.
+//
+// Additive fleet.v1 field: a daemon that predates it omits it, and the zero
+// value is indistinguishable from a genuinely empty envelope — which is why the
+// field is a pointer.
+type Envelope struct {
+	CPU           int `json:"cpu"`
+	MemoryMiB     int `json:"memoryMiB"`
+	Slots         int `json:"slots"`
+	AgedCPU       int `json:"agedCpu"`
+	AgedMemoryMiB int `json:"agedMemoryMiB"`
+	AgedSlots     int `json:"agedSlots"`
 }
 
 type Queue struct {

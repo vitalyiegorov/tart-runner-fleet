@@ -256,7 +256,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			QueueSLO:  &queueCheck,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
-			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
+			Envelope: envelopeRow(snapshot),
+			Stalled:  stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
@@ -389,6 +390,23 @@ func reservationRow(snapshot Snapshot) *adminapi.Reservation {
 	return &adminapi.Reservation{Demand: metric.Demand, Repo: metric.Repo, Profile: metric.Profile,
 		CPU: metric.CPU, MemoryMiB: metric.MemoryMiB, Slots: metric.Slots,
 		HeldSeconds: metric.Held.Seconds(), Axis: metric.Axis}
+}
+
+// envelopeRow projects the computed admission capacity into the versioned DTO.
+//
+// Unlike reservationRow there is no "nothing held" state to distinguish: every
+// usable tick computes an envelope, and a tick whose observation was unusable
+// computes none. The pointer is therefore nil for exactly the ticks that never
+// asked the question, which is the honest answer and the one an operator needs
+// -- a zero row there would read as "no capacity" when the truth is "not
+// judged".
+func envelopeRow(snapshot Snapshot) *adminapi.Envelope {
+	envelope := snapshot.Envelope
+	if envelope == (EnvelopeMetric{}) {
+		return nil
+	}
+	return &adminapi.Envelope{CPU: envelope.CPU, MemoryMiB: envelope.MemoryMiB, Slots: envelope.Slots,
+		AgedCPU: envelope.AgedCPU, AgedMemoryMiB: envelope.AgedMemoryMiB, AgedSlots: envelope.AgedSlots}
 }
 
 // operationFailures projects the bounded failure aggregate into the versioned

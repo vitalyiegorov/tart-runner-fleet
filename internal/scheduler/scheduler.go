@@ -182,6 +182,39 @@ type Plan struct {
 	// own repository's instances to exit, which no amount of freed CPU can
 	// shorten.
 	ReservationAxis ReservationAxis
+	// Envelope is the admission capacity this tick actually computed. It is
+	// diagnostic only: nothing reads it back, and it is excluded from the plan
+	// identity `finish` derives, so publishing it moves no digest.
+	//
+	// It exists because "why did nothing fit" was six config knobs of archaeology
+	// over SSH. On 2026-08-23 the mac studio held a reservation on the `vector`
+	// axis for 75 minutes while, by arithmetic on every published field, the
+	// head's 2 CPU / 4096 MiB fitted the free envelope exactly. Reconstructing
+	// the real envelope needed hostBudget, maxLinuxWhenMacosIdle, the static vs
+	// elastic model, the guard clamps and the live cohort — and the answer, when
+	// it finally came, was that the tick had never been asked the question,
+	// because a setting the node lacked sent it down another lane entirely
+	// (issue #263). The axis says why the head was refused; this says what it was
+	// refused against.
+	Envelope Envelope
+}
+
+// Envelope is what one tick judged admission against, on both of the envelopes
+// this scheduler distinguishes.
+//
+// The two differ in exactly one term and it is the term that confuses operators:
+// aged work escapes the advisory CPU-idle clamp (`linuxFreeAged`), so a head
+// past the fairness age is judged against capacity that young work is not
+// offered. Publishing only one of them would answer the question wrongly half
+// the time.
+type Envelope struct {
+	// Free is the young-admission envelope: `linuxFree`, every clamp applied.
+	Free domain.Resources
+	// AgedFree is what a demand past the fairness age is judged against:
+	// `agedLinuxEnvelope`, the advisory CPU-idle clamp lifted and the production
+	// slot ceiling applied. It is the envelope a reservation's axis is decided
+	// in, so it is the one that explains a `vector` hold.
+	AgedFree domain.Resources
 }
 
 // ReservationAxis is the closed vocabulary of reasons a reserved head is not
@@ -210,7 +243,20 @@ const (
 )
 
 // PlanTick computes a complete plan without performing side effects.
+//
+// The envelope is attached here rather than inside `planTick` so that every
+// return path carries it by construction — there are eleven, and a diagnostic
+// that is present on ten of them is worse than none, because the tick an
+// operator wants is always the unusual one.
 func PlanTick(in Input) Plan {
+	plan := planTick(in)
+	if in.Demands.Usable() && in.Instances.Usable() && in.Host.Usable() {
+		plan.Envelope = Envelope{Free: linuxFree(in), AgedFree: agedLinuxEnvelope(in)}
+	}
+	return plan
+}
+
+func planTick(in Input) Plan {
 	if !in.Demands.Usable() || !in.Instances.Usable() || !in.Host.Usable() {
 		return finish(Plan{Status: PlanBlockedObservation, Next: in.Prior, Reason: blockedReason(in)})
 	}
