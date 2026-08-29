@@ -68,6 +68,15 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
 		pressure.FreeDiskGiB, pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pagingState(pressure),
 		pressure.CPUIdlePercent, pressure.LoadAverage, admissionState(pressure.AdmissionAllowed), pressure.AdmissionReason)
+	// A node draining toward an update prints it above the queues too: the queue
+	// growing is the *expected* cost of the drain, not evidence against it.
+	if drain := status.Data.UpdateDrain; drain != nil && drain.Draining {
+		candidate := drain.Candidate
+		if candidate == "" {
+			candidate = "a newer generation"
+		}
+		fmt.Fprintf(output, "\nUPDATE DRAIN\nadmission refused to reach %s; running work finishes, nothing new starts\n", candidate)
+	}
 	// A withdrawn node prints why above its queues, because the queues are the
 	// thing that looks normal while it is not serving (#292).
 	if yield := status.Data.SessionYield; yield != nil && yield.Yielded {

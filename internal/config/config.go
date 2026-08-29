@@ -300,6 +300,27 @@ type SessionRecovery struct {
 // not allowed to take. Withdrawing the session is the node-local half of the
 // placement ADR 0036 will own: it cannot move a job already bound, only stop
 // being chosen for the next one, which is why the blocked bound is minutes.
+// UpdateDrain bounds how a node reaches the quiescence its own update needs.
+//
+// ADR 0011 refuses to swap a generation out from under running work. That gate
+// can only be passed by being idle, and a node doing its job never is, so the
+// busiest nodes ran the oldest code — one refused 1011 consecutive times while
+// 26 releases behind (issues #230, #282). Draining stops the arrival of new
+// instances so the live ones can finish; nothing running is ever interrupted.
+type UpdateDrain struct {
+	// Enabled is whether this node may refuse admission to reach an update.
+	Enabled bool
+	// PendingFor is how long a newer generation must sit unapplied on disk
+	// before the node starts draining toward it.
+	PendingFor time.Duration
+	// MaxWait bounds the drain, so a guest that will not end cannot hold the
+	// node at zero admission indefinitely.
+	MaxWait time.Duration
+	// Cooldown is how long the node serves normally after abandoning a drain,
+	// so an unreachable quiescence cannot become permanent half capacity.
+	Cooldown time.Duration
+}
+
 type SessionYield struct {
 	// Enabled is whether this node may withdraw at all. A node that is the only
 	// one advertising its labels loses nothing by withdrawing — the jobs it
@@ -324,6 +345,11 @@ const (
 	defaultSessionYieldHealthyFor   = 2 * time.Minute
 	minSessionYieldBound            = 30 * time.Second
 	maxSessionYieldBound            = time.Hour
+	defaultUpdateDrainPendingFor    = 30 * time.Minute
+	defaultUpdateDrainMaxWait       = 2 * time.Hour
+	defaultUpdateDrainCooldown      = time.Hour
+	minUpdateDrainBound             = time.Minute
+	maxUpdateDrainBound             = 24 * time.Hour
 )
 
 // GuestLiveness bounds how long a `running` instance may go on holding its
@@ -526,6 +552,7 @@ type Config struct {
 	Guards          Guards
 	SessionRecovery SessionRecovery
 	SessionYield    SessionYield
+	UpdateDrain     UpdateDrain
 	// GuestLiveness bounds how long an instance whose guest has stopped answering
 	// may go on holding its vector (ADR 0040). An absent block is the shipped
 	// default bound, not an absent one.
@@ -599,6 +626,14 @@ type wireConfig struct {
 	SessionYieldDisabled          bool `json:"sessionYieldDisabled,omitempty"`
 	SessionYieldBlockedForSeconds int  `json:"sessionYieldBlockedForSeconds,omitempty"`
 	SessionYieldHealthyForSeconds int  `json:"sessionYieldHealthyForSeconds,omitempty"`
+	// UpdateDrain* express how this node reaches the quiescence its updater
+	// needs. Disabled is the explicit off switch: omitting every field ships the
+	// behaviour on, because a node that can never install its own fixes is the
+	// failure this defaults against.
+	UpdateDrainDisabled          bool `json:"updateDrainDisabled,omitempty"`
+	UpdateDrainPendingForSeconds int  `json:"updateDrainPendingForSeconds,omitempty"`
+	UpdateDrainMaxWaitSeconds    int  `json:"updateDrainMaxWaitSeconds,omitempty"`
+	UpdateDrainCooldownSeconds   int  `json:"updateDrainCooldownSeconds,omitempty"`
 	// The guest-liveness bounds are omitted while they hold the shipped defaults,
 	// for the same reason: a rewritten file must stay decodable by an older strict
 	// release. A stated -1 disables the mechanism outright.
@@ -663,7 +698,7 @@ func Decode(r io.Reader) (Config, error) {
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
-		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), SessionYield: normalizeSessionYield(w),
+		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), SessionYield: normalizeSessionYield(w), UpdateDrain: normalizeUpdateDrain(w),
 		GuestLiveness: normalizeGuestLiveness(w), Targets: normalizeTargets(w.Targets),
 		Priority: decodePriority(w.Priority),
 	}
@@ -719,6 +754,18 @@ func Encode(w io.Writer, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	drainPendingSeconds, err := wholeSeconds("update drain pending bound", cfg.UpdateDrain.PendingFor)
+	if err != nil {
+		return err
+	}
+	drainMaxWaitSeconds, err := wholeSeconds("update drain max wait bound", cfg.UpdateDrain.MaxWait)
+	if err != nil {
+		return err
+	}
+	drainCooldownSeconds, err := wholeSeconds("update drain cooldown bound", cfg.UpdateDrain.Cooldown)
+	if err != nil {
+		return err
+	}
 	priority, err := encodePriority(cfg.Priority)
 	if err != nil {
 		return err
@@ -763,6 +810,18 @@ func Encode(w io.Writer, cfg Config) error {
 	}
 	if cfg.SessionYield.HealthyFor != defaultSessionYieldHealthyFor {
 		wire.SessionYieldHealthyForSeconds = yieldHealthySeconds
+	}
+	if !cfg.UpdateDrain.Enabled {
+		wire.UpdateDrainDisabled = true
+	}
+	if cfg.UpdateDrain.PendingFor != defaultUpdateDrainPendingFor {
+		wire.UpdateDrainPendingForSeconds = drainPendingSeconds
+	}
+	if cfg.UpdateDrain.MaxWait != defaultUpdateDrainMaxWait {
+		wire.UpdateDrainMaxWaitSeconds = drainMaxWaitSeconds
+	}
+	if cfg.UpdateDrain.Cooldown != defaultUpdateDrainCooldown {
+		wire.UpdateDrainCooldownSeconds = drainCooldownSeconds
 	}
 	if cfg.HostBudget != (Resources{}) {
 		budget := cfg.HostBudget
@@ -904,6 +963,23 @@ func hostBudget(budget *Resources) Resources {
 	return *budget
 }
 
+func normalizeUpdateDrain(w wireConfig) UpdateDrain {
+	drain := UpdateDrain{Enabled: !w.UpdateDrainDisabled,
+		PendingFor: time.Duration(w.UpdateDrainPendingForSeconds) * time.Second,
+		MaxWait:    time.Duration(w.UpdateDrainMaxWaitSeconds) * time.Second,
+		Cooldown:   time.Duration(w.UpdateDrainCooldownSeconds) * time.Second}
+	if drain.PendingFor == 0 {
+		drain.PendingFor = defaultUpdateDrainPendingFor
+	}
+	if drain.MaxWait == 0 {
+		drain.MaxWait = defaultUpdateDrainMaxWait
+	}
+	if drain.Cooldown == 0 {
+		drain.Cooldown = defaultUpdateDrainCooldown
+	}
+	return drain
+}
+
 func normalizeSessionYield(w wireConfig) SessionYield {
 	yield := SessionYield{Enabled: !w.SessionYieldDisabled,
 		BlockedFor: time.Duration(w.SessionYieldBlockedForSeconds) * time.Second,
@@ -1008,6 +1084,8 @@ func Default() Config {
 			FailureWindow: defaultSessionFailureWindow},
 		SessionYield: SessionYield{Enabled: true, BlockedFor: defaultSessionYieldBlockedFor,
 			HealthyFor: defaultSessionYieldHealthyFor},
+		UpdateDrain: UpdateDrain{Enabled: true, PendingFor: defaultUpdateDrainPendingFor,
+			MaxWait: defaultUpdateDrainMaxWait, Cooldown: defaultUpdateDrainCooldown},
 		GuestLiveness: GuestLiveness{ConsecutiveRefusals: defaultGuestLivenessRefusals,
 			Window: defaultGuestLivenessWindow, ProbeTimeout: defaultGuestLivenessProbe},
 		Targets: []Target{{Type: "repo", Slug: "owner/repo", MaxActive: 4, SchedulingClass: domain.SchedulingStandard}},
@@ -1084,6 +1162,12 @@ func (c Config) Validate() error {
 	}
 	if c.SessionYield.HealthyFor < minSessionYieldBound || c.SessionYield.HealthyFor > maxSessionYieldBound {
 		return errors.New("session yield healthy bound must be between 30 and 3600 seconds")
+	}
+	for name, bound := range map[string]time.Duration{"pending": c.UpdateDrain.PendingFor,
+		"max wait": c.UpdateDrain.MaxWait, "cooldown": c.UpdateDrain.Cooldown} {
+		if bound < minUpdateDrainBound || bound > maxUpdateDrainBound {
+			return fmt.Errorf("update drain %s bound must be between 60 and 86400 seconds", name)
+		}
 	}
 	if err := c.GuestLiveness.validate(); err != nil {
 		return err

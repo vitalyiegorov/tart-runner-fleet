@@ -1166,6 +1166,34 @@ run that was already `queued` needs an operator-driven cancel and re-run. Those
 jobs stay visible in `queues` and still breach the queue SLO, so they are not
 silent — but the controller must never cancel a user workflow itself.
 
+### A node draining toward its own update
+
+`fleet status` prints an `UPDATE DRAIN` block above the queues, `fleet doctor`
+fails its `update drain` check, and `fleet_update_drain_active` is 1. This is
+not a fault: a generation newer than the running one has been sitting under
+`releases/` unapplied, and the node has stopped admitting *new* instances so the
+live ones can finish and the updater's quiescence gate can pass
+([ADR 0048](adr/0048-a-node-arranges-the-quiescence-its-update-needs.md)).
+
+Nothing running is interrupted — that guarantee is ADR 0011's and is untouched.
+The queue growing during a drain is the expected cost, not evidence against it.
+
+It ends by itself in one of three ways: the update lands and the process is
+replaced; the candidate disappears; or `updateDrainMaxWaitSeconds` (default
+7200) elapses, after which the node serves normally for
+`updateDrainCooldownSeconds` (default 3600) before trying again.
+
+An operator who needs the capacity back immediately can set
+`updateDrainDisabled: true` and restart — a draining node resumes admission
+rather than staying stranded. `updateDrainPendingForSeconds` (default 1800)
+tunes how long a candidate waits before a drain starts. All four are omitted
+from a rewritten file while they hold the defaults.
+
+If a node is drain-looping — draining, timing out, cooling down, draining again
+— the candidate cannot be reached at all: something holds an instance longer
+than `MaxWait`. Read `OCCUPANCY` for the hold and its budget rather than raising
+`MaxWait`.
+
 ### A node that withdrew its sessions
 
 `fleet status` prints `SESSIONS WITHDRAWN` above the queues, `fleet doctor`

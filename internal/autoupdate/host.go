@@ -466,11 +466,20 @@ func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) err
 	if status.Data.Operations.Retrying != 0 {
 		return ErrBusy
 	}
-	for _, queue := range status.Data.Queues {
-		if queue.Jobs != 0 {
-			return ErrBusy
-		}
-	}
+	// Queued work deliberately does not defer activation, which amends ADR 0011's
+	// original "or queued work" clause (2026-08-29, issue #230).
+	//
+	// A queued job is not work a generation swap can interrupt: nothing is
+	// running it, and the successor re-observes the same durable queue on its
+	// first tick. Counting it made the gate unreachable for exactly the nodes
+	// that most needed the fix — a node doing its job always has a queue, which
+	// is how one accumulated 1011 consecutive refusals while 26 releases behind.
+	// It also made the drain below self-defeating: refusing admission to reach
+	// quiescence is precisely what grows a queue.
+	//
+	// Running instances and retrying operations still defer activation, so the
+	// guarantee ADR 0011 exists for — never swap a generation out from under
+	// live work — is untouched.
 	// The same trap applies to the phantom's durable instance row, which kept
 	// publishing one maestro instance. An instance the daemon reports as parked —
 	// its only outstanding work is a dead letter and its VM is observed stopped —

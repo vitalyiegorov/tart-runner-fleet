@@ -493,7 +493,9 @@ func writeMultiScopeConfig(t *testing.T) string {
 func testDependencies(t *testing.T) dependencies {
 	t.Helper()
 	d := newDependencies("darwin")
-	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory { return runtimeInventory{} }
+	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
+		return runtimeInventory{}
+	}
 	d.listen = func(_, _ string) (net.Listener, error) { return newFakeListener(), nil }
 	d.adminListen = func(string) (net.Listener, error) { return newFakeListener(), nil }
 	d.loadKey = func(ctx context.Context, _, _, _ string) (*credentials.Secret, error) {
@@ -509,7 +511,7 @@ func TestRunObserveAndShadow(t *testing.T) {
 			ready := make(chan struct{})
 			var readyOnce sync.Once
 			var recovery app.RecoveryObserver
-			d.inventory = func(_ runtimeStore, _ config.Config, observer app.RecoveryObserver) app.Inventory {
+			d.inventory = func(_ runtimeStore, _ config.Config, observer app.RecoveryObserver, _ *updateDrainController) app.Inventory {
 				recovery = observer
 				return notifyingInventory{ready: ready, once: &readyOnce}
 			}
@@ -620,7 +622,7 @@ func TestRunReportsRedactedScaleSetCleanupFailure(t *testing.T) {
 	d := testDependencies(t)
 	ready := make(chan struct{})
 	var readyOnce sync.Once
-	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory {
+	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
 		return notifyingInventory{ready: ready, once: &readyOnce}
 	}
 	brokerFailure := errors.New("private broker response")
@@ -865,7 +867,7 @@ func TestRunCanaryAndAuthorityAreArmed(t *testing.T) {
 			ready := make(chan struct{})
 			var readyOnce sync.Once
 			var recovery app.RecoveryObserver
-			d.inventory = func(_ runtimeStore, _ config.Config, observer app.RecoveryObserver) app.Inventory {
+			d.inventory = func(_ runtimeStore, _ config.Config, observer app.RecoveryObserver, _ *updateDrainController) app.Inventory {
 				recovery = observer
 				return notifyingInventory{ready: ready, once: &readyOnce}
 			}
@@ -920,7 +922,7 @@ func TestRunAuthorityStartsDurableOperationWorker(t *testing.T) {
 	d := testDependencies(t)
 	ready := make(chan struct{})
 	var readyOnce sync.Once
-	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory {
+	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
 		return notifyingInventory{ready: ready, once: &readyOnce}
 	}
 	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
@@ -1049,7 +1051,7 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	cfg := config.Default()
 	cfg.Guards = config.Guards{MinFreeDiskGiB: 70, MinAvailableMemoryMiB: 1536, MaxSwapUsedMiB: 3072, MaxLoadAverage: 8.5, MinCPUIdlePercent: 7.5}
-	production, ok := newDependencies("darwin").inventory(nil, cfg, nil).(app.ProductionInventory)
+	production, ok := newDependencies("darwin").inventory(nil, cfg, nil, nil).(app.ProductionInventory)
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
@@ -1062,7 +1064,7 @@ func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 func TestProductionInventoryWiresPressureMemoryAccounting(t *testing.T) {
 	cfg := config.Default()
 	cfg.Guards.PressureMemoryAccounting = true
-	production, ok := newDependencies("darwin").inventory(nil, cfg, nil).(app.ProductionInventory)
+	production, ok := newDependencies("darwin").inventory(nil, cfg, nil, nil).(app.ProductionInventory)
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
@@ -1075,7 +1077,7 @@ func TestProductionInventoryWiresPressureMemoryAccounting(t *testing.T) {
 	}
 
 	cfg.Guards.PressureMemoryAccounting = false
-	legacy := newDependencies("darwin").inventory(nil, cfg, nil).(app.ProductionInventory).Host.(*macos.Probe)
+	legacy := newDependencies("darwin").inventory(nil, cfg, nil, nil).(app.ProductionInventory).Host.(*macos.Probe)
 	if legacy.PressureAccounting {
 		t.Fatal("legacy configuration enabled pressure accounting")
 	}
@@ -1239,7 +1241,7 @@ func TestDefaultDependenciesAndHelpers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if d.inventory(store, config.Default(), nil) == nil {
+	if d.inventory(store, config.Default(), nil, nil) == nil {
 		t.Fatal("nil inventory")
 	}
 	if _, err := d.loadKey(ctx, "tart-runner-fleet-test-missing", "none", ""); err == nil {
@@ -1555,7 +1557,7 @@ func TestRunMultiScopeUsesCorrectInstallationAndStoreKeys(t *testing.T) {
 	d := testDependencies(t)
 	ready := make(chan struct{})
 	var once sync.Once
-	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory {
+	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
 		return notifyingInventory{ready: ready, once: &once}
 	}
 	var mu sync.Mutex
@@ -1847,7 +1849,7 @@ func TestRunAuthorityReleasesLeaseOnShutdown(t *testing.T) {
 	d := testDependencies(t)
 	ready := make(chan struct{})
 	var once sync.Once
-	d.inventory = func(_ runtimeStore, _ config.Config, _ app.RecoveryObserver) app.Inventory {
+	d.inventory = func(_ runtimeStore, _ config.Config, _ app.RecoveryObserver, _ *updateDrainController) app.Inventory {
 		return notifyingInventory{ready: ready, once: &once}
 	}
 	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
@@ -2247,7 +2249,7 @@ func TestRuntimeExecutorsDriveProvisionToAssigned(t *testing.T) {
 
 	ready := make(chan struct{})
 	var once sync.Once
-	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory {
+	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
 		return notifyingInventory{ready: ready, once: &once}
 	}
 	ctx, cancel := context.WithCancel(context.Background())

@@ -83,6 +83,15 @@ available for local rollback.
 
 - A release cannot interrupt two Maestro VMs, an exclusive builder, Linux work,
   or queued work; it retries after the fleet is quiescent.
+  **Amended 2026-08-29 by [ADR 0048](0048-a-node-arranges-the-quiescence-its-update-needs.md):**
+  queued work no longer defers activation — nothing is running it, and the
+  successor re-observes the same durable queue — and a node with a generation
+  waiting may refuse *new* admission to reach quiescence. Running instances and
+  retrying operations still defer activation, so no release interrupts a job.
+  The original clause made the gate unreachable on the nodes that most needed
+  the release: one refused 1011 consecutive times while 26 releases behind
+  ([#230](https://github.com/vitalyiegorov/tart-runner-fleet/issues/230),
+  [#282](https://github.com/vitalyiegorov/tart-runner-fleet/issues/282)).
 - Deleting or reordering GitHub releases cannot automatically downgrade the
   controller.
 - The launchd user must have authenticated `gh` access to the release repository.

@@ -19,6 +19,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/discharge"
@@ -308,7 +309,7 @@ type dependencies struct {
 	loadKey         func(context.Context, string, string, string) (*credentials.Secret, error)
 	newScaleSet     func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error)
 	newRESTObserver func(githubscaleset.ObserverConfig) (queueObserver, error)
-	inventory       func(runtimeStore, config.Config, app.RecoveryObserver) app.Inventory
+	inventory       func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory
 	listen          func(string, string) (net.Listener, error)
 	adminListen     func(string) (net.Listener, error)
 	cursor          func(context.Context, runtimeStore, int64) (int64, error)
@@ -393,8 +394,8 @@ func newDependencies(goos string) dependencies {
 		newRESTObserver: func(cfg githubscaleset.ObserverConfig) (queueObserver, error) {
 			return githubscaleset.NewObserver(cfg)
 		},
-		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver) app.Inventory {
-			return app.ProductionInventory{Store: store,
+		inventory: func(store runtimeStore, cfg config.Config, recovery app.RecoveryObserver, drain *updateDrainController) app.Inventory {
+			return app.ProductionInventory{Store: store, UpdateDrain: drain.Draining,
 				Executor:                   node.executor(cfg),
 				Host:                       node.host(cfg),
 				Recovery:                   recovery,
@@ -582,6 +583,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}()
 
 	reporter := newFailureReporter(os.Stderr, d.now)
+	// Consulted by the scheduler's host observation on every tick: a node
+	// draining toward its own update refuses admission while the instances it is
+	// waiting on finish, which is how quiescence becomes reachable at all.
+	updateDrain := newUpdateDrainController(autoupdate.DrainPolicy{Enabled: cfg.UpdateDrain.Enabled,
+		PendingFor: cfg.UpdateDrain.PendingFor, MaxWait: cfg.UpdateDrain.MaxWait,
+		Cooldown: cfg.UpdateDrain.Cooldown}, installationRoot(opts.ConfigPath), opts.Version,
+		autoupdate.ReleaseDirNames, reporter)
 	reporter.counter = health
 	// What runner version each base image carries is a fact about the
 	// configuration this process started with, and configuration does not change
@@ -709,12 +717,12 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	if opts.Mode != reconcile.Observe {
 		recovery = control
 	}
-	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery), Config: schedulerConfig,
+	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	yield := newSessionYieldController(yieldState, closers, reporter)
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
-		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield}
+		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1470,6 +1478,20 @@ func (r *failureReporter) reportBinding(binding app.Binding, reason string) {
 		"scaleSet", binding.ScaleSetID, "observation", fmt.Sprintf("github-%d", binding.StoreKey), "reason", reason)
 }
 
+// reportUpdateDrain records that this node started or stopped refusing admission
+// to reach the quiescence a pending generation needs. It is deliberately not
+// rate-limited: a drain is rare, deliberate, and the only explanation for a node
+// that is healthy, idle, and admitting nothing.
+func (r *failureReporter) reportUpdateDrain(action, version string, instances int) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	if version == "" {
+		version = "unknown"
+	}
+	r.logger.Warn("update drain "+action, "candidate", version, "instances", instances)
+}
+
 // reportSessionYield records that this node stopped, or resumed, competing for
 // the jobs GitHub binds to its scale sets. It is not a failure and it is not
 // rate-limited away: a withdrawal is rare, deliberate, and the single fact that
@@ -1765,6 +1787,9 @@ type engineTicker struct {
 	// to its scale sets. A nil controller never withdraws, which is every mode
 	// that owns no sessions.
 	yield *sessionYieldController
+	// drain decides whether this node refuses admission to reach the quiescence
+	// its own pending update needs (ADR 0011 amendment, issue #230).
+	drain *updateDrainController
 }
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
@@ -1832,8 +1857,26 @@ func (e engineTicker) Tick(ctx context.Context) error {
 		if counted {
 			e.applySessionYield(ctx, result, busy)
 		}
+		e.applyUpdateDrain(result)
 	}
 	return err
+}
+
+// applyUpdateDrain folds this tick into the update-drain policy and publishes
+// the result every tick, so a node that has been draining for an hour still says
+// so rather than only having said it once.
+func (e engineTicker) applyUpdateDrain(result app.TickResult) {
+	if e.drain == nil {
+		return
+	}
+	live := 0
+	for _, instance := range result.Instances {
+		if instance.Live() {
+			live++
+		}
+	}
+	e.drain.Observe(result.At, live)
+	e.health.SetUpdateDrain(e.drain.Metric())
 }
 
 // applySessionYield folds this tick into the yield policy and publishes the
