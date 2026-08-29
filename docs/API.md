@@ -211,6 +211,39 @@ deliberately NOT metric labels; they travel in this document only. Both fields
 are additive and absent on daemons that published no reservation at all — which
 is the condition issue #226 ran in unobserved.
 
+`admissionCheck` says whether this node is taking work at all, and when it is not,
+which guardrail refused it and by how much:
+
+```json
+"admissionCheck": {"ok": false,
+  "reasons": ["node is admitting no work: disk reserve (disk 58 GiB free, floor 60)"]}
+```
+
+It **passes with a margin** rather than silently: an admitting node reports the
+guardrail with the least fractional headroom (`nearest floor: disk 72 GiB free,
+floor 60`), so a slide toward a floor is readable before it arrives. Headroom is
+always a fraction of the limit rather than a raw distance, so guards measured in
+gibibytes, mebibytes and load average are comparable at all.
+
+A blocked node reports the guard its **own** `admissionReason` names, because
+that is the one that refused it — not whichever guard happens to be tightest.
+A floor the operator never configured is not rendered: a node with no disk floor
+is not zero GiB away from one.
+
+The field is additive and absent on daemons that predate it, and absence is
+reported as passing — a daemon that cannot say whether it is admitting has not
+said that it is refusing, and inventing a failure from silence would fail every
+node during a rolling update. `fleet doctor` distinguishes the two in words
+(`not reported by this daemon`).
+
+It exists because on 2026-08-25 the mac studio starved the whole fleet for about
+two and a half hours with `admissionAllowed: false` and
+`admissionReason: "disk reserve"` sitting in this document, while `fleet doctor`
+reported 10 of 11 checks OK and named only the downstream queue-SLO symptom
+(issue #286). A refusal is a finding, not a status field: a breached queue SLO
+has a dozen causes and this has exactly one, so reporting the symptom sends an
+operator to the scheduler for a host-pressure condition.
+
 `envelope` is the admission capacity that same tick computed, and it is the other
 half of the reservation's diagnosis: the axis says WHY a head was refused, and
 this says what it was refused AGAINST.

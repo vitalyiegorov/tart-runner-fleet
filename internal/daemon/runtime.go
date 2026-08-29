@@ -553,7 +553,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
 		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute,
-		FailureComponents: failureComponents})
+		FailureComponents: failureComponents, AdmissionFloors: admissionFloors(cfg)})
 	serverConfig := telemetry.ServerConfig{ControllerVersion: opts.Version, ControllerMode: string(opts.Mode)}
 	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
@@ -2172,6 +2172,19 @@ func (e engineTicker) recordReservation(result app.TickResult) {
 		MemoryMiB: reservation.Resources.MemoryMB, Slots: reservation.Resources.Slots,
 		Held: held, Axis: string(axis),
 	})
+}
+
+// admissionFloors carries the configured host guardrails to telemetry, so the
+// admission check can say "58 GiB free, floor 60" rather than "disk reserve".
+// The difference is a finding an operator can act on versus a category (#286).
+func admissionFloors(cfg config.Config) telemetry.AdmissionFloors {
+	return telemetry.AdmissionFloors{
+		MinFreeDiskGiB:        cfg.Guards.MinFreeDiskGiB,
+		MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
+		MaxSwapUsedMiB:        cfg.Guards.MaxSwapUsedMiB,
+		MaxLoadAverage:        cfg.Guards.MaxLoadAverage,
+		MinCPUIdlePercent:     cfg.Guards.MinCPUIdlePercent,
+	}
 }
 
 type wallClock struct{}

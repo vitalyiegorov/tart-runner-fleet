@@ -729,6 +729,24 @@ func renderVector(cpu, memoryMiB, slots int) string {
 	return fmt.Sprintf("%d cpu / %d MiB / %d slots", cpu, memoryMiB, slots)
 }
 
+// admissionDetail says whether this node is taking work, and how close it is to
+// stopping.
+//
+// A daemon that predates the check says so rather than printing a bare "ok". The
+// distinction is the whole point of issue #286: silence read as health is what
+// let the mac studio refuse every job for two and a half hours behind ten
+// passing checks, and a check that cannot tell "healthy" from "not asked" would
+// reproduce that with an extra line.
+func admissionDetail(status adminapi.Status, check adminapi.Check) string {
+	if status.AdmissionCheck == nil {
+		return "not reported by this daemon"
+	}
+	if detail := joinReasons(check); detail != "" && detail != "ok" {
+		return detail
+	}
+	return "admitting; no configured floor is near"
+}
+
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an
 // empty gap in the sentence.
 func axisOrUnjudged(axis string) string {
@@ -755,11 +773,20 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	runners := status.Data.EffectiveRunnerVersionCheck()
 	console := status.Data.EffectiveGuestConsoleCheck()
 	yield := status.Data.EffectiveSessionYieldCheck()
+	admission := status.Data.EffectiveAdmissionCheck()
 	drain := status.Data.EffectiveUpdateDrainCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
 		{Name: "scheduler ready", OK: status.Data.Ready.OK, Detail: joinReasons(status.Data.Ready)},
+		// The admission check precedes the queue SLO deliberately: a node refusing
+		// every job is the CAUSE of a breached queue, and on 2026-08-25 the mac
+		// studio starved the fleet for two and a half hours while doctor reported
+		// 10 of 11 OK and named only the symptom (issue #286). It prints the
+		// guardrail margin even when it passes, because the studio's free disk slid
+		// 72 -> 54 GiB over six hours and nothing made that visible until it
+		// arrived.
+		{Name: "admission", OK: admission.OK, Detail: admissionDetail(status.Data, admission)},
 		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "occupancy", OK: occupancy.OK, Detail: joinReasons(occupancy)},
 		// The reservation check names the head, its repository, and the axis
