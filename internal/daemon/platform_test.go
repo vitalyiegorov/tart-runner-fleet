@@ -197,7 +197,7 @@ func (noInstanceStore) LiveInstances(context.Context) ([]operations.Instance, er
 // machine. That pair is what "observe steady state" means on a node with no
 // backend, and it is the acceptance criterion of issue #138.
 func TestObserveOnlyInventoryStillObservesTheMachine(t *testing.T) {
-	production, ok := newDependencies("linux").inventory(nil, config.Default(), nil).(app.ProductionInventory)
+	production, ok := newDependencies("linux").inventory(nil, config.Default(), nil, nil).(app.ProductionInventory)
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}

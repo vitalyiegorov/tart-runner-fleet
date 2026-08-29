@@ -82,14 +82,22 @@ type Status struct {
 	// otherwise identical from outside, which is what let one node hold a
 	// sibling's work for eleven hours (#292, #297). An older daemon publishes
 	// none of it, which is why EffectiveSessionYieldCheck exists.
-	SessionYield      *SessionYield    `json:"sessionYield,omitempty"`
-	SessionYieldCheck *Check           `json:"sessionYieldCheck,omitempty"`
-	Queues            []Queue          `json:"queues"`
-	Instances         []Instance       `json:"instances"`
-	ScopeQueues       []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations      []Observation    `json:"observations"`
-	Operations        OperationSummary `json:"operations"`
-	HostPressure      HostPressure     `json:"hostPressure"`
+	SessionYield      *SessionYield `json:"sessionYield,omitempty"`
+	SessionYieldCheck *Check        `json:"sessionYieldCheck,omitempty"`
+	// UpdateDrain is an additive fleet.v1 field: whether this node is refusing
+	// admission on purpose so the instances standing between it and a pending
+	// generation can finish. Without it, a healthy node admitting nothing is
+	// indistinguishable from a broken one — and before ADR 0011's 2026-08-29
+	// amendment the state never arrived deliberately at all (#230, #282). An
+	// older daemon publishes none of it, hence EffectiveUpdateDrainCheck.
+	UpdateDrain      *UpdateDrain     `json:"updateDrain,omitempty"`
+	UpdateDrainCheck *Check           `json:"updateDrainCheck,omitempty"`
+	Queues           []Queue          `json:"queues"`
+	Instances        []Instance       `json:"instances"`
+	ScopeQueues      []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations     []Observation    `json:"observations"`
+	Operations       OperationSummary `json:"operations"`
+	HostPressure     HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.
@@ -293,6 +301,15 @@ func (s Status) EffectiveSessionYieldCheck() Check {
 	return *s.SessionYieldCheck
 }
 
+// EffectiveUpdateDrainCheck reads the drain check an older daemon does not
+// publish. Absence is a pass: a controller that cannot drain has not.
+func (s Status) EffectiveUpdateDrainCheck() Check {
+	if s.UpdateDrainCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.UpdateDrainCheck
+}
+
 // GuestConsole is this node's answer to one question: when a Linux guest's
 // kernel dies mid-job, will there be anything to read afterwards? BootsLinuxGuests
 // is false on a node whose backend boots nothing of the kind, and the pair is
@@ -313,6 +330,17 @@ type SessionYield struct {
 	Since     time.Time `json:"since,omitzero"`
 	Bindings  int       `json:"bindings,omitempty"`
 	Withdrawn int       `json:"withdrawn,omitempty"`
+}
+
+// UpdateDrain reports whether this node is draining toward a pending
+// generation. PendingSince and Since separate "waiting to start" from
+// "draining", which is the difference between a node that is fine and one an
+// operator may want to look at.
+type UpdateDrain struct {
+	Draining     bool      `json:"draining"`
+	Candidate    string    `json:"candidate,omitempty"`
+	PendingSince time.Time `json:"pendingSince,omitzero"`
+	Since        time.Time `json:"since,omitzero"`
 }
 
 // Reservation is the aged head the fleet is standing capacity by for.

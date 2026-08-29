@@ -651,6 +651,19 @@ func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
 // check passes, on the same terms as runnerVersionDetail: a bare "ok" would
 // leave the question — can a dead guest leave evidence? — as invisible as it
 // was before issue #259.
+func updateDrainDetail(status adminapi.Status, check adminapi.Check) string {
+	if !check.OK {
+		return joinReasons(check)
+	}
+	if status.UpdateDrain == nil {
+		return "not reported by this daemon"
+	}
+	if status.UpdateDrain.Candidate != "" {
+		return "candidate " + status.UpdateDrain.Candidate + " waiting, admitting normally"
+	}
+	return "running the newest generation on disk"
+}
+
 func sessionYieldDetail(status adminapi.Status, check adminapi.Check) string {
 	if !check.OK {
 		return joinReasons(check)
@@ -716,6 +729,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	runners := status.Data.EffectiveRunnerVersionCheck()
 	console := status.Data.EffectiveGuestConsoleCheck()
 	yield := status.Data.EffectiveSessionYieldCheck()
+	drain := status.Data.EffectiveUpdateDrainCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -757,6 +771,10 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// indistinguishable from a healthy idle one for the eleven hours of #292,
 		// so it says so here whichever way it reads.
 		{Name: "session yield", OK: yield.OK, Detail: sessionYieldDetail(status.Data, yield)},
+		// A node draining toward its own update is healthy and admitting nothing.
+		// Said plainly here, because an empty queue on a healthy host is exactly
+		// what a fault looks like (#230).
+		{Name: "update drain", OK: drain.OK, Detail: updateDrainDetail(status.Data, drain)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {

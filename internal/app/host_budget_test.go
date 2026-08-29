@@ -47,7 +47,7 @@ func TestHostObservationRejectsABudgetTheMachineCannotHonour(t *testing.T) {
 			snapshot := productionSnapshot()
 			snapshot.PhysicalCPU = test.physCPU
 			snapshot.PhysicalMemoryMB = test.physMemory
-			observation := hostObservation(snapshot, configuredCapacity(), productionGuards(), test.elastic, test.budget)
+			observation := hostObservation(snapshot, configuredCapacity(), productionGuards(), test.elastic, test.budget, false)
 			if test.wantReason == "" {
 				if !observation.Usable() {
 					t.Fatalf("observation unusable: %#v", observation)

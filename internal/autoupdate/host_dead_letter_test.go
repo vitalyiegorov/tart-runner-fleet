@@ -46,7 +46,6 @@ func TestParkedInstanceRowDoesNotBlockProductionUpdates(t *testing.T) {
 func TestRealCapacityStillBlocksProductionUpdates(t *testing.T) {
 	for name, status := range map[string]string{
 		"retrying operation": `{"data":{"controllerVersion":"v1","controllerMode":"authority","operations":{"retrying":1}}}`,
-		"queued job":         `{"data":{"controllerVersion":"v1","controllerMode":"authority","queues":[{"jobs":1}]}}`,
 		"live vm":            `{"data":{"controllerVersion":"v1","controllerMode":"authority","instances":[{"count":1}]}}`,
 		"dead letter that is not parked": `{"data":{"controllerVersion":"v1","controllerMode":"authority","instances":[{"count":1}],` +
 			`"operations":{"dead":1,"deadLetters":[{"operationId":"op-1","resourceId":"trf-a","parked":false}]}}}`,
@@ -61,5 +60,36 @@ func TestRealCapacityStillBlocksProductionUpdates(t *testing.T) {
 		if err := host.ensureQuiescent(context.Background(), current); !errors.Is(err, ErrBusy) {
 			t.Fatalf("%s: quiescence error=%v want ErrBusy", name, err)
 		}
+	}
+}
+
+// TestQueuedWorkAloneNoLongerDefersActivation pins the 2026-08-29 amendment to
+// ADR 0011 (issue #230). A queued job is not work a swap can interrupt: nothing
+// is running it, and the successor re-observes the same durable queue. Counting
+// it made the gate unreachable on exactly the nodes that needed the release —
+// one node refused 1011 consecutive times while 26 releases behind — and made
+// the update drain self-defeating, since refusing admission is what grows a
+// queue.
+func TestQueuedWorkAloneNoLongerDefersActivation(t *testing.T) {
+	for name, status := range map[string]string{
+		"one queued job": `{"data":{"controllerVersion":"v1","controllerMode":"authority","queues":[{"jobs":1}],` +
+			`"instances":[],"operations":{"retrying":0}}}`,
+		"a deep queue across profiles": `{"data":{"controllerVersion":"v1","controllerMode":"authority",` +
+			`"queues":[{"jobs":6},{"jobs":11}],"instances":[{"count":0}],"operations":{"retrying":0}}}`,
+	} {
+		host, command, current, _, _ := hostFixture(t)
+		command.current = status
+		if err := host.ensureQuiescent(context.Background(), current); err != nil {
+			t.Fatalf("%s: quiescence error=%v, want nil — a queue is not interruptible work", name, err)
+		}
+	}
+
+	// The guarantee itself is unchanged: a queue beside a live instance still
+	// defers, because the instance does.
+	host, command, current, _, _ := hostFixture(t)
+	command.current = `{"data":{"controllerVersion":"v1","controllerMode":"authority","queues":[{"jobs":3}],` +
+		`"instances":[{"count":1}],"operations":{"retrying":0}}}`
+	if err := host.ensureQuiescent(context.Background(), current); !errors.Is(err, ErrBusy) {
+		t.Fatalf("a live instance stopped deferring activation: %v", err)
 	}
 }

@@ -201,6 +201,12 @@ type ProductionInventory struct {
 	// accumulates nothing, so no instance is ever corroborated stopped — which is
 	// fail-closed: it can only withhold a reclaim, never authorize one.
 	Power *PowerCorroborator
+	// UpdateDrain reports that this node is refusing admission on purpose, to
+	// reach the quiescence its pending update needs (ADR 0011's amendment of
+	// 2026-08-29, issue #230). It refuses only the arrival of new instances;
+	// everything already running finishes untouched, which is the whole reason a
+	// drain is safe. A nil gate never drains.
+	UpdateDrain func() bool
 }
 
 func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]domain.Instance], domain.Observation[domain.Host]) {
@@ -209,7 +215,8 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 	}
 	now := time.Now().UTC()
 	hostSnapshot := p.Host.Snapshot(ctx)
-	host := hostObservation(hostSnapshot, p.Capacity, p.Guards, p.ElasticHostEnvelope, p.HostBudget)
+	draining := p.UpdateDrain != nil && p.UpdateDrain()
+	host := hostObservation(hostSnapshot, p.Capacity, p.Guards, p.ElasticHostEnvelope, p.HostBudget, draining)
 	stored, err := p.Store.LiveInstances(ctx)
 	if err != nil {
 		return domain.Unavailable[[]domain.Instance]("durable instance inventory unavailable"), host
@@ -388,7 +395,7 @@ func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {
 // validate` decodes a file and never probes a machine, so a budget larger than
 // the host it runs on cannot be caught until the host is observed.
 func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, guards executor.Guardrails, elastic bool,
-	budget domain.Resources) domain.Observation[domain.Host] {
+	budget domain.Resources, draining bool) domain.Observation[domain.Host] {
 	switch snapshot.Freshness {
 	case executor.Fresh:
 		// Continue with explicit guardrails below.
@@ -403,6 +410,14 @@ func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, 
 		return domain.Unavailable[domain.Host](reason)
 	}
 	decision := guards.Evaluate(snapshot, executor.AdmissionRequest{})
+	// A drain outranks a healthy host: the node is refusing admission to reach a
+	// quiescence it cannot otherwise arrive at, and a host with capacity to spare
+	// is exactly the case that would keep replacing the instances it is waiting
+	// on. The reason is stated so `fleet status` never shows an unexplained
+	// refusal on an idle machine.
+	if draining && decision.Allowed {
+		decision = executor.AdmissionDecision{Reason: "update drain"}
+	}
 	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
 		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts,
 		SwapOutRatePerSecond: snapshot.SwapOutRatePerSecond, SwapOutRateObserved: snapshot.SwapOutRateObserved,

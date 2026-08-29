@@ -244,7 +244,9 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	runnerVersionCheck := adminapi.Check{OK: runnerVersions.OK, Reasons: nonNilStrings(runnerVersions.Reasons)}
 	guestConsoleCheck := adminapi.Check{OK: guestConsole.OK, Reasons: nonNilStrings(guestConsole.Reasons)}
 	yield := sessionYieldResult(snapshot.SessionYield)
+	drain := updateDrainResult(snapshot.UpdateDrain)
 	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
+	updateDrainCheck := adminapi.Check{OK: drain.OK, Reasons: nonNilStrings(drain.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -259,6 +261,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
 			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,
+			UpdateDrain: updateDrainRow(snapshot), UpdateDrainCheck: &updateDrainCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
@@ -322,6 +325,15 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
 	}
 	return rows
+}
+
+// updateDrainRow projects the node's drain posture into the versioned surface.
+func updateDrainRow(snapshot Snapshot) *adminapi.UpdateDrain {
+	if snapshot.UpdateDrain == nil {
+		return nil
+	}
+	return &adminapi.UpdateDrain{Draining: snapshot.UpdateDrain.Draining, Candidate: snapshot.UpdateDrain.Candidate,
+		PendingSince: snapshot.UpdateDrain.PendingSince, Since: snapshot.UpdateDrain.Since}
 }
 
 // sessionYieldRow projects the node's yield posture into the versioned surface.
@@ -656,6 +668,9 @@ func renderMetrics(snapshot Snapshot) string {
 	if snapshot.SessionYield != nil {
 		fmt.Fprintf(&output, "fleet_session_yielded %d\n", boolGauge(snapshot.SessionYield.Yielded))
 		fmt.Fprintf(&output, "fleet_session_bindings_withdrawn %d\n", snapshot.SessionYield.Withdrawn)
+	}
+	if snapshot.UpdateDrain != nil {
+		fmt.Fprintf(&output, "fleet_update_drain_active %d\n", boolGauge(snapshot.UpdateDrain.Draining))
 	}
 
 	writeHelpType("fleet_observation_fresh", "Whether a bounded critical observation is fresh.", "gauge")
