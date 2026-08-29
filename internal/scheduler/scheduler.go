@@ -242,13 +242,13 @@ func PlanTick(in Input) Plan {
 		plan.Next.LinuxHandoff = nil
 		if mode == domain.HostLinux || mode == domain.HostMixed {
 			plan = planMacWithCoexistence(in, plan, linux, macos)
-			plan = fillLinuxRemainder(in, plan, linux)
+			plan = fillLinuxRemainder(in, plan, linux, macos)
 		} else {
 			plan.Next.MacHandoff = nil
 			attempted := planMacOS(in, plan, macos)
 			switch {
 			case containsSpawn(attempted.Operations):
-				plan = fillLinuxRemainder(in, attempted, linux)
+				plan = fillLinuxRemainder(in, attempted, linux, macos)
 			case mode == domain.HostIdle:
 				// On a fully idle host a macOS head that will not spawn is resource-
 				// infeasible: nothing is live to drain and make room for it, so it is
@@ -279,7 +279,7 @@ func PlanTick(in Input) Plan {
 			plan = planLinuxWithCoexistence(in, plan, linux, macos)
 		} else {
 			plan.Next.LinuxHandoff = nil
-			plan = planLinux(in, plan, linux)
+			plan = planLinux(in, plan, linuxBesideAgedMacHead(in, linux, macos))
 		}
 		plan = fillMacRemainder(in, plan, macos)
 	}
@@ -1701,9 +1701,10 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 // it. MacHandoff is retained for state continuity but the BackfillAdmitted latch
 // is never set here.
 func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
-	handoff := macHandoffFor(in.Prior.MacHandoff, priorityOrder(in, macDemands)[0], in.Now)
+	macHead := priorityOrder(in, macDemands)[0]
+	handoff := macHandoffFor(in.Prior.MacHandoff, macHead, in.Now)
 	before := len(plan.Operations)
-	plan = planLinux(in, plan, linuxDemands)
+	plan = planLinux(in, plan, linuxBesideAgedMacHead(in, linuxDemands, macDemands))
 	plan.Next.MacHandoff = &handoff
 	if containsSpawn(plan.Operations[before:]) {
 		return plan
@@ -1713,6 +1714,81 @@ func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands [
 		plan = planMacOS(in, plan, remaining)
 	}
 	return plan
+}
+
+// linuxBesideAgedMacHead applies ADR 0045's reservation bound across the
+// platform boundary: work may be admitted BESIDE an aged head, never INTO it.
+//
+// The head of this queue is macOS and cannot spawn this tick, so the remainder
+// planner fills the residual with Linux rather than idling the host. That is
+// right, and it was unbounded: `planLinux` received the whole envelope, so a
+// Linux demand of any age could take the exact vector an older macOS head was
+// waiting for. Production, 2026-08-09: a 6 CPU / 12288 MiB instance freed, and
+// five seconds later a Linux pull-request job took it while a macOS App Store
+// release that had waited 2h01m kept waiting — it got the host only when an
+// operator cancelled the Linux job by hand (issue #225).
+//
+// Reservations are authored in `planLinux` over Linux demands, so an aged macOS
+// head never had one and nothing checked it. The rule it needs already exists
+// and is already argued: ADR 0045 says a reservation withholds order and one
+// repository slot, never a vector, and no demand that could take the head's
+// vector whole may be admitted into it. Applying that same predicate here is
+// ordering only — no veto changes, nothing is charged against the head, and
+// work that fits `free - head` is admitted exactly as before.
+//
+// The bound is deliberately limited to an AGED head. A young macOS demand does
+// not hold up Linux work: within a pass the fairness age is what turns waiting
+// into precedence, and the same threshold governs here.
+func linuxBesideAgedMacHead(in Input, linuxDemands, macDemands []domain.Demand) []domain.Demand {
+	if len(linuxDemands) == 0 || len(macDemands) == 0 {
+		return linuxDemands
+	}
+	macHead := priorityOrder(in, macDemands)[0]
+	profile, ok := in.Config.Profiles[macHead.Profile]
+	if !ok || !demandAged(in.Now, in.Config.FairnessAge, macHead) {
+		return linuxDemands
+	}
+	head := &domain.Reservation{Demand: macHead.Key, Profile: macHead.Profile, Resources: profile.Resources, Since: macHead.CreatedAt}
+	// The head is aged by the check above, so it is judged against the envelope
+	// aged work is judged against everywhere else. Using `linuxFree` here would
+	// shrink the remainder by the advisory CPU-idle clamp the head does not pay,
+	// and refuse coexisting work on capacity the head was never denied.
+	remainder, remainderExists := agedLinuxEnvelope(in).Sub(profile.Resources)
+	rank := priorityRank(in)
+	headRank, headRanked := rank[macHead.Key]
+	beside := make([]domain.Demand, 0, len(linuxDemands))
+	for _, demand := range linuxDemands {
+		demandRank, ranked := rank[demand.Key]
+		if headRanked && ranked && demandRank > headRank &&
+			jumpsTheReservedHead(in.Config, head, remainder, remainderExists, demand) {
+			continue
+		}
+		beside = append(beside, demand)
+	}
+	return beside
+}
+
+// priorityRank is each demand's position in the single order ADR 0037 gives the
+// whole queue, both platforms together. It is what makes the bound above an
+// ORDERING rule rather than a platform preference: a Linux demand that outranks
+// the macOS head is never filtered, because it is entitled to go first and the
+// head is the one that must wait.
+//
+// It is derived from `normalizedDemands` rather than from the caller's slices,
+// and that is not a detail. `priorityOrder`'s aged band is a STABLE sort by tier
+// alone -- age order is inherited from the order the caller already had, which
+// `normalizedDemands` establishes once per tick. Ranking a re-assembled slice
+// would therefore rank by whichever platform the caller happened to append
+// first, and did: the incident test read the two-hour macOS head as junior to
+// the eighty-minute Linux demand purely because the Linux slice was passed
+// first.
+func priorityRank(in Input) map[domain.DemandKey]int {
+	ordered := priorityOrder(in, normalizedDemands(in))
+	rank := make(map[domain.DemandKey]int, len(ordered))
+	for position, demand := range ordered {
+		rank[demand.Key] = position
+	}
+	return rank
 }
 
 // mixedRemainderInput gates and prepares a second, complementary admission pass.
@@ -1875,8 +1951,9 @@ func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
 // has planned. It never drains and never latches, so it is safe to run beside a
 // live macOS cohort or a freshly planned macOS spawn. The Linux allocator owns
 // the reservation and DRR cursor, so the second pass adopts them.
-func fillLinuxRemainder(in Input, plan Plan, linux []domain.Demand) Plan {
-	linux = demandsAwaitingAdmission(linux, plan.Operations)
+func fillLinuxRemainder(in Input, plan Plan, linux, macos []domain.Demand) Plan {
+	linux = linuxBesideAgedMacHead(in, demandsAwaitingAdmission(linux, plan.Operations),
+		demandsAwaitingAdmission(macos, plan.Operations))
 	if len(linux) == 0 {
 		return plan
 	}
@@ -2234,7 +2311,7 @@ func planLinuxHandoff(in Input, plan Plan, demands, macDemands []domain.Demand) 
 
 func planLinuxWithCoexistence(in Input, plan Plan, demands, macDemands []domain.Demand) Plan {
 	remaining := consumeCompatibleIdle(demands, in.Instances.Value)
-	attempted := planLinux(in, plan, demands)
+	attempted := planLinux(in, plan, linuxBesideAgedMacHead(in, demands, macDemands))
 	if len(remaining) == 0 || containsSpawn(attempted.Operations) {
 		attempted.Next.LinuxHandoff = nil
 		return attempted

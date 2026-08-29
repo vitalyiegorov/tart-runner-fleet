@@ -303,7 +303,7 @@ func TestLinuxRemainderBackfillsBehindAnInfeasibleReservation(t *testing.T) {
 		State{Reservation: reservation})
 
 	plan := fillLinuxRemainder(in, Plan{Status: PlanReady, Next: State{Reservation: reservation}},
-		[]domain.Demand{head, small})
+		[]domain.Demand{head, small}, nil)
 
 	if !spawnsProfile(plan, "small") {
 		t.Fatalf("the feasible residual must be admitted behind the infeasible head: %#v", plan.Operations)

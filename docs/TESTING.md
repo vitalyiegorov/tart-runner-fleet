@@ -50,9 +50,16 @@ Layer 8 is the answer to the defect class the other layers structurally cannot
 see: a composition that is correct function by function and wrong across passes
 and ticks. `tests/simulation` runs the real planner, the real reconcile
 controller, and a real SQLite store against a simulated scale-set broker, REST
-scope, and host, with every source of nondeterminism drawn from one seed. Eleven
+scope, and host, with every source of nondeterminism drawn from one seed. The
 properties are checked after every tick, and a violation shrinks to a minimal
-event trace. `make unit` runs a small default seed range; the pull-request gate
+event trace.
+
+Only one of them compares two demands across the PLATFORM boundary — (r),
+`crossPlatformInversionChecker`, added by ADR 0049. Every other ordering property
+is confined to one platform by construction, which is how a two-hour fairness
+inversion between a macOS release and a Linux pull-request job (issue #225) ran
+in production with a green sweep. When adding an ordering property, say which
+boundary it does not cross. `make unit` runs a small default seed range; the pull-request gate
 widens it to about a minute; `.github/workflows/nightly-simulation.yml` explores
 the rest.
 
