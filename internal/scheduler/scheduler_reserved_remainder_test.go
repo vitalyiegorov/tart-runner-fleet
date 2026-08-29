@@ -407,7 +407,7 @@ func TestTheReservedHeadsRepositorySlotBoundsWhoIsAdmitted(t *testing.T) {
 				[]domain.Instance{liveInstance(cfg, "linux-xl-1", "b/repo", "xl")}, State{})
 			in.Config.RepoCaps = test.caps
 			plan := Plan{Status: PlanReady, Next: State{Reservation: reservation}}
-			if got := spawnedKeys(fillMacRemainder(in, plan, test.demands)); !reflect.DeepEqual(got, test.want) {
+			if got := spawnedKeys(fillMacRemainder(in, plan, test.demands, nil)); !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("remainder admitted %#v, want %#v", got, test.want)
 			}
 		})
@@ -470,7 +470,7 @@ func TestASameRepositoryCandidateThatCannotFitDoesNotSpendTheHeadsSpareSlot(t *t
 		Demand: head.Key, Profile: "xl", Resources: cfg.Profiles["xl"].Resources}}}
 
 	want := []domain.DemandKey{sameRepo.Key, otherRepo.Key}
-	if got := spawnedKeys(fillMacRemainder(in, plan, demands)); !reflect.DeepEqual(got, want) {
+	if got := spawnedKeys(fillMacRemainder(in, plan, demands, nil)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("remainder admitted %#v, want the older same-repository demand first, %#v", got, want)
 	}
 }

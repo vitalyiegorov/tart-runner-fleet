@@ -59,7 +59,13 @@ Only one of them compares two demands across the PLATFORM boundary — (r),
 is confined to one platform by construction, which is how a two-hour fairness
 inversion between a macOS release and a Linux pull-request job (issue #225) ran
 in production with a green sweep. When adding an ordering property, say which
-boundary it does not cross. `make unit` runs a small default seed range; the pull-request gate
+boundary it does not cross.
+
+An ordering change in the scheduler must be swept at the GATE's width before it
+is pushed — `-seeds=80 -sim-ticks=200`, what `ci.yml` runs — not at the local
+default of eight seeds. Four of the six defects ADR 0049 fixed are invisible
+below seed 12, and two of them are the mirror image of the defect the change set
+out to fix. `make unit` runs a small default seed range; the pull-request gate
 widens it to about a minute; `.github/workflows/nightly-simulation.yml` explores
 the rest.
 

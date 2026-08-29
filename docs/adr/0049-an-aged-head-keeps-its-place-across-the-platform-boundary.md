@@ -5,8 +5,8 @@
 Accepted. Resolves the deferral in
 [ADR 0030](0030-a-reserved-head-holds-one-repository-slot.md)'s "Not addressed
 here" — the shared residual arbitrated one platform at a time — and extends
-[ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md)'s no-jump rule to
-the four passes that never applied it. Everything both records decide remains
+[ADR 0045](0045-a-reservation-withholds-order-not-a-vector.md)'s no-jump rule
+across the platform boundary, at the two funnels every spawn passes through. Everything both records decide remains
 accepted; this decision changes which demands a pass is offered, and nothing
 about how it judges them.
 
@@ -32,7 +32,7 @@ a single global ordering ... it is a separate decision". The deferral was
 reasonable when the two platforms rarely contended for the same vector. ADR 0034's
 shared-label amendment made them contend constantly.
 
-### One hole, four passes
+### One hole, every pass
 
 The issue filed against this named `planLinux` running before the macOS passes.
 That is half the mechanism, and the missing half is what decides the size of the
@@ -75,10 +75,22 @@ fills what the macOS pass left over, and it too took the whole residual: propert
 admitted and an aged `xl` then took the 6 CPU / 12288 MiB vector the SECOND macOS
 demand — an older `builder` — was waiting for.
 
-The complementary direction was never broken. `fillMacRemainder` runs
-`reservedRemainderDemands` and `chargeReservedHead` over its macOS candidates, so
-a macOS demand has never been able to take a reserved LINUX head's vector. The
-defect is an asymmetry between two passes that face each other, which is the
+**The mirror direction is broken too**, and the first draft of this record said
+it was not. `fillMacRemainder` runs `reservedRemainderDemands` and
+`chargeReservedHead` over its macOS candidates, so a macOS demand cannot take a
+RESERVED Linux head's vector — but a Linux head only holds a reservation on the
+ticks `planLinux` chose to author one, and on every other tick nothing protected
+it at all. The wide gate sweep found it twice within minutes of the one-directional
+fix being pushed: seed 12 tick 48 of the mac-mini world and seed 17 tick 25 of the
+tiered world, both a younger macOS `builder` taking the 6 CPU / 12288 MiB vector
+an older Linux `xl` was waiting for, both with `reservation=<nil>`.
+
+That is why the rule is written platform-agnostically as
+`besideAgedForeignHead(candidates, foreign)` rather than as a Linux-side filter.
+A rule that names one platform has to be written twice and will be forgotten
+once; this one was, and the property caught it in the same hour.
+
+The defect is an asymmetry between passes that face each other, which is the
 third time this codebase has shipped exactly that shape: ADR 0029 repaired it for
 the reservation veto, ADR 0024 for the identity veto, and this record for the
 no-jump rule. The lesson each time is the same one, and it is why the fix here is
@@ -88,22 +100,32 @@ chance to forget it.
 
 ## Decision
 
-Every pass that plans the Linux queue while a macOS queue is waiting is offered
-only the demands that may sit BESIDE an aged macOS head — never the ones that
-would land INTO its vector.
+A pass that plans one platform's queue while the other platform's queue is
+waiting is offered only the demands that may sit BESIDE that queue's aged head —
+never the ones that would land INTO its vector. The rule is symmetric: both
+directions were broken, and a rule that named one platform would have to be
+written twice and forgotten once.
 
-`linuxBesideAgedMacHead` builds the reservation the macOS head would have had if
-it were Linux — its key, its profile's vector, its creation time — and runs each
-Linux candidate through the same `jumpsTheReservedHead` ADR 0045 defines. It is
-applied at the four call sites that plan Linux admission with a macOS queue in
-hand:
+`besideAgedForeignHead` builds the reservation the foreign head would have had if
+it belonged to the pass's own platform — its key, its profile's vector, its
+creation time — and runs each candidate through the same `jumpsTheReservedHead`
+ADR 0045 defines.
 
-| pass | lane |
+It is applied at exactly two places, and that number is the decision:
+
+| funnel | admits |
 |---|---|
-| `planBehindInfeasibleMacHead` | macOS head that cannot spawn — the production incident |
-| `fillLinuxRemainder` | macOS head that DID spawn, Linux filling what is left |
-| `planLinuxWithCoexistence` | Linux head beside a live macOS cohort — the tiered inversion |
-| `PlanTick`'s plain Linux lane | Linux head on a host with no macOS instance |
+| `planLinux` | every Linux spawn in the package |
+| `appendMacSpawns` | every macOS spawn in the package |
+
+The first version of this change applied the rule at each call site that planned
+one platform beside the other. Five were found by hand; the gate's wider sweep
+then found a sixth (`fillMacRemainder`), and after that a seventh and eighth
+(`appendMacSpawns` behind a repository-capped macOS head, and its
+`planLinuxHandoff` backfill). Enumerating passes by hand was the wrong method —
+it is the same method that produced the defect this record fixes. Both funnels
+derive the other platform's waiting queue themselves, via `foreignQueue`, so a
+pass added later inherits the rule instead of having to remember it.
 
 This is ordering, not capacity. No veto changes, no envelope shrinks, nothing is
 charged, and `Next` is untouched — the head is a predicate argument for the
@@ -144,7 +166,7 @@ The 2026-08-09 tick is pinned as
 `TestAgedMacHeadIsNotJumpedByYoungerLinuxWantingItsVector`: a live builder holds
 the profile's only active slot, a 2h01m macOS head waits behind it, and an 80m
 Linux demand of an equal vector is refused the residual. It fails without
-`linuxBesideAgedMacHead` and passes with it. Two guard tests fail if the bound
+`besideAgedForeignHead` and passes with it. Two guard tests fail if the bound
 over-reaches — one admitting work that fits beside the aged head, one admitting
 Linux behind a YOUNG macOS head.
 
@@ -176,6 +198,18 @@ time it named a defect the incident report did not:
    `fillLinuxRemainder`, plus an oracle bug: it clamped its envelope by the
    host's measured availability, so it read a 6-core head as unable to fit five
    available cores on a tick the scheduler had judged it against ten.
+4. **Seeds 12 and 17 at the gate's width** — the MIRROR direction, which the
+   first draft of this record asserted was safe: a younger macOS `builder` taking
+   the vector an older Linux `xl` was waiting for, on ticks where the Linux head
+   held no reservation.
+5. **Seeds 43 and 51** — the mirror again, in two further macOS passes, after the
+   mirror had already been "fixed" at one call site. This is what moved the rule
+   from six hand-picked call sites to the two funnels.
+
+Findings 4 and 5 arrived only at the gate's own sweep width
+(`-seeds=80 -sim-ticks=200`); the default local range of 8 seeds is silent on
+every one of them. Run the gate's width before pushing a scheduler ordering
+change.
 
 The simulation worlds already generated this contention: `simProfiles` has had a
 Linux `xl` and a macOS `builder` at an identical 6 CPU / 12288 MiB, with
@@ -193,14 +227,27 @@ platforms, which is the only place this rule can bind:
 | `m4-mac-mini` before | 69 | 51 | 51 | `666eb149486c754f` |
 | `m4-mac-mini` after | 69 | 51 | 51 | `3c89e09f93d9bdb1` |
 | `tiered-release-priority` before | 81 | 54 | 54 | `22dbe1024fc5a918` |
-| `tiered-release-priority` after | 84 | 54 | 54 | `b33edaa50fe87d2b` |
+| `tiered-release-priority` after | 85 | 54 | 54 | `3c4cfc406da35301` |
 
 The same 51 and 54 spawns produce the same 51 and 54 instances on both sides of
 the change. No work is refused and none is added; what moved is WHICH tick each
 spawn lands on, which is what an ordering rule is. Swept one seed at a time, both
 arms are identical at seed 1 and diverge from seed 2 onward. The tiered arm needs
-three more applied plans to reach the same 54 spawns — the cost of the rule, and
+four more applied plans to reach the same 54 spawns — the cost of the rule, and
 the mirror image of ADR 0045's own arithmetic, which bought one applied plan back.
+
+Placing the rule at the funnels surfaced two exemptions that the call-site
+version never had to state, and both are real:
+
+- **`macOSExclusive`** settles the platform question by configuration. Linux is
+  not admitted at all under that flag, so a Linux queue withholds nothing, and
+  reading it would starve the macOS work the flag exists to prioritise.
+- **A demand an instance already incarnates is served, not waiting.** The
+  remainder passes call the funnels with a FRESH sub-plan whose operation list is
+  empty, handing them an Input whose instances include this tick's own planned
+  spawns (`mixedRemainderInput`). Reading only `plan.Operations` there left a
+  pass withholding capacity for a head the same tick had just admitted, which is
+  the opposite of this record's purpose and broke three existing tests.
 
 ## Not addressed here
 
@@ -209,7 +256,9 @@ reservation would have to answer what happens when the two platform lanes
 disagree about the same slot across ticks, and no incident has asked that
 question.
 
-`planMacHandoff`'s bounded drain backfill is left alone. It is reachable only
+`planMacHandoff`'s bounded drain backfill is left alone, and it is the one
+admission path in the package that does NOT pass through either funnel —
+`boundedDrainBackfill` calls `exactSelect` directly. It is reachable only
 with `mixedPlatformAdmission` off, it is latched to one job, and
 `boundedDrainBackfill` restricts its candidates to the SMALLEST Linux profile —
 which cannot hold a larger macOS head's vector, so the rule would be a no-op on
@@ -219,5 +268,5 @@ branch would add an argument no evidence supports.
 
 It does not revisit which pass plans first. Nothing here reorders `PlanTick`; the
 global order that chooses the head is ADR 0037's and is unchanged. The fix is
-that each pass is told about the head it was previously planned in ignorance of,
-not that the passes are merged into one.
+that each funnel derives the head it was previously planning in ignorance of, not
+that the passes are merged into one.
