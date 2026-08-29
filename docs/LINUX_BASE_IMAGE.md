@@ -125,6 +125,48 @@ locate it instead of downloading a fresh one into an ephemeral container. An
 image that declares no SDK gives its jobs no Android variables, exactly as
 before.
 
+### The container is told the vector it was charged
+
+A cgroup quota bounds what a job may *use*; it does not change what the job can
+*see*. Inside a container charged 2 CPUs and 4 GiB, `/proc/cpuinfo` still lists
+every host thread and `/proc/meminfo` still reports the host's whole memory, so
+anything that sizes itself from those plans for a machine it does not have.
+
+The executor therefore states the vector outright, and every one of these is a
+default a job may override:
+
+| Variable | Why |
+| --- | --- |
+| `TRF_CPUS`, `TRF_MEMORY_MB` | the plain facts, for tools no flag reaches |
+| `GOMAXPROCS` | Go reads it before it reads the machine |
+| `JAVA_TOOL_OPTIONS=-XX:MaxRAM=… -XX:ActiveProcessorCount=…` | see below |
+
+The JVM is the case worth explaining, because it is supposed to handle this
+itself. `UseContainerSupport` is on by default, but it consults `/proc/cgroups`
+— the cgroup **v1** controller table — and a pure v2 host carries no `memory`
+row there at all. Measured on node B:
+
+```
+$ java -Xlog:os+container=trace -version
+[os,container] controller memory is not enabled
+[os,container] One or more required controllers disabled at kernel level.
+```
+
+So the JVM disables container support and sizes off the host: a **6.76 GiB**
+max heap inside a 4 GiB container. `-XX:MaxRAM` restores the arithmetic without
+depending on detection.
+
+**What this does not fix.** `os.cpus().length` reads `/proc/cpuinfo` and cannot
+be masked by any cgroup setting, so Node tools that size worker pools from it —
+Playwright's default is `os.cpus().length / 2` — still see every host thread.
+Their configuration has to read `TRF_CPUS`. Two other levers were measured and
+rejected on this host: `--cpuset-cpus` fails outright because the cpuset
+controller is not delegated to the rootless user slice (`cgroup.controllers`
+carries only `cpu memory pids`), and `--cgroupns=private` changes nothing.
+Pinning affinity with `taskset` does work — `nproc` reports 2 — but needs a
+disjoint-set allocator across instances to avoid two containers contending on
+the same cores, which is issue #291's remaining half.
+
 ### `systemd-run --scope` is the requirement nobody would guess
 
 [ADR 0010](adr/0010-ephemeral-guest-shutdown.md) says the helper "starts

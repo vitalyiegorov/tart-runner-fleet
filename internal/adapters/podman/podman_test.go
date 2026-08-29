@@ -289,6 +289,12 @@ func TestHealthyProbesOnceAndRetriesAfterAFailure(t *testing.T) {
 // TestCreateBuildsTheWholeContainerSpecificationInOneVector is the audit: every
 // capability a job's container has is on this line, so a grant that appears
 // without a decision record fails a test.
+// vectorEnv is what the executor states to every container about the vector it
+// was charged (issues #291, #296). It is spelled out once here so the golden
+// vectors below stay readable, and so a change to it has to be made on purpose.
+const vectorEnv = "--env TRF_CPUS=2 --env TRF_MEMORY_MB=4096 --env GOMAXPROCS=2 " +
+	"--env JAVA_TOOL_OPTIONS=-XX:MaxRAM=4096m -XX:ActiveProcessorCount=2 "
+
 func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 	for _, testCase := range []struct {
 		name     string
@@ -301,6 +307,7 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 			name: "an ordinary profile gets no device", instance: "trf-small-abc",
 			kvm: []string{"trf-android-"},
 			want: "create --name trf-small-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
+				vectorEnv +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"ghcr.io/example/runner:1 sleep infinity",
 		},
@@ -308,6 +315,7 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 			name: "the android profile gets /dev/kvm", instance: "trf-android-abc",
 			kvm: []string{"", "trf-android-"},
 			want: "create --name trf-android-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
+				vectorEnv +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"--device /dev/kvm ghcr.io/example/runner:1 sleep infinity",
 		},
@@ -315,6 +323,7 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 			name: "a configured hold command replaces the default", instance: "trf-small-abc",
 			hold: []string{"/usr/bin/tail", "-f", "/dev/null"},
 			want: "create --name trf-small-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
+				vectorEnv +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"ghcr.io/example/runner:1 /usr/bin/tail -f /dev/null",
 		},
@@ -1307,4 +1316,65 @@ func countVerb(host *fakePodman, verb string) int {
 		}
 	}
 	return count
+}
+
+// A cgroup quota bounds what a container may use; it does not change what the
+// container can see. These are the two production failures that came from the
+// gap — Playwright starting 12 workers against a 2-CPU quota (#291) and a JVM
+// sizing a 6.76 GiB heap inside an 8 GiB container (#296) — expressed as the
+// arithmetic the executor now states outright.
+func TestTheContainerIsToldTheVectorItWasCharged(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		cpu, memoryMB    int
+		wantCPUs, wantMB string
+	}{
+		{"the 2x4 profile", 2, 4096, "2", "4096"},
+		{"the 4x8 profile", 4, 8192, "4", "8192"},
+		{"a single-core profile", 1, 2048, "1", "2048"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			instance := spec("trf-small-abc")
+			instance.CPU, instance.MemoryMB = test.cpu, test.memoryMB
+			args := (&Adapter{}).createArgs(instance)
+			env := map[string]string{}
+			for index, arg := range args {
+				if arg == "--env" && index+1 < len(args) {
+					parts := strings.SplitN(args[index+1], "=", 2)
+					env[parts[0]] = parts[1]
+				}
+			}
+			if env["TRF_CPUS"] != test.wantCPUs || env["TRF_MEMORY_MB"] != test.wantMB {
+				t.Fatalf("the plain facts are %q/%q, want %q/%q — Playwright's worker count has nothing else to read",
+					env["TRF_CPUS"], env["TRF_MEMORY_MB"], test.wantCPUs, test.wantMB)
+			}
+			if env["GOMAXPROCS"] != test.wantCPUs {
+				t.Fatalf("GOMAXPROCS = %q, want %q", env["GOMAXPROCS"], test.wantCPUs)
+			}
+			// The JVM disables its own container support on a pure cgroup-v2 host
+			// (`controller memory is not enabled`), so the ceiling has to be stated
+			// rather than detected.
+			java := env["JAVA_TOOL_OPTIONS"]
+			if !strings.Contains(java, "-XX:MaxRAM="+test.wantMB+"m") {
+				t.Fatalf("JAVA_TOOL_OPTIONS = %q, want it to cap MaxRAM at the charged memory", java)
+			}
+			if !strings.Contains(java, "-XX:ActiveProcessorCount="+test.wantCPUs) {
+				t.Fatalf("JAVA_TOOL_OPTIONS = %q, want it to cap the processor count", java)
+			}
+		})
+	}
+}
+
+// An unset vector states nothing rather than inventing a zero-sized machine: a
+// container told it has 0 CPUs and 0 MiB is worse off than one told nothing.
+func TestAnUnsetVectorStatesNothing(t *testing.T) {
+	for _, instance := range []executor.InstanceSpec{
+		{Name: "trf-small-abc", CPU: 0, MemoryMB: 4096},
+		{Name: "trf-small-abc", CPU: 2, MemoryMB: 0},
+		{Name: "trf-small-abc"},
+	} {
+		if env := vectorEnvironment(instance); env != nil {
+			t.Fatalf("vector %d/%d stated %v", instance.CPU, instance.MemoryMB, env)
+		}
+	}
 }

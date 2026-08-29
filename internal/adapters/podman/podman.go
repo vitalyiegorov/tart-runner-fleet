@@ -462,6 +462,7 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 		// which would otherwise accumulate under the hold command as PID 1.
 		"--init",
 	}
+	args = append(args, vectorEnvironment(spec)...)
 	for _, label := range ownershipLabels(spec.Ownership) {
 		args = append(args, "--label", label)
 	}
@@ -473,6 +474,57 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 	}
 	args = append(args, spec.Image)
 	return append(args, a.holdCommand()...)
+}
+
+// vectorEnvironment states the vector this container was charged, because the
+// container cannot discover it.
+//
+// A cgroup quota bounds what a process may *use*; it does not change what the
+// process can *see*. Inside a container charged 2 CPUs and 4 GiB on this fleet's
+// nodes, `/proc/cpuinfo` still lists every host thread and `/proc/meminfo` still
+// reports the host's whole memory, so anything that sizes itself from those
+// plans for a machine it does not have. Two production failures came from
+// exactly this: Playwright read 24 host threads and started 12 browser workers
+// against a 2-CPU quota until its assertions timed out (issue #291), and a JVM
+// sized a 6.76 GiB heap beside a 4.2 GiB emulator inside an 8 GiB container
+// until the kernel killed the emulator with no out-of-memory message anywhere
+// (issue #296).
+//
+// The JVM is the case worth explaining, because it is supposed to handle this
+// itself. `UseContainerSupport` is on by default and reads the cgroup limit —
+// but it first consults `/proc/cgroups`, the cgroup **v1** controller table, and
+// on a pure v2 host that table carries no `memory` row at all. Measured on node
+// B with `-Xlog:os+container=trace`:
+//
+//	controller memory is not enabled
+//	One or more required controllers disabled at kernel level
+//
+// So the JVM disables container support entirely and falls back to the host.
+// `-XX:MaxRAM` restores the correct arithmetic without depending on detection,
+// and `-XX:ActiveProcessorCount` does the same for its thread pools.
+//
+// TRF_CPUS and TRF_MEMORY_MB are the same facts as plain numbers, for the tools
+// no flag reaches. Playwright's worker count is the standing example: it reads
+// `os.cpus().length`, which no cgroup setting can mask, so its config has to be
+// told — and now there is something to tell it.
+//
+// Every variable here is a default a job may override: a `JAVA_TOOL_OPTIONS`
+// the workflow exports wins, which is deliberate. The fleet states the vector;
+// it does not dictate how a job spends it.
+func vectorEnvironment(spec executor.InstanceSpec) []string {
+	if spec.CPU <= 0 || spec.MemoryMB <= 0 {
+		return nil
+	}
+	cpus := strconv.Itoa(spec.CPU)
+	memory := strconv.Itoa(spec.MemoryMB)
+	return []string{
+		"--env", "TRF_CPUS=" + cpus,
+		"--env", "TRF_MEMORY_MB=" + memory,
+		// Go reads GOMAXPROCS before it reads the machine, so this is the whole
+		// fix for every Go tool in a job.
+		"--env", "GOMAXPROCS=" + cpus,
+		"--env", "JAVA_TOOL_OPTIONS=-XX:MaxRAM=" + memory + "m -XX:ActiveProcessorCount=" + cpus,
+	}
 }
 
 // podmanDefaultShmMB is the size podman gives /dev/shm when nothing asks: 64 MB,
