@@ -336,12 +336,35 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 	}
 	candidate := autoupdate.Generation{Version: release.Version, Mode: *mode, ReleaseDir: release.Dir,
 		ConfigPath: *configPath, Endpoint: *endpoint}
-	if err := (autoupdate.Controller{Host: host}).Apply(ctx, candidate); err != nil {
-		fmt.Fprintf(stderr, "apply production release: %v\n", err)
+	applyErr := (autoupdate.Controller{Host: host}).Apply(ctx, candidate)
+	// Collect superseded downloads whether or not this run adopted anything, and
+	// that ordering is the whole of issue #287. The updater downloads and verifies
+	// every release BEFORE the quiescence gate decides, so a node that never
+	// reaches quiescence downloads forever and adopts nothing: the mac studio held
+	// 26 generations, several GiB, while refusing every job for a 2 GiB disk
+	// shortfall. A collector that only ran after a successful adoption would have
+	// freed nothing there.
+	pruneReleases(ctx, host, *root, stdout)
+	if applyErr != nil {
+		fmt.Fprintf(stderr, "apply production release: %v\n", applyErr)
 		return exitFailure
 	}
 	fmt.Fprintf(stdout, "production generation is current: %s\n", release.Version)
 	return exitSuccess
+}
+
+// pruneReleases reclaims the disk superseded generations hold, and says what it
+// took. It reports nothing on failure: this is an errand performed on the way to
+// updating, and failing an update because a stale directory is busy would turn a
+// disk-space problem into an availability one.
+func pruneReleases(ctx context.Context, host *autoupdate.LocalHost, root string, stdout io.Writer) {
+	current, err := host.Current(ctx)
+	if err != nil {
+		return
+	}
+	if removed := autoupdate.PruneReleases(root, current.Version, autoupdate.DefaultRetainedReleases); len(removed) > 0 {
+		fmt.Fprintf(stdout, "pruned %d superseded release(s): %s\n", len(removed), strings.Join(removed, " "))
+	}
 }
 
 func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
