@@ -51,10 +51,37 @@ func refuseMalformed(err error) error {
 }
 
 type Store struct {
-	db          *sql.DB
+	db *sql.DB
+	// leaseDB is a second connection used only by the authority lease.
+	//
+	// db is capped at one open connection, so every statement the daemon issues
+	// queues behind every other one — a plan commit, an inventory read, a
+	// worker's operation. A lease renewal is a single small UPDATE with a
+	// five-second budget, and on a saturated host it spent that budget waiting
+	// in Go's connection queue without ever reaching SQLite. The daemon then
+	// exited with "controller authority lost: renew lease: context deadline
+	// exceeded" and launchd restarted it, which is the expensive part: a
+	// successor re-establishes every scale-set session on a host that is already
+	// struggling (issue #295, and the 2026-08-01 incident before it).
+	//
+	// Renewal must therefore not queue behind scheduling. WAL admits one writer
+	// beside its readers, and busy_timeout bounds the moment two writers meet,
+	// so this is a queueing fix rather than an attempt to widen SQLite's own
+	// single-writer rule. Nil falls back to db, which is what every test store
+	// and any future in-memory caller gets.
+	leaseDB     *sql.DB
 	clock       func() time.Time
 	injectFault func(string) error
 	injectRows  func(string) rowsScanner
+}
+
+// lease returns the connection the authority lease must use: its own where one
+// exists, the shared one otherwise.
+func (s *Store) lease() *sql.DB {
+	if s.leaseDB != nil {
+		return s.leaseDB
+	}
+	return s.db
 }
 
 // Option configures a Store at open time.
@@ -132,11 +159,43 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 			return nil, fmt.Errorf("secure sqlite permissions: %w", err)
 		}
 	}
+	// Opened after Migrate so the schema and the file's persistent journal mode
+	// are already established; this connection only ever renews a lease.
+	if err := store.openLeaseConnection(ctx, path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
+// openLeaseConnection gives the authority lease a connection of its own. The
+// per-connection pragmas are re-applied here because SQLite scopes them to a
+// connection: busy_timeout in particular, which is what bounds the wait when
+// this connection's UPDATE meets the scheduler's writer.
+func (s *Store) openLeaseConnection(ctx context.Context, path string) error {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return fmt.Errorf("open sqlite lease connection: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{`PRAGMA synchronous=FULL`, `PRAGMA foreign_keys=ON`, `PRAGMA busy_timeout=5000`} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return fmt.Errorf("configure sqlite lease connection: %w", err)
+		}
+	}
+	s.leaseDB = db
+	return nil
+}
+
 func (s *Store) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.leaseDB != nil {
+		if leaseErr := s.leaseDB.Close(); err == nil {
+			err = leaseErr
+		}
+	}
+	return err
 }
 
 func (s *Store) SchedulerState(ctx context.Context) (operations.SchedulerState, error) {
@@ -1282,7 +1341,7 @@ func (s *Store) AcquireLease(ctx context.Context, name, owner string, now time.T
 }
 
 func (s *Store) RenewLease(ctx context.Context, lease operations.Lease, now time.Time, ttl time.Duration) (operations.Lease, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE leases SET expires_at=? WHERE name=? AND owner=? AND token=? AND expires_at>?`,
+	result, err := s.lease().ExecContext(ctx, `UPDATE leases SET expires_at=? WHERE name=? AND owner=? AND token=? AND expires_at>?`,
 		now.Add(ttl).UTC().UnixNano(), lease.Name, lease.Owner, lease.Token, now.UTC().UnixNano())
 	if err != nil {
 		return operations.Lease{}, fmt.Errorf("renew lease: %w", err)
@@ -1296,7 +1355,7 @@ func (s *Store) RenewLease(ctx context.Context, lease operations.Lease, now time
 }
 
 func (s *Store) ReleaseLease(ctx context.Context, lease operations.Lease) error {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM leases WHERE name=? AND owner=? AND token=?`, lease.Name, lease.Owner, lease.Token)
+	result, err := s.lease().ExecContext(ctx, `DELETE FROM leases WHERE name=? AND owner=? AND token=?`, lease.Name, lease.Owner, lease.Token)
 	if err != nil {
 		return fmt.Errorf("release lease: %w", err)
 	}
