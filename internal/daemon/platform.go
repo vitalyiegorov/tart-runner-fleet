@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -212,8 +213,21 @@ func newPodmanAdapter(store runtimeStore, cfg config.Config, control lifecycle.D
 		Ownership: store, Confirmation: control,
 		Image: cfg.Executor.Image, HoldCommand: cfg.Executor.HoldCommand,
 		KVMInstancePrefixes: kvmInstancePrefixes(cfg),
+		VectorViewDir:       vectorViewDir(cfg),
 		CommandTimeout:      cfg.Timeouts.Tart, StopTimeout: containerStopGrace,
 		ConfirmationMaxAge: deletionConfirmationMaxAge}
+}
+
+// vectorViewDir is where the narrowed `/proc` view a container is shown is
+// materialised. A node whose state directory is unknown — every unit test that
+// wires a backend from a bare configuration — gets the empty string, which
+// disables the narrowing and leaves the container seeing the host exactly as it
+// did before issue #291.
+func vectorViewDir(cfg config.Config) string {
+	if cfg.StateDir == "" {
+		return ""
+	}
+	return filepath.Join(cfg.StateDir, "vectorview")
 }
 
 // kvmInstancePrefixes turns the configured profile IDs into the instance-name

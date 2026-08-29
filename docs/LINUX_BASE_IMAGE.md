@@ -156,16 +156,46 @@ So the JVM disables container support and sizes off the host: a **6.76 GiB**
 max heap inside a 4 GiB container. `-XX:MaxRAM` restores the arithmetic without
 depending on detection.
 
-**What this does not fix.** `os.cpus().length` reads `/proc/cpuinfo` and cannot
-be masked by any cgroup setting, so Node tools that size worker pools from it —
-Playwright's default is `os.cpus().length / 2` — still see every host thread.
-Their configuration has to read `TRF_CPUS`. Two other levers were measured and
-rejected on this host: `--cpuset-cpus` fails outright because the cpuset
-controller is not delegated to the rootless user slice (`cgroup.controllers`
-carries only `cpu memory pids`), and `--cgroupns=private` changes nothing.
-Pinning affinity with `taskset` does work — `nproc` reports 2 — but needs a
-disjoint-set allocator across instances to avoid two containers contending on
-the same cores, which is issue #291's remaining half.
+### The container is also shown the vector it was charged
+
+Telling a job its vector only reaches tools that were configured to listen.
+Playwright's default worker count is `os.cpus().length / 2`, and no environment
+variable changes that number — which is why three of four e2e shards timed out in
+cascade with `Running ... tests using 12 workers` inside a 2-CPU container
+(issue #291).
+
+So the executor narrows what the container can count. It generates
+`/proc/cpuinfo` and `/proc/stat` from the host's own files, truncated to the
+vector, and bind-mounts both read-only
+([ADR 0050](adr/0050-a-container-is-shown-the-vector-it-was-charged.md)).
+
+Measured on node B, `--cpus 2` on a 24-thread host — the surprising row is the
+last one, and it is the only one that matters:
+
+| mechanism | `nproc` | `availableParallelism()` | `os.cpus().length` |
+| --- | --- | --- | --- |
+| baseline | 24 | **2** | 24 |
+| `--cpuset-cpus 0,1` | *fails: controller not delegated to the rootless slice* | | |
+| `--cgroupns=private` | 24 | 2 | 24 |
+| `taskset -c 0-1` | **2** | 2 | 24 |
+| narrowed `/proc/cpuinfo` | 24 | 2 | 24 |
+| narrowed `/proc/stat` | 24 | 2 | **2** |
+
+`availableParallelism()` was never wrong: libuv reads the CFS quota. `os.cpus()`
+does not read `/proc/cpuinfo` at all — libuv counts the `cpuN` lines of
+`/proc/stat`, which is why narrowing the obvious file changes nothing.
+
+**The cost.** The two files are written once and never updated, so anything
+computing CPU *utilisation* from two samples inside the container reads zero.
+`top`, `uptime` and `vmstat` all still run and report idle. Those counters were
+the host's, across every tenant on the box — they were never about this container
+and no fleet decision reads them.
+
+**What this still does not fix.** `nproc` reads `sched_getaffinity` and reports
+24, so `make -j$(nproc)` still oversubscribes. Fixing it needs `taskset` with a
+per-node disjoint-set allocator, or cpuset delegation (root on each node), which
+is issue #291's remaining half. A job that wants the exact number today should
+read `TRF_CPUS`.
 
 ### `systemd-run --scope` is the requirement nobody would guess
 
