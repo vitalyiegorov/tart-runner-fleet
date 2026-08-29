@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -97,7 +98,7 @@ func TestLeaseLossIsStillDetectedOnItsOwnConnection(t *testing.T) {
 		t.Fatalf("re-acquire: %v", err)
 	}
 	// The first lease's token is now stale.
-	if _, err := store.RenewLease(ctx, lease, now.Add(time.Minute), 30*time.Second); err != operations.ErrLeaseLost {
+	if _, err := store.RenewLease(ctx, lease, now.Add(time.Minute), 30*time.Second); !errors.Is(err, operations.ErrLeaseLost) {
 		t.Fatalf("RenewLease on a superseded lease = %v, want ErrLeaseLost", err)
 	}
 }
