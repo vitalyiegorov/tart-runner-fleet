@@ -562,6 +562,16 @@ type Config struct {
 	// demand escalates (issue #224). An absent block is the fleet this code
 	// always was: one default tier and aged FIFO.
 	Priority Priority
+	// StateDir is the directory this configuration was loaded from, which is the
+	// node's own state directory. It is populated at load time by the daemon and
+	// is NEVER serialised: it describes where a file was found, not anything an
+	// operator writes down, so `Encode` has no counterpart for it and a decoded
+	// configuration always carries the empty string.
+	//
+	// It exists so a backend that must materialise something on disk has a place
+	// the node already owns. The first of those is the narrowed `/proc` view a
+	// container is shown (issue #291).
+	StateDir string
 }
 
 type wireExecutor struct {

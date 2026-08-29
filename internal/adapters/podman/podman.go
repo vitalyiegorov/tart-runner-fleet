@@ -257,10 +257,19 @@ type Adapter struct {
 	// emulator profile and to no other, so this is a list of names and never a
 	// boolean.
 	KVMInstancePrefixes []string
-	CommandTimeout      time.Duration
-	StopTimeout         time.Duration
-	ConfirmationMaxAge  time.Duration
-	Now                 func() time.Time
+	// VectorViewDir is where the narrowed `/proc/cpuinfo` and `/proc/stat` a
+	// container is shown are materialised (issue #291). Empty disables the
+	// narrowing entirely, which is the behaviour every node had before it and is
+	// what a backend with no writable state directory gets.
+	VectorViewDir string
+	// VectorViewSource reads the host's own `/proc` files. Empty is os.ReadFile,
+	// which is the only value production uses; the field exists so the narrowing
+	// is testable without a host that happens to have the right number of cores.
+	VectorViewSource   func(string) ([]byte, error)
+	CommandTimeout     time.Duration
+	StopTimeout        time.Duration
+	ConfirmationMaxAge time.Duration
+	Now                func() time.Time
 
 	mu      sync.Mutex
 	healthy bool
@@ -463,6 +472,7 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 		"--init",
 	}
 	args = append(args, vectorEnvironment(spec)...)
+	args = append(args, a.vectorViewMounts(spec)...)
 	for _, label := range ownershipLabels(spec.Ownership) {
 		args = append(args, "--label", label)
 	}
