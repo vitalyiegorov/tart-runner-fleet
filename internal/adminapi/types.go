@@ -87,6 +87,11 @@ type Status struct {
 	// none of it, which is why EffectiveSessionYieldCheck exists.
 	SessionYield      *SessionYield `json:"sessionYield,omitempty"`
 	SessionYieldCheck *Check        `json:"sessionYieldCheck,omitempty"`
+	// AdmissionCheck is an additive fleet.v1 field: whether this node is taking
+	// work at all, and which guardrail refused it when it is not (issue #286).
+	// Absent from a daemon that predates it, which is why
+	// EffectiveAdmissionCheck exists.
+	AdmissionCheck *Check `json:"admissionCheck,omitempty"`
 	// UpdateDrain is an additive fleet.v1 field: whether this node is refusing
 	// admission on purpose so the instances standing between it and a pending
 	// generation can finish. Without it, a healthy node admitting nothing is
@@ -293,6 +298,17 @@ func (s Status) EffectiveGuestConsoleCheck() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.GuestConsoleCheck
+}
+
+// EffectiveAdmissionCheck reads the admission check an older daemon does not
+// publish. Absent is reported as passing: a daemon that cannot say whether it is
+// admitting has not said that it is refusing, and inventing a failure from
+// silence would fail every node during a rolling update.
+func (s Status) EffectiveAdmissionCheck() Check {
+	if s.AdmissionCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.AdmissionCheck
 }
 
 // EffectiveSessionYieldCheck reads the yield check an older daemon does not

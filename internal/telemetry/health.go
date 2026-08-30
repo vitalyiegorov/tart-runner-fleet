@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
@@ -79,6 +80,22 @@ type HealthConfig struct {
 	// loop inventory with the process that starts the loops, exactly as
 	// CriticalObservations keeps the observation inventory with its wiring.
 	FailureComponents []string
+	// AdmissionFloors are the guardrail thresholds the host probe judges pressure
+	// against. They are carried here for one reason: so the admission check can
+	// say "58 GiB free, floor 60" instead of "disk reserve", which is the whole
+	// difference between a finding an operator can act on and a category.
+	AdmissionFloors AdmissionFloors
+}
+
+// AdmissionFloors mirrors the configured host guardrails. Zero means a floor the
+// operator did not set, and an unset floor is never rendered as `0` — a node is
+// not "0 GiB from its disk floor", it simply has no disk floor.
+type AdmissionFloors struct {
+	MinFreeDiskGiB        int
+	MinAvailableMemoryMiB int
+	MaxSwapUsedMiB        int
+	MaxLoadAverage        float64
+	MinCPUIdlePercent     float64
 }
 
 type QueueMetrics struct {
@@ -240,6 +257,7 @@ type Snapshot struct {
 	UpdateDrain        *UpdateDrainMetric
 	Reservation        *ReservationMetric
 	Envelope           EnvelopeMetric
+	AdmissionFloors    AdmissionFloors
 	HostPressure       HostPressureMetric
 	ObservationTTL     time.Duration
 }
@@ -288,6 +306,7 @@ type Health struct {
 	updateDrain        *UpdateDrainMetric
 	reservation        *ReservationMetric
 	envelope           EnvelopeMetric
+	admissionFloors    AdmissionFloors
 	hostPressure       HostPressureMetric
 	revision           uint64
 }
@@ -348,6 +367,7 @@ func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
 		queueSLO:               config.QueueSLO, queueIncidentSLO: config.QueueIncidentSLO,
 		stalledAttempts: config.StalledAttempts, drainHold: config.DrainHold,
 		profiles: profiles, critical: critical, failureComponents: failureComponents, mode: ModeIdle,
+		admissionFloors:   config.AdmissionFloors,
 		componentFailures: make(map[componentFailureKey]int, len(failureComponents)),
 		queues:            make(map[string]QueueMetrics, len(profiles)),
 		instances:         make(map[string]InstanceMetrics, len(profiles)),
@@ -982,6 +1002,7 @@ func (h *Health) Snapshot() Snapshot {
 		UpdateDrain:       h.updateDrain,
 		Reservation:       cloneReservation(h.reservation),
 		Envelope:          h.envelope,
+		AdmissionFloors:   h.admissionFloors,
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }
@@ -1080,6 +1101,118 @@ func (h *Health) Ready() HealthResult {
 // QueueHealth reports service SLO degradation independently from authority
 // readiness. Capacity backlog must page operators, but it must not make a
 // healthy authority daemon fail updater verification or restart in a loop.
+// Admission reports whether this node is taking work at all, and when it is not,
+// says which guardrail refused it and by how much.
+//
+// It exists because on 2026-08-25 the mac studio starved the whole fleet for
+// about two and a half hours with `admissionAllowed: false` and
+// `admissionReason: "disk reserve"` sitting in `fleet status`, while
+// `fleet doctor` reported 10 of 11 checks OK and named only the downstream
+// symptom — a breached queue SLO (issue #286). The operator learned that jobs
+// were slow. What was true is that the node was refusing every job, and why.
+//
+// A refusal is a FINDING, not a status field. The distinction matters because a
+// queue SLO breach has a dozen causes and this has exactly one, so reporting the
+// symptom sends an operator to the scheduler for a host-pressure condition.
+//
+// The check also names the measurement against its floor when it passes. The
+// studio's free disk slid 72 -> 54 GiB over about six hours, which was obvious
+// in hindsight and invisible at the time; a margin an operator reads on every
+// doctor run is the cheapest form of the warning this issue asked for, and it
+// costs no threshold nobody would agree on.
+func (h *Health) Admission() HealthResult { return admissionResult(h.Snapshot()) }
+
+// admissionResult is the check as a pure function of one snapshot, so the status
+// document and the health accessor can never disagree about whether this node is
+// taking work.
+func admissionResult(snapshot Snapshot) HealthResult {
+	pressure, floors := snapshot.HostPressure, snapshot.AdmissionFloors
+	// A pressure reading always carries a reason -- SetHostPressure refuses one
+	// that does not -- so an empty reason is the zero value: the host has not
+	// been observed yet. That is not a refusal. A fresh observe-mode daemon sits
+	// in exactly this state, and reading it as "admitting no work" failed the
+	// observe smoke on every run of the gate before this branch was told apart
+	// from a real refusal. Silence is not a fault; it is reported as silence.
+	if pressure.AdmissionReason == "" {
+		return HealthResult{OK: true, Reasons: []string{"host pressure not yet observed"}}
+	}
+	margin := admissionMargin(pressure, floors)
+	if pressure.AdmissionAllowed {
+		if margin == "" {
+			return HealthResult{OK: true}
+		}
+		return HealthResult{OK: true, Reasons: []string{margin}}
+	}
+	reason := pressure.AdmissionReason
+	if !validAdmissionReason(reason) || reason == "" {
+		reason = "admission refused"
+	}
+	if margin == "" {
+		return HealthResult{Reasons: []string{"node is admitting no work: " + reason}}
+	}
+	return HealthResult{Reasons: []string{"node is admitting no work: " + reason + " (" + margin + ")"}}
+}
+
+// admissionMargin renders the guardrail nearest to refusing this node, measured
+// against its configured floor.
+//
+// A blocked node reports the guard its own reason names, because that is the one
+// that refused it. An admitting node reports whichever guard has the least
+// headroom, so the slide toward a floor is visible before it arrives. A floor the
+// operator never configured is not rendered at all: a node with no disk floor is
+// not zero GiB away from one.
+func admissionMargin(pressure HostPressureMetric, floors AdmissionFloors) string {
+	type guard struct {
+		reason  string
+		text    string
+		nearest float64
+	}
+	// Headroom is always a FRACTION OF THE LIMIT, never a raw distance, so guards
+	// measured in gibibytes, mebibytes and load average are comparable at all. A
+	// first draft mixed `measured/floor` for minimums with
+	// `(ceiling-measured)/ceiling` for maximums and reported a load average of 4
+	// against a ceiling of 24 as tighter than 72 GiB of disk against a floor of
+	// 60, which is the opposite of true.
+	var guards []guard
+	if floors.MinFreeDiskGiB > 0 {
+		guards = append(guards, guard{"disk reserve",
+			fmt.Sprintf("disk %d GiB free, floor %d", pressure.FreeDiskGiB, floors.MinFreeDiskGiB),
+			float64(pressure.FreeDiskGiB-int64(floors.MinFreeDiskGiB)) / float64(floors.MinFreeDiskGiB)})
+	}
+	if floors.MinAvailableMemoryMiB > 0 {
+		guards = append(guards, guard{"memory reserve",
+			fmt.Sprintf("memory %d MiB available, floor %d", pressure.AvailableMemoryMiB, floors.MinAvailableMemoryMiB),
+			float64(pressure.AvailableMemoryMiB-int64(floors.MinAvailableMemoryMiB)) / float64(floors.MinAvailableMemoryMiB)})
+	}
+	if floors.MaxSwapUsedMiB > 0 {
+		guards = append(guards, guard{"swap pressure",
+			fmt.Sprintf("swap %d MiB used, ceiling %d", pressure.SwapUsedMiB, floors.MaxSwapUsedMiB),
+			float64(int64(floors.MaxSwapUsedMiB)-pressure.SwapUsedMiB) / float64(floors.MaxSwapUsedMiB)})
+	}
+	if floors.MaxLoadAverage > 0 {
+		guards = append(guards, guard{"cpu pressure",
+			fmt.Sprintf("load %.2f, ceiling %.2f", pressure.LoadAverage, floors.MaxLoadAverage),
+			(floors.MaxLoadAverage - pressure.LoadAverage) / floors.MaxLoadAverage})
+	}
+	if len(guards) == 0 {
+		return ""
+	}
+	if !pressure.AdmissionAllowed {
+		for _, candidate := range guards {
+			if candidate.reason == pressure.AdmissionReason {
+				return candidate.text
+			}
+		}
+	}
+	nearest := guards[0]
+	for _, candidate := range guards[1:] {
+		if candidate.nearest < nearest.nearest {
+			nearest = candidate
+		}
+	}
+	return "nearest floor: " + nearest.text
+}
+
 func (h *Health) QueueHealth() HealthResult {
 	now := h.clock.Now()
 	h.mu.RLock()

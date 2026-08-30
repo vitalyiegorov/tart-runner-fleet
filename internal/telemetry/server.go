@@ -246,6 +246,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	yield := sessionYieldResult(snapshot.SessionYield)
 	drain := updateDrainResult(snapshot.UpdateDrain)
 	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
+	admission := admissionResult(snapshot)
+	admissionCheck := adminapi.Check{OK: admission.OK, Reasons: nonNilStrings(admission.Reasons)}
 	updateDrainCheck := adminapi.Check{OK: drain.OK, Reasons: nonNilStrings(drain.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
@@ -256,8 +258,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			QueueSLO:  &queueCheck,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
-			Envelope: envelopeRow(snapshot),
-			Stalled:  stalledRows(snapshot), ProgressCheck: &progressCheck,
+			Envelope: envelopeRow(snapshot), AdmissionCheck: &admissionCheck,
+			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
