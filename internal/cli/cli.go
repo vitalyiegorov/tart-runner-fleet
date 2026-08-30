@@ -770,6 +770,20 @@ func admissionDetail(status adminapi.Status, check adminapi.Check) string {
 	return "admitting; no configured floor is near"
 }
 
+// ingestDetail says whether GitHub is holding work this node's sessions have not
+// been offered. An older daemon says so rather than printing a bare "ok", for
+// the reason the admission line does: a check that cannot tell "healthy" from
+// "not asked" reproduces the silence issue #292 is about.
+func ingestDetail(status adminapi.Status, check adminapi.Check) string {
+	if status.IngestCheck == nil {
+		return "not reported by this daemon"
+	}
+	if detail := joinReasons(check); detail != "" && detail != "ok" {
+		return detail
+	}
+	return "every set is being offered the work GitHub has for it"
+}
+
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an
 // empty gap in the sentence.
 func axisOrUnjudged(axis string) string {
@@ -797,6 +811,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	console := status.Data.EffectiveGuestConsoleCheck()
 	yield := status.Data.EffectiveSessionYieldCheck()
 	admission := status.Data.EffectiveAdmissionCheck()
+	ingest := status.Data.EffectiveIngestCheck()
 	drain := status.Data.EffectiveUpdateDrainCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
@@ -810,6 +825,13 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// 72 -> 54 GiB over six hours and nothing made that visible until it
 		// arrived.
 		{Name: "admission", OK: admission.OK, Detail: admissionDetail(status.Data, admission)},
+		// The ingest check precedes the queue SLO for the same reason admission
+		// does: a scale set GitHub has stopped offering jobs to produces an EMPTY
+		// node queue, so the SLO has nothing to breach and every signal reads
+		// healthy from this node's own chair. On 2026-08-26 that state ran for four
+		// hours and the only observer who could see it was a human reading GitHub
+		// (issue #292).
+		{Name: "ingest delivery", OK: ingest.OK, Detail: ingestDetail(status.Data, ingest)},
 		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "occupancy", OK: occupancy.OK, Detail: joinReasons(occupancy)},
 		// The reservation check names the head, its repository, and the axis

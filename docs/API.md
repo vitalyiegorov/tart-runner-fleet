@@ -211,6 +211,38 @@ deliberately NOT metric labels; they travel in this document only. Both fields
 are additive and absent on daemons that published no reservation at all — which
 is the condition issue #226 ran in unobserved.
 
+`ingestCheck` reports a scale set GitHub has queued work for that this node's own
+broker session has not delivered:
+
+```json
+"ingestCheck": {"ok": false, "reasons": [
+  "ops/fleet small: GitHub has 1 queued for 4h0m0s that this node's session has not delivered (delivered 0 of 1)"]}
+```
+
+Each `scopeQueues` row carries the two terms the finding is computed from:
+`delivered` is what that set's own broker session handed the node, `observed` is
+what GitHub's REST view says is queued for it, and `jobs` is the larger of the
+two. **The larger is the right number to schedule against and the wrong number to
+diagnose with** — taking the maximum is exactly what made this invisible, because
+the divergence is absorbed into a correct-looking count.
+
+A row also carries `sharedLabels`. Under
+[ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) GitHub may bind a
+job matching shared labels to either node, so undelivered work on such a set is
+not evidence of a fault *here* — the finding names the sibling rather than
+blaming this node. It is still reported, because work no node has taken for
+longer than the queue SLO is a fleet-level fact.
+
+The check waits for the queue SLO before saying anything: a set mid-delivery
+diverges for seconds on every ordinary tick.
+
+It exists because on 2026-08-26 `trf-fleet-small` received no job for four hours
+while a matching job sat `queued` on GitHub the whole time, and every signal read
+healthy from the node's own chair (issue #292). The session's observations were
+`fresh` — it polled fine, it simply got nothing. The node's queue for the profile
+was `0`, so the queue SLO had nothing to breach. `fleet doctor` returned PASS.
+The only observer who could notice was on GitHub's side: a human, hours later.
+
 `admissionCheck` says whether this node is taking work at all, and when it is not,
 which guardrail refused it and by how much:
 

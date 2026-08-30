@@ -69,3 +69,25 @@ func TestAPassingCheckStillPrintsItsMargin(t *testing.T) {
 		t.Fatalf("a margin must survive to the line: %q", detail)
 	}
 }
+
+// The ingest line distinguishes a daemon that predates the check from one
+// reporting health, for the reason the admission line does: silence read as
+// health is the whole of issue #292.
+func TestTheIngestLineDistinguishesSilenceFromHealth(t *testing.T) {
+	status := healthyStatus()
+
+	if detail := ingestDetail(status.Data, status.Data.EffectiveIngestCheck()); detail != "not reported by this daemon" {
+		t.Fatalf("an absent check must say so: %q", detail)
+	}
+	passing := adminapi.Check{OK: true}
+	status.Data.IngestCheck = &passing
+	if detail := ingestDetail(status.Data, passing); !strings.Contains(detail, "being offered") {
+		t.Fatalf("a reporting daemon says what it checked: %q", detail)
+	}
+	starved := adminapi.Check{OK: false, Reasons: []string{
+		"ops/fleet small: GitHub has 1 queued for 4h0m0s that this node's session has not delivered (delivered 0 of 1)"}}
+	status.Data.IngestCheck = &starved
+	if detail := ingestDetail(status.Data, starved); !strings.Contains(detail, "not delivered") {
+		t.Fatalf("the finding must reach the line: %q", detail)
+	}
+}
