@@ -306,7 +306,7 @@ func (s Status) EffectiveGuestConsoleCheck() Check {
 // silence would fail every node during a rolling update.
 func (s Status) EffectiveAdmissionCheck() Check {
 	if s.AdmissionCheck == nil {
-		return Check{OK: true}
+		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.AdmissionCheck
 }
