@@ -310,3 +310,55 @@ func (memoryDemandStore) ApplyDemandBatch(context.Context, int64, int64, []opera
 func (memoryDemandStore) ActiveDemands(context.Context, int64) ([]operations.DemandRecord, error) {
 	return nil, nil
 }
+
+// flappingSessionSource is the mac mini at 2026-08-25 19:00: a session whose
+// long poll fails intermittently -- a transient every few polls, healthy polls
+// between -- and whose broker-side release GitHub refuses every time.
+type flappingSessionSource struct {
+	fakeSource
+	handled atomic.Int32
+}
+
+func (s *flappingSessionSource) Handle(context.Context, func(context.Context, githubscaleset.Demand) error) error {
+	if s.handled.Add(1)%2 == 1 {
+		return errors.New("get next message: transient")
+	}
+	return nil
+}
+
+func (s *flappingSessionSource) Close(context.Context) error {
+	s.closed.Add(1)
+	return errors.New("private broker response body")
+}
+
+// TestRecoveringSourceDiscardsASessionGitHubKeepsRefusingToRelease is issue
+// #292's third ask.
+//
+// The bounded escalation counts CONSECUTIVE failures and a healthy poll clears
+// the count. A session GitHub refuses to release therefore never escalates as
+// long as some polls succeed: every transient tries a release, the release is
+// refused, `session_release_failed` is logged, the next healthy poll wipes the
+// slate, and the same dead handle is kept for the next round. On the mini that
+// was 20-35 such warnings an hour for days and a session that never healed.
+// A release that keeps being refused is its own kind of failure, and it has to
+// accumulate on its own clock.
+func TestRecoveringSourceDiscardsASessionGitHubKeepsRefusingToRelease(t *testing.T) {
+	ctx := context.Background()
+	flapping := &flappingSessionSource{}
+	harness := newRecoveryHarness(t, flapping, githubscaleset.SessionRecoveryPolicy{
+		MaxConsecutiveFailures: 3, FailureWindow: time.Hour})
+
+	refused := 0
+	for poll := 1; poll <= 8 && harness.opens.Load() == 0; poll++ {
+		if err := harness.handle(ctx); err != nil &&
+			githubscaleset.IngestFailureDetail(err) == githubscaleset.ReasonSessionReleaseFailed {
+			refused++
+		}
+	}
+	if harness.opens.Load() != 1 {
+		t.Fatalf("a session whose release was refused %d times was never discarded: opens=%d", refused, harness.opens.Load())
+	}
+	if refused > 3 {
+		t.Fatalf("the refused-release count must escalate at the same bound as consecutive failures, got %d", refused)
+	}
+}
