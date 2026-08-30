@@ -136,3 +136,18 @@ func TestTheAccessorAgreesWithTheDocument(t *testing.T) {
 		t.Fatal("the accessor must report the same refusal the document does")
 	}
 }
+
+// A host that has not been observed yet has not refused anything. A fresh
+// observe-mode daemon sits in exactly this state, and reading its zero-valued
+// pressure as "admitting no work" turned every observe smoke run red -- which is
+// the silence-read-as-fault this check exists to end, committed by the check.
+func TestAnUnobservedHostIsNotARefusal(t *testing.T) {
+	result := admissionResult(Snapshot{AdmissionFloors: studioFloors()})
+
+	if !result.OK {
+		t.Fatalf("an unobserved host must not be reported as refusing work: %v", result.Reasons)
+	}
+	if strings.Join(result.Reasons, " ") != "host pressure not yet observed" {
+		t.Fatalf("silence must be reported as silence, not as health: %v", result.Reasons)
+	}
+}

@@ -1127,6 +1127,15 @@ func (h *Health) Admission() HealthResult { return admissionResult(h.Snapshot())
 // taking work.
 func admissionResult(snapshot Snapshot) HealthResult {
 	pressure, floors := snapshot.HostPressure, snapshot.AdmissionFloors
+	// A pressure reading always carries a reason -- SetHostPressure refuses one
+	// that does not -- so an empty reason is the zero value: the host has not
+	// been observed yet. That is not a refusal. A fresh observe-mode daemon sits
+	// in exactly this state, and reading it as "admitting no work" failed the
+	// observe smoke on every run of the gate before this branch was told apart
+	// from a real refusal. Silence is not a fault; it is reported as silence.
+	if pressure.AdmissionReason == "" {
+		return HealthResult{OK: true, Reasons: []string{"host pressure not yet observed"}}
+	}
 	margin := admissionMargin(pressure, floors)
 	if pressure.AdmissionAllowed {
 		if margin == "" {

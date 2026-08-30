@@ -159,6 +159,12 @@ while :; do
 done
 
 printf '%s\n' "$status" > "$work/status.json"
-"$binary" doctor --output json --endpoint "$endpoint" > "$work/doctor.json"
+# Doctor's output is captured as a diagnostic beside the status document, not
+# asserted on: the assert below reads status.json alone. Its exit code is the
+# HOST's verdict, and the host a smoke happens to run on is not what a smoke
+# asserts -- a runner with swap over the example config's 2 GiB ceiling is a
+# node refusing admission, which doctor now reports (issue #286) and which says
+# nothing about whether this build reached the observe steady state.
+"$binary" doctor --output json --endpoint "$endpoint" > "$work/doctor.json" || true
 printf 'became ready after %ss\n' "$(( $(date +%s) - started ))"
 exec python3 scripts/observe-smoke-assert.py "$work/status.json"
