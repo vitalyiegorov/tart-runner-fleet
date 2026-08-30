@@ -1102,7 +1102,7 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | --- | --- | --- |
 | `session_expired` | GitHub invalidated the broker session; it is being recreated. | None. Expect `fresh` within one poll interval. |
 | `recreated_after_failures` | The failure could not be classified, so the bounded escalation discarded the session. | None, unless it repeats — then treat it as a broker or credential fault. |
-| `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. |
+| `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. A refusal counts on its own clock: after as many refusals as `maxConsecutiveFailures` (default 5) the session is discarded WITHOUT the release and a replacement opened, however many healthy polls came between. Before issue #292 a healthy poll reset the count, so a session GitHub would not delete was kept forever — the mini logged this 20–35 times an hour for days. |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
 | `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
 | `rate_limited` | GitHub answered with its primary or a secondary rate limit. | None if occasional. A count that climbs across hours means this node polls too aggressively — widen the poll interval before GitHub widens it for you. |

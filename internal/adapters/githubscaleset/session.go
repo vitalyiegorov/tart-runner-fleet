@@ -274,6 +274,15 @@ type SessionRecoveryPolicy struct {
 	FailureWindow          time.Duration
 }
 
+// ReleaseRefusalBound is how many times GitHub may refuse to release one
+// session before the session is discarded without it. It is the same number as
+// MaxConsecutiveFailures on purpose: a refused release is a failure of the
+// session, and it gets the same patience -- but on its own clock, because a
+// healthy poll between refusals must not reset it (issue #292).
+func (p SessionRecoveryPolicy) ReleaseRefusalBound() int {
+	return p.normalized().MaxConsecutiveFailures
+}
+
 func (p SessionRecoveryPolicy) normalized() SessionRecoveryPolicy {
 	if p.MaxConsecutiveFailures <= 0 {
 		p.MaxConsecutiveFailures = defaultSessionMaxIngestFailures

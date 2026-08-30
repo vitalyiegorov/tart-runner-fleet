@@ -78,7 +78,15 @@ type recoveringScaleSetSource struct {
 	released bool
 	policy   githubscaleset.SessionRecoveryPolicy
 	failures githubscaleset.SessionFailureState
-	now      func() time.Time
+	// releaseRefusals counts the times GitHub refused to release the CURRENT
+	// session. It lives beside failures rather than inside it because it keeps
+	// its own clock: a healthy poll clears the consecutive-failure count, and a
+	// session GitHub will not let go of stays exactly as dead across a healthy
+	// poll as it was before one. Counting refusals only while polls also failed
+	// is how the mini logged session_release_failed 20-35 times an hour for
+	// days and never once recreated the session (issue #292).
+	releaseRefusals int
+	now             func() time.Time
 }
 
 type recoveringScaleSetConfig struct {
@@ -127,7 +135,12 @@ func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(conte
 	// inside a closed-vocabulary reason so an operator can see why ingestion
 	// failed through the admin API without any upstream text being rendered.
 	decision := s.recordFailure(err)
-	reason := replacementReason(s.replace(ctx, source, decision.Discard), decision.Reason)
+	discard := decision.Discard || s.releaseRefusalsExceeded()
+	replaceErr := s.replace(ctx, source, discard)
+	if errors.Is(replaceErr, errScaleSetClose) {
+		s.recordReleaseRefusal()
+	}
+	reason := replacementReason(replaceErr, decision.Reason)
 	// The poll's own classification travels beside the replacement outcome. A
 	// rate-limited poll whose session then fails to release and a dead session
 	// whose release fails both reported session_release_failed and nothing else,
@@ -155,10 +168,28 @@ func (s *recoveringScaleSetSource) recordFailure(err error) githubscaleset.Sessi
 	return decision
 }
 
+// clearFailures is a healthy poll: the consecutive-failure clock resets, and
+// deliberately nothing else does. A refused release is not undone by a poll
+// that happened to succeed on the handle GitHub would not delete.
 func (s *recoveringScaleSetSource) clearFailures() {
 	s.mu.Lock()
 	s.failures = githubscaleset.SessionFailureState{}
 	s.mu.Unlock()
+}
+
+func (s *recoveringScaleSetSource) recordReleaseRefusal() {
+	s.mu.Lock()
+	s.releaseRefusals++
+	s.mu.Unlock()
+}
+
+// releaseRefusalsExceeded reports that GitHub has refused to release this
+// session as many times as the policy tolerates consecutive failures, so the
+// next replacement proceeds without the release rather than asking again.
+func (s *recoveringScaleSetSource) releaseRefusalsExceeded() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.releaseRefusals >= s.policy.ReleaseRefusalBound()
 }
 
 // replace discards the failed session and installs a replacement. discard means
@@ -192,6 +223,7 @@ func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetS
 	s.source = replacement
 	s.released = false
 	s.failures = githubscaleset.SessionFailureState{}
+	s.releaseRefusals = 0
 	return nil
 }
 
