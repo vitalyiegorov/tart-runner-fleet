@@ -92,6 +92,10 @@ type Status struct {
 	// Absent from a daemon that predates it, which is why
 	// EffectiveAdmissionCheck exists.
 	AdmissionCheck *Check `json:"admissionCheck,omitempty"`
+	// IngestCheck is an additive fleet.v1 field: a scale set GitHub has queued
+	// work for that this node's own broker session has not delivered (issue
+	// #292). Absent from a daemon that predates it.
+	IngestCheck *Check `json:"ingestCheck,omitempty"`
 	// UpdateDrain is an additive fleet.v1 field: whether this node is refusing
 	// admission on purpose so the instances standing between it and a pending
 	// generation can finish. Without it, a healthy node admitting nothing is
@@ -311,6 +315,17 @@ func (s Status) EffectiveAdmissionCheck() Check {
 	return *s.AdmissionCheck
 }
 
+// EffectiveIngestCheck reads the ingest-delivery check an older daemon does not
+// publish. Absent is passing, for the reason every other additive check treats
+// it so: silence is not a report of a fault, and failing on absence would fail
+// every node during a rolling update.
+func (s Status) EffectiveIngestCheck() Check {
+	if s.IngestCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.IngestCheck
+}
+
 // EffectiveSessionYieldCheck reads the yield check an older daemon does not
 // publish. Absence is a pass: a controller that cannot withdraw has not.
 func (s Status) EffectiveSessionYieldCheck() Check {
@@ -433,6 +448,20 @@ type ScopeQueue struct {
 	// daemons older than the feature and on a fleet that declares no tier, so a
 	// consumer must treat its absence as "no policy", never as "no demand".
 	Tiers []QueueTier `json:"tiers,omitempty"`
+	// Delivered is what this set's own broker session handed the node; Observed
+	// is what GitHub's REST view says is queued for it. `jobs` is the larger of
+	// the two, which is the right number to schedule against and the wrong number
+	// to diagnose with -- taking the maximum is what made a starved session
+	// invisible for four hours (issue #292).
+	//
+	// Additive: both are absent on a daemon that predates them, and zero on a
+	// node with no REST observation of that scope.
+	Delivered int `json:"delivered,omitempty"`
+	Observed  int `json:"observed,omitempty"`
+	// SharedLabels reports that another node advertises these labels too, so work
+	// GitHub shows queued here may legitimately be the sibling's to run
+	// (ADR 0034).
+	SharedLabels bool `json:"sharedLabels,omitempty"`
 }
 
 // QueueTier is one priority tier's share of a scope queue. `tier` is the

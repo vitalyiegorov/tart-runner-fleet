@@ -15,6 +15,7 @@ func TestEffectiveChecksTreatAnAbsentCheckAsAPass(t *testing.T) {
 		"session yield": older.EffectiveSessionYieldCheck(),
 		"update drain":  older.EffectiveUpdateDrainCheck(),
 		"admission":     older.EffectiveAdmissionCheck(),
+		"ingest":        older.EffectiveIngestCheck(),
 	} {
 		if !check.OK {
 			t.Fatalf("%s: an unpublished check failed", name)
@@ -38,6 +39,7 @@ func TestEffectiveChecksReturnAPublishedCheckUnchanged(t *testing.T) {
 		SessionYieldCheck: &failing,
 		UpdateDrainCheck:  &failing,
 		AdmissionCheck:    &failing,
+		IngestCheck:       &failing,
 	}
 	for name, check := range map[string]Check{
 		"reservation":   published.EffectiveReservationCheck(),
@@ -45,6 +47,7 @@ func TestEffectiveChecksReturnAPublishedCheckUnchanged(t *testing.T) {
 		"session yield": published.EffectiveSessionYieldCheck(),
 		"update drain":  published.EffectiveUpdateDrainCheck(),
 		"admission":     published.EffectiveAdmissionCheck(),
+		"ingest":        published.EffectiveIngestCheck(),
 	} {
 		if check.OK {
 			t.Fatalf("%s: a reported failure was softened into a pass", name)

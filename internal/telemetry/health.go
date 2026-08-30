@@ -115,6 +115,19 @@ type ScopeQueueMetrics struct {
 	// demand was classified into (issue #224). It is empty for a fleet that
 	// declares no tier.
 	Tiers []QueueTierMetrics
+	// Delivered is what this set's own broker session handed the node; Observed is
+	// what GitHub's REST view says is queued for it. Count is the larger, which is
+	// the right number to schedule against and the wrong one to diagnose with.
+	//
+	// The gap is issue #292's first ask. A scale set that stops being OFFERED jobs
+	// reads healthy from every signal the node owns -- its session polls fine, its
+	// queue is empty, so the queue SLO has nothing to breach -- and taking the
+	// maximum is what makes the divergence invisible.
+	Delivered int
+	Observed  int
+	// SharedLabels reports that this set is not alone on its labels, so work
+	// GitHub shows queued here may legitimately be a sibling node's to run.
+	SharedLabels bool
 }
 
 // QueueTierMetrics is one priority tier's share of one scope's queue. Rank
@@ -258,8 +271,12 @@ type Snapshot struct {
 	Reservation        *ReservationMetric
 	Envelope           EnvelopeMetric
 	AdmissionFloors    AdmissionFloors
-	HostPressure       HostPressureMetric
-	ObservationTTL     time.Duration
+	// QueueSLO is how long queued work may wait before it is a finding. It is
+	// carried on the snapshot so a check that needs it stays a pure function of
+	// one observation.
+	QueueSLO       time.Duration
+	HostPressure   HostPressureMetric
+	ObservationTTL time.Duration
 }
 
 type HealthResult struct {
@@ -1003,6 +1020,7 @@ func (h *Health) Snapshot() Snapshot {
 		Reservation:       cloneReservation(h.reservation),
 		Envelope:          h.envelope,
 		AdmissionFloors:   h.admissionFloors,
+		QueueSLO:          h.queueSLO,
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 	}
 }
@@ -1211,6 +1229,66 @@ func admissionMargin(pressure HostPressureMetric, floors AdmissionFloors) string
 		}
 	}
 	return "nearest floor: " + nearest.text
+}
+
+// Ingest reports a scale set GitHub has queued work for that this node's own
+// broker session has not delivered.
+//
+// It is issue #292's first ask, and it exists because every other signal reads
+// healthy from the node's own chair. On 2026-08-26 `trf-fleet-small` received no
+// job for four hours while a matching job sat `queued` on GitHub the whole time:
+// the session's observations were `fresh` (it polled fine, it simply got
+// nothing), the node's queue for the profile was `0` so the queue SLO had
+// nothing to breach, and `fleet doctor` returned PASS. The only observer who
+// could notice was on GitHub's side -- a human, hours later.
+//
+// The fleet already knew. `QueueSummary` takes the LARGER of what the session
+// delivered and what REST observed, which is the right number to schedule
+// against and is exactly what hides this: the divergence is absorbed into a
+// correct-looking count. Both terms are now carried, and this reports the
+// difference.
+//
+// Two things keep it honest.
+//
+// A set whose labels are SHARED with a sibling node is named as such rather than
+// blamed. Under ADR 0034 GitHub may bind a job matching these labels to either
+// node, so undelivered work here is not evidence of a fault here -- but work no
+// node has taken for longer than the queue SLO is still a fleet-level fact worth
+// a line, which is why it is reported rather than suppressed.
+//
+// It waits for the queue SLO before saying anything. A set that is mid-delivery
+// diverges for seconds on every ordinary tick, and a check that fired on that
+// would be noise in the artifact this issue exists to make readable.
+func (h *Health) Ingest() HealthResult { return ingestResult(h.Snapshot()) }
+
+// ingestResult is the check as a pure function of one snapshot, so the status
+// document and the health accessor can never disagree.
+func ingestResult(snapshot Snapshot) HealthResult {
+	if snapshot.QueueSLO <= 0 {
+		return HealthResult{OK: true}
+	}
+	var reasons []string
+	for _, row := range snapshot.ScopeQueues {
+		undelivered := row.Observed - row.Delivered
+		if undelivered <= 0 || row.OldestEnqueuedAt.IsZero() {
+			continue
+		}
+		waited := snapshot.Now.Sub(row.OldestEnqueuedAt)
+		if waited < snapshot.QueueSLO {
+			continue
+		}
+		reason := fmt.Sprintf("%s %s: GitHub has %d queued for %s that this node's session has not delivered (delivered %d of %d)",
+			row.Scope, row.Profile, undelivered, waited.Round(time.Second), row.Delivered, row.Observed)
+		if row.SharedLabels {
+			reason += "; labels are shared with another node, which may be serving them"
+		}
+		reasons = append(reasons, reason)
+	}
+	if len(reasons) == 0 {
+		return HealthResult{OK: true}
+	}
+	sort.Strings(reasons)
+	return HealthResult{Reasons: reasons}
 }
 
 func (h *Health) QueueHealth() HealthResult {

@@ -2060,7 +2060,8 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	for _, row := range result.ScopeQueues {
 		scopeRows = append(scopeRows, telemetry.ScopeQueueMetrics{Scope: row.Scope,
 			Profile: string(row.Profile), ScaleSetID: row.ScaleSetID, Count: row.Count,
-			OldestEnqueuedAt: row.Oldest, Tiers: queueTierMetrics(row.Tiers)})
+			OldestEnqueuedAt: row.Oldest, Tiers: queueTierMetrics(row.Tiers),
+			Delivered: row.Delivered, Observed: row.Observed, SharedLabels: row.SharedLabels})
 	}
 	_ = e.health.SetScopeQueues(scopeRows)
 	for _, instance := range result.Instances {

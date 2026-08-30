@@ -219,7 +219,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 		}
 		scopeQueues = append(scopeQueues, adminapi.ScopeQueue{Scope: row.Scope, Profile: row.Profile,
 			ScaleSetID: row.ScaleSetID, Jobs: row.Count, OldestEnqueuedAt: row.OldestEnqueuedAt,
-			OldestAgeSeconds: age.Seconds(), Tiers: queueTiers(snapshot, row.Tiers)})
+			OldestAgeSeconds: age.Seconds(), Tiers: queueTiers(snapshot, row.Tiers),
+			Delivered: row.Delivered, Observed: row.Observed, SharedLabels: row.SharedLabels})
 	}
 	instances := make([]adminapi.Instance, 0, len(snapshot.Instances))
 	for _, profile := range sortedKeys(snapshot.Instances) {
@@ -247,6 +248,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	drain := updateDrainResult(snapshot.UpdateDrain)
 	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
 	admission := admissionResult(snapshot)
+	ingest := ingestResult(snapshot)
+	ingestCheck := adminapi.Check{OK: ingest.OK, Reasons: nonNilStrings(ingest.Reasons)}
 	admissionCheck := adminapi.Check{OK: admission.OK, Reasons: nonNilStrings(admission.Reasons)}
 	updateDrainCheck := adminapi.Check{OK: drain.OK, Reasons: nonNilStrings(drain.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
@@ -258,7 +261,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			QueueSLO:  &queueCheck,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
-			Envelope: envelopeRow(snapshot), AdmissionCheck: &admissionCheck,
+			Envelope: envelopeRow(snapshot), AdmissionCheck: &admissionCheck, IngestCheck: &ingestCheck,
 			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,

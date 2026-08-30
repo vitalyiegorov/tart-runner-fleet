@@ -207,7 +207,8 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		}
 		queues[binding.Profile.ID] = current
 		scopeQueues = append(scopeQueues, ScopeQueue{Scope: binding.Scope, Profile: binding.Profile.ID,
-			ScaleSetID: binding.ScaleSetID, Count: summary.Count, Oldest: summary.Oldest, Tiers: summary.Tiers})
+			ScaleSetID: binding.ScaleSetID, Count: summary.Count, Oldest: summary.Oldest, Tiers: summary.Tiers,
+			Delivered: summary.Delivered, Observed: summary.Observed, SharedLabels: binding.SharedLabels})
 	}
 	// Deterministic order so operators, JSON consumers, and replay fixtures never
 	// depend on map or binding iteration order.

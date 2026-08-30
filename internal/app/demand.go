@@ -189,6 +189,19 @@ var ErrDemandStatisticsUnavailable = fmt.Errorf("demand statistics unavailable: 
 type QueueSummary struct {
 	Count  int
 	Oldest time.Time
+	// Delivered is how many of this queue's jobs the node's own BROKER SESSION
+	// handed it, and Observed is how many GitHub's REST view says are queued for
+	// it. Count is the larger of the two, which is the right number to schedule
+	// against and the wrong number to diagnose with.
+	//
+	// The gap between them is the whole of issue #292's first ask. On 2026-08-26
+	// a scale set received no job for four hours while GitHub showed a matching
+	// job queued the entire time; every signal read healthy from the node's own
+	// chair, because the node's queue was the thing that was empty. Taking the
+	// maximum makes the SLO correct and makes the divergence invisible, so both
+	// terms are carried and the difference is reported rather than absorbed.
+	Delivered int
+	Observed  int
 	// Tiers breaks the same queue down by the priority tier each waiting demand
 	// was classified into (issue #224). It is empty for a fleet that declares no
 	// tier, so an operator surface that never had this column keeps not having
@@ -217,10 +230,19 @@ type ScopeQueue struct {
 	Count      int
 	Oldest     time.Time
 	Tiers      []QueueTier
+	// Delivered and Observed are QueueSummary's two terms, carried per binding
+	// because that is the granularity a starved session has: one scale set stops
+	// being offered jobs while every other set on the node is fine (issue #292).
+	Delivered int
+	Observed  int
+	// SharedLabels reports that this scale set is not alone on its labels, so a
+	// job GitHub shows queued here may legitimately be the sibling node's to run.
+	// It is what keeps the divergence from being read as this node's fault.
+	SharedLabels bool
 }
 
 func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, executable []domain.Demand) (QueueSummary, error) {
-	summary := QueueSummary{Count: len(executable)}
+	summary := QueueSummary{Count: len(executable), Delivered: len(executable)}
 	for _, demand := range executable {
 		if summary.Oldest.IsZero() || demand.CreatedAt.Before(summary.Oldest) {
 			summary.Oldest = demand.CreatedAt
@@ -235,6 +257,7 @@ func (c DemandCoordinator) QueueSummary(ctx context.Context, binding Binding, ex
 	if err != nil {
 		return QueueSummary{}, err
 	}
+	summary.Observed = len(jobs)
 	if len(jobs) > summary.Count {
 		summary.Count = len(jobs)
 	}
