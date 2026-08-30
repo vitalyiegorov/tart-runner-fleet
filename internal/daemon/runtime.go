@@ -128,7 +128,11 @@ func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(conte
 	// failed through the admin API without any upstream text being rendered.
 	decision := s.recordFailure(err)
 	reason := replacementReason(s.replace(ctx, source, decision.Discard), decision.Reason)
-	return &githubscaleset.SessionFailure{Reason: reason, Cause: err}
+	// The poll's own classification travels beside the replacement outcome. A
+	// rate-limited poll whose session then fails to release and a dead session
+	// whose release fails both reported session_release_failed and nothing else,
+	// and they call for opposite operator responses (issue #292).
+	return &githubscaleset.SessionFailure{Reason: reason, Poll: decision.Reason, Cause: err}
 }
 
 // replacementReason keeps the recovery outcome inside the closed vocabulary.
@@ -1394,7 +1398,8 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 	// The detail is closed vocabulary. It explains why one binding's ingestion
 	// failed without exposing a token, a JIT configuration, or an upstream
 	// response body.
-	detail := githubscaleset.IngestFailureDetail(err)
+	failure := githubscaleset.DescribeIngestFailure(err)
+	detail := failure.Reason
 	if b.health != nil && b.observation != "" {
 		freshness := telemetry.ObservationFresh
 		if err != nil {
@@ -1407,7 +1412,7 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 	// signal that one named scale set had stopped hearing GitHub (issue #165).
 	// A binding failure now says which binding.
 	if err != nil && ctx.Err() == nil && b.reporter != nil {
-		b.reporter.reportBinding(b.binding, detail)
+		b.reporter.reportBinding(b.binding, failure)
 	}
 	return changed, err
 }
@@ -1473,15 +1478,35 @@ func (r *failureReporter) report(component, reason string) {
 // stderr while a CHANGED reason on any binding is always emitted, and it does
 // not count: the aggregate component counter already counts the same failure,
 // and counting it twice would make one incident read as two.
-func (r *failureReporter) reportBinding(binding app.Binding, reason string) {
-	if !githubscaleset.ValidFailureReason(reason) {
+func (r *failureReporter) reportBinding(binding app.Binding, failure githubscaleset.IngestFailure) {
+	if !githubscaleset.ValidFailureReason(failure.Reason) {
 		return
 	}
-	if !r.admit("binding\x00" + strconv.FormatInt(binding.StoreKey, 10) + "\x00" + reason) {
+	// The rate-limit key stays (binding, reason) rather than growing the new
+	// fields. A hot loop that alternates status codes must not talk its way past
+	// the window that exists to keep it from drowning stderr.
+	if !r.admit("binding\x00" + strconv.FormatInt(binding.StoreKey, 10) + "\x00" + failure.Reason) {
 		return
 	}
-	r.logger.Warn("binding ingest failure", "scope", binding.Scope, "profile", string(binding.Profile.ID),
-		"scaleSet", binding.ScaleSetID, "observation", fmt.Sprintf("github-%d", binding.StoreKey), "reason", reason)
+	attributes := []any{"scope", binding.Scope, "profile", string(binding.Profile.ID),
+		"scaleSet", binding.ScaleSetID, "observation", fmt.Sprintf("github-%d", binding.StoreKey),
+		"reason", failure.Reason, "phase", failure.Phase}
+	// Absent facts are omitted rather than logged as zeroes. `status=0` reads as
+	// a status GitHub sent, and the whole complaint behind issue #292 is a line
+	// that looks like information and is not.
+	if failure.Status != 0 {
+		attributes = append(attributes, "status", failure.Status)
+	}
+	if failure.RequestID != "" {
+		attributes = append(attributes, "requestId", failure.RequestID)
+	}
+	if failure.RetryAfter > 0 {
+		attributes = append(attributes, "retryAfter", failure.RetryAfter.String())
+	}
+	if failure.Poll != "" {
+		attributes = append(attributes, "pollReason", failure.Poll)
+	}
+	r.logger.Warn("binding ingest failure", attributes...)
 }
 
 // reportUpdateDrain records that this node started or stopped refusing admission
