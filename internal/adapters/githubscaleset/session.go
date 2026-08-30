@@ -56,6 +56,98 @@ const (
 	ReasonDemandCommitConflict = "demand_commit_conflict"
 )
 
+// The ingest PHASE vocabulary is closed for the same reason the failure reasons
+// are: it is rendered, and an open one is unbounded cardinality. It answers a
+// question the reason alone cannot when a later phase overrides an earlier
+// classification — whether the fleet failed to hear GitHub, to hand a session
+// back, or to open a new one.
+const (
+	PhasePoll    = "poll"
+	PhaseRelease = "release"
+	PhaseCreate  = "create"
+	PhaseObserve = "observe"
+	PhaseCommit  = "commit"
+)
+
+// IngestFailure is the whole bounded account of one ingest failure: what it was
+// classified as, which phase it happened in, and what GitHub actually answered.
+//
+// It exists because the reason alone identified nothing. Between July and
+// 2026-08 this fleet emitted 2,065 warnings reading `reason=message_poll_failed`
+// with no status, no correlation id, and no phase — which is the same as
+// emitting none, because every one of them is consistent with a transient
+// network blip, a misconfigured App, a throttle, and a broker outage (issue
+// #292). A status code and GitHub's own request id separate those in one line.
+//
+// Every field is safe to render. Status and RetryAfter are numbers GitHub put in
+// a response header; RequestID is the opaque `x-github-request-id` correlation
+// token, which carries no credential and is the only handle GitHub support will
+// accept. The upstream body, the JIT configuration and the installation token
+// never appear here — they stay inside SessionFailure.Cause, reachable by
+// errors.As and by nothing that writes.
+type IngestFailure struct {
+	// Reason is the closed-vocabulary classification. It is the metric label and
+	// the only field that existed before issue #292.
+	Reason string
+	// Phase is where in the session's life the failure happened. It is not always
+	// derivable from Reason: a poll that failed and then could not be released
+	// reports session_release_failed, and Poll below keeps what was lost.
+	Phase string
+	// Poll is the classification of the underlying poll failure when a later
+	// phase overrode it, and empty when Reason already names the whole story.
+	// A rate limit that then fails to release is a throttle to back off from; a
+	// 404 that then fails to release is a dead session. Both reported
+	// session_release_failed and nothing else.
+	Poll string
+	// Status is the HTTP status GitHub answered with, or 0 when the failure never
+	// reached an HTTP response.
+	Status int
+	// RequestID is GitHub's `x-github-request-id`, or empty. It is the handle an
+	// operator quotes upstream.
+	RequestID string
+	// RetryAfter is how long GitHub asked the fleet to wait, or 0.
+	RetryAfter time.Duration
+}
+
+// phaseFor names the phase a reason belongs to. Every reason maps to exactly
+// one, and an unrecognised reason is a poll: ingestion's default activity is
+// listening, and the catch-all classification is a failed listen.
+func phaseFor(reason string) string {
+	switch reason {
+	case ReasonSessionReleaseFailed:
+		return PhaseRelease
+	case ReasonSessionCreateFailed:
+		return PhaseCreate
+	case ReasonQueueObservationFailed, ReasonQueueObservationStale, ReasonQueueReconcileFailed:
+		return PhaseObserve
+	case ReasonDemandCommitConflict:
+		return PhaseCommit
+	default:
+		return PhasePoll
+	}
+}
+
+// DescribeIngestFailure reduces any ingest failure to the whole bounded account.
+// It is total, and its Reason is exactly what IngestFailureDetail returns.
+func DescribeIngestFailure(err error) IngestFailure {
+	reason := IngestFailureDetail(err)
+	if reason == "" {
+		return IngestFailure{}
+	}
+	failure := IngestFailure{Reason: reason, Phase: phaseFor(reason)}
+	var session *SessionFailure
+	if errors.As(err, &session) && session.Poll != reason && ValidFailureReason(session.Poll) {
+		failure.Poll = session.Poll
+	}
+	var api *APIError
+	if errors.As(err, &api) {
+		failure.Status = api.Status
+		failure.RequestID = api.RequestID
+		failure.RetryAfter = api.RetryAfter
+	}
+	return failure
+}
+
 // ValidFailureReason guards the closed vocabulary at every recording site so an
 // unclassified string can never reach health, the admin API, or a log line.
 func ValidFailureReason(reason string) bool {
@@ -75,7 +167,11 @@ func ValidFailureReason(reason string) bool {
 // errors.As callers but never reaches the error message.
 type SessionFailure struct {
 	Reason string
-	Cause  error
+	// Poll is the classification the poll itself earned, kept when a later
+	// release or create failure overrode Reason. Without it a rate-limited poll
+	// and a dead session are the same line (issue #292).
+	Poll  string
+	Cause error
 }
 
 func (e *SessionFailure) Error() string {

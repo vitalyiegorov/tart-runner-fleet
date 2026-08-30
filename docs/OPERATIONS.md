@@ -319,6 +319,35 @@ never boots out itself. The plist on disk and launchd's cached
 `ProgramArguments` therefore advance together, and a later timer invocation,
 login, or reboot cannot regress to an older updater.
 
+**Every `apply-latest` also collects superseded generations**, and it does so
+whether or not that run adopted anything. The ordering is the point. The updater
+downloads and verifies a release *before* the quiescence gate decides whether to
+adopt it, so a node that never reaches quiescence downloads forever and adopts
+nothing: on 2026-08-25 the mac studio held **26 generations** (v0.1.461 through
+v0.1.487, several GiB) while refusing every job for a 2 GiB disk-reserve
+shortfall (issue #287). A collector that only ran after a successful adoption
+would have freed nothing there.
+
+Four things are kept, and nothing else:
+
+| Kept | Why |
+| --- | --- |
+| The running generation | Deleting it unlinks the live process's own binary. |
+| The `current` symlink target | Between the commit's symlink swap and the service restart these differ, and that window is when a prune would strand the boot path. |
+| The newest version present | It is the pending candidate the next adoption takes (`fleet doctor` reports it as a pending update). |
+| The **2** newest generations *older* than running | Rollback headroom. Counted among older versions only — rolling back to a version the node has never run is not a rollback. |
+
+Everything else goes, oldest first, including generations *newer* than running
+that are not the newest: the updater resolves `releases/latest` on every run, so
+an intermediate download is superseded before anything can adopt it. Names that
+are not versions — the updater's own `.generation-*` staging directories — are
+never touched.
+
+The line to look for is `pruned N superseded release(s): …`. Collection is
+best-effort and never fails the update: reclaiming disk is an errand performed
+on the way to updating, and failing an update because a stale directory is busy
+would turn a disk-space problem into an availability one.
+
 Activation and rollback use bounded launchd bootstrap recovery for the brief
 unload-to-load transition. Production allows a five-minute readiness budget so
 all configured Scale Set sessions can start sequentially on a busy control
@@ -1088,11 +1117,42 @@ and nothing else, so a second, binding-scoped warning names the binding:
 
 ```
 level=WARN msg="binding ingest failure" scope=knee-repo profile=large \
-  scaleSet=2 observation=github-8077185082566234948 reason=demand_commit_conflict
+  scaleSet=2 observation=github-8077185082566234948 reason=demand_commit_conflict \
+  phase=commit
 ```
 
 It is rate limited to one line per binding and reason per minute, on the same
 window as the component warning, and it carries no upstream text.
+
+**The line also names what GitHub answered**, which is what turns it from a
+category into a diagnosis. Between July and 2026-08 this fleet emitted 2,065
+warnings reading `reason=message_poll_failed` and nothing else — equally
+consistent with a network blip, a throttle, a misconfigured App and a broker
+outage, so they identified nothing at all (issue #292):
+
+```
+level=WARN msg="binding ingest failure" scope=rnw-repo profile=small \
+  scaleSet=7 observation=github-42 reason=session_release_failed phase=release \
+  status=403 requestId=C4A2:1F3D retryAfter=1m0s pollReason=rate_limited
+```
+
+| attribute | Meaning | Present when |
+| --- | --- | --- |
+| `phase` | `poll`, `release`, `create`, `observe` or `commit` — where in a session's life it failed. | Always. |
+| `status` | The HTTP status GitHub answered with. | The failure reached an HTTP response. |
+| `requestId` | GitHub's `x-github-request-id`. **Quote this upstream.** | GitHub returned one. |
+| `retryAfter` | How long GitHub asked the fleet to wait. | GitHub asked. |
+| `pollReason` | The poll's own classification, when a later phase overrode `reason`. | The two differ. |
+
+`pollReason` is the one worth knowing about. A rate-limited poll whose session
+then cannot be released, and a dead session whose release fails, both report
+`reason=session_release_failed` — and they call for opposite responses: back off,
+or stop waiting for a session that is never coming back. `pollReason` is the only
+thing that separates them.
+
+An absent fact is **omitted, not zeroed**. There is no `status=0`: a line that
+looks like information and is not is the whole complaint issue #292 was filed
+over.
 
 ### A broker message-id sequence restarted
 
