@@ -191,6 +191,10 @@ func statCPUIndex(line string) (int, bool) {
 	return index, true
 }
 
+// chmodStaged is a seam so the chmod failure path is exercisable in tests; a
+// chmod on a file this process just wrote cannot be made to fail otherwise.
+var chmodStaged = os.Chmod
+
 // writeFileAtomic replaces a file by rename so a container can never bind-mount
 // a half-written one. A concurrent writer of the same width writes identical
 // bytes, so the loser of the race is harmless.
@@ -208,7 +212,7 @@ func writeFileAtomic(path string, content []byte) bool {
 	// pool from it hangs or exits empty (measured: @expo/fingerprint exiting 0
 	// with no output on every Android build from 2026-08-31). Chmod is not
 	// umask-filtered, so it states the intended mode outright.
-	if os.Chmod(staging, 0o644) != nil { // #nosec G302 -- read by the container's mapped user
+	if chmodStaged(staging, 0o644) != nil { // #nosec G302 -- read by the container's mapped user
 		_ = os.Remove(staging)
 		return false
 	}

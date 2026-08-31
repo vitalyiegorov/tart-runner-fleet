@@ -323,3 +323,22 @@ func TestTheViewIsReadableByTheContainersMappedUser(t *testing.T) {
 		}
 	}
 }
+
+// A chmod that fails must clean up its staging file and narrow nothing, the
+// same fail-open contract every other failure in writeFileAtomic keeps.
+func TestAFailedChmodLeavesNoStagingFileBehind(t *testing.T) {
+	oldChmod := chmodStaged
+	chmodStaged = func(string, os.FileMode) error { return os.ErrPermission }
+	defer func() { chmodStaged = oldChmod }()
+	target := filepath.Join(t.TempDir(), "stat")
+
+	if writeFileAtomic(target, []byte("cpu0 0\n")) {
+		t.Fatal("a failed chmod must fail the write")
+	}
+	if _, err := os.Stat(target + ".staging"); !os.IsNotExist(err) {
+		t.Fatal("a failed chmod must not leave its staging file behind")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("a failed chmod must not produce the target file")
+	}
+}
