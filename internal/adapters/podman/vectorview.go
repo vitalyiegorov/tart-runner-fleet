@@ -191,6 +191,10 @@ func statCPUIndex(line string) (int, bool) {
 	return index, true
 }
 
+// chmodStaged is a seam so the chmod failure path is exercisable in tests; a
+// chmod on a file this process just wrote cannot be made to fail otherwise.
+var chmodStaged = os.Chmod
+
 // writeFileAtomic replaces a file by rename so a container can never bind-mount
 // a half-written one. A concurrent writer of the same width writes identical
 // bytes, so the loser of the race is harmless.
@@ -199,6 +203,17 @@ func writeFileAtomic(path string, content []byte) bool {
 	// 0644 because the reader is the container's user, which rootless podman maps
 	// to a different uid than the one writing here.
 	if os.WriteFile(staging, content, 0o644) != nil { // #nosec G306 -- read by the container's mapped user
+		return false
+	}
+	// WriteFile's mode is filtered through the process umask, and under the
+	// authority's 0077 umask the 0644 above lands as 0600 on disk. The mapped
+	// container user then gets EACCES on the bind-mounted file, libuv cannot
+	// open /proc/stat, os.cpus() reports zero, and any tool sizing a worker
+	// pool from it hangs or exits empty (measured: @expo/fingerprint exiting 0
+	// with no output on every Android build from 2026-08-31). Chmod is not
+	// umask-filtered, so it states the intended mode outright.
+	if chmodStaged(staging, 0o644) != nil { // #nosec G302 -- read by the container's mapped user
+		_ = os.Remove(staging)
 		return false
 	}
 	if os.Rename(staging, path) != nil {

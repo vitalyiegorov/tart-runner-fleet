@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
@@ -295,5 +296,49 @@ func TestAnUnwritableTargetNarrowsNothing(t *testing.T) {
 
 	if mounts := adapter.vectorViewMounts(executor.InstanceSpec{Name: "trf-small-a", CPU: 2}); mounts != nil {
 		t.Fatalf("an unwritable target must narrow nothing: %v", mounts)
+	}
+}
+
+// The authority runs under UMask=0077, which filters WriteFile's 0644 down to
+// 0600 on disk. The container's mapped user then reads the bind-mounted file as
+// "other" and gets EACCES, libuv cannot open /proc/stat, and os.cpus() inside
+// the guest reports zero. The write must state its mode in a way the umask
+// cannot filter.
+func TestTheViewIsReadableByTheContainersMappedUser(t *testing.T) {
+	oldMask := syscall.Umask(0o077)
+	defer syscall.Umask(oldMask)
+	adapter := viewAdapter(t, hostCPUInfo, hostStat)
+
+	cpuinfo, stat, ok := adapter.writeVectorView(2)
+	if !ok {
+		t.Fatal("writeVectorView failed")
+	}
+	for _, path := range []string{cpuinfo, stat} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o644 {
+			t.Fatalf("%s must be world-readable for the mapped container user, got %04o", path, mode)
+		}
+	}
+}
+
+// A chmod that fails must clean up its staging file and narrow nothing, the
+// same fail-open contract every other failure in writeFileAtomic keeps.
+func TestAFailedChmodLeavesNoStagingFileBehind(t *testing.T) {
+	oldChmod := chmodStaged
+	chmodStaged = func(string, os.FileMode) error { return os.ErrPermission }
+	defer func() { chmodStaged = oldChmod }()
+	target := filepath.Join(t.TempDir(), "stat")
+
+	if writeFileAtomic(target, []byte("cpu0 0\n")) {
+		t.Fatal("a failed chmod must fail the write")
+	}
+	if _, err := os.Stat(target + ".staging"); !os.IsNotExist(err) {
+		t.Fatal("a failed chmod must not leave its staging file behind")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("a failed chmod must not produce the target file")
 	}
 }

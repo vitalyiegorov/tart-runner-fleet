@@ -3,6 +3,7 @@ package linux
 import (
 	"context"
 	"errors"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -396,8 +397,16 @@ func TestDefaultsReadTheRealMachine(t *testing.T) {
 	if snapshot.AvailableMemoryMB <= 0 || snapshot.PhysicalMemoryMB <= 0 {
 		t.Errorf("implausible memory: available=%d physical=%d", snapshot.AvailableMemoryMB, snapshot.PhysicalMemoryMB)
 	}
-	if snapshot.PhysicalCPU <= 0 || int(snapshot.PhysicalCPU) < runtime.NumCPU() {
-		t.Errorf("processors = %d, runtime reports %d", snapshot.PhysicalCPU, runtime.NumCPU())
+	expectedProcessors := runtime.NumCPU()
+	if statCPUs := countStatProcessors(t); statCPUs > 0 && statCPUs < expectedProcessors {
+		// This fleet's own runners narrow a container's /proc/stat to its vector
+		// (podman vector view), while the affinity mask runtime.NumCPU reads
+		// stays host-wide. The probe's contract is what /proc says, so inside
+		// such a container the narrowed count is the correct expectation.
+		expectedProcessors = statCPUs
+	}
+	if snapshot.PhysicalCPU <= 0 || int(snapshot.PhysicalCPU) < expectedProcessors {
+		t.Errorf("processors = %d, expected at least %d (runtime reports %d)", snapshot.PhysicalCPU, expectedProcessors, runtime.NumCPU())
 	}
 	if snapshot.FreeDiskGB < 0 || snapshot.SwapUsedMB < 0 || snapshot.LoadAverage < 0 {
 		t.Errorf("implausible machine: %#v", snapshot)
@@ -449,4 +458,21 @@ func TestDiskRunnerForcesTheCLocale(t *testing.T) {
 			t.Errorf("%s=%q, want %q", name, locale[name], want)
 		}
 	}
+}
+
+// countStatProcessors counts the `cpuN` lines the real /proc/stat carries, which
+// is the machine the probe under test actually reads.
+func countStatProcessors(t *testing.T) int {
+	t.Helper()
+	content, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "cpu") && len(line) > 3 && line[3] >= '0' && line[3] <= '9' {
+			count++
+		}
+	}
+	return count
 }
