@@ -201,6 +201,17 @@ func writeFileAtomic(path string, content []byte) bool {
 	if os.WriteFile(staging, content, 0o644) != nil { // #nosec G306 -- read by the container's mapped user
 		return false
 	}
+	// WriteFile's mode is filtered through the process umask, and under the
+	// authority's 0077 umask the 0644 above lands as 0600 on disk. The mapped
+	// container user then gets EACCES on the bind-mounted file, libuv cannot
+	// open /proc/stat, os.cpus() reports zero, and any tool sizing a worker
+	// pool from it hangs or exits empty (measured: @expo/fingerprint exiting 0
+	// with no output on every Android build from 2026-08-31). Chmod is not
+	// umask-filtered, so it states the intended mode outright.
+	if os.Chmod(staging, 0o644) != nil { // #nosec G302 -- read by the container's mapped user
+		_ = os.Remove(staging)
+		return false
+	}
 	if os.Rename(staging, path) != nil {
 		_ = os.Remove(staging)
 		return false
