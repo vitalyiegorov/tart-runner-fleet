@@ -352,3 +352,166 @@ func TestContentionDelayIsBoundedByTheErrorBackoff(t *testing.T) {
 		t.Fatalf("first retry = %v, want %v", got, contentionRetryBase)
 	}
 }
+
+// TestAFastNilIngestIsPacedNotSpun is issue #314's mechanism, found by a
+// SIGQUIT goroutine dump on the live studio: all 36 per-binding ingest loops
+// simultaneously RUNNABLE inside the bookkeeping after IngestChanged.
+//
+// The success path trusted the source to block — a broker long poll spends ~50s
+// per empty answer, so `continue` with no pause was free. But `Handle` returns
+// nil the moment `Next` yields no message, and on a pressured host those empty
+// answers can come back immediately. Then the loop's pacing is whatever the
+// network feels like, which is to say none: one core pegged, a continuous read
+// stream against the store, health revisions in the billions — and not one log
+// line, because nothing ever failed.
+func TestAFastNilIngestIsPacedNotSpun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var waits []time.Duration
+	calls := 0
+	now := time.Unix(0, 0)
+	service := Service{
+		Ticker: tickFunc(func(context.Context) error { return nil }),
+		Now:    func() time.Time { return now },
+		After: func(d time.Duration) <-chan time.Time {
+			mu.Lock()
+			waits = append(waits, d)
+			mu.Unlock()
+			done := make(chan time.Time, 1)
+			done <- time.Time{}
+			return done
+		},
+	}
+	ingester := changeIngestFunc(func(context.Context) (bool, error) {
+		calls++
+		if calls >= 4 {
+			cancel()
+		}
+		return false, nil // an instantly empty poll: no message, no error
+	})
+
+	service.ingestLoop(ctx, ingester, make(chan struct{}, 1))
+
+	mu.Lock()
+	defer mu.Unlock()
+	paced := 0
+	for _, wait := range waits {
+		if wait == minIngestSpacing {
+			paced++
+		}
+	}
+	if paced < 3 {
+		t.Fatalf("an instantly returning source must be paced between polls: %d paced waits in %v", paced, waits)
+	}
+}
+
+// A source that genuinely long-polled owes nothing: charging the floor on top of
+// a 50-second poll would slow real delivery for no protection. The spacing is
+// only the part of the floor the source did not already spend.
+func TestALongPollingIngestIsNotChargedTheFloor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var waits []time.Duration
+	calls := 0
+	now := time.Unix(0, 0)
+	service := Service{
+		Ticker: tickFunc(func(context.Context) error { return nil }),
+		Now:    func() time.Time { return now },
+		After: func(d time.Duration) <-chan time.Time {
+			mu.Lock()
+			waits = append(waits, d)
+			mu.Unlock()
+			done := make(chan time.Time, 1)
+			done <- time.Time{}
+			return done
+		},
+	}
+	ingester := changeIngestFunc(func(context.Context) (bool, error) {
+		now = now.Add(50 * time.Second) // the long poll itself consumed the time
+		calls++
+		if calls >= 3 {
+			cancel()
+		}
+		return false, nil
+	})
+
+	service.ingestLoop(ctx, ingester, make(chan struct{}, 1))
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, wait := range waits {
+		if wait > 0 && wait <= minIngestSpacing {
+			t.Fatalf("a slow poll was charged spacing it already spent: %v", waits)
+		}
+	}
+}
+
+// Cancellation during the spacing wait ends the loop, exactly as it does in
+// every other wait this file has.
+func TestIngestSpacingWaitHonoursCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	now := time.Unix(0, 0)
+	service := Service{
+		Ticker: tickFunc(func(context.Context) error { return nil }),
+		Now:    func() time.Time { return now },
+		After: func(time.Duration) <-chan time.Time {
+			cancel()                    // the shutdown arrives mid-wait
+			return make(chan time.Time) // and the timer never fires
+		},
+	}
+	calls := 0
+	ingester := changeIngestFunc(func(context.Context) (bool, error) { calls++; return false, nil })
+
+	service.ingestLoop(ctx, ingester, make(chan struct{}, 1))
+
+	if calls != 1 {
+		t.Fatalf("a cancelled spacing wait must end the loop after one poll, got %d", calls)
+	}
+}
+
+// An ingest error that arrives because the shutdown interrupted it is a
+// shutdown, not a failure: nothing is reported and nothing is retried.
+func TestIngestErrorDuringShutdownIsNotAFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reported := 0
+	service := Service{
+		Ticker:    tickFunc(func(context.Context) error { return nil }),
+		OnFailure: func(string, string) { reported++ },
+		After:     func(time.Duration) <-chan time.Time { return make(chan time.Time) },
+	}
+	ingester := changeIngestFunc(func(context.Context) (bool, error) {
+		cancel()
+		return false, errors.New("poll interrupted by shutdown")
+	})
+
+	service.ingestLoop(ctx, ingester, make(chan struct{}, 1))
+
+	if reported != 0 {
+		t.Fatalf("a shutdown-interrupted poll was reported as a failure %d times", reported)
+	}
+}
+
+// The error backoff honours cancellation the same way the spacing wait does.
+func TestIngestErrorBackoffHonoursCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	service := Service{
+		Ticker: tickFunc(func(context.Context) error { return nil }),
+		After: func(time.Duration) <-chan time.Time {
+			cancel()
+			return make(chan time.Time)
+		},
+	}
+	ingester := changeIngestFunc(func(context.Context) (bool, error) {
+		calls++
+		return false, errors.New("broker refused the poll")
+	})
+
+	service.ingestLoop(ctx, ingester, make(chan struct{}, 1))
+
+	if calls != 1 {
+		t.Fatalf("a cancelled error backoff must end the loop after one poll, got %d", calls)
+	}
+}

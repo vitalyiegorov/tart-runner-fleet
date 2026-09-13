@@ -17,6 +17,20 @@ const (
 	// contentionRetryShiftLimit caps the doubling so the shift can never
 	// overflow; the error backoff clamps the resulting delay anyway.
 	contentionRetryShiftLimit = 8
+	// minIngestSpacing is the floor between successful ingest polls of ONE
+	// binding. The success path used to trust the source to block -- a broker
+	// long poll spends ~50s per empty answer, so no local pause was needed --
+	// but `Handle` returns nil the moment a poll yields no message, and on a
+	// pressured host those empty answers come back immediately. Then the loop's
+	// pacing is whatever the network feels like, which is to say none: issue
+	// #314 found all 36 of a node's binding loops simultaneously runnable, one
+	// core pegged, a continuous read stream against the store, health revisions
+	// in the billions -- and not one log line, because nothing ever failed.
+	//
+	// Only the part of the floor the source did not itself spend is charged, so
+	// a genuine long poll (~50s) pays nothing and delivery latency is untouched;
+	// an instantly-empty poll degrades to one request per second per binding.
+	minIngestSpacing = time.Second
 )
 
 type TickRunner interface{ Tick(context.Context) error }
@@ -34,6 +48,10 @@ type Service struct {
 	WorkInterval time.Duration
 	ErrorBackoff time.Duration
 	After        func(time.Duration) <-chan time.Time
+	// Now exists so the ingest spacing above is measured on an injectable clock
+	// and the loop stays deterministic under test, exactly as After does for
+	// waiting. Nil is time.Now.
+	Now func() time.Time
 	// OnFailure deliberately receives only a bounded component name and a
 	// closed-vocabulary reason. This prevents an upstream error from reflecting
 	// a token or JIT secret to logs while still telling an operator why a
@@ -160,6 +178,7 @@ func (s Service) contentionDelay(attempt int) time.Duration {
 
 func (s Service) ingestLoop(ctx context.Context, ingester Ingester, wake chan<- struct{}) {
 	for ctx.Err() == nil {
+		started := s.now()
 		changed, err := ingest(ctx, ingester)
 		if changed {
 			// A capacity-one edge coalesces a burst without losing the fact that
@@ -170,6 +189,11 @@ func (s Service) ingestLoop(ctx context.Context, ingester Ingester, wake chan<- 
 			}
 		}
 		if err == nil {
+			if remainder := minIngestSpacing - s.now().Sub(started); remainder > 0 {
+				if !s.wait(ctx, remainder) {
+					return
+				}
+			}
 			continue
 		}
 		if ctx.Err() != nil {
@@ -245,6 +269,13 @@ func (s Service) errorBackoff() time.Duration {
 	}
 	return s.ErrorBackoff
 }
+func (s Service) now() time.Time {
+	if s.Now == nil {
+		return time.Now()
+	}
+	return s.Now()
+}
+
 func (s Service) after(delay time.Duration) <-chan time.Time {
 	if s.After == nil {
 		return time.After(delay)
