@@ -1345,6 +1345,14 @@ Neither case is repaired by restarting the daemon. Both clear when the blocking
 instance finishes; the reserved head is re-checked first on every tick and takes
 the first vector large enough for it.
 
+A queue whose OLDEST is implausibly ancient (days) on a node that was recently
+down is usually not real work: rows delivered before an outage outlive jobs
+that finished during it. Since issue #315 the tick itself retires any
+`JobAvailable` row older than 48 h — double GitHub's own 24-hour job-start
+bound — and logs `overdue demand expired` with the count, so the condition
+clears within a tick of the daemon returning and no longer needs the manual
+`expired_at` SQL this section once required.
+
 If the arithmetic says the head fits and it is still not admitted, the fault is
 one level up from the scheduler and the envelope will look unremarkable. Check
 that this node's config carries the keys its peers carry — `mixedPlatformAdmission`

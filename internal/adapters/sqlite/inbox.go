@@ -937,6 +937,34 @@ func (s *Store) ExpireGhostDemands(ctx context.Context, scaleSetID int64, criter
 	return result.RowsAffected()
 }
 
+// ExpireOverdueDemands retires queued demand whose job GitHub has already
+// failed for never starting. The predicate is the whole guard, exactly as it is
+// for ghost expiry above: the row must still be exactly JobAvailable at commit
+// time, never expired before, never assigned a runner, and queued longer ago
+// than the criteria's TTL by its own earliest queue time. A row with no queue
+// time at all is kept -- absence of evidence retires nothing.
+//
+// Unlike ghost expiry this needs no REST corroboration, because the conclusion
+// is not "a snapshot no longer contains it" but "GitHub's own 24-hour job-start
+// bound has passed twice over"; the clock doing the judging is the same one
+// every other row in this store is stamped with (issue #315).
+func (s *Store) ExpireOverdueDemands(ctx context.Context, scaleSetID int64, criteria operations.OverdueDemandCriteria) (int64, error) {
+	if scaleSetID <= 0 || !criteria.Valid() {
+		return 0, operations.ErrInvalid
+	}
+	now := criteria.Now.UTC().UnixNano()
+	cutoff := criteria.Now.Add(-criteria.TTL).UTC().UnixNano()
+	result, err := s.dbExec(ctx, "inbox.overdue.expire", `UPDATE runner_demands SET expired_at=?,updated_at=?
+		WHERE scale_set_id=? AND status_rank=? AND expired_at=0 AND runner_id=0
+		AND COALESCE(NULLIF(first_queue_time,0),queue_time)>0
+		AND COALESCE(NULLIF(first_queue_time,0),queue_time)<=?`, now, now, scaleSetID,
+		demandRank(operations.DemandJobAvailable), cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("expire overdue demands: %w", err)
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) QueuedGitHubJobs(ctx context.Context, scaleSetID int64) ([]operations.GitHubJobObservation, error) {
 	if scaleSetID <= 0 {
 		return nil, operations.ErrInvalid

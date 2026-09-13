@@ -317,3 +317,95 @@ func TestTrickleAdmitsTheOldestPlannableDemand(t *testing.T) {
 		t.Fatalf("a skipped-forward queue must trickle its own head: %#v", got)
 	}
 }
+
+// overdueTickStore lets the tick's overdue expiry act on the same records the
+// tick is about to read, which is the ordering under test.
+type overdueTickStore struct {
+	*tickStore
+	criteria operations.OverdueDemandCriteria
+}
+
+func (s *overdueTickStore) ExpireOverdueDemands(_ context.Context, _ int64, criteria operations.OverdueDemandCriteria) (int64, error) {
+	s.criteria = criteria
+	kept := s.records[:0]
+	expired := int64(0)
+	cutoff := criteria.Now.Add(-criteria.TTL)
+	for _, record := range s.records {
+		if record.Status == operations.DemandJobAvailable && !record.QueueTime.IsZero() && !record.QueueTime.After(cutoff) {
+			expired++
+			continue
+		}
+		kept = append(kept, record)
+	}
+	s.records = kept
+	return expired, nil
+}
+
+// TestEngineTickRetiresOverdueDemandBeforeReadingIt is issue #315's wiring.
+//
+// The expiry has to run on the TICK, before demand is read: it is the one path
+// that needs neither a session nor a REST observer, so a node returning from
+// the outage that minted its dead rows sheds them on the first ticks instead of
+// breaching its queue SLO until an operator arrives with raw SQL. A row GitHub
+// has already failed must not spend one more tick as plannable work or as
+// queue age.
+func TestEngineTickRetiresOverdueDemandBeforeReadingIt(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	prior, _ := json.Marshal(scheduler.State{})
+	store := &overdueTickStore{tickStore: &tickStore{state: operations.SchedulerState{Version: 2, Data: prior},
+		fakeDemandStore: fakeDemandStore{
+			statistics: operations.DemandStatistics{MessageID: 1, Available: 1, ObservedAt: now},
+			records: []operations.DemandRecord{
+				{Status: operations.DemandJobAvailable, RunnerRequestID: 10, Owner: "owner", Repository: "repo",
+					WorkflowRunID: 8, QueueTime: now.Add(-49 * time.Hour)},
+				{Status: operations.DemandJobAvailable, RunnerRequestID: 11, Owner: "owner", Repository: "repo",
+					WorkflowRunID: 9, QueueTime: now.Add(-time.Minute)},
+			}}}}
+	binding := Binding{ScaleSetID: 1, Profile: tickConfig().Profiles["small"]}
+	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
+	}, Config: tickConfig(), Bindings: []Binding{binding}, ControllerID: "controller", Mode: reconcile.Authority,
+		Now: func() time.Time { return now }}
+
+	result, err := engine.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExpiredOverdue != 1 {
+		t.Fatalf("ExpiredOverdue = %d, want the one dead row", result.ExpiredOverdue)
+	}
+	if got := result.Queues["small"].Count; got != 1 {
+		t.Fatalf("queue still counts the retired row: %d", got)
+	}
+	if oldest := result.Queues["small"].Oldest; oldest != now.Add(-time.Minute) {
+		t.Fatalf("queue age is still the dead row's: %s", oldest)
+	}
+	if store.criteria.TTL != 48*time.Hour {
+		t.Fatalf("TTL = %s, want double GitHub's 24-hour job-start bound", store.criteria.TTL)
+	}
+}
+
+type overdueFailingTickStore struct{ *tickStore }
+
+func (s *overdueFailingTickStore) ExpireOverdueDemands(context.Context, int64, operations.OverdueDemandCriteria) (int64, error) {
+	return 0, errors.New("expiry write refused")
+}
+
+// A tick whose expiry write fails does not proceed to publish queue ages it
+// knows may include dead rows; the failure classifies like any other unreadable
+// demand.
+func TestEngineTickFailsClosedWhenOverdueExpiryFails(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	prior, _ := json.Marshal(scheduler.State{})
+	store := &overdueFailingTickStore{tickStore: &tickStore{state: operations.SchedulerState{Version: 2, Data: prior}}}
+	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	engine := Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
+	}, Config: tickConfig(), Bindings: []Binding{{ScaleSetID: 1, Profile: tickConfig().Profiles["small"]}},
+		ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
+
+	if _, err := engine.Tick(context.Background()); err == nil {
+		t.Fatal("a failed expiry write must fail the tick closed")
+	}
+}

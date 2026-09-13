@@ -2127,6 +2127,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordRecoveries(result)
 	e.recordReservation(result)
 	e.recordEnvelope(result)
+	e.recordOverdueExpiry(result)
 	pressure := result.Host.Pressure
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
@@ -2211,6 +2212,20 @@ func (e engineTicker) recordEnvelope(result app.TickResult) {
 		AgedCPU: envelope.AgedFree.CPU, AgedMemoryMiB: envelope.AgedFree.MemoryMB,
 		AgedSlots: envelope.AgedFree.Slots,
 	})
+}
+
+// recordOverdueExpiry says out loud that dead rows were retired. The rows leave
+// the queue silently otherwise, and a queue that shrinks without a visible
+// cause is its own small mystery -- issue #315 asked for "a named reason and a
+// doctor line, not silence", and the named reason is this line plus the row's
+// own expired_at. It is not rate-limited: the event fires once per outage
+// recovery, not per tick.
+func (e engineTicker) recordOverdueExpiry(result app.TickResult) {
+	if result.ExpiredOverdue <= 0 || e.reporter == nil || e.reporter.logger == nil {
+		return
+	}
+	e.reporter.logger.Warn("overdue demand expired",
+		"count", result.ExpiredOverdue, "reason", "job_start_bound_passed")
 }
 
 func (e engineTicker) recordReservation(result app.TickResult) {

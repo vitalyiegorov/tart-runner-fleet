@@ -48,6 +48,11 @@ type TickResult struct {
 	Instances   []domain.Instance
 	HostMode    domain.HostMode
 	Host        domain.Host
+	// ExpiredOverdue counts queued demand this tick retired because GitHub's own
+	// job-start bound had long passed (issue #315). It is carried so the daemon
+	// can say so out loud: the rows leave the queue silently otherwise, and a
+	// queue that shrinks without a visible cause is its own small mystery.
+	ExpiredOverdue int64
 }
 
 // commitFailureReason names why a commit failed. A non-ready plan never reached
@@ -172,6 +177,14 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			liveIncarnations[instance.Demand] = true
 		}
 	}
+	// Before demand is read: a row GitHub has already failed must not spend one
+	// more tick as plannable work or as queue-SLO age. This is the path that
+	// needs neither a session nor a REST observer, so it works on the first
+	// ticks after the outage that minted the rows (issue #315).
+	expiredOverdue, err := coordinator.ExpireOverdueDemands(ctx, e.Bindings, now)
+	if err != nil {
+		return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
+	}
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
 		// One filter for every path: a demand whose VM is already cloning,
@@ -225,6 +238,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
-			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value},
+			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
+			ExpiredOverdue: expiredOverdue},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }
