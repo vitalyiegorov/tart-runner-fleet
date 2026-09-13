@@ -482,6 +482,27 @@ type GhostDemandCriteria struct {
 	MinObservations int
 }
 
+// OverdueDemandCriteria retires queued demand whose job GitHub itself has
+// already failed. GitHub fails any workflow job that has not started within 24
+// hours of queueing, so a JobAvailable row older than that is not a judgement
+// call about staleness -- it describes a job that no longer exists to run. TTL
+// carries the bound (production uses double GitHub's contract) so the store
+// stays policy-free.
+//
+// It exists because ghost expiry (above) deliberately requires positive REST
+// corroboration, and a node without a REST observer can never satisfy it: three
+// times a daemon outage on such a node left rows that outlived their jobs
+// forever, breached the queue SLO on return, and were retired by hand with raw
+// SQL against a stopped daemon (issue #315).
+type OverdueDemandCriteria struct {
+	Now time.Time
+	TTL time.Duration
+}
+
+func (c OverdueDemandCriteria) Valid() bool {
+	return !c.Now.IsZero() && c.TTL > 0
+}
+
 func (c GhostDemandCriteria) Valid() bool {
 	return !c.ObservedAt.IsZero() && !c.AbsentBefore.IsZero() && !c.AbsentBefore.After(c.ObservedAt) &&
 		c.MinObservations > 0

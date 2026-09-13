@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,5 +51,27 @@ func TestEngineTickerPublishesNothingForATickThatJudgedNoEnvelope(t *testing.T) 
 
 	if published := health.Snapshot().Envelope; published.CPU != 0 || published.AgedCPU != 0 {
 		t.Fatalf("a blocked tick must publish no envelope: %#v", published)
+	}
+}
+
+// A tick that retired dead rows says so. The rows leave the queue silently
+// otherwise, and issue #315 asked for a named reason rather than silence.
+func TestEngineTickerSaysWhenOverdueDemandWasExpired(t *testing.T) {
+	var buffer bytes.Buffer
+	reporter := newFailureReporter(&buffer, nil)
+	ticker := engineTicker{health: reservationHealthForTest(t), reporter: reporter}
+
+	ticker.recordOverdueExpiry(app.TickResult{ExpiredOverdue: 3})
+	line := buffer.String()
+	for _, want := range []string{"overdue demand expired", "count=3", "job_start_bound_passed"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("expiry line missing %q: %q", want, line)
+		}
+	}
+
+	buffer.Reset()
+	ticker.recordOverdueExpiry(app.TickResult{})
+	if buffer.Len() != 0 {
+		t.Fatalf("a tick that expired nothing must say nothing: %q", buffer.String())
 	}
 }

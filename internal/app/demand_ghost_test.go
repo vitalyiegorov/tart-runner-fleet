@@ -92,3 +92,32 @@ func TestGhostExpiryFailureFailsTheReconciliation(t *testing.T) {
 		t.Fatalf("store without ghost expiry = %v, %v", changed, err)
 	}
 }
+
+// overdueErrorStore fails the expiry itself, which must surface rather than be
+// swallowed: a store that cannot retire dead rows is a store the tick cannot
+// trust for the queue ages it is about to publish.
+type overdueErrorStore struct{ *fakeDemandStore }
+
+func (s overdueErrorStore) ExpireOverdueDemands(context.Context, int64, operations.OverdueDemandCriteria) (int64, error) {
+	return 0, errors.New("expiry write refused")
+}
+
+func TestOverdueExpiryErrorSurfaces(t *testing.T) {
+	coordinator := DemandCoordinator{Store: overdueErrorStore{&fakeDemandStore{}}}
+
+	_, err := coordinator.ExpireOverdueDemands(context.Background(), []Binding{{ScaleSetID: 1}}, time.Now())
+	if err == nil {
+		t.Fatal("a refused expiry write must surface")
+	}
+}
+
+// A store without the capability retires nothing and fails nothing — the
+// pre-#315 behaviour, and always the safe direction.
+func TestOverdueExpiryIsOptionalForTheStore(t *testing.T) {
+	coordinator := DemandCoordinator{Store: &fakeDemandStore{}}
+
+	count, err := coordinator.ExpireOverdueDemands(context.Background(), []Binding{{ScaleSetID: 1}}, time.Now())
+	if err != nil || count != 0 {
+		t.Fatalf("a store without the capability must be a no-op: %d, %v", count, err)
+	}
+}

@@ -36,6 +36,15 @@ type GhostDemandStore interface {
 	ExpireGhostDemands(context.Context, int64, operations.GhostDemandCriteria) (int64, error)
 }
 
+// OverdueDemandStore retires queued demand whose job GitHub has already failed
+// for never starting within its own 24-hour bound. It is optional for the same
+// reason GhostDemandStore is, and it exists for the node GhostDemandStore
+// cannot help: one without a REST observer, whose dead rows otherwise outlive
+// every outage forever (issue #315).
+type OverdueDemandStore interface {
+	ExpireOverdueDemands(context.Context, int64, operations.OverdueDemandCriteria) (int64, error)
+}
+
 type GitHubQueueSnapshot interface {
 	ObservedAt() time.Time
 	QueuedJobs() []githubscaleset.WorkflowJob
@@ -605,6 +614,35 @@ func (c DemandCoordinator) expireGhostDemand(ctx context.Context, bindings []Bin
 		expired = expired || count > 0
 	}
 	return expired, nil
+}
+
+// overdueDemandTTL is double GitHub's own 24-hour job-start bound. A
+// JobAvailable row older than this describes a job GitHub has already failed;
+// the doubling is margin for clock skew and for however long the row's node was
+// down -- which is exactly when these rows are minted (issue #315).
+const overdueDemandTTL = 48 * time.Hour
+
+// ExpireOverdueDemands retires queued demand across every binding whose job
+// GitHub has already failed for never starting. It needs no session and no REST
+// observer, which is the point: it runs on the tick, so a node that returns
+// from an outage carrying dead rows sheds them on its first ticks instead of
+// breaching its queue SLO until an operator arrives with raw SQL. Three
+// outages, three manual rounds; this is the fourth round not happening.
+func (c DemandCoordinator) ExpireOverdueDemands(ctx context.Context, bindings []Binding, now time.Time) (int64, error) {
+	store, ok := c.Store.(OverdueDemandStore)
+	if !ok {
+		return 0, nil
+	}
+	criteria := operations.OverdueDemandCriteria{Now: now.UTC(), TTL: overdueDemandTTL}
+	total := int64(0)
+	for _, binding := range bindings {
+		count, err := store.ExpireOverdueDemands(ctx, binding.durableKey(), criteria)
+		if err != nil {
+			return total, err
+		}
+		total += count
+	}
+	return total, nil
 }
 
 func containsFold(values []string, want string) bool {
