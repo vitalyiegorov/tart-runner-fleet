@@ -364,7 +364,7 @@ func TestTheListingIsRecognisedBehindGitHubsTenantPrefix(t *testing.T) {
 		t.Fatal("a prefixed listing request was not recognised")
 	}
 	other, err := http.NewRequestWithContext(listingContext(context.Background()), http.MethodGet,
-		"https://pipelinesghubeus2.actions.githubusercontent.com/Ab12Cd34/_apis/runtime/runnerscalesets/7", nil)
+		"https://pipelinesghubeus2.actions.githubusercontent.com/Ab12Cd34/_apis/runtime/runnerscalesets/7?runnerGroupId=1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
