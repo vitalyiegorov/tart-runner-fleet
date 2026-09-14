@@ -63,7 +63,11 @@ func listingRequest(req *http.Request) bool {
 	if req == nil || req.URL == nil || req.Context().Value(listingContextKey{}) == nil {
 		return false
 	}
-	return strings.TrimSuffix(req.URL.Path, "/") == "/"+scaleSetListPath && req.URL.Query().Has("runnerGroupId")
+	// GitHub's Actions service URL carries a per-tenant path prefix
+	// (`https://pipelines….actions.githubusercontent.com/<tenant>/`), so the
+	// resource is matched by suffix: an exact match fired only against the bare
+	// hosts the fakes used and never against GitHub.
+	return strings.HasSuffix(strings.TrimSuffix(req.URL.Path, "/"), "/"+scaleSetListPath) && req.URL.Query().Has("runnerGroupId")
 }
 
 // ScaleSetStatistics is GitHub's own count of what a scale set is holding. The
