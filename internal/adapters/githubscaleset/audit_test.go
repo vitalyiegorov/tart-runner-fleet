@@ -188,6 +188,7 @@ func TestARetriedListingIsStillRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != emptyScaleSetListing {
 		t.Fatalf("the client must still see an empty listing: %q %v", body, err)
@@ -218,7 +219,9 @@ func TestTheTapRefusesRatherThanInventingAnEmptyGroup(t *testing.T) {
 			tap.arm()
 			req := listRequest(t)
 			tap.beforeRequest(nil, req, 0)
-			tap.afterResponse(nil, respond(req))
+			resp := respond(req)
+			defer func() { _ = resp.Body.Close() }()
+			tap.afterResponse(nil, resp)
 			if _, observed := tap.take(); observed {
 				t.Fatal("nothing readable was read, so nothing may be reported")
 			}
