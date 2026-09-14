@@ -39,7 +39,10 @@ the backend afterwards.
   credentials — never install any of this with `sudo`;
 - lingering enabled for that account, so its units survive logout:
   `sudo loginctl enable-linger fleet`;
-- an authenticated GitHub CLI (`gh auth status`) for release downloads;
+- an authenticated GitHub CLI (`gh auth status`) for release downloads. The
+  updater unit resolves `gh` on `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`
+  plus `~/.local/bin` only — a version-manager install elsewhere must be linked
+  into one of those directories;
 - `coreutils` (`df`) and a readable `/proc`, which is every normal Linux.
 
 Do not add a container runtime yet. The daemon has no backend to drive it with,
