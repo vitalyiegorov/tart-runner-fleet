@@ -356,12 +356,18 @@ func (h *LocalHost) Ready(ctx context.Context, candidate Generation) error {
 }
 
 // awaitReady polls the candidate's own executable until the daemon it started
-// reports itself ready as exactly that version and mode. A supervisor reports
+// reports itself HEALTHY as exactly that version and mode. A supervisor reports
 // success as soon as a process exists, which is not the same claim.
+//
+// It proves health rather than readiness because of ADR 0052: a node that
+// withdrew its sessions under host pressure is never ready, so proving readiness
+// would roll the release back on exactly the node that had nothing running to
+// protect. Admission is the scheduler's question; what this transaction must
+// establish is that the generation it just booted is working.
 func awaitReady(ctx context.Context, command Command, candidate Generation, attempts int, delay time.Duration) error {
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
-		body, err := command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", candidate.Endpoint)
+		body, err := command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "status", "--require-healthy", "--output", "json", "--endpoint", candidate.Endpoint)
 		if err == nil {
 			var status struct {
 				Data struct {
@@ -370,12 +376,26 @@ func awaitReady(ctx context.Context, command Command, candidate Generation, atte
 					Ready             struct {
 						OK bool `json:"ok"`
 					} `json:"ready"`
+					// Healthy is a pointer because a candidate older than ADR 0052
+					// does not publish it. Its absence falls back to readiness, the
+					// only word that daemon had for the same question and a strictly
+					// stronger one, so a rollback to an older generation still proves
+					// something rather than nothing.
+					Healthy *struct {
+						OK bool `json:"ok"`
+					} `json:"healthy"`
 				} `json:"data"`
 			}
-			if json.Unmarshal(body, &status) == nil && status.Data.Ready.OK && status.Data.ControllerVersion == candidate.Version && status.Data.ControllerMode == candidate.Mode {
-				return nil
+			if json.Unmarshal(body, &status) == nil {
+				healthy := status.Data.Ready.OK
+				if status.Data.Healthy != nil {
+					healthy = status.Data.Healthy.OK
+				}
+				if healthy && status.Data.ControllerVersion == candidate.Version && status.Data.ControllerMode == candidate.Mode {
+					return nil
+				}
 			}
-			err = errors.New("candidate identity or readiness mismatch")
+			err = errors.New("candidate identity or health mismatch")
 		}
 		last = err
 		if attempt+1 < attempts {
@@ -512,8 +532,16 @@ func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) err
 // ensureQuiescent is ADR 0011's gate: a generation is never swapped out from
 // under live work. It is shared by both transactions because what counts as
 // live work is a property of the fleet, never of the supervisor.
+//
+// The gate asks the running daemon for HEALTH, not readiness (ADR 0052). A node
+// that withdrew its sessions under ADR 0047 because it could not admit is the
+// most quiescent a node ever gets — nothing is running and nothing can start —
+// and demanding readiness made that the one state from which no release could
+// ever be installed. The mac studio sat in it for a day while every fix written
+// for that outage shipped past it (#320). What still defers a swap is unchanged:
+// a running instance, or a retrying operation.
 func ensureQuiescent(ctx context.Context, command Command, current Generation) error {
-	body, err := command.Run(ctx, filepath.Join(current.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", current.Endpoint)
+	body, err := command.Run(ctx, filepath.Join(current.ReleaseDir, "fleet"), "status", "--require-healthy", "--output", "json", "--endpoint", current.Endpoint)
 	if err != nil {
 		return err
 	}

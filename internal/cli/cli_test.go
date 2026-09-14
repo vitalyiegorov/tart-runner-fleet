@@ -76,8 +76,8 @@ func (c *fakeUpdateCommand) Run(_ context.Context, name string, args ...string) 
 	if name == "gh" {
 		return []byte(`{"tag_name":"v2","draft":false,"prerelease":false}`), nil
 	}
-	if strings.Contains(call, "status --require-ready") {
-		return []byte(`{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":true}}}`), nil
+	if strings.Contains(call, "status --require-healthy") {
+		return []byte(`{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":false},"healthy":{"ok":true}}}`), nil
 	}
 	if strings.Contains(call, "launchctl print") {
 		return []byte(c.launchPrint), nil

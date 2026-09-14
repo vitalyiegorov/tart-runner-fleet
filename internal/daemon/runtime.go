@@ -1422,7 +1422,7 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 		// nothing failed. The detail names the cause so the freshness column is
 		// never the only thing an operator has to interpret.
 		if b.health != nil && b.observation != "" {
-			_ = b.health.RecordObservationDetail(b.observation, telemetry.ObservationStale, "session_yielded")
+			_ = b.health.RecordObservationDetail(b.observation, telemetry.ObservationStale, telemetry.SessionYieldedObservation)
 		}
 		return false, nil
 	}

@@ -38,6 +38,7 @@ in-memory revision so future watch clients can use conditional polling.
     "lastSuccessfulTick": "2026-07-12T20:00:00Z",
     "live": {"ok": true, "reasons": []},
     "ready": {"ok": true, "reasons": []},
+    "healthy": {"ok": true, "reasons": []},
     "hostPressure": {
       "availableMemoryMiB": 10240,
       "freeDiskGiB": 203,
@@ -74,6 +75,18 @@ in-memory revision so future watch clients can use conditional polling.
   "warnings": []
 }
 ```
+
+`healthy` is the weaker of the two liveness predicates (ADR 0052): the daemon is
+ticking, its store is writable, and every critical observation is either fresh or
+stale for exactly one reason — this node withdrew the sessions behind it under
+ADR 0047 because it could not admit (`observations[].detail: "session_yielded"`).
+`ready` is unchanged and strictly stronger: healthy **and** admitting. A node
+under its disk reserve reports `ready.ok: false` with `healthy.ok: true`, which
+is the state its own release transaction gates on. The field is additive and is
+absent on daemons older than ADR 0052; a client reading it from such a daemon
+must fall back to `ready`, never to a pass. `fleet status --require-healthy`
+exits 5 unless `healthy.ok` is true, exactly as `--require-ready` does for
+`ready.ok`. `/readyz` keeps its readiness meaning.
 
 `hostPressure.swapOutRatePerSecond` and `hostPressure.swapOutRateObserved` are
 the swap guardrail's deciding signal. Admission is refused only when

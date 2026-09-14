@@ -70,6 +70,11 @@ exit `1`.
 - `--timeout 5s`: bounded request timeout; maximum 30 seconds.
 - `--output table|json` or `-o`: human table or stable machine JSON.
 - `--require-ready`: make `status` return exit 5 when readiness is false.
+- `--require-healthy`: make `status` return exit 5 when the daemon is not
+  healthy — ticking, store writable, observations fresh or stale only because
+  this node withdrew its sessions (ADR 0052). A node under host pressure fails
+  `--require-ready` and passes this; it is what the update transaction gates on.
+  Against a daemon older than ADR 0052 it reads `ready`, which is stricter.
 
 The HTTP compatibility endpoint is accepted only for literal loopback IPs.
 HTTPS, DNS names, remote IPs, URL credentials, query strings, and fragments are

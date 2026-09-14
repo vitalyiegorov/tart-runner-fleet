@@ -228,6 +228,15 @@ type ObservationMetric struct {
 	Detail string
 }
 
+// SessionYieldedObservation is the one detail that turns a stale critical
+// observation into a decision rather than a fault: this node released the
+// scale-set session behind that binding under ADR 0047, so it observed nothing
+// because it chose to observe nothing. Healthy excuses exactly this detail and
+// nothing else; Ready excuses none of it, because a node that is not listening
+// is not admitting. It is a constant so the daemon that writes it and the
+// predicate that reads it cannot drift apart.
+const SessionYieldedObservation = "session_yielded"
+
 type HostPressureMetric struct {
 	AvailableMemoryMiB int64
 	FreeDiskGiB        int64
@@ -277,6 +286,11 @@ type Snapshot struct {
 	QueueSLO       time.Duration
 	HostPressure   HostPressureMetric
 	ObservationTTL time.Duration
+	// SuccessfulTickTTL is how old the last successful tick may be before this
+	// daemon stops calling itself healthy. It rides on the snapshot so both
+	// readiness predicates stay pure functions of one observation, exactly as
+	// admissionResult is.
+	SuccessfulTickTTL time.Duration
 }
 
 type HealthResult struct {
@@ -1022,6 +1036,7 @@ func (h *Health) Snapshot() Snapshot {
 		AdmissionFloors:   h.admissionFloors,
 		QueueSLO:          h.queueSLO,
 		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
+		SuccessfulTickTTL: h.readyTickTTL,
 	}
 }
 
@@ -1085,24 +1100,64 @@ func (h *Health) Live() HealthResult {
 	return HealthResult{OK: true}
 }
 
-func (h *Health) Ready() HealthResult {
-	now := h.clock.Now()
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+func (h *Health) Ready() HealthResult { return h.readiness(false) }
+
+// Healthy is the weaker of the two predicates ADR 0052 split readiness into:
+// this process is live and ticking, its store is writable, and every critical
+// observation is either fresh or stale for exactly one reason the node chose —
+// it withdrew the sessions behind it under ADR 0047 because it could not admit.
+//
+// It exists because a release transaction and the scheduler ask different
+// questions of the same daemon. The transaction asks whether the daemon is a
+// working thing to swap a generation under; the scheduler asks whether it is
+// taking work. A node below its disk reserve answers yes to the first and no to
+// the second, and conflating them left the mac studio unable to install any
+// release for as long as it stayed withdrawn (issue #320): the one state in
+// which nothing is running was the one state the quiescence gate refused.
+//
+// Store writability is not a separate term. The `operations` observation is the
+// durable store's own tick — it is recorded by the pass that reads and writes
+// SQLite, and no yield ever excuses it — so a node that cannot write its store
+// reports that observation unavailable and is not healthy.
+func (h *Health) Healthy() HealthResult { return h.readiness(true) }
+
+// readiness computes both predicates from one body, so ready can never drift
+// from healthy. excuseSessionYield is the whole difference between them: a
+// critical observation that is stale because this node released the session
+// behind it records a decision, not a failed observation.
+func (h *Health) readiness(excuseSessionYield bool) HealthResult {
+	return readinessResult(h.Snapshot(), excuseSessionYield)
+}
+
+// readinessResult is the judgement as a pure function of one snapshot, so the
+// status document and the health accessors can never disagree about whether
+// this node is working — the property admissionResult already holds.
+func readinessResult(snapshot Snapshot, excuseSessionYield bool) HealthResult {
+	now := snapshot.Now
 	reasons := make(map[string]struct{})
-	if h.lastSuccessfulTick.IsZero() {
+	if snapshot.LastSuccessfulTick.IsZero() {
 		reasons["successful_tick_missing"] = struct{}{}
-	} else if now.Sub(h.lastSuccessfulTick) > h.readyTickTTL {
+	} else if now.Sub(snapshot.LastSuccessfulTick) > snapshot.SuccessfulTickTTL {
 		reasons["successful_tick_expired"] = struct{}{}
 	}
-	for name := range h.critical {
-		observation := h.observations[name]
+	for name := range snapshot.Observations {
+		observation := snapshot.Observations[name]
 		switch observation.Freshness {
 		case ObservationFresh:
-			if observation.ObservedAt.IsZero() || now.Sub(observation.ObservedAt) > h.criticalObservationTTL {
+			if observation.ObservedAt.IsZero() || now.Sub(observation.ObservedAt) > snapshot.ObservationTTL {
 				reasons["critical_observation_expired"] = struct{}{}
 			}
 		case ObservationStale:
+			// A yielded binding is still written every tick. The excuse holds only
+			// while that keeps being true: a withdrawal whose own record has expired
+			// is evidence the loop stopped, which is the fault healthiness exists to
+			// catch.
+			if excuseSessionYield && observation.Detail == SessionYieldedObservation {
+				if observation.ObservedAt.IsZero() || now.Sub(observation.ObservedAt) > snapshot.ObservationTTL {
+					reasons["critical_observation_expired"] = struct{}{}
+				}
+				continue
+			}
 			reasons["critical_observation_stale"] = struct{}{}
 		default:
 			reasons["critical_observation_unavailable"] = struct{}{}

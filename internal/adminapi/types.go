@@ -30,7 +30,14 @@ type Status struct {
 	LastSuccessfulTick time.Time `json:"lastSuccessfulTick"`
 	Live               Check     `json:"live"`
 	Ready              Check     `json:"ready"`
-	QueueSLO           *Check    `json:"queueSlo,omitempty"`
+	// Healthy is an additive fleet.v1 field: the process is live and ticking,
+	// its store is writable, and every critical observation is fresh or stale
+	// only because this node withdrew its sessions (ADR 0047). It is what a
+	// release transaction proves, where Ready — healthy AND admitting — is what
+	// the scheduler asks. A daemon older than ADR 0052 published only the
+	// conflated field, which is why EffectiveHealthy exists.
+	Healthy  *Check `json:"healthy,omitempty"`
+	QueueSLO *Check `json:"queueSlo,omitempty"`
 	// Occupancy is an additive fleet.v1 field: how long each live instance has
 	// held its profile's resource vector, and whether that hold is past the
 	// profile's ceiling while work that would fit it waits. An older daemon
@@ -166,6 +173,24 @@ func (s Status) EffectiveQueueSLO() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.QueueSLO
+}
+
+// EffectiveHealthy reads the health predicate a daemon older than ADR 0052 does
+// not publish. Absence is NOT a pass here, and that is the one place this
+// accessor departs from every other Effective* rule: readiness was the older
+// daemon's only word for the same question, and it is a strictly stronger claim,
+// so reading it loses nothing and invents nothing. Reporting absence as a pass
+// would let a release transaction swap a generation under a daemon that never
+// said it was working.
+func (s Status) EffectiveHealthy() Check {
+	if s.Healthy == nil {
+		reasons := s.Ready.Reasons
+		if reasons == nil {
+			reasons = []string{}
+		}
+		return Check{OK: s.Ready.OK, Reasons: reasons}
+	}
+	return *s.Healthy
 }
 
 // EffectiveOccupancy keeps a new fleet CLI compatible with an older fleet.v1

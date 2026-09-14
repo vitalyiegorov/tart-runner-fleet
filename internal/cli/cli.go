@@ -525,6 +525,10 @@ type remoteOptions struct {
 	timeout      time.Duration
 	output       string
 	requireReady bool
+	// requireHealthy is the release transaction's gate (ADR 0052): the daemon is
+	// working, whether or not it is admitting. --require-ready keeps its older,
+	// stronger meaning for everyone whose question is "will this node take work".
+	requireHealthy bool
 }
 
 func parseRemote(command string, args []string, stderr io.Writer) (remoteOptions, int) {
@@ -543,6 +547,7 @@ func parseRemoteInto(flags *flag.FlagSet, args []string, stderr io.Writer) (remo
 	flags.StringVar(&opts.output, "output", "table", "output format: table or json")
 	flags.StringVar(&opts.output, "o", "table", "output format: table or json")
 	flags.BoolVar(&opts.requireReady, "require-ready", false, "exit 5 unless the controller is ready")
+	flags.BoolVar(&opts.requireHealthy, "require-healthy", false, "exit 5 unless the controller is healthy (ticking; may have withdrawn its sessions)")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		if err == nil {
 			fmt.Fprintln(stderr, "unexpected positional arguments")
@@ -595,6 +600,9 @@ func runRemote(ctx context.Context, command string, args []string, stdout, stder
 			renderCommand(stdout, command, status)
 		}
 		if opts.requireReady && !status.Data.Ready.OK {
+			return exitDegraded
+		}
+		if opts.requireHealthy && !status.Data.EffectiveHealthy().OK {
 			return exitDegraded
 		}
 		return exitSuccess
@@ -676,6 +684,20 @@ func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
 // was before issue #259.
 func updateDrainDetail(status adminapi.Status, check adminapi.Check) string {
 	if !check.OK {
+		// A drain that has already reached zero instances is either one gate away
+		// from applying or stuck, and those two look identical from a queue. Say
+		// which: ADR 0052 lets a withdrawn but healthy node take the release, so
+		// the only remaining blocker worth naming is unhealthiness, and an
+		// operator watching a drain that can never end deserves the reason rather
+		// than the wait (#320).
+		if liveInstances(status) == 0 {
+			healthy := status.EffectiveHealthy()
+			if healthy.OK {
+				return joinReasons(check) + "; zero instances and healthy: the release may apply now"
+			}
+			return joinReasons(check) + "; zero instances but not healthy (" + joinReasons(healthy) +
+				"): the candidate is blocked until this node ticks cleanly again"
+		}
 		return joinReasons(check)
 	}
 	if status.UpdateDrain == nil {
@@ -685,6 +707,17 @@ func updateDrainDetail(status adminapi.Status, check adminapi.Check) string {
 		return "candidate " + status.UpdateDrain.Candidate + " waiting, admitting normally"
 	}
 	return "running the newest generation on disk"
+}
+
+// liveInstances totals the instances this node publishes. It is the same count
+// the update transaction's quiescence gate reads, so the doctor row and the
+// gate agree about whether anything is running.
+func liveInstances(status adminapi.Status) int {
+	live := 0
+	for _, instance := range status.Instances {
+		live += instance.Count
+	}
+	return live
 }
 
 func sessionYieldDetail(status adminapi.Status, check adminapi.Check) string {
@@ -1031,7 +1064,7 @@ func writeHelp(output io.Writer) {
 	fmt.Fprint(output, `fleet — safe operator interface for Tart Runner Fleet
 
 READ-ONLY COMMANDS (observe/shadow safe)
-  fleet status [--output table|json] [--require-ready]
+  fleet status [--output table|json] [--require-ready] [--require-healthy]
   fleet queues|instances|operations|observations [--output table|json]
   fleet health|doctor [--output table|json]
   fleet metrics

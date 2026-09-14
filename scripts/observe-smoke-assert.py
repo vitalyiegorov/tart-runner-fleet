@@ -19,6 +19,17 @@ def main(path: str) -> int:
     if not data.get("ready", {}).get("ok"):
         failures.append(f'ready={data.get("ready")!r}')
 
+    # A daemon that is ready is healthy by construction (ADR 0052: ready is
+    # healthy AND admitting), so a real daemon publishing the weaker field as
+    # false here would mean the two predicates have drifted apart -- the one way
+    # this split can go wrong without any test noticing. A missing field is a
+    # failure too: this build is newer than the ADR and must publish it.
+    healthy = data.get("healthy")
+    if healthy is None:
+        failures.append("no healthy check in the status document")
+    elif not healthy.get("ok"):
+        failures.append(f"ready daemon reported healthy={healthy!r}")
+
     # The scheduler observation is fresh only when the host and instance
     # observations feeding it were both fresh, so it is the single signal that
     # says this node measured the machine it runs on. An unavailable one on a

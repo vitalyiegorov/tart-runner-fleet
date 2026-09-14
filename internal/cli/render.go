@@ -50,6 +50,13 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 		status.Data.ControllerMode, status.Data.HostMode, status.Revision)
 	if !status.Data.Ready.OK {
 		fmt.Fprintf(output, "blocked: %s\n", joinReasons(status.Data.Ready))
+		// A node that is ticking but not admitting is not a broken node, and ADR
+		// 0052 makes the difference load-bearing: this is the state in which a
+		// release may still be installed. Saying it here keeps an operator from
+		// reading a withdrawal as a fault.
+		if status.Data.EffectiveHealthy().OK {
+			fmt.Fprintln(output, "healthy: the daemon is ticking and its store is writable; it is not admitting work")
+		}
 	}
 	if !queueSLO.OK {
 		fmt.Fprintf(output, "queue SLO: %s\n", joinReasons(queueSLO))
