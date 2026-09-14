@@ -3,13 +3,11 @@
 # rendered here by render-systemd.sh so that a Linux node's three units come from
 # the release rather than from the running daemon.
 #
-# NOT ENABLED BY DEFAULT. `fleet update apply-latest` still drives a launchd
-# transaction — it lints a plist with `plutil` and swaps generations with
-# `launchctl` — so on this node it refuses with a message naming that gap
-# instead of half-applying a release. INSTALL-linux.md documents the manual
-# `systemctl --user` release bridge to use until the supervisor port lands.
-# Render the unit anyway: it is the exact shape that port will drive, and a node
-# rendered from its release must not need a hand-written file later.
+# This unit is the work; tart-runner-fleet-updater.timer is the schedule. Only
+# the timer is enabled, started and re-armed — `fleet update apply-latest` may
+# itself be running as this service, and restarting it would terminate the
+# update mid-transaction (ADR 0051). `fleet update adopt` installs and enables
+# the pair; until a node is adopted, neither is enabled.
 [Unit]
 Description=tart-runner-fleet forward-only production release check
 Documentation=https://github.com/vitalyiegorov/tart-runner-fleet

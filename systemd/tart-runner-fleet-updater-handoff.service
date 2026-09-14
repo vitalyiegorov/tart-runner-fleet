@@ -2,12 +2,13 @@
 #
 # The macOS original exists because a loaded updater may be the very process
 # executing the commit, so asking the supervisor to reload it there terminates
-# the caller before it can start the replacement. The boundary is delegated to
-# this distinct, retrying one-shot unit, which refuses to act until the commit
-# is durably published — the same ordering holds on systemd and the same unit is
-# needed, which is why it is rendered here rather than invented at cutover.
+# the caller before it can start the replacement. systemd needs no such dance:
+# the schedule lives in a separate timer unit, which a commit can re-arm without
+# touching the one-shot running it (ADR 0051). What the subcommand does here is
+# the assertion the handoff was always for — after a durable commit, require the
+# timer to report ActiveState=active.
 #
-# NOT ENABLED BY DEFAULT, for the reason in tart-runner-fleet-updater.service.
+# NOT ENABLED BY DEFAULT. Nothing starts it; it answers a manual invocation.
 [Unit]
 Description=tart-runner-fleet updater generation handoff
 Documentation=https://github.com/vitalyiegorov/tart-runner-fleet

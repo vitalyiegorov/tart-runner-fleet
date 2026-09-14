@@ -419,25 +419,62 @@ fleet status --require-ready --output json
 fleet doctor --output json
 ```
 
-### The Linux node's release bridge
+### The Linux node updates itself
 
 Everything above is a `launchd` transaction: it lints a plist with `plutil` and
 swaps generations with `launchctl bootout` / `bootstrap` / `kickstart`. A Linux
-node (geekom, ADR 0034's node B — not yet delivered) has none of those, and
-`fleet update apply-latest` refuses there rather than half-applying a
-generation — the refusal names the domain, because a `systemd --user` manager
-is not addressable as a launchd one. Automatic updates on that node arrive
-with the systemd release transaction; its units are already rendered by
-`render-systemd.sh` so the node will not need a hand-written file when it
-does.
+node (geekom, ADR 0034's node B) has none of those, and for three releases it
+was brought forward by hand. It no longer is: `fleet update apply-latest` drives
+the `systemd --user` transaction there
+([ADR 0051](adr/0051-a-linux-node-updates-itself.md)), which renders the node's
+units from the release being installed, restarts the controller, proves the new
+version ready, and restores the previous unit if it is not. The manual bridge is
+retired.
 
-Until then a Linux node adopts a generation by hand, and the ordering rule is
-the same one the macOS bridge has: the unit and the recorded generation move
-together, and the result is *verified* rather than assumed.
+Automatic updates arrive through `tart-runner-fleet-updater.timer`, and the
+one-time enable is the same command macOS uses:
+
+```sh
+RELEASE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tart-runner-fleet/releases/$VERSION"
+"$RELEASE_DIR/fleet" update adopt \
+  --release-dir "$RELEASE_DIR" \
+  --mode authority \
+  --confirm adopt-current-generation
+```
+
+Adoption refuses unless the unit that is already running names exactly that
+release directory and mode, and unless the daemon reports itself ready as that
+version. It then installs and enables the updater service and timer, and records
+the generation. From that point the node polls every five minutes on its own.
+
+Require the timer and exact daemon readiness after every install or reboot,
+rather than treating process presence as health:
+
+```sh
+ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/tart-runner-fleet"
+systemctl --user status tart-runner-fleet-authority.service
+systemctl --user list-timers tart-runner-fleet-updater.timer
+"$RELEASE_DIR/fleet" status --require-ready --output json \
+  --endpoint "unix://$ROOT/state/fleetd.sock"
+```
+
+Note that the updater **service** is never restarted by an update: it is the
+one-shot that may be running the update. Only the timer is re-armed. Do not
+`systemctl --user restart tart-runner-fleet-updater.service` while an update is
+in flight.
+
+#### The manual bridge, if the timer is not installed
+
+A node that has never been adopted — or one whose timer an operator has
+disabled — still moves forward by hand, and the ordering rule is the same one
+the macOS bridge has: the unit and the recorded generation move together, and
+the result is *verified* rather than assumed. `render-systemd.sh` requires its
+output directory to exist and will not create it.
 
 ```sh
 ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/tart-runner-fleet"
 UNITS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+mkdir -p "$ROOT/systemd/$VERSION"
 "$RELEASE_DIR/render-systemd.sh" observe "$RELEASE_DIR" "$ROOT/state" "$ROOT/systemd/$VERSION"
 install -m 0600 "$ROOT/systemd/$VERSION/tart-runner-fleet.service" \
   "$UNITS_DIR/tart-runner-fleet.service"

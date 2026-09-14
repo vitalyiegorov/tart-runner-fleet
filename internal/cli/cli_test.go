@@ -880,3 +880,80 @@ func TestApplyLatestCollectsSupersededReleases(t *testing.T) {
 		}
 	}
 }
+
+// makeSystemdUpdateRelease is a Linux node's release: the same executable and
+// identity manifest, and the `systemd --user` units that boot them.
+func makeSystemdUpdateRelease(t *testing.T, root string) string {
+	t.Helper()
+	dir := filepath.Join(root, "releases", "v2")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	controller := []byte("[Unit]\n\n[Service]\nExecStart=\"__RELEASE_DIR__/fleet\" run \"--mode=authority\" \"--config=__STATE_DIR__/fleet.json\"\n")
+	updater := []byte("[Service]\nExecStart=\"__RELEASE_DIR__/fleet\" update apply-latest \"--repo\" \"__REPOSITORY__\" \"--root\" \"__ROOT__\" \"--state-dir\" \"__STATE_DIR__\" \"--launch-agents-dir\" \"__UNITS_DIR__\" \"--mode\" \"__MODE__\" \"--config\" \"__STATE_DIR__/fleet.json\" \"--endpoint\" \"__ENDPOINT__\" \"--domain\" \"user\"\n")
+	timer := []byte("[Timer]\nOnUnitActiveSec=300\n")
+	files := map[string][]byte{"RELEASE_VERSION": []byte("v2\n"), "fleet": []byte("fleet"),
+		"tart-runner-fleet-authority.service": controller,
+		"tart-runner-fleet-updater.service":   updater,
+		"tart-runner-fleet-updater.timer":     timer}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var sums strings.Builder
+	// The shared manifest names the controller by its loose-asset name.
+	for _, name := range []string{"RELEASE_VERSION", "fleet", "tart-runner-fleet-authority.service"} {
+		digest := sha256.Sum256(files[name])
+		entry := name
+		if name == "fleet" {
+			entry = autoupdate.SystemdTarget().ControllerAsset()
+		}
+		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + entry + "\n")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestGuardedAdoptionEnrollsALinuxNodeThroughItsSystemdTimer(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	units := filepath.Join(root, "units")
+	for _, dir := range []string{state, units} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := makeSystemdUpdateRelease(t, root)
+	configPath := filepath.Join(state, "fleet.json")
+	if err := os.WriteFile(configPath, []byte(`{"valid":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(units, "tart-runner-fleet-authority.service")
+	if err := os.WriteFile(canonical, []byte("[Service]\nExecStart=\""+release+"/fleet\" run \"--mode=authority\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := &fakeUpdateCommand{}
+	deps := dependencies{command: command}
+	args := []string{"update", "adopt", "--root", root, "--state-dir", state, "--launch-agents-dir", units,
+		"--config", configPath, "--endpoint", "unix:///state/fleetd.sock", "--domain", "user", "--repo", "owner/repo",
+		"--mode", "authority", "--release-dir", release, "--confirm", "adopt-current-generation"}
+	var stdout, stderr bytes.Buffer
+	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
+		t.Fatalf("adopt code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(units, "tart-runner-fleet-updater.timer")); err != nil {
+		t.Fatalf("adoption did not install the updater timer: %v", err)
+	}
+	joined := strings.Join(command.calls, "\n")
+	for _, want := range []string{"systemctl --user daemon-reload", "systemctl --user enable --now tart-runner-fleet-updater.timer"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in calls:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "launchctl") {
+		t.Fatalf("a systemd node was driven with launchctl:\n%s", joined)
+	}
+}
