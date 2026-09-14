@@ -237,6 +237,11 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 		observations = append(observations, adminapi.Observation{Name: name, Freshness: string(metric.Freshness),
 			ObservedAt: metric.ObservedAt, AgeSeconds: age.Seconds(), Detail: metric.Detail})
 	}
+	// Healthy is derived from the same snapshot the rest of this document is
+	// rendered from rather than taken as a parameter, so a status that says READY
+	// can never also say this daemon is not working.
+	healthy := readinessResult(snapshot, true)
+	healthyCheck := adminapi.Check{OK: healthy.OK, Reasons: nonNilStrings(healthy.Reasons)}
 	queueCheck := adminapi.Check{OK: queueSLO.OK, Reasons: nonNilStrings(queueSLO.Reasons)}
 	occupancyCheck := adminapi.Check{OK: occupancy.OK, Reasons: nonNilStrings(occupancy.Reasons)}
 	reservationCheck := adminapi.Check{OK: reservation.OK, Reasons: nonNilStrings(reservation.Reasons)}
@@ -258,6 +263,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			LastLoopTick: snapshot.LastLoopTick, LastSuccessfulTick: snapshot.LastSuccessfulTick,
 			Live:      adminapi.Check{OK: live.OK, Reasons: nonNilStrings(live.Reasons)},
 			Ready:     adminapi.Check{OK: ready.OK, Reasons: nonNilStrings(ready.Reasons)},
+			Healthy:   &healthyCheck,
 			QueueSLO:  &queueCheck,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,

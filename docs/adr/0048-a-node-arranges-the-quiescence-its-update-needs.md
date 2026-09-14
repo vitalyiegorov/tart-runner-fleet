@@ -9,6 +9,15 @@ Accepted. Implements
 It **amends [ADR 0011](0011-atomic-production-updates.md)** in one clause and
 leaves the rest of that decision standing.
 
+**Amended 2026-09-14 by
+[ADR 0052](0052-a-withdrawn-node-still-takes-a-release.md)** in one clause: the
+quiescence gate and the candidate proof below ask the running daemon whether it
+is HEALTHY, not whether it is ready. A node that withdrew its sessions under
+ADR 0047 is never ready, which made the most quiescent state a node can reach
+the one state no release could ever be installed from (#320). Everything else
+here — the drain, its bounds, its cooldown, and what still defers activation —
+is unchanged.
+
 ## Context
 
 ADR 0011 refuses to swap a generation out from under running work, and lists

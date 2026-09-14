@@ -1309,6 +1309,28 @@ If a node is drain-looping — draining, timing out, cooling down, draining agai
 than `MaxWait`. Read `OCCUPANCY` for the hold and its budget rather than raising
 `MaxWait`.
 
+Once a drain has reached zero instances, the `update drain` row says which of
+two states the node is in. `zero instances and healthy: the release may apply
+now` means the transaction's own gate passes and the next updater run installs
+the candidate — including on a node that has withdrawn its sessions under host
+pressure, which since
+[ADR 0052](adr/0052-a-withdrawn-node-still-takes-a-release.md) is updatable
+rather than permanently stuck. `zero instances but not healthy (...)` names what
+is actually blocking the candidate: the daemon has stopped ticking cleanly or
+cannot take one of its critical observations, and no release will apply until it
+does. Before ADR 0052 both states rendered as a drain that could run forever,
+and one node stayed `prepare update: exit status 5` for a day (#320).
+
+To ask the question directly, without waiting for a doctor run:
+
+```sh
+fleet status --require-healthy --output json | jq '.data.healthy'
+```
+
+`--require-healthy` exits 5 when the daemon is not working. `--require-ready` is
+unchanged and stricter: it also requires the node to be admitting, so a
+withdrawn node fails it by design.
+
 ### A node that withdrew its sessions
 
 `fleet status` prints `SESSIONS WITHDRAWN` above the queues, `fleet doctor`

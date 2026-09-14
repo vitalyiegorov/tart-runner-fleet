@@ -35,7 +35,7 @@ func (c *fakeCommand) Run(_ context.Context, name string, args ...string) ([]byt
 			return nil, err
 		}
 	}
-	if strings.Contains(call, "status --require-ready") {
+	if strings.Contains(call, "status --require-healthy") {
 		if strings.Contains(call, "/v1/fleet") && c.current != "" {
 			return []byte(c.current), c.currentErr
 		}
@@ -113,7 +113,7 @@ func hostFixture(t *testing.T) (*LocalHost, *fakeCommand, Generation, Generation
 		t.Fatal(err)
 	}
 	command := &fakeCommand{
-		ready:   `{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":true}}}`,
+		ready:   `{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":false},"healthy":{"ok":true}}}`,
 		current: `{"data":{"controllerVersion":"v1","controllerMode":"authority","ready":{"ok":true},"queues":[],"instances":[],"operations":{"retrying":0,"dead":0}}}`,
 	}
 	host, err := NewLocalHost(LocalHostConfig{RootDir: root, StateDir: state, LaunchAgentsDir: agents,
@@ -161,7 +161,7 @@ func TestLocalHostAtomicallyPersistsTheBootGeneration(t *testing.T) {
 		}
 	}
 	joined := strings.Join(command.calls, "\n")
-	for _, want := range []string{"fleet config validate --mode authority", "launchctl bootout", "launchctl bootstrap", "status --require-ready"} {
+	for _, want := range []string{"fleet config validate --mode authority", "launchctl bootout", "launchctl bootstrap", "status --require-healthy"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in calls:\n%s", want, joined)
 		}
