@@ -902,9 +902,14 @@ func makeSystemdUpdateRelease(t *testing.T, root string) string {
 		}
 	}
 	var sums strings.Builder
+	// The shared manifest names the controller by its loose-asset name.
 	for _, name := range []string{"RELEASE_VERSION", "fleet", "tart-runner-fleet-authority.service"} {
 		digest := sha256.Sum256(files[name])
-		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + name + "\n")
+		entry := name
+		if name == "fleet" {
+			entry = autoupdate.CurrentTarget().ControllerAsset()
+		}
+		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + entry + "\n")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums.String()), 0o600); err != nil {
 		t.Fatal(err)

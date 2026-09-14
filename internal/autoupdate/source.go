@@ -41,6 +41,9 @@ type Target struct {
 // CurrentTarget is the platform this binary was built for.
 func CurrentTarget() Target { return Target{OS: runtime.GOOS, Arch: runtime.GOARCH} }
 
+// appleTarget is the node type a launchd-supervised LocalHost always is.
+var appleTarget = Target{OS: "darwin", Arch: "arm64"}
+
 // ArchiveName is the release asset that carries this target's generation.
 func (t Target) ArchiveName(version string) string {
 	return "tart-runner-fleet-" + version + "-" + t.OS + "-" + t.Arch + ".tar.gz"
@@ -55,6 +58,17 @@ func (t Target) ServiceDefinition() string {
 		return authorityServiceDefinition
 	}
 	return systemdAuthorityUnit
+}
+
+// ControllerAsset names this target's controller in the release's SHA256SUMS.
+// Every archive unpacks its controller as `fleet`, but the manifest is shared
+// by both node types and lists the loose assets, where only the Apple binary
+// is the bare `fleet`; every other platform's carries its suffix.
+func (t Target) ControllerAsset() string {
+	if t.OS == "darwin" {
+		return "fleet"
+	}
+	return "fleet-" + t.OS + "-" + t.Arch
 }
 
 // LatestProductionRelease downloads and verifies GitHub's latest normal
@@ -125,7 +139,7 @@ func LatestProductionRelease(ctx context.Context, root, repository string, comma
 	if err := verifyReleaseIdentity(staging, metadata.TagName); err != nil {
 		return Release{}, err
 	}
-	if err := verifyChecksums(staging, target.ServiceDefinition()); err != nil {
+	if err := verifyChecksums(staging, target); err != nil {
 		return Release{}, err
 	}
 	if err := os.Rename(staging, destination); err != nil {

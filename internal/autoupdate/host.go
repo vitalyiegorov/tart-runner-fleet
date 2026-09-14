@@ -60,10 +60,14 @@ type Command interface {
 type LocalHostConfig struct {
 	RootDir, StateDir, LaunchAgentsDir string
 	Domain                             string
-	Repository                         string
-	UpdateInterval                     time.Duration
-	ReadyAttempts                      int
-	ReadyDelay                         time.Duration
+	// Target names the platform whose controller a SystemdHost checks the
+	// release manifest for; empty means the platform this process runs on. A
+	// LocalHost is launchd's and is always the Apple node's.
+	Target         Target
+	Repository     string
+	UpdateInterval time.Duration
+	ReadyAttempts  int
+	ReadyDelay     time.Duration
 }
 
 type LocalHost struct {
@@ -106,6 +110,9 @@ func normalizeHostConfig(cfg LocalHostConfig, command Command) (LocalHostConfig,
 	}
 	if cfg.UpdateInterval == 0 {
 		cfg.UpdateInterval = 5 * time.Minute
+	}
+	if cfg.Target == (Target{}) {
+		cfg.Target = CurrentTarget()
 	}
 	if cfg.UpdateInterval < time.Minute || cfg.UpdateInterval > 24*time.Hour {
 		return LocalHostConfig{}, ErrInvalidGeneration
@@ -183,7 +190,7 @@ func installedGeneration(stateDir string) (Generation, error) {
 func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
 	// A LocalHost is launchd-supervised by construction (see launchdDomain), so
 	// the definition its generation must carry is the LaunchAgent.
-	return validateCandidate(ctx, h.command, h.rootDir, candidate, authorityServiceDefinition)
+	return validateCandidate(ctx, h.command, h.rootDir, candidate, appleTarget)
 }
 
 // validateCandidate proves a candidate is a complete generation of this node's
@@ -191,7 +198,7 @@ func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
 // it claims to be, a verified executable and boot definition, and a
 // configuration the candidate's own binary accepts. serviceDefinition is the
 // one part that differs per node type (Target.ServiceDefinition).
-func validateCandidate(ctx context.Context, command Command, rootDir string, candidate Generation, serviceDefinition string) error {
+func validateCandidate(ctx context.Context, command Command, rootDir string, candidate Generation, target Target) error {
 	if err := candidate.validate(); err != nil {
 		return err
 	}
@@ -202,7 +209,7 @@ func validateCandidate(ctx context.Context, command Command, rootDir string, can
 	if err != nil || strings.TrimSpace(string(manifest)) != candidate.Version {
 		return fmt.Errorf("release identity: %w", ErrInvalidGeneration)
 	}
-	if err := verifyChecksums(candidate.ReleaseDir, serviceDefinition); err != nil {
+	if err := verifyChecksums(candidate.ReleaseDir, target); err != nil {
 		return err
 	}
 	if _, err := command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
@@ -215,13 +222,20 @@ func validateCandidate(ctx context.Context, command Command, rootDir string, can
 // the service definition that boots it all match the checksum manifest
 // published beside the archive. serviceDefinition is a parameter because it is
 // the one entry that differs per node type (Target.ServiceDefinition).
-func verifyChecksums(releaseDir, serviceDefinition string) error {
+// verifyChecksums checks the generation's verified contents — the identity
+// manifest, the controller, and the service definition that boots it — against
+// the release's shared manifest. The manifest names the controller by its
+// loose-asset name (Target.ControllerAsset) while the archive unpacks it as
+// `fleet`, so the entry is looked up under one name and the file under another.
+func verifyChecksums(releaseDir string, target Target) error {
 	file, err := os.Open(filepath.Join(releaseDir, "SHA256SUMS")) // #nosec G304 -- validated immutable release path.
 	if err != nil {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	required := map[string]bool{"RELEASE_VERSION": false, "fleet": false, serviceDefinition: false}
+	serviceDefinition := target.ServiceDefinition()
+	members := map[string]string{"RELEASE_VERSION": "RELEASE_VERSION", target.ControllerAsset(): "fleet", serviceDefinition: serviceDefinition}
+	required := map[string]bool{"RELEASE_VERSION": false, target.ControllerAsset(): false, serviceDefinition: false}
 	scanner := bufio.NewScanner(io.LimitReader(file, 1<<20))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -231,7 +245,7 @@ func verifyChecksums(releaseDir, serviceDefinition string) error {
 		if _, tracked := required[fields[1]]; !tracked {
 			continue
 		}
-		body, readErr := os.ReadFile(filepath.Join(releaseDir, fields[1])) // #nosec G304 -- basename constrained above.
+		body, readErr := os.ReadFile(filepath.Join(releaseDir, members[fields[1]])) // #nosec G304 -- enumerated member under the release directory.
 		if readErr != nil {
 			return readErr
 		}

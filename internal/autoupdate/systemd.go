@@ -44,6 +44,7 @@ const (
 // it is booting.
 type SystemdHost struct {
 	rootDir, stateDir, unitsDir string
+	target                      Target
 	repository                  string
 	updateInterval              time.Duration
 	readyAttempts               int
@@ -60,7 +61,7 @@ func NewSystemdHost(cfg LocalHostConfig, command Command) (*SystemdHost, error) 
 		return nil, fmt.Errorf("%w: %q", ErrUnsupervised, cfg.Domain)
 	}
 	return &SystemdHost{rootDir: filepath.Clean(cfg.RootDir), stateDir: filepath.Clean(cfg.StateDir),
-		unitsDir: filepath.Clean(cfg.LaunchAgentsDir), repository: cfg.Repository,
+		unitsDir: filepath.Clean(cfg.LaunchAgentsDir), target: cfg.Target, repository: cfg.Repository,
 		updateInterval: cfg.UpdateInterval,
 		readyAttempts:  cfg.ReadyAttempts, readyDelay: cfg.ReadyDelay, command: command}, nil
 }
@@ -72,7 +73,7 @@ func (h *SystemdHost) Current(context.Context) (Generation, error) {
 func (h *SystemdHost) Validate(ctx context.Context, candidate Generation) error {
 	// A SystemdHost is `systemd --user` supervised by construction, so the
 	// definition its generation must carry is the authority unit.
-	return validateCandidate(ctx, h.command, h.rootDir, candidate, systemdAuthorityUnit)
+	return validateCandidate(ctx, h.command, h.rootDir, candidate, h.target)
 }
 
 func (h *SystemdHost) Prepare(ctx context.Context, current, candidate Generation) error {

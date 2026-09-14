@@ -41,9 +41,15 @@ then have to fake.
 
 Twin means twin. The same quiescence gate, the same checksum-verified generation
 (with the authority *unit* as the boot definition a Linux generation must carry,
-per `Target.ServiceDefinition`), the same durable journal naming the prepared
-unit and the backups, the same readiness proof against the candidate's own
-executable, and the same all-or-nothing rollback. Both hosts call one
+per `Target.ServiceDefinition`, and the controller checked under the name the
+shared manifest gives it, per `Target.ControllerAsset`: a release lists one
+`SHA256SUMS` for both node types, every archive unpacks its controller as
+`fleet`, and only the Apple binary is the bare `fleet` among the loose assets
+the manifest enumerates — a Linux node's is `fleet-linux-amd64`, so a verifier
+that looked its `fleet` up under `fleet` refused every real release), the same
+durable journal naming the prepared unit and the backups, the same readiness
+proof against the candidate's own executable, and the same all-or-nothing
+rollback. Both hosts call one
 implementation of each of those, so the two transactions cannot drift into
 disagreeing about what "busy" or "ready" means.
 

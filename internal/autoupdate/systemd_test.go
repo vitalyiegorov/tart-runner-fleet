@@ -71,7 +71,7 @@ func makeSystemdRelease(t *testing.T, root, version string) string {
 	// generation's verified contents, exactly as Target.ServiceDefinition says.
 	for _, name := range []string{"RELEASE_VERSION", "fleet", systemdAuthorityUnit} {
 		digest := sha256.Sum256(files[name])
-		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + name + "\n")
+		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + manifestName(linuxTestTarget, name) + "\n")
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(sums.String()), 0o600); err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func systemdFixture(t *testing.T) (*SystemdHost, *fakeCommand, Generation, Gener
 		current: `{"data":{"controllerVersion":"v1","controllerMode":"authority","ready":{"ok":true},"queues":[],"instances":[],"operations":{"retrying":0,"dead":0}}}`,
 	}
 	host, err := NewSystemdHost(LocalHostConfig{RootDir: root, StateDir: state, LaunchAgentsDir: units,
-		Domain: "user", Repository: "owner/repo", ReadyAttempts: 1, ReadyDelay: time.Millisecond}, command)
+		Domain: "user", Target: linuxTestTarget, Repository: "owner/repo", ReadyAttempts: 1, ReadyDelay: time.Millisecond}, command)
 	if err != nil {
 		t.Fatal(err)
 	}
