@@ -19,7 +19,10 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 ExecStart="__RELEASE_DIR__/fleet" update finish-updater-handoff "--repo" "__REPOSITORY__" "--root" "__ROOT__" "--state-dir" "__STATE_DIR__" "--launch-agents-dir" "__UNITS_DIR__" "--mode" "__MODE__" "--config" "__STATE_DIR__/fleet.json" "--endpoint" "__ENDPOINT__" "--domain" "user" "--release-dir" "__RELEASE_DIR__" "--interval" "__INTERVAL__" "--confirm" "automatic-updater-handoff"
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# The updater resolves `gh` on this path. The launchd twin carries Homebrew's
+# prefix for the same reason; the XDG user binary directory is the Linux
+# analogue for a node whose GitHub CLI is not a distribution package.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:%h/.local/bin
 # KeepAlive{SuccessfulExit:false} with a ten-second throttle.
 Restart=on-failure
 RestartSec=10
