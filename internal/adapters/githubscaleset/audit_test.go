@@ -103,14 +103,18 @@ func TestTheTapLeavesEveryOtherRequestAlone(t *testing.T) {
 	}
 
 	tap.beforeRequest(nil, handshake, 0)
-	tap.afterResponse(nil, jsonResponse(handshake, http.StatusOK, `{"token":"t"}`))
+	handshakeResponse := jsonResponse(handshake, http.StatusOK, `{"token":"t"}`)
+	defer func() { _ = handshakeResponse.Body.Close() }()
+	tap.afterResponse(nil, handshakeResponse)
 	if _, observed := tap.take(); observed {
 		t.Fatal("an unrelated request must not be read as a listing")
 	}
 
 	stale := listRequest(t)
 	tap.beforeRequest(nil, stale, 0)
-	tap.afterResponse(nil, jsonResponse(stale, http.StatusOK, `{"count":0,"value":[]}`))
+	staleResponse := jsonResponse(stale, http.StatusOK, `{"count":0,"value":[]}`)
+	defer func() { _ = staleResponse.Body.Close() }()
+	tap.afterResponse(nil, staleResponse)
 	if _, observed := tap.take(); observed {
 		t.Fatal("a disarmed tap must observe nothing")
 	}
@@ -123,7 +127,9 @@ func TestTheTapLeavesEveryOtherRequestAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tap.afterResponse(nil, jsonResponse(unmarked, http.StatusOK, `{"count":0,"value":[]}`))
+	unmarkedResponse := jsonResponse(unmarked, http.StatusOK, `{"count":0,"value":[]}`)
+	defer func() { _ = unmarkedResponse.Body.Close() }()
+	tap.afterResponse(nil, unmarkedResponse)
 	tap.afterResponse(nil, nil)
 	if _, observed := tap.take(); observed {
 		t.Fatal("only the marked call may be read as this tap's listing")
