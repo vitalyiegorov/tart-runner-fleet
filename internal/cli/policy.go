@@ -168,6 +168,12 @@ func flattenPolicy(prefix string, value any, into map[string]string) {
 		into[prefix] = renderPolicyValue(value)
 		return
 	}
+	// An empty object is a leaf too: a node stating `targets: {}` and one
+	// omitting the key must not flatten to the same nothing and agree.
+	if len(nested) == 0 && prefix != "" {
+		into[prefix] = "{}"
+		return
+	}
 	for key, child := range nested {
 		path := key
 		if prefix != "" {

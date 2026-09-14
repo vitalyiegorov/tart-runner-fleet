@@ -590,6 +590,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
 		CriticalObservations: criticalObservations, CriticalObservationTTL: 2 * time.Minute,
 		FailureComponents: failureComponents, AdmissionFloors: admissionFloors(cfg)})
+	// What this node is CONFIGURED with is published before either server
+	// accepts a request, so no status document is ever served without it: until
+	// ADR 0053 the only way to read another node's load-bearing settings was to
+	// open its file over SSH, and one node running for weeks without
+	// `macosBurst.mixedPlatformAdmission` while its peer had it was invisible to
+	// every check either node ran (issue #304).
+	health.SetPolicy(nodePolicy(cfg))
 	serverConfig := telemetry.ServerConfig{ControllerVersion: opts.Version, ControllerMode: string(opts.Mode)}
 	healthServer, _ := telemetry.NewServer(health, serverConfig)
 	listener, err := d.listen("tcp", opts.HealthAddress)
@@ -648,12 +655,6 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// serial sink was off on every node; publishing the posture once here is what
 	// makes the lapse a doctor finding instead of an operator's memory.
 	health.SetGuestConsole(guestConsole(runtime.GOOS, cfg))
-	// What this node is CONFIGURED with is a fact about the same file, published
-	// once for the same reason: until ADR 0053 the only way to read another node's
-	// load-bearing settings was to open its file over SSH, and one node running for
-	// weeks without `macosBurst.mixedPlatformAdmission` while its peer had it was
-	// invisible to every check either node ran (issue #304).
-	health.SetPolicy(nodePolicy(cfg))
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}

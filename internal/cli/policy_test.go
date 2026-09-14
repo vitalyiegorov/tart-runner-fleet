@@ -245,3 +245,20 @@ func statusDocumentWith(t *testing.T, digest string, mixed bool, extra map[strin
 	}
 	return string(encoded)
 }
+
+// An empty object is a leaf: a node stating `targets: {}` and a node omitting
+// `targets` do not agree, and the diff must say so rather than flatten both
+// to nothing.
+func TestFlattenPolicyKeepsAnEmptyObjectAsALeaf(t *testing.T) {
+	stated := map[string]string{}
+	flattenPolicy("", map[string]any{"targets": map[string]any{}, "pollSeconds": 5.0}, stated)
+	omitted := map[string]string{}
+	flattenPolicy("", map[string]any{"pollSeconds": 5.0}, omitted)
+	if stated["targets"] != "{}" {
+		t.Fatalf("empty object flattened to %q", stated["targets"])
+	}
+	drift := policyDrift([]map[string]string{stated, omitted})
+	if len(drift) != 1 || drift[0] != "targets" {
+		t.Fatalf("drift=%v want [targets]", drift)
+	}
+}
