@@ -17,9 +17,10 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `operations discharge` | Close one dead-lettered cleanup an operator has established can never complete; optionally retire the phantom instance row and its stopped VM |
 | `observations` | Scheduler observation freshness and age |
 | `health` | Liveness and readiness probes |
-| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, and metrics checks |
+| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, policy declaration, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
+| `config policy PATH...` | Print the load-bearing policy one node runs with; with more than one path, the keys on which they disagree |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
 | `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
 | `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
@@ -61,6 +62,48 @@ A single path prints `configuration is valid: PATH` and the JSON object
 line per configuration plus a summary, and the JSON object carries `paths`
 instead of `path`. Cross-node failures are written to stderr, one per line, and
 exit `1`.
+
+### Comparing what two nodes are configured with
+
+`config policy` answers a different question from `config validate`: not "is this
+file legal" but "what does this node actually decide with". It prints the
+bounded, credential-free projection of the effective configuration that
+[ADR 0053](adr/0053-a-node-declares-the-policy-it-runs-with.md) defines — the
+same object a running daemon publishes as `data.policy` — with `policyDigest`
+identifying the set.
+
+Each path is **either** a node configuration **or** a `fleet status --output
+json` document, recognised by the presence of `data.policy`. That is what makes
+the comparison possible without SSH and without file access: copy each node's
+status document out and diff them.
+
+```sh
+fleet config policy ./state/fleet.json
+fleet config policy ./state/fleet.json /path/to/peer-fleet.json
+fleet config policy ./node-a-status.json ./node-b-status.json
+```
+
+One path prints the policy as JSON and exits `0`. Two or more print one row per
+disagreeing key — the key path, then one column per node — and exit `5`; nodes
+that agree print `no policy drift across N nodes` and exit `0`. Anything that
+cannot be read or parsed exits `2`, because a diff that could not read one side
+has not established agreement.
+
+```
+KEY                                 ./state/fleet.json  /path/to/peer-fleet.json
+macosBurst.mixedPlatformAdmission   true                false
+1 policy key disagrees across 2 nodes
+```
+
+A key one node does not project at all reads as `absent`, never as `false`: a
+missing key and a stated `false` being indistinguishable is the whole of issue
+#304. Within one release they cannot differ — every projected key is always
+published — so `absent` means the two nodes are running different releases.
+
+Human `fleet status` prints `policy <digest-prefix>` and `fleet doctor` carries a
+`policy` row with the same digest. The row is informational and never fails on
+its own: a digest is an identity, not a judgement, and no single node can know
+whether its own policy is the right one.
 
 ## Common flags
 

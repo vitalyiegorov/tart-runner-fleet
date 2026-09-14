@@ -6,6 +6,7 @@ document an operator would otherwise have to reproduce by hand.
 """
 
 import json
+import re
 import sys
 
 
@@ -29,6 +30,18 @@ def main(path: str) -> int:
         failures.append("no healthy check in the status document")
     elif not healthy.get("ok"):
         failures.append(f"ready daemon reported healthy={healthy!r}")
+
+    # A node that cannot say what it is configured with is the state ADR 0053
+    # exists to end, and this build is newer than that record, so the declaration
+    # and its digest must both be there. The projection is asserted only for its
+    # identity: what is IN it is the configuration of whatever host this runs on.
+    policy = data.get("policy")
+    if not isinstance(policy, dict):
+        failures.append(f"no policy declaration in the status document: {policy!r}")
+    elif not re.fullmatch(r"[0-9a-f]{64}", policy.get("policyDigest") or ""):
+        failures.append(f'policyDigest={policy.get("policyDigest")!r}, want a hex sha256')
+    elif len(policy) < 2:
+        failures.append(f"the policy declaration carries a digest and nothing else: {policy!r}")
 
     # The scheduler observation is fresh only when the host and instance
     # observations feeding it were both fresh, so it is the single signal that
@@ -86,6 +99,7 @@ def main(path: str) -> int:
     print(f'  cpu idle        {pressure.get("cpuIdlePercent")}%')
     print(f'  load            {pressure.get("loadAverage")}')
     print(f'  swap used       {pressure.get("swapUsedMiB")} MiB')
+    print(f'  policy          {data["policy"]["policyDigest"][:12]}')
     return 0
 
 

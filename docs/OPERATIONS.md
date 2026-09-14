@@ -1419,13 +1419,34 @@ above all, whose absence sends every tick with an infeasible macOS head into
 `planMacHandoff`, which drains an aged *Linux* instance and plans nothing when
 there is none. That is the whole of issue #263: the studio stalled Linux
 admission behind every long macOS build for weeks because one node had the key
-and the other did not, and nothing compares two nodes' configurations. Until
-something does, compare them by hand after any config change:
+and the other did not.
+
+Since [ADR 0053](adr/0053-a-node-declares-the-policy-it-runs-with.md) each node
+declares the load-bearing subset of its own configuration, so this is one
+command rather than a hand-written diff of one block. Compare the two nodes
+after any config change:
 
 ```sh
-fleet config validate ./state/fleet.json /path/to/peer-fleet.json
-diff <(jq -S .macosBurst ./state/fleet.json) <(jq -S .macosBurst /path/to/peer-fleet.json)
+fleet config policy ./state/fleet.json /path/to/peer-fleet.json
 ```
+
+Without file access on the peer, compare what each node published about itself
+instead — `data.policy` is in the status document, so this needs no SSH at all:
+
+```sh
+fleet status --output json > node-a-status.json       # on this node
+fleet status --output json > node-b-status.json       # from the peer
+fleet config policy node-a-status.json node-b-status.json
+```
+
+It exits `5` and prints one row per disagreeing key — `macosBurst.mixedPlatformAdmission`
+included, with `true` against the `false` an absent key means — `0` when the two
+agree, and `2` when it could not read a side. `fleet status` prints
+`policy <digest-prefix>` and `fleet doctor` carries the same digest on its
+informational `policy` row, so two nodes that are already known to match can be
+confirmed by eye before anything is diffed. `fleet config validate` with both
+paths still applies ADR 0034's cross-node rules, which is a different question:
+legality, not agreement.
 
 ## Recovery
 

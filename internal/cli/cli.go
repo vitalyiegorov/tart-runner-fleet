@@ -906,6 +906,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// Said plainly here, because an empty queue on a healthy host is exactly
 		// what a fault looks like (#230).
 		{Name: "update drain", OK: drain.OK, Detail: updateDrainDetail(status.Data, drain)},
+		// The policy row never fails. It states WHICH configuration this node is
+		// running — the digest of the load-bearing subset of it — because the drift
+		// of issue #304 was invisible for weeks to every check either node ran, and
+		// no single node can know whether its own policy is the right one. Judging
+		// that is a comparison, and a comparison needs a peer.
+		{Name: "policy", OK: true, Detail: policyDetail(status.Data)},
 		{Name: "metrics", OK: metrics != "", Detail: "bounded endpoint responds"},
 	}
 	if output == "json" {
@@ -945,9 +951,17 @@ func runVersion(args []string, stdout, stderr io.Writer, version string) int {
 	return exitSuccess
 }
 
+// runConfig dispatches the offline configuration surface. `validate` judges a
+// file against the rules of this release; `policy` reports what a file — or the
+// status document a node published from one — actually decides with, which is a
+// different question and the one nothing could answer before ADR 0053.
 func runConfig(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "policy" {
+		return runConfigPolicy(args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || args[0] != "validate" {
 		fmt.Fprintln(stderr, "usage: fleet config validate [--mode observe|shadow|canary|authority] [--output table|json] <path>...")
+		fmt.Fprintln(stderr, "       fleet config policy <path>...")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet config validate", flag.ContinueOnError)
@@ -1071,6 +1085,10 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleet config validate [--mode observe|shadow|canary|authority] <path>...
     More than one path additionally checks the cross-node rules of ADR 0034:
     guest-capability parity behind a shared label, and one owner per scale set.
+  fleet config policy <path>...
+    Print the load-bearing policy a node runs with, or, with more than one path,
+    the keys on which they disagree (exit 5). Each path is a node configuration
+    or a status document written by fleet status --output json.
   fleet version | api-version
 
 GUARDED BOOTSTRAP

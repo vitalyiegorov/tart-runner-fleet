@@ -109,14 +109,22 @@ type Status struct {
 	// indistinguishable from a broken one — and before ADR 0011's 2026-08-29
 	// amendment the state never arrived deliberately at all (#230, #282). An
 	// older daemon publishes none of it, hence EffectiveUpdateDrainCheck.
-	UpdateDrain      *UpdateDrain     `json:"updateDrain,omitempty"`
-	UpdateDrainCheck *Check           `json:"updateDrainCheck,omitempty"`
-	Queues           []Queue          `json:"queues"`
-	Instances        []Instance       `json:"instances"`
-	ScopeQueues      []ScopeQueue     `json:"scopeQueues,omitempty"`
-	Observations     []Observation    `json:"observations"`
-	Operations       OperationSummary `json:"operations"`
-	HostPressure     HostPressure     `json:"hostPressure"`
+	UpdateDrain      *UpdateDrain `json:"updateDrain,omitempty"`
+	UpdateDrainCheck *Check       `json:"updateDrainCheck,omitempty"`
+	// Policy is an additive fleet.v1 field: the load-bearing subset of the
+	// configuration this node is actually running with, plus a digest of it, so
+	// "what is this node configured with" is answerable from the same document
+	// that answers "what is this node doing" (ADR 0053). Nothing published it
+	// before, which is how one node ran for weeks without
+	// `macosBurst.mixedPlatformAdmission` while its peer had it and every
+	// single-node check passed (issue #304) — and why EffectivePolicy exists.
+	Policy       *Policy          `json:"policy,omitempty"`
+	Queues       []Queue          `json:"queues"`
+	Instances    []Instance       `json:"instances"`
+	ScopeQueues  []ScopeQueue     `json:"scopeQueues,omitempty"`
+	Observations []Observation    `json:"observations"`
+	Operations   OperationSummary `json:"operations"`
+	HostPressure HostPressure     `json:"hostPressure"`
 }
 
 // HostPressure is the host evidence behind the latest admission decision.

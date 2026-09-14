@@ -51,6 +51,22 @@ in-memory revision so future watch clients can use conditional polling.
       "admissionAllowed": true,
       "admissionReason": "capacity available"
     },
+    "policy": {
+      "policyDigest": "0f3c1d9a4b77e1c2d8a5b6f30e91a2c47d5e8b09c1f2a3b4c5d6e7f809a1b2c3",
+      "hostBudget": {"cpu": 10, "memoryMb": 20480},
+      "macosBurst": {
+        "enabled": true,
+        "admissionPolicy": "shared",
+        "mixedPlatformAdmission": true,
+        "mixedProfileCohorts": false,
+        "nestedVirtualization": false,
+        "builder": {"cpu": 8, "memoryMb": 12288, "maxActive": 1},
+        "maestro": {"cpu": 4, "memoryMb": 7168, "maxActive": 2}
+      },
+      "pollSeconds": 20,
+      "canonicalJobInventory": false,
+      "serialLogEnabled": false
+    },
     "queues": [],
     "instances": [],
     "observations": [],
@@ -106,6 +122,36 @@ time, ordered highest tier first. `default` is the tier every unmatched demand
 lands in. The array is additive and is absent both on daemons older than the
 feature and on a fleet that declares no tier, so an absent key means "no policy
 declared", never "no demand" (ADR 0037).
+
+`policy` is this node's declaration of the load-bearing configuration it is
+running with: a bounded, credential-free projection of its effective settings
+plus `policyDigest`, the hex sha256 of the canonical encoding of the rest of the
+object (ADR 0053). It exists so "what is this node configured with" is answerable
+from the same document that answers "what is this node doing" — until issue #304
+the only way to read another node's settings was to open its file over SSH, and
+one node running for weeks without `macosBurst.mixedPlatformAdmission` while its
+peer had it was invisible to every check either node ran.
+
+Three rules hold for everything inside it, and a consumer may rely on all three:
+
+- **It is bounded and load-bearing.** Only settings a scheduling, admission, or
+  placement decision reads appear. It is not the configuration file.
+- **No credential and no per-host path is ever part of it.** Client and
+  installation identifiers, keychain names, private-key files, the state
+  directory, socket paths, base VM names, and the serial-log directory are all
+  excluded; the serial-log *posture* is published as the boolean
+  `serialLogEnabled`.
+- **Nothing is omitted.** Every projected key is present whatever its value, so
+  an unstated `mixedPlatformAdmission` is published as `false` — the value the
+  scheduler actually reads — rather than as a gap. A key that is **absent from
+  the object entirely** means the publishing daemon does not project it at all;
+  it never means the node has the setting off.
+
+The encoding is deterministic, so two nodes running the same policy produce the
+same digest and can be compared by its twelve-character prefix alone. The whole
+field is additive and absent on daemons older than ADR 0053; absence is silence,
+never agreement. `fleet config policy` accepts these documents directly and names
+the keys two nodes disagree on.
 
 `operations.failures` explains the counts. Each entry pairs an operation kind
 with one closed-vocabulary failure code — `<stage>` or `<stage>:<reason>`, for
