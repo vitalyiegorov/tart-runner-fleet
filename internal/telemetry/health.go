@@ -130,6 +130,23 @@ type ScopeQueueMetrics struct {
 	SharedLabels bool
 }
 
+// ParkedScaleSetMetric is one runner scale set that exists on GitHub for a
+// configured scope and that this node's configuration does not name.
+//
+// A parked set holding nothing is ordinary and informational: under ADR 0034 a
+// set parked here is very often bound on a SIBLING node, and this node cannot
+// read a sibling's configuration. A parked set HOLDING work is the finding
+// regardless, because GitHub has already routed those jobs to it and will offer
+// them to nobody else.
+type ParkedScaleSetMetric struct {
+	Scope      string
+	ScaleSetID int
+	Name       string
+	Assigned   int
+	Busy       int
+	ObservedAt time.Time
+}
+
 // QueueTierMetrics is one priority tier's share of one scope's queue. Rank
 // travels with the name so a renderer orders tiers as the operator declared
 // them without reading the configuration.
@@ -281,6 +298,12 @@ type Snapshot struct {
 	Reservation        *ReservationMetric
 	Envelope           EnvelopeMetric
 	AdmissionFloors    AdmissionFloors
+	// ParkedScaleSets is what the last completed parked-scale-set audit found,
+	// and ParkedScaleSetsAuditedAt is when it completed. A zero time means no
+	// audit has ever run on this node -- an observe-mode daemon never runs one --
+	// which is reported as "not audited" and never as a pass.
+	ParkedScaleSets          []ParkedScaleSetMetric
+	ParkedScaleSetsAuditedAt time.Time
 	// QueueSLO is how long queued work may wait before it is a finding. It is
 	// carried on the snapshot so a check that needs it stays a pure function of
 	// one observation.
@@ -322,6 +345,8 @@ type Health struct {
 	mode               Mode
 	queues             map[string]QueueMetrics
 	scopeQueues        []ScopeQueueMetrics
+	parkedScaleSets    []ParkedScaleSetMetric
+	parkedAuditedAt    time.Time
 	instances          map[string]InstanceMetrics
 	observations       map[string]ObservationMetric
 	operationRetries   int
@@ -513,6 +538,31 @@ func cloneScopeQueues(rows []ScopeQueueMetrics) []ScopeQueueMetrics {
 		out[i].Tiers = append([]QueueTierMetrics(nil), rows[i].Tiers...)
 	}
 	return out
+}
+
+// SetParkedScaleSets publishes one completed audit of the scale sets GitHub
+// holds for this node's scopes.
+//
+// An audit that found nothing parked is still an audit and is published as an
+// empty set, because "no parked set holds work" and "nobody looked" are
+// different states and the second must never render as the first — that
+// conflation is the whole of issue #164, where every signal read PASS while two
+// jobs sat assigned to a set no daemon polled for 4.5 hours.
+func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time.Time) error {
+	for _, row := range rows {
+		if row.Scope == "" || row.ScaleSetID <= 0 || row.Assigned < 0 || row.Busy < 0 {
+			return errInvalidMetric
+		}
+	}
+	if observedAt.IsZero() {
+		return errInvalidMetric
+	}
+	h.mu.Lock()
+	h.parkedScaleSets = append([]ParkedScaleSetMetric(nil), rows...)
+	h.parkedAuditedAt = observedAt.UTC()
+	h.revision++
+	h.mu.Unlock()
+	return nil
 }
 
 func (h *Health) SetInstances(profile string, count, cpu, memoryMiB int) error {
@@ -1024,21 +1074,23 @@ func (h *Health) Snapshot() Snapshot {
 		Instances:    cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
-		ComponentFailures: h.sortedComponentFailures(),
-		DeadLetters:       append([]DeadLetter(nil), h.deadLetters...),
-		Stalled:           append([]Stalled(nil), h.stalled...),
-		Occupancy:         append([]OccupancyMetric(nil), h.occupancy...),
-		GuestSilences:     append([]GuestSilenceMetric(nil), h.guestSilences...),
-		RunnerImages:      append([]RunnerImageMetric(nil), h.runnerImages...),
-		GuestConsole:      h.guestConsole,
-		Policy:            h.policy,
-		SessionYield:      h.sessionYield,
-		UpdateDrain:       h.updateDrain,
-		Reservation:       cloneReservation(h.reservation),
-		Envelope:          h.envelope,
-		AdmissionFloors:   h.admissionFloors,
-		QueueSLO:          h.queueSLO,
-		HostPressure:      h.hostPressure, ObservationTTL: h.criticalObservationTTL,
+		ComponentFailures:        h.sortedComponentFailures(),
+		DeadLetters:              append([]DeadLetter(nil), h.deadLetters...),
+		Stalled:                  append([]Stalled(nil), h.stalled...),
+		Occupancy:                append([]OccupancyMetric(nil), h.occupancy...),
+		GuestSilences:            append([]GuestSilenceMetric(nil), h.guestSilences...),
+		RunnerImages:             append([]RunnerImageMetric(nil), h.runnerImages...),
+		GuestConsole:             h.guestConsole,
+		Policy:                   h.policy,
+		SessionYield:             h.sessionYield,
+		UpdateDrain:              h.updateDrain,
+		Reservation:              cloneReservation(h.reservation),
+		Envelope:                 h.envelope,
+		AdmissionFloors:          h.admissionFloors,
+		QueueSLO:                 h.queueSLO,
+		ParkedScaleSets:          append([]ParkedScaleSetMetric(nil), h.parkedScaleSets...),
+		ParkedScaleSetsAuditedAt: h.parkedAuditedAt,
+		HostPressure:             h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 		SuccessfulTickTTL: h.readyTickTTL,
 	}
 }
@@ -1341,6 +1393,46 @@ func ingestResult(snapshot Snapshot) HealthResult {
 			reason += "; labels are shared with another node, which may be serving them"
 		}
 		reasons = append(reasons, reason)
+	}
+	if len(reasons) == 0 {
+		return HealthResult{OK: true}
+	}
+	sort.Strings(reasons)
+	return HealthResult{Reasons: reasons}
+}
+
+// parkedScaleSetResult reports a scale set GitHub is holding work for that this
+// node does not serve.
+//
+// It is issue #164. On 2026-08-04 `trf-sudoku-builder-studio` (id 7) held two
+// assigned jobs and two busy runners for 4.5 hours while no daemon polled it;
+// the identically-labelled set on the other node sat idle, because GitHub had
+// already routed the work and offers an assigned job to nobody else. `fleet
+// queues` read 0, `fleet doctor` read PASS, and every observation read fresh.
+//
+// The wording is exact about what this node can know. Shared-label federation is
+// the ordinary case (ADR 0034), so a set parked HERE may well be bound on a
+// sibling; the audit cannot read a sibling's configuration and does not pretend
+// to. A parked set holding NOTHING is therefore informational and silent. A
+// parked set holding work is a finding regardless, because something must be
+// listening to it and, from here, nothing is known to be.
+func parkedScaleSetResult(snapshot Snapshot) HealthResult {
+	// Never audited is not a pass and not a failure: it is the absence of a
+	// reading. An observe-mode daemon has no authority to audit and always reads
+	// this way, which the surfaces render as "not audited".
+	if snapshot.ParkedScaleSetsAuditedAt.IsZero() {
+		return HealthResult{OK: true}
+	}
+	var reasons []string
+	for _, row := range snapshot.ParkedScaleSets {
+		if row.Assigned <= 0 && row.Busy <= 0 {
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf(
+			"%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s): "+
+				"something must be listening to this set and, from here, nothing is known to be; "+
+				"cancel and re-run the workflow, or bind the set on a node",
+			row.Scope, row.ScaleSetID, row.Name, row.Assigned, row.Busy))
 	}
 	if len(reasons) == 0 {
 		return HealthResult{OK: true}

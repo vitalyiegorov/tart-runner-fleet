@@ -76,6 +76,16 @@ def main(path: str) -> int:
     if not pressure.get("admissionReason"):
         failures.append(f"host admission was not decided: {pressure!r}")
 
+    # An observe daemon holds no GitHub App authority, so it must never run the
+    # parked-scale-set audit: it publishes the check (absence of a check would be
+    # read as a daemon too old to have one) and no audit timestamp, which every
+    # surface renders as "not audited" rather than as health (ADR 0054).
+    parked = data.get("parkedScaleSetCheck")
+    if not isinstance(parked, dict) or not parked.get("ok"):
+        failures.append(f"parkedScaleSetCheck={parked!r}, want a published pass")
+    if data.get("parkedScaleSetsAuditedAt") is not None or data.get("parkedScaleSets"):
+        failures.append(f"an observe daemon audited scale sets: {data.get('parkedScaleSets')!r}")
+
     # Every profile is reported with a count, so an empty list is not the
     # expectation; a node with no executor holds no instance of any profile.
     held = [row for row in data.get("instances") or [] if row.get("count")]
@@ -100,6 +110,7 @@ def main(path: str) -> int:
     print(f'  load            {pressure.get("loadAverage")}')
     print(f'  swap used       {pressure.get("swapUsedMiB")} MiB')
     print(f'  policy          {data["policy"]["policyDigest"][:12]}')
+    print('  parked sets     not audited (observe holds no authority to audit)')
     return 0
 
 

@@ -302,6 +302,37 @@ healthy from the node's own chair (issue #292). The session's observations were
 was `0`, so the queue SLO had nothing to breach. `fleet doctor` returned PASS.
 The only observer who could notice was on GitHub's side: a human, hours later.
 
+`parkedScaleSets`, `parkedScaleSetsAuditedAt` and `parkedScaleSetCheck` report
+the runner scale sets that exist on GitHub for a configured scope and that this
+node does not serve:
+
+```json
+"parkedScaleSets": [
+  {"scope": "suuudokuuu", "id": 7, "name": "trf-sudoku-builder-studio",
+   "assigned": 2, "busy": 2, "observedAt": "2026-08-04T18:30:00Z"}],
+"parkedScaleSetsAuditedAt": "2026-08-04T18:30:00Z",
+"parkedScaleSetCheck": {"ok": false, "reasons": [
+  "suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be; cancel and re-run the workflow, or bind the set on a node"]}
+```
+
+All three are additive and absent on a daemon that predates them, which is what
+`EffectiveParkedScaleSetCheck()` exists for. **`parkedScaleSetsAuditedAt` is
+load-bearing by its absence**: it is nil until an audit completes, and an
+observe-mode daemon never audits at all, so a consumer must render its absence as
+*not audited* rather than as health. A check that cannot tell "nothing is parked"
+from "nobody looked" is the PASS that stood over issue #164 for 4.5 hours while
+two jobs sat assigned to a scale set no daemon polled.
+
+`parkedScaleSets` carries only the PARKED sets, not an inventory: a set this node
+serves is already described by `scopeQueues`, the observations and every other
+check. A parked set holding nothing is still listed and is not a finding — under
+[ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) it is very often a
+sibling node's, and this node cannot read a sibling's configuration
+([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md)). The same
+counts are exported as `fleet_parked_scale_set_assigned_jobs` and
+`fleet_parked_scale_set_busy_runners`, labelled by scope and scale set; a node
+that has not audited exports neither series at all.
+
 `admissionCheck` says whether this node is taking work at all, and when it is not,
 which guardrail refused it and by how much:
 

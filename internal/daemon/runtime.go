@@ -29,6 +29,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/scalesetaudit"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
@@ -731,6 +732,18 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					controls[key] = lifecycle.SourceBinding{StoreKey: binding.StoreKey, Source: source}
 				}
 			}
+			// Only the authority audits. A shadow or canary process holds no
+			// mandate over the fleet's scale sets, and an observe node has no
+			// GitHub App authority at all -- it would publish an audit it cannot
+			// perform, which is worse than the silence it replaces.
+			if auditInterval := cfg.GitHub.ParkedScaleSetAuditInterval(); opts.Mode == reconcile.Authority &&
+				auditInterval > 0 && len(cfg.GitHub.Scopes) > 0 {
+				ingesters = append(ingesters, &parkedScaleSetAuditor{config: cfg, key: privateKey,
+					open: func(admin githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) {
+						return githubscaleset.NewAuditor(admin)
+					},
+					version: opts.Version, interval: auditInterval, health: health, now: d.now})
+			}
 		}
 		if canonicalRESTInventory {
 			for scope, scopeBindings := range bindingsByScope(bindings) {
@@ -1326,6 +1339,81 @@ type boundIngester struct {
 	// caused on purpose — which is how a deliberate withdrawal would come to
 	// look like the broker outage it is not.
 	yield *sessionYieldState
+}
+
+// parkedScaleSetAuditor asks GitHub, on a slow cadence, which scale sets exist
+// for this node's scopes and publishes the ones this node does not serve.
+//
+// It is an ingester because that is the loop shape the daemon already has for a
+// paced remote read, and it paces itself for the same reason the REST queue
+// ingester does. The cadence is minutes: the condition is a set holding assigned
+// jobs with nothing polling it, which lasted 4.5 hours in issue #164 and six
+// hours on the studio's withdrawn `linux-1x2` set on 2026-09-13. It costs one
+// admin-API listing per scope plus one read per parked set, so a fast cadence
+// would spend the rate limit the sessions need and buy nothing (ADR 0054).
+//
+// It never wakes the scheduler: nothing it learns is this node's demand. A
+// parked set is by construction a set this node does not serve.
+type parkedScaleSetAuditor struct {
+	config   config.Config
+	key      *githubscaleset.PrivateKeySecret
+	open     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error)
+	version  string
+	interval time.Duration
+	health   *telemetry.Health
+	now      func() time.Time
+	next     time.Time
+}
+
+func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
+	if a == nil || a.open == nil || a.now == nil || a.health == nil || a.interval <= 0 {
+		return operations.ErrInvalid
+	}
+	now := a.now().UTC()
+	if wait := a.next.Sub(now); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+		now = a.now().UTC()
+	}
+	// `now` is the START of this audit, and it schedules the next one: the cadence
+	// is measured between attempts, so a slow or failed audit cannot push the
+	// following one out by its own duration.
+	a.next = now.Add(a.interval)
+	result, err := scalesetaudit.Run(ctx, scalesetaudit.Request{Config: a.config, Key: a.key, Open: a.open,
+		Version: a.version, Now: func() time.Time { return now }})
+	if err != nil {
+		// An audit that failed publishes nothing. The last completed audit keeps
+		// standing, and a node that has never completed one keeps reading "not
+		// audited": inventing an empty parked set here would report "no set is
+		// parked" on the evidence of a failed request.
+		return err
+	}
+	// The PUBLISHED timestamp is when the audit completed, which is what the
+	// status document's `parkedScaleSetsAuditedAt` promises. Publishing the start
+	// instant instead would understate the age of a reading by however long
+	// GitHub took to produce it -- the one direction that matters, because this
+	// field is read to decide whether the audit is current.
+	return a.health.SetParkedScaleSets(parkedScaleSetMetrics(result), a.now().UTC())
+}
+
+// parkedScaleSetMetrics keeps only the parked sets. A bound set is already
+// reported by every queue, observation and check this node publishes, and
+// carrying it here would turn a finding-shaped section into an inventory.
+func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleSetMetric {
+	rows := make([]telemetry.ParkedScaleSetMetric, 0, len(result.ScaleSets))
+	for _, set := range result.ScaleSets {
+		if set.State != scalesetaudit.Parked {
+			continue
+		}
+		rows = append(rows, telemetry.ParkedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name,
+			Assigned: set.Assigned, Busy: set.Busy, ObservedAt: set.ObservedAt})
+	}
+	return rows
 }
 
 type restQueueIngester struct {

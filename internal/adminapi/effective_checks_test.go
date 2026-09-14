@@ -16,6 +16,7 @@ func TestEffectiveChecksTreatAnAbsentCheckAsAPass(t *testing.T) {
 		"update drain":  older.EffectiveUpdateDrainCheck(),
 		"admission":     older.EffectiveAdmissionCheck(),
 		"ingest":        older.EffectiveIngestCheck(),
+		"parked sets":   older.EffectiveParkedScaleSetCheck(),
 	} {
 		if !check.OK {
 			t.Fatalf("%s: an unpublished check failed", name)
@@ -34,12 +35,13 @@ func TestEffectiveChecksTreatAnAbsentCheckAsAPass(t *testing.T) {
 func TestEffectiveChecksReturnAPublishedCheckUnchanged(t *testing.T) {
 	failing := Check{Reasons: []string{"the node said so"}}
 	published := Status{
-		ReservationCheck:  &failing,
-		GuestConsoleCheck: &failing,
-		SessionYieldCheck: &failing,
-		UpdateDrainCheck:  &failing,
-		AdmissionCheck:    &failing,
-		IngestCheck:       &failing,
+		ReservationCheck:    &failing,
+		GuestConsoleCheck:   &failing,
+		SessionYieldCheck:   &failing,
+		UpdateDrainCheck:    &failing,
+		AdmissionCheck:      &failing,
+		IngestCheck:         &failing,
+		ParkedScaleSetCheck: &failing,
 	}
 	for name, check := range map[string]Check{
 		"reservation":   published.EffectiveReservationCheck(),
@@ -48,6 +50,7 @@ func TestEffectiveChecksReturnAPublishedCheckUnchanged(t *testing.T) {
 		"update drain":  published.EffectiveUpdateDrainCheck(),
 		"admission":     published.EffectiveAdmissionCheck(),
 		"ingest":        published.EffectiveIngestCheck(),
+		"parked sets":   published.EffectiveParkedScaleSetCheck(),
 	} {
 		if check.OK {
 			t.Fatalf("%s: a reported failure was softened into a pass", name)

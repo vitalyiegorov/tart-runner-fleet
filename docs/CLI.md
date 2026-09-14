@@ -17,11 +17,12 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `operations discharge` | Close one dead-lettered cleanup an operator has established can never complete; optionally retire the phantom instance row and its stopped VM |
 | `observations` | Scheduler observation freshness and age |
 | `health` | Liveness and readiness probes |
-| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, policy declaration, and metrics checks |
+| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, parked scale sets, policy declaration, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
 | `config policy PATH...` | Print the load-bearing policy one node runs with; with more than one path, the keys on which they disagree |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
+| `scale-sets audit --config PATH` | Read the scale sets GitHub holds for each configured scope and classify each as bound or parked; a parked set holding work exits 5 |
 | `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
 | `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
 | `version` | CLI build version |
@@ -138,6 +139,45 @@ rejected.
 - Tables use compact ages for reading; automation must use numeric age fields.
 - No token, private key, JIT configuration, operation payload, or unbounded
   backend error is part of the API.
+
+### Auditing the scale sets GitHub holds
+
+`scale-sets audit` is the read-only answer to a scale set that exists on GitHub
+and that no daemon polls. GitHub routes a queued job to exactly one matching set,
+marks it assigned, and then offers it to nobody else — so a parked set holding
+work is work that will never run, and no signal a node publishes about the sets
+it *serves* can see it ([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md),
+issue #164).
+
+```sh
+fleet scale-sets audit --config ./state/fleet.json
+fleet scale-sets audit --config ./state/fleet.json --output json
+```
+
+```
+suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
+suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idle=0
+```
+
+| Exit | Meaning |
+| ---: | --- |
+| 0 | Every scale set GitHub holds is either bound here or parked and holding nothing |
+| 4 | The audit was unavailable or could not produce a trustworthy result — GitHub unreachable, the App credential missing, or an answer too uncertain to classify. **Never read as a pass** |
+| 5 | A parked set holds assigned jobs or busy runners |
+
+**Parked here does not mean parked everywhere.** Under
+[ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) a sibling node may
+legitimately own the set, and this command cannot read a sibling's
+configuration — so a parked set holding nothing is informational and never a
+finding. A parked set holding work is reported regardless, because something must
+be listening to it and, from here, nothing is known to be.
+
+The cost is bounded: one listing per scope, plus one read per parked set whose
+listing carried no statistics. There is no polling loop. The authority daemon
+runs the same audit every `github.parkedScaleSetAuditMinutes` (default 15, `0`
+disables) and publishes it as the `parked scale sets` doctor row, the
+`parkedScaleSets` status section and the `fleet_parked_scale_set_assigned_jobs`
+and `fleet_parked_scale_set_busy_runners` metrics.
 
 ## Exit codes
 
