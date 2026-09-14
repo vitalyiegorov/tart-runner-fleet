@@ -144,7 +144,9 @@ func TestTheTapLeavesEveryOtherRequestAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	tap.beforeRequest(nil, byID, 0)
-	tap.afterResponse(nil, jsonResponse(byID, http.StatusOK, `{"id":7}`))
+	byIDResponse := jsonResponse(byID, http.StatusOK, `{"id":7}`)
+	defer func() { _ = byIDResponse.Body.Close() }()
+	tap.afterResponse(nil, byIDResponse)
 	if _, observed := tap.take(); observed {
 		t.Fatal("a by-id read is not the group listing")
 	}
