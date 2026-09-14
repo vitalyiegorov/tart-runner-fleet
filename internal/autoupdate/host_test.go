@@ -23,6 +23,7 @@ type fakeCommand struct {
 	bootstrapFailures int
 	launchPrint       string
 	printFailures     int
+	systemdShow       string
 	fail              map[string]error
 }
 
@@ -39,6 +40,9 @@ func (c *fakeCommand) Run(_ context.Context, name string, args ...string) ([]byt
 			return []byte(c.current), c.currentErr
 		}
 		return []byte(c.ready), c.readyErr
+	}
+	if strings.Contains(call, "systemctl --user show") {
+		return []byte(c.systemdShow), nil
 	}
 	if strings.Contains(call, "launchctl print") {
 		if c.printFailures > 0 {

@@ -23,7 +23,7 @@ configuration, it never talks to another node, and GitHub's one-session-per-scal
 | Shadow, canary, authority | **Only with an `executor` block.** Without one the daemon refuses to start: those modes exist to act on a machine that has told it no execution technology. |
 | Provision runners | **Yes, in containers.** One rootless, unprivileged, ephemeral Podman container per job, never reused. Configure it in step 4a. |
 | Run macOS guests | **No, ever.** Apple's Virtualization framework is macOS-only. |
-| `fleet update apply-latest` | **No.** The release transaction drives `launchctl` and `plutil`. It refuses with a message naming the gap; use the manual bridge below. |
+| `fleet update apply-latest` | **Yes, once the node is adopted.** The release transaction drives `systemctl --user` on this node (ADR 0051). Step 7 enrols it; the manual bridge is the fallback. |
 
 Bring a node up in observe mode **first**, with no `executor` block and no
 scopes. That is Part A of `docs/MULTI_NODE_PLAN.md`'s node B bring-up, and it is
@@ -219,10 +219,11 @@ systemctl --user status tart-runner-fleet.service
 
 **Install the controller unit only.** The rendered
 `tart-runner-fleet-updater.service`, `tart-runner-fleet-updater.timer`, and
-`tart-runner-fleet-updater-handoff.service` are the shape the automatic updater
-will take, and they are rendered so that a node never needs a hand-written unit
-later — but `fleet update apply-latest` still drives a launchd transaction and
-refuses on this node. Do not enable the timer; use the manual bridge in step 7.
+`tart-runner-fleet-updater-handoff.service` are the automatic updater, and step
+7's `fleet update adopt` is what installs and enables them — from the release it
+adopts, against a node it has proven ready. Do not enable the timer by hand
+here: a timer armed before the node has a recorded generation has nothing to
+update from.
 
 The controller unit restarts only on failure, stops within thirty seconds,
 umasks to `0077`, runs at low CPU and I/O priority, and stops the controller
@@ -282,10 +283,27 @@ every commit:
 Reboot once and repeat. Lingering plus `WantedBy=default.target` is what makes
 the unit come back without a login.
 
-## 7. Installing a newer release, by hand
+## 7. Installing a newer release
 
-Until the release transaction speaks `systemctl`, a Linux node adopts a new
-generation with the same steps a macOS node's manual bridge uses. Do it while
+Enrol the node once, with the same command a macOS node uses, and it brings
+itself forward every five minutes after that:
+
+```sh
+"$RELEASE_DIR/fleet" update adopt \
+  --release-dir "$RELEASE_DIR" \
+  --mode observe \
+  --confirm adopt-current-generation
+```
+
+Adoption refuses unless the unit already running names exactly that release
+directory and mode, and unless the daemon reports itself ready as that version.
+It then installs and enables `tart-runner-fleet-updater.timer`. Verify with
+`systemctl --user list-timers tart-runner-fleet-updater.timer`.
+
+### By hand, if the timer is not installed
+
+A node that has not been adopted takes a new generation with the same steps a
+macOS node's manual bridge uses. Do it while
 the node is quiescent — no queued jobs, no live instances, no retrying
 operations — which on an observe-mode node with no scopes is always true.
 

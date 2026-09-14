@@ -290,7 +290,7 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 		fmt.Fprintf(stderr, "unsafe update: require --confirm %s\n", wantConfirm)
 		return exitUnsafe
 	}
-	host, err := autoupdate.NewLocalHost(autoupdate.LocalHostConfig{RootDir: *root, StateDir: *stateDir,
+	host, err := autoupdate.NewHost(autoupdate.LocalHostConfig{RootDir: *root, StateDir: *stateDir,
 		LaunchAgentsDir: *launchAgentsDir, Domain: *domain, Repository: *repository, UpdateInterval: *interval,
 		ReadyAttempts: updateReadyAttempts, ReadyDelay: updateReadyDelay}, deps.command)
 	if err != nil {
@@ -357,7 +357,7 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 // took. It reports nothing on failure: this is an errand performed on the way to
 // updating, and failing an update because a stale directory is busy would turn a
 // disk-space problem into an availability one.
-func pruneReleases(ctx context.Context, host *autoupdate.LocalHost, root string, stdout io.Writer) {
+func pruneReleases(ctx context.Context, host autoupdate.ManagedHost, root string, stdout io.Writer) {
 	current, err := host.Current(ctx)
 	if err != nil {
 		return

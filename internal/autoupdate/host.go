@@ -37,23 +37,19 @@ var (
 	ErrChecksum = errors.New("autoupdate: release checksum mismatch")
 	ErrBusy     = errors.New("autoupdate: fleet is not quiescent")
 	// ErrUnsupervised is returned when this node's service manager is not one
-	// this transaction can drive. See launchdDomain.
-	ErrUnsupervised = errors.New("autoupdate: the release transaction is launchd-only, and this node names no launchd domain")
+	// this transaction can drive. See launchdDomain and systemdUserDomain.
+	ErrUnsupervised = errors.New("autoupdate: this node names no supervisor domain this transaction can drive")
 	safeVersion     = regexp.MustCompile(`^v[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$`)
-	// launchdDomain is the set of per-user launchd targets a release transaction
-	// may address, and it doubles as this package's platform gate. Activation
-	// lints with `plutil` and swaps generations with `launchctl bootout` /
-	// `bootstrap` / `kickstart`, none of which exist on ADR 0034's Linux node,
-	// whose service manager is `systemd --user` and whose domain
-	// (hostpaths.Layout.ServiceDomain) is the bare word `user`.
+	// launchdDomain is the set of per-user launchd targets a LocalHost may
+	// address. Its transaction lints with `plutil` and swaps generations with
+	// `launchctl bootout` / `bootstrap` / `kickstart`, none of which exist on
+	// ADR 0034's Linux node; that node names systemdUserDomain and is driven by
+	// the twin transaction in systemd.go, which NewHost selects.
 	//
-	// Matching the domain rather than testing runtime.GOOS keeps the gate a
+	// Matching the domain rather than testing runtime.GOOS keeps the choice a
 	// property of the target being addressed, which is what actually decides
 	// whether these commands can work, and keeps this package free of a
-	// platform switch its whole test suite would then have to fake. Issue #138
-	// renders the Linux node's systemd units from its release and documents the
-	// manual `systemctl --user` bridge; the systemd release transaction is the
-	// follow-up that retires this gate.
+	// platform switch its whole test suite would then have to fake.
 	launchdDomain = regexp.MustCompile(`^(system|(gui|user|pid)/[0-9]+)$`)
 )
 
@@ -100,19 +96,30 @@ func (h *LocalHost) Adopt(ctx context.Context, candidate Generation) error {
 	return h.Commit(ctx, candidate)
 }
 
-func NewLocalHost(cfg LocalHostConfig, command Command) (*LocalHost, error) {
+// normalizeHostConfig applies every validation a release transaction needs
+// regardless of which supervisor it drives, so each constructor is left with
+// only its own domain gate and the two cannot drift apart.
+func normalizeHostConfig(cfg LocalHostConfig, command Command) (LocalHostConfig, error) {
 	if command == nil || !filepath.IsAbs(cfg.RootDir) || !filepath.IsAbs(cfg.StateDir) || !filepath.IsAbs(cfg.LaunchAgentsDir) ||
 		!safeRepository.MatchString(cfg.Repository) || cfg.ReadyAttempts <= 0 || cfg.ReadyDelay < 0 {
-		return nil, ErrInvalidGeneration
-	}
-	if !launchdDomain.MatchString(strings.TrimSpace(cfg.Domain)) {
-		return nil, fmt.Errorf("%w: %q", ErrUnsupervised, cfg.Domain)
+		return LocalHostConfig{}, ErrInvalidGeneration
 	}
 	if cfg.UpdateInterval == 0 {
 		cfg.UpdateInterval = 5 * time.Minute
 	}
 	if cfg.UpdateInterval < time.Minute || cfg.UpdateInterval > 24*time.Hour {
-		return nil, ErrInvalidGeneration
+		return LocalHostConfig{}, ErrInvalidGeneration
+	}
+	return cfg, nil
+}
+
+func NewLocalHost(cfg LocalHostConfig, command Command) (*LocalHost, error) {
+	cfg, err := normalizeHostConfig(cfg, command)
+	if err != nil {
+		return nil, err
+	}
+	if !launchdDomain.MatchString(strings.TrimSpace(cfg.Domain)) {
+		return nil, fmt.Errorf("%w: %q", ErrUnsupervised, cfg.Domain)
 	}
 	return &LocalHost{rootDir: filepath.Clean(cfg.RootDir), stateDir: filepath.Clean(cfg.StateDir),
 		launchAgentsDir: filepath.Clean(cfg.LaunchAgentsDir), domain: cfg.Domain, repository: cfg.Repository,
@@ -120,8 +127,43 @@ func NewLocalHost(cfg LocalHostConfig, command Command) (*LocalHost, error) {
 		readyAttempts:  cfg.ReadyAttempts, readyDelay: cfg.ReadyDelay, command: command}, nil
 }
 
+// ManagedHost is a Host that a node can also be enrolled into and whose
+// periodic updater can be handed a new generation: the whole surface
+// `fleet update` drives.
+type ManagedHost interface {
+	Host
+	Adopt(context.Context, Generation) error
+	FinishUpdaterHandoff(context.Context, Generation) error
+}
+
+// NewHost builds the release transaction for the supervisor this node names.
+// The domain decides, rather than runtime.GOOS, because the domain is what the
+// supervisor commands are addressed to: a macOS node names a launchd domain and
+// a Linux node names systemdUserDomain (hostpaths.Layout.ServiceDomain).
+func NewHost(cfg LocalHostConfig, command Command) (ManagedHost, error) {
+	if strings.TrimSpace(cfg.Domain) == systemdUserDomain {
+		host, err := NewSystemdHost(cfg, command)
+		if err != nil {
+			return nil, err
+		}
+		return host, nil
+	}
+	host, err := NewLocalHost(cfg, command)
+	if err != nil {
+		return nil, err
+	}
+	return host, nil
+}
+
 func (h *LocalHost) Current(context.Context) (Generation, error) {
-	file, err := os.Open(filepath.Join(h.stateDir, InstalledGenerationFile)) // #nosec G304 -- fixed state path.
+	return installedGeneration(h.stateDir)
+}
+
+// installedGeneration reads the generation a node has durably promoted. Both
+// transactions record the same file in the same state directory, because it is
+// what `fleet status` and the next update read, not a supervisor artifact.
+func installedGeneration(stateDir string) (Generation, error) {
+	file, err := os.Open(filepath.Join(stateDir, InstalledGenerationFile)) // #nosec G304 -- fixed state path.
 	if err != nil {
 		return Generation{}, err
 	}
@@ -139,22 +181,31 @@ func (h *LocalHost) Current(context.Context) (Generation, error) {
 }
 
 func (h *LocalHost) Validate(ctx context.Context, candidate Generation) error {
+	// A LocalHost is launchd-supervised by construction (see launchdDomain), so
+	// the definition its generation must carry is the LaunchAgent.
+	return validateCandidate(ctx, h.command, h.rootDir, candidate, authorityServiceDefinition)
+}
+
+// validateCandidate proves a candidate is a complete generation of this node's
+// immutable root before any supervisor is touched: the right shape, the release
+// it claims to be, a verified executable and boot definition, and a
+// configuration the candidate's own binary accepts. serviceDefinition is the
+// one part that differs per node type (Target.ServiceDefinition).
+func validateCandidate(ctx context.Context, command Command, rootDir string, candidate Generation, serviceDefinition string) error {
 	if err := candidate.validate(); err != nil {
 		return err
 	}
-	if candidate.Mode == "canary" || !safeVersion.MatchString(candidate.Version) || filepath.Clean(candidate.ReleaseDir) != filepath.Join(h.rootDir, "releases", candidate.Version) {
+	if candidate.Mode == "canary" || !safeVersion.MatchString(candidate.Version) || filepath.Clean(candidate.ReleaseDir) != filepath.Join(rootDir, "releases", candidate.Version) {
 		return ErrInvalidGeneration
 	}
 	manifest, err := os.ReadFile(filepath.Join(candidate.ReleaseDir, "RELEASE_VERSION")) // #nosec G304 -- validated immutable release path.
 	if err != nil || strings.TrimSpace(string(manifest)) != candidate.Version {
 		return fmt.Errorf("release identity: %w", ErrInvalidGeneration)
 	}
-	// A LocalHost is launchd-supervised by construction (see launchdDomain), so
-	// the definition its generation must carry is the LaunchAgent.
-	if err := verifyChecksums(candidate.ReleaseDir, authorityServiceDefinition); err != nil {
+	if err := verifyChecksums(candidate.ReleaseDir, serviceDefinition); err != nil {
 		return err
 	}
-	if _, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
+	if _, err := command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "config", "validate", "--mode", candidate.Mode, candidate.ConfigPath); err != nil {
 		return fmt.Errorf("candidate config validation: %w", err)
 	}
 	return nil
@@ -208,6 +259,11 @@ type updateJournal struct {
 	BackupPlist   string     `json:"backupPlist"`
 	BackupUpdater string     `json:"backupUpdater,omitempty"`
 	HadUpdater    bool       `json:"hadUpdater"`
+	// BackupTimer and HadTimer are the systemd transaction's half: launchd
+	// carries its schedule inside the updater job, systemd keeps it in a
+	// separate timer unit that rollback must restore or remove with it.
+	BackupTimer string `json:"backupTimer,omitempty"`
+	HadTimer    bool   `json:"hadTimer,omitempty"`
 }
 
 func (h *LocalHost) Prepare(ctx context.Context, current, candidate Generation) error {
@@ -251,16 +307,10 @@ func (h *LocalHost) Prepare(ctx context.Context, current, candidate Generation) 
 	if err := atomicWrite(backup, oldPlist, 0o600); err != nil {
 		return err
 	}
-	updaterPath := filepath.Join(h.launchAgentsDir, UpdaterPlist)
 	updaterBackup := filepath.Join(h.stateDir, updateBackupUpdaterFile)
-	hadUpdater := false
-	if updater, readErr := os.ReadFile(updaterPath); readErr == nil { // #nosec G304 -- fixed LaunchAgents path.
-		if writeErr := atomicWrite(updaterBackup, updater, 0o600); writeErr != nil {
-			return writeErr
-		}
-		hadUpdater = true
-	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
+	hadUpdater, err := backupIfPresent(filepath.Join(h.launchAgentsDir, UpdaterPlist), updaterBackup)
+	if err != nil {
+		return err
 	}
 	journal, _ := json.Marshal(updateJournal{Current: current, Candidate: candidate, PreparedPlist: prepared,
 		BackupPlist: backup, BackupUpdater: updaterBackup, HadUpdater: hadUpdater})
@@ -290,9 +340,16 @@ func (h *LocalHost) Activate(ctx context.Context, candidate Generation) error {
 }
 
 func (h *LocalHost) Ready(ctx context.Context, candidate Generation) error {
+	return awaitReady(ctx, h.command, candidate, h.readyAttempts, h.readyDelay)
+}
+
+// awaitReady polls the candidate's own executable until the daemon it started
+// reports itself ready as exactly that version and mode. A supervisor reports
+// success as soon as a process exists, which is not the same claim.
+func awaitReady(ctx context.Context, command Command, candidate Generation, attempts int, delay time.Duration) error {
 	var last error
-	for attempt := 0; attempt < h.readyAttempts; attempt++ {
-		body, err := h.command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", candidate.Endpoint)
+	for attempt := 0; attempt < attempts; attempt++ {
+		body, err := command.Run(ctx, filepath.Join(candidate.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", candidate.Endpoint)
 		if err == nil {
 			var status struct {
 				Data struct {
@@ -309,11 +366,11 @@ func (h *LocalHost) Ready(ctx context.Context, candidate Generation) error {
 			err = errors.New("candidate identity or readiness mismatch")
 		}
 		last = err
-		if attempt+1 < h.readyAttempts {
+		if attempt+1 < attempts {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(h.readyDelay):
+			case <-time.After(delay):
 			}
 		}
 	}
@@ -359,18 +416,8 @@ func (h *LocalHost) Commit(ctx context.Context, candidate Generation) error {
 // exact candidate and cleared its transaction, so a failed commit or rollback
 // cannot strand launchd on the wrong executable.
 func (h *LocalHost) FinishUpdaterHandoff(ctx context.Context, candidate Generation) error {
-	if err := candidate.validate(); err != nil || !safeVersion.MatchString(candidate.Version) ||
-		filepath.Clean(candidate.ReleaseDir) != filepath.Join(h.rootDir, "releases", candidate.Version) {
-		return ErrInvalidGeneration
-	}
-	if _, err := os.Stat(filepath.Join(h.stateDir, UpdateJournalFile)); err == nil {
-		return ErrBusy
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := requireCommittedGeneration(ctx, h, h.rootDir, h.stateDir, candidate); err != nil {
 		return err
-	}
-	current, err := h.Current(ctx)
-	if err != nil || current != candidate {
-		return ErrInvalidGeneration
 	}
 	updaterPath := filepath.Join(h.launchAgentsDir, UpdaterPlist)
 	updater, err := os.ReadFile(updaterPath) // #nosec G304 -- fixed LaunchAgents path.
@@ -389,6 +436,26 @@ func (h *LocalHost) FinishUpdaterHandoff(ctx context.Context, candidate Generati
 	loaded, err := h.command.Run(ctx, "launchctl", "print", updaterLabel)
 	if err != nil || !launchdNamesProgram(string(loaded), filepath.Join(candidate.ReleaseDir, "fleet")) {
 		return fmt.Errorf("verify automatic updater generation: %w", ErrInvalidGeneration)
+	}
+	return nil
+}
+
+// requireCommittedGeneration refuses a handoff until Commit has durably
+// published this exact candidate and cleared its transaction, so a failed
+// commit or a rollback cannot strand a supervisor on the wrong executable.
+func requireCommittedGeneration(ctx context.Context, host Host, rootDir, stateDir string, candidate Generation) error {
+	if err := candidate.validate(); err != nil || !safeVersion.MatchString(candidate.Version) ||
+		filepath.Clean(candidate.ReleaseDir) != filepath.Join(rootDir, "releases", candidate.Version) {
+		return ErrInvalidGeneration
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, UpdateJournalFile)); err == nil {
+		return ErrBusy
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	current, err := host.Current(ctx)
+	if err != nil || current != candidate {
+		return ErrInvalidGeneration
 	}
 	return nil
 }
@@ -427,7 +494,14 @@ func launchdNamesProgram(output, program string) bool {
 }
 
 func (h *LocalHost) ensureQuiescent(ctx context.Context, current Generation) error {
-	body, err := h.command.Run(ctx, filepath.Join(current.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", current.Endpoint)
+	return ensureQuiescent(ctx, h.command, current)
+}
+
+// ensureQuiescent is ADR 0011's gate: a generation is never swapped out from
+// under live work. It is shared by both transactions because what counts as
+// live work is a property of the fleet, never of the supervisor.
+func ensureQuiescent(ctx context.Context, command Command, current Generation) error {
+	body, err := command.Run(ctx, filepath.Join(current.ReleaseDir, "fleet"), "status", "--require-ready", "--output", "json", "--endpoint", current.Endpoint)
 	if err != nil {
 		return err
 	}
@@ -552,6 +626,20 @@ func (h *LocalHost) Rollback(ctx context.Context, current Generation) error {
 	return h.clearTransaction()
 }
 
+// backupIfPresent copies a supervisor definition aside for rollback and reports
+// whether there was one. A node adopting its first generation has no updater
+// installed yet, and its absence is the state rollback must restore.
+func backupIfPresent(source, destination string) (bool, error) {
+	body, err := os.ReadFile(source) // #nosec G304 -- caller-owned service definition path.
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, atomicWrite(destination, body, 0o600)
+}
+
 // bootstrapService absorbs the short unload-to-load race launchd can expose
 // after bootout. Retrying this single idempotent boundary is safe; the rest of
 // activation and rollback remains fail-closed and is never replayed.
@@ -579,7 +667,11 @@ func (h *LocalHost) bootstrapService(ctx context.Context, plist string) error {
 }
 
 func (h *LocalHost) readJournal() (updateJournal, error) {
-	body, err := os.ReadFile(filepath.Join(h.stateDir, UpdateJournalFile)) // #nosec G304 -- fixed state path.
+	return readUpdateJournal(h.stateDir)
+}
+
+func readUpdateJournal(stateDir string) (updateJournal, error) {
+	body, err := os.ReadFile(filepath.Join(stateDir, UpdateJournalFile)) // #nosec G304 -- fixed state path.
 	if err != nil {
 		return updateJournal{}, err
 	}
@@ -591,10 +683,20 @@ func (h *LocalHost) readJournal() (updateJournal, error) {
 }
 
 func (h *LocalHost) clearTransaction() error {
-	// Validate every cleanup target before removing any rollback evidence, then
-	// remove the journal last. The handoff treats journal absence as the durable
-	// commit marker and must never observe it before cleanup is complete.
-	paths := []string{filepath.Join(h.stateDir, updateBackupFile), filepath.Join(h.stateDir, updateBackupUpdaterFile), filepath.Join(h.stateDir, UpdateJournalFile)}
+	return clearTransaction(h.stateDir, updateBackupFile, updateBackupUpdaterFile)
+}
+
+// clearTransaction removes a finished transaction's rollback evidence. The
+// backups are named by the caller because each supervisor backs up its own
+// files, and the journal is always last: the handoff treats journal absence as
+// the durable commit marker and must never observe it before cleanup is
+// complete. Every target is validated before anything is removed.
+func clearTransaction(stateDir string, backups ...string) error {
+	paths := make([]string, 0, len(backups)+1)
+	for _, name := range backups {
+		paths = append(paths, filepath.Join(stateDir, name))
+	}
+	paths = append(paths, filepath.Join(stateDir, UpdateJournalFile))
 	for _, path := range paths {
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {

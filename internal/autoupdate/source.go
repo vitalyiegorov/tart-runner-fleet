@@ -54,7 +54,7 @@ func (t Target) ServiceDefinition() string {
 	if t.OS == "darwin" {
 		return authorityServiceDefinition
 	}
-	return "tart-runner-fleet-authority.service"
+	return systemdAuthorityUnit
 }
 
 // LatestProductionRelease downloads and verifies GitHub's latest normal
