@@ -48,6 +48,12 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	fmt.Fprintf(output, "TART RUNNER FLEET — %s\n", state)
 	fmt.Fprintf(output, "controller %s  mode %s  host %s  revision %d\n", status.Data.ControllerVersion,
 		status.Data.ControllerMode, status.Data.HostMode, status.Revision)
+	// One line for the configuration this node is running with, so two nodes can
+	// be compared at a glance: equal digests are the same policy, and unequal ones
+	// are `fleet config policy` away from naming the key (ADR 0053).
+	if policy := status.Data.EffectivePolicy(); policy.Digest != "" {
+		fmt.Fprintf(output, "policy %s\n", shortDigest(policy.Digest))
+	}
 	if !status.Data.Ready.OK {
 		fmt.Fprintf(output, "blocked: %s\n", joinReasons(status.Data.Ready))
 		// A node that is ticking but not admitting is not a broken node, and ADR

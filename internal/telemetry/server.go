@@ -272,6 +272,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
+			Policy:       policyRow(snapshot),
 			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,
 			UpdateDrain: updateDrainRow(snapshot), UpdateDrainCheck: &updateDrainCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
@@ -369,6 +370,21 @@ func guestConsoleRow(snapshot Snapshot) *adminapi.GuestConsole {
 	}
 	return &adminapi.GuestConsole{BootsLinuxGuests: snapshot.GuestConsole.BootsLinuxGuests,
 		SerialLogConfigured: snapshot.GuestConsole.SerialLogConfigured}
+}
+
+// policyRow projects the node's own policy declaration into the versioned DTO.
+// Nil stays nil so a daemon that has declared nothing emits exactly the document
+// older clients already saw, and a nil field map is published as an empty object
+// rather than as JSON null.
+func policyRow(snapshot Snapshot) *adminapi.Policy {
+	if snapshot.Policy == nil {
+		return nil
+	}
+	fields := snapshot.Policy.Fields
+	if fields == nil {
+		fields = map[string]any{}
+	}
+	return &adminapi.Policy{Digest: snapshot.Policy.Digest, Fields: fields}
 }
 
 // stalledRows projects the operations that will not finish and the instances

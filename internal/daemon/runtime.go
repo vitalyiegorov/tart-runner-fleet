@@ -648,6 +648,12 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// serial sink was off on every node; publishing the posture once here is what
 	// makes the lapse a doctor finding instead of an operator's memory.
 	health.SetGuestConsole(guestConsole(runtime.GOOS, cfg))
+	// What this node is CONFIGURED with is a fact about the same file, published
+	// once for the same reason: until ADR 0053 the only way to read another node's
+	// load-bearing settings was to open its file over SSH, and one node running for
+	// weeks without `macosBurst.mixedPlatformAdmission` while its peer had it was
+	// invisible to every check either node ran (issue #304).
+	health.SetPolicy(nodePolicy(cfg))
 	coordinator := app.DemandCoordinator{Store: store, Now: d.now, StatisticsMaxAge: 2 * time.Minute,
 		StrictJobRouting: opts.Mode != reconcile.Canary, OnSequenceReset: reporter.reportSequenceReset,
 		Priority: cfg.Priority.Policy()}
@@ -861,6 +867,15 @@ func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
 func guestConsole(goos string, cfg config.Config) telemetry.GuestConsoleMetric {
 	return telemetry.GuestConsoleMetric{BootsLinuxGuests: goos == "darwin" && cfg.Linux.BaseVM != "",
 		SerialLogConfigured: cfg.Linux.SerialLogDirectory != ""}
+}
+
+// nodePolicy is this node's declaration of the load-bearing configuration it
+// runs with. The projection — what is load-bearing, and what is a credential or
+// a per-host path that must never appear — is the configuration package's
+// judgement; the daemon only carries it and its digest to telemetry.
+func nodePolicy(cfg config.Config) telemetry.PolicyMetric {
+	policy := config.ProjectPolicy(cfg)
+	return telemetry.PolicyMetric{Digest: policy.Digest(), Fields: policy.Fields()}
 }
 
 func profileCapabilities(cfg config.Config) map[domain.ProfileID][]string {
