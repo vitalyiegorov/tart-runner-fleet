@@ -291,6 +291,7 @@ itself forward every five minutes after that:
 ```sh
 "$RELEASE_DIR/fleet" update adopt \
   --release-dir "$RELEASE_DIR" \
+  --repo "$REPOSITORY" \
   --mode observe \
   --confirm adopt-current-generation
 ```

@@ -907,7 +907,7 @@ func makeSystemdUpdateRelease(t *testing.T, root string) string {
 		digest := sha256.Sum256(files[name])
 		entry := name
 		if name == "fleet" {
-			entry = autoupdate.CurrentTarget().ControllerAsset()
+			entry = autoupdate.SystemdTarget().ControllerAsset()
 		}
 		sums.WriteString(hex.EncodeToString(digest[:]) + "  " + entry + "\n")
 	}

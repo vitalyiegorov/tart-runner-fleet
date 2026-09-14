@@ -451,6 +451,7 @@ Require the timer and exact daemon readiness after every install or reboot,
 rather than treating process presence as health:
 
 ```sh
+ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/tart-runner-fleet"
 systemctl --user status tart-runner-fleet-authority.service
 systemctl --user list-timers tart-runner-fleet-updater.timer
 "$RELEASE_DIR/fleet" status --require-ready --output json \

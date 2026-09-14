@@ -328,6 +328,9 @@ func TestSystemdHostRefusesToPrepareWhatItCannotRenderFaithfully(t *testing.T) {
 		{name: "quoted configuration path", want: ErrInvalidGeneration, arrange: func(_ *testing.T, host *SystemdHost, candidate *Generation) {
 			candidate.ConfigPath = filepath.Join(host.stateDir, `fleet".json`)
 		}},
+		{name: "endpoint carrying a newline", want: ErrInvalidGeneration, arrange: func(_ *testing.T, host *SystemdHost, candidate *Generation) {
+			candidate.Endpoint = "unix://" + filepath.Join(host.stateDir, "fleetd.sock") + "\nExecStart=/bin/true"
+		}},
 		{name: "newline in release path", want: ErrInvalidGeneration, arrange: func(_ *testing.T, _ *SystemdHost, candidate *Generation) {
 			candidate.ReleaseDir += "\nExecStartPost=/bin/false"
 		}},

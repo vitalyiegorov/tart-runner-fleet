@@ -61,8 +61,8 @@ type LocalHostConfig struct {
 	RootDir, StateDir, LaunchAgentsDir string
 	Domain                             string
 	// Target names the platform whose controller a SystemdHost checks the
-	// release manifest for; empty means the platform this process runs on. A
-	// LocalHost is launchd's and is always the Apple node's.
+	// release manifest for; empty means SystemdTarget. A LocalHost is
+	// launchd's and is always the Apple node's.
 	Target         Target
 	Repository     string
 	UpdateInterval time.Duration
@@ -111,9 +111,6 @@ func normalizeHostConfig(cfg LocalHostConfig, command Command) (LocalHostConfig,
 	if cfg.UpdateInterval == 0 {
 		cfg.UpdateInterval = 5 * time.Minute
 	}
-	if cfg.Target == (Target{}) {
-		cfg.Target = CurrentTarget()
-	}
 	if cfg.UpdateInterval < time.Minute || cfg.UpdateInterval > 24*time.Hour {
 		return LocalHostConfig{}, ErrInvalidGeneration
 	}
@@ -125,11 +122,12 @@ func NewLocalHost(cfg LocalHostConfig, command Command) (*LocalHost, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !launchdDomain.MatchString(strings.TrimSpace(cfg.Domain)) {
+	domain := strings.TrimSpace(cfg.Domain)
+	if !launchdDomain.MatchString(domain) {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupervised, cfg.Domain)
 	}
 	return &LocalHost{rootDir: filepath.Clean(cfg.RootDir), stateDir: filepath.Clean(cfg.StateDir),
-		launchAgentsDir: filepath.Clean(cfg.LaunchAgentsDir), domain: cfg.Domain, repository: cfg.Repository,
+		launchAgentsDir: filepath.Clean(cfg.LaunchAgentsDir), domain: domain, repository: cfg.Repository,
 		updateInterval: cfg.UpdateInterval,
 		readyAttempts:  cfg.ReadyAttempts, readyDelay: cfg.ReadyDelay, command: command}, nil
 }

@@ -44,6 +44,12 @@ func CurrentTarget() Target { return Target{OS: runtime.GOOS, Arch: runtime.GOAR
 // appleTarget is the node type a launchd-supervised LocalHost always is.
 var appleTarget = Target{OS: "darwin", Arch: "arm64"}
 
+// SystemdTarget is the node type a systemd-supervised host verifies for by
+// default: a Linux node of this process's architecture. It is a function of
+// the supervisor, not of runtime.GOOS, so the same fixture proves the same
+// thing on a developer's Mac and on the Linux gate.
+func SystemdTarget() Target { return Target{OS: "linux", Arch: runtime.GOARCH} }
+
 // ArchiveName is the release asset that carries this target's generation.
 func (t Target) ArchiveName(version string) string {
 	return "tart-runner-fleet-" + version + "-" + t.OS + "-" + t.Arch + ".tar.gz"

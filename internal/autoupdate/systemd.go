@@ -57,6 +57,9 @@ func NewSystemdHost(cfg LocalHostConfig, command Command) (*SystemdHost, error) 
 	if err != nil {
 		return nil, err
 	}
+	if cfg.Target == (Target{}) {
+		cfg.Target = SystemdTarget()
+	}
 	if strings.TrimSpace(cfg.Domain) != systemdUserDomain {
 		return nil, fmt.Errorf("%w: %q", ErrUnsupervised, cfg.Domain)
 	}
@@ -307,7 +310,7 @@ func (h *SystemdHost) renderUnit(candidate Generation, name string) ([]byte, err
 	// systemd splits unquoted words itself, so every argument in the templates is
 	// quoted. Refusing a quote or a newline in the two paths this host
 	// substitutes is what makes that quoting unescapable.
-	if strings.ContainsAny(candidate.ReleaseDir, "\"\n") || strings.ContainsAny(candidate.ConfigPath, "\"\n") {
+	if strings.ContainsAny(candidate.ReleaseDir+candidate.ConfigPath+candidate.Endpoint, "\"\n") {
 		return nil, ErrInvalidGeneration
 	}
 	body, err := os.ReadFile(filepath.Join(candidate.ReleaseDir, name)) // #nosec G304 -- enumerated name under a validated release directory.

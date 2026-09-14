@@ -48,8 +48,8 @@ func TestLinuxControllerIsVerifiedAgainstItsSuffixedManifestEntry(t *testing.T) 
 	}
 }
 
-// The host a node constructs verifies for the platform it runs on unless the
-// caller names one; the fixtures name theirs so the tests are the same on
+// A systemd host verifies for a Linux node of this architecture unless the
+// caller names a target; the fixtures name theirs so the tests are the same on
 // every developer machine.
 func TestHostConfigDefaultsTheTargetToTheRunningPlatform(t *testing.T) {
 	root := t.TempDir()
@@ -59,8 +59,8 @@ func TestHostConfigDefaultsTheTargetToTheRunningPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if host.target != CurrentTarget() {
-		t.Fatalf("target=%+v want %+v", host.target, CurrentTarget())
+	if host.target != SystemdTarget() || host.target.OS != "linux" {
+		t.Fatalf("target=%+v want %+v", host.target, SystemdTarget())
 	}
 	cfg.Target = Target{OS: "linux", Arch: "arm64"}
 	host, err = NewSystemdHost(cfg, &fakeCommand{})
