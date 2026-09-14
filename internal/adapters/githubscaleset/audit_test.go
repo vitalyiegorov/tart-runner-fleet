@@ -349,3 +349,26 @@ func TestTheListSentinelIsURLSafe(t *testing.T) {
 		t.Fatalf("the sentinel must survive interpolation: %q", auditListName)
 	}
 }
+
+// GitHub's Actions service URL carries a per-tenant path prefix, so the
+// listing resource sits at `/<tenant>/_apis/runtime/runnerscalesets`, not at
+// the root the fakes above use. The first live audit returned "observation
+// uncertain" on every scope because the tap matched the path exactly.
+func TestTheListingIsRecognisedBehindGitHubsTenantPrefix(t *testing.T) {
+	req, err := http.NewRequestWithContext(listingContext(context.Background()), http.MethodGet,
+		"https://pipelinesghubeus2.actions.githubusercontent.com/Ab12Cd34/_apis/runtime/runnerscalesets?runnerGroupId=1&name="+auditListName, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !listingRequest(req) {
+		t.Fatal("a prefixed listing request was not recognised")
+	}
+	other, err := http.NewRequestWithContext(listingContext(context.Background()), http.MethodGet,
+		"https://pipelinesghubeus2.actions.githubusercontent.com/Ab12Cd34/_apis/runtime/runnerscalesets/7", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listingRequest(other) {
+		t.Fatal("a by-id read was taken for the listing")
+	}
+}
