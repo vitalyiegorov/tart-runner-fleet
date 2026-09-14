@@ -99,6 +99,17 @@ type Status struct {
 	// Absent from a daemon that predates it, which is why
 	// EffectiveAdmissionCheck exists.
 	AdmissionCheck *Check `json:"admissionCheck,omitempty"`
+	// ParkedScaleSets is what this node's last parked-scale-set audit found: the
+	// runner scale sets that exist on GitHub for a configured scope and that this
+	// node's configuration does not name (issue #164). ParkedScaleSetsAuditedAt is
+	// when that audit completed, and its ABSENCE is load-bearing -- it means no
+	// audit has ever run here, which is not the same as nothing being parked.
+	ParkedScaleSets          []ParkedScaleSet `json:"parkedScaleSets,omitempty"`
+	ParkedScaleSetsAuditedAt *time.Time       `json:"parkedScaleSetsAuditedAt,omitempty"`
+	// ParkedScaleSetCheck fails when a parked set holds assigned jobs or busy
+	// runners. Absent from a daemon that predates it, which is why
+	// EffectiveParkedScaleSetCheck exists.
+	ParkedScaleSetCheck *Check `json:"parkedScaleSetCheck,omitempty"`
 	// IngestCheck is an additive fleet.v1 field: a scale set GitHub has queued
 	// work for that this node's own broker session has not delivered (issue
 	// #292). Absent from a daemon that predates it.
@@ -359,6 +370,19 @@ func (s Status) EffectiveIngestCheck() Check {
 	return *s.IngestCheck
 }
 
+// EffectiveParkedScaleSetCheck reads the parked-scale-set check an older daemon
+// does not publish. Absence is a pass for the reason every additive check treats
+// it so: a controller that cannot audit has not reported a stranding. The
+// distinct state -- a daemon that publishes the check and has never run an audit
+// -- is carried by ParkedScaleSetsAuditedAt, which is nil until one completes,
+// and is rendered as "not audited" rather than as health.
+func (s Status) EffectiveParkedScaleSetCheck() Check {
+	if s.ParkedScaleSetCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.ParkedScaleSetCheck
+}
+
 // EffectiveSessionYieldCheck reads the yield check an older daemon does not
 // publish. Absence is a pass: a controller that cannot withdraw has not.
 func (s Status) EffectiveSessionYieldCheck() Check {
@@ -495,6 +519,22 @@ type ScopeQueue struct {
 	// GitHub shows queued here may legitimately be the sibling's to run
 	// (ADR 0034).
 	SharedLabels bool `json:"sharedLabels,omitempty"`
+}
+
+// ParkedScaleSet is one runner scale set that exists on GitHub for a configured
+// scope and that this node does not serve.
+//
+// Parked here does not mean parked everywhere: under ADR 0034 a sibling node may
+// legitimately own it, and this node cannot read a sibling's configuration. The
+// counts are what make a row actionable -- a parked set holding assigned jobs or
+// busy runners is work GitHub will offer to nobody else.
+type ParkedScaleSet struct {
+	Scope      string    `json:"scope"`
+	ScaleSetID int       `json:"id"`
+	Name       string    `json:"name,omitempty"`
+	Assigned   int       `json:"assigned"`
+	Busy       int       `json:"busy"`
+	ObservedAt time.Time `json:"observedAt"`
 }
 
 // QueueTier is one priority tier's share of a scope queue. `tier` is the

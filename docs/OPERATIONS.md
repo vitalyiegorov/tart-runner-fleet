@@ -209,6 +209,20 @@ consumes the same scale-set sessions, then run the exact-scope canary. Change
 live scale-set capacity only while it owns no active job. Keep the running
 authority configuration unchanged until those gates pass.
 
+**Parking a profile leaves the scale set on GitHub, and GitHub keeps routing to
+it.** Remove a binding from a node's configuration and the object stays, absorbing
+every job matching the labels it advertises. Audit after any parking, and on a
+cadence:
+
+```sh
+fleet scale-sets audit --config fleet.json
+```
+
+The authority repeats it every `github.parkedScaleSetAuditMinutes` (default 15;
+`0` disables it) and reports the result on the `parked scale sets` doctor row.
+See *A scale set GitHub is holding jobs for that nobody polls* below and
+[ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md).
+
 Provisioning is explicit, drift-failing, and plan-first:
 
 ```sh
@@ -940,6 +954,74 @@ fleet operations --endpoint "$ENDPOINT" --output json |
 
 A drain stuck at the deregister stage is bounded by ADR 0007's retries and ends as
 a dischargeable dead letter; it is never released by hand.
+
+### A scale set GitHub is holding jobs for that nobody polls
+
+GitHub routes a queued job to exactly **one** matching scale set, marks it
+assigned, and then offers it to nobody else — not even to an identically
+labelled, healthy set in the same repository. A scale set that exists on GitHub
+and that no daemon polls therefore swallows the labels it advertises. Parking a
+profile does exactly that: the binding leaves the node's configuration and the
+object stays on GitHub.
+
+**Run the audit. Do not read GitHub's web UI for this, and do not reason from
+`fleet queues`** — a stranded job is invisible to every signal a node publishes
+about the sets it serves. On 2026-08-04 two jobs sat assigned to
+`trf-sudoku-builder-studio` for 4.5 hours while `fleet queues` read 0, `fleet
+doctor` read PASS and every observation read fresh (issue #164); on 2026-09-13
+the v0.1.549 release job sat six hours on the studio's withdrawn `linux-1x2` set.
+
+```sh
+fleet scale-sets audit --config ./state/fleet.json
+```
+
+```
+suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
+suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idle=0
+suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be
+```
+
+It exits `5` on a stranding, `0` when no parked set holds work, and `4` when
+GitHub could not be reached or the App credential was missing. **Exit 4 is not a
+pass.** Run it once per node: each node classifies against its OWN configuration,
+and a set parked here is very often bound on the sibling
+([ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md)) — which is why a
+parked set holding *nothing* is informational and only a parked set holding
+*work* is a finding.
+
+The authority publishes the same audit every 15 minutes
+(`github.parkedScaleSetAuditMinutes`; `0` disables it) as a doctor row:
+
+```sh
+fleet doctor --output json | jq '.checks[] | select(.name == "parked scale sets")'
+```
+
+```
+FAIL   parked scale sets   suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be; cancel and re-run the workflow, or bind the set on a node
+```
+
+The row reads `not audited` on a node that has never completed one — an
+observe-mode daemon never audits, because it holds no GitHub App authority — and
+`not reported by this daemon` on a build older than the check. Neither is health.
+
+**The remedy is manual, and there are exactly two.**
+
+1. **Cancel the run and re-run it.** GitHub releases the assignment with the run,
+   and the re-queued job is routed again — to a set something is polling, as long
+   as the parked one is gone or bound by then. This is the fast path for a user
+   waiting on CI.
+2. **Bind the set on a node.** Add it back to that node's `github.scopes[].scaleSets`
+   with its id and restart the daemon; the session picks the assignment up. Use
+   this when the set is one the fleet means to keep serving.
+
+Do not delete the scale set on GitHub to "clear" it: deletion takes every job
+already assigned to it with it. Nothing re-routes the work automatically —
+cancelling a run needs repository `actions: write`, an authority no node in this
+fleet holds, and moving a binding between nodes needs the hub
+([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md), ADR 0036).
+
+Alert on `fleet_parked_scale_set_assigned_jobs > 0`; it is labelled by scope and
+scale set, and a node that has not audited exports no series at all.
 
 ### A base image whose runner GitHub will refuse
 

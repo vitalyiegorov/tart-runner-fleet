@@ -23,6 +23,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/provision"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/scalesetaudit"
 )
 
 const (
@@ -54,6 +55,7 @@ type dependencies struct {
 	loadPrivateKey           func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
 	openProvision            func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
 	openReconcilingProvision func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
+	openAudit                func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error)
 	writeConfig              func(string, config.Config) error
 	command                  autoupdate.Command
 	version                  string
@@ -112,6 +114,9 @@ func defaultDependencies() dependencies {
 			}
 			provisioner.ReconcileDrift = true
 			return provisioner, nil
+		},
+		openAudit: func(cfg githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) {
+			return githubscaleset.NewAuditor(cfg)
 		},
 		writeConfig: atomicWriteConfig,
 		command:     execCommand{},
@@ -368,8 +373,12 @@ func pruneReleases(ctx context.Context, host autoupdate.ManagedHost, root string
 }
 
 func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	if len(args) > 0 && args[0] == "audit" {
+		return runScaleSetAudit(ctx, args[1:], stdout, stderr, deps)
+	}
 	if len(args) == 0 || args[0] != "provision" {
 		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text] [--reconcile-drift]")
+		fmt.Fprintln(stderr, "       fleet scale-sets audit --config path [--output table|json]")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet scale-sets provision", flag.ContinueOnError)
@@ -438,6 +447,67 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		for _, change := range result.Changes {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%s\n", change.Scope, change.Profile, change.Name, change.ID, change.Action)
 		}
+	}
+	return exitSuccess
+}
+
+// runScaleSetAudit reads the scale sets GitHub holds for every configured scope
+// and reports the ones this node does not serve.
+//
+// It is read-only and bounded: one listing per scope, one read per parked set,
+// no loop. Exit 5 is a stranding -- a parked set holding work GitHub has already
+// routed and will offer to nobody else. Exit 4 is an audit that could not be
+// performed, which is never reported as a pass: "GitHub did not answer" and "no
+// set is parked" are the two states issue #164 was lost between.
+func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	flags := flag.NewFlagSet("fleet scale-sets audit", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	path := flags.String("config", "", "fleet configuration path")
+	output := flags.String("output", "table", "output format: table or json")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *path == "" ||
+		(*output != "table" && *output != "json") {
+		return exitUsage
+	}
+	file, err := deps.openConfig(*path)
+	if err != nil {
+		fmt.Fprintf(stderr, "open config: %v\n", err)
+		return exitFailure
+	}
+	cfg, decodeErr := config.Decode(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		fmt.Fprintf(stderr, "invalid config: %v\n", decodeErr)
+		return exitFailure
+	}
+	if closeErr != nil {
+		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
+		return exitFailure
+	}
+	result, err := scalesetaudit.Run(ctx, scalesetaudit.Request{Config: cfg, LoadKey: deps.loadPrivateKey,
+		Open: deps.openAudit, Version: deps.buildVersion(), Now: time.Now})
+	if err != nil {
+		fmt.Fprintf(stderr, "audit scale sets: %v\n", err)
+		if errors.Is(err, operations.ErrInvalid) {
+			return exitUsage
+		}
+		return exitUnavailable
+	}
+	if *output == "json" {
+		if err := writeJSON(stdout, result.ScaleSets); err != nil {
+			return exitFailure
+		}
+	} else {
+		for _, set := range result.ScaleSets {
+			fmt.Fprintf(stdout, "%s\t%d\t%s\t%s\tassigned=%d\tbusy=%d\tregistered=%d\tidle=%d\n",
+				set.Scope, set.ID, set.Name, set.State, set.Assigned, set.Busy, set.Registered, set.Idle)
+		}
+	}
+	strandings := result.Strandings()
+	for _, set := range strandings {
+		fmt.Fprintln(stderr, set.Reason())
+	}
+	if len(strandings) > 0 {
+		return exitDegraded
 	}
 	return exitSuccess
 }
@@ -817,6 +887,26 @@ func ingestDetail(status adminapi.Status, check adminapi.Check) string {
 	return "every set is being offered the work GitHub has for it"
 }
 
+// parkedScaleSetDetail says whether a scale set GitHub is holding work for is
+// one no daemon is known to poll.
+//
+// Three states, never two. A daemon that predates the check says so. A daemon
+// that publishes it and has never completed an audit says "not audited" -- an
+// observe-mode node never audits, and rendering that as health is exactly the
+// PASS issue #164 spent 4.5 hours reading.
+func parkedScaleSetDetail(status adminapi.Status, check adminapi.Check) string {
+	if status.ParkedScaleSetCheck == nil {
+		return "not reported by this daemon"
+	}
+	if status.ParkedScaleSetsAuditedAt == nil {
+		return "not audited"
+	}
+	if detail := joinReasons(check); detail != "" && detail != "ok" {
+		return detail
+	}
+	return "no parked scale set holds work"
+}
+
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an
 // empty gap in the sentence.
 func axisOrUnjudged(axis string) string {
@@ -845,6 +935,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	yield := status.Data.EffectiveSessionYieldCheck()
 	admission := status.Data.EffectiveAdmissionCheck()
 	ingest := status.Data.EffectiveIngestCheck()
+	parked := status.Data.EffectiveParkedScaleSetCheck()
 	drain := status.Data.EffectiveUpdateDrainCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
@@ -865,6 +956,13 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// hours and the only observer who could see it was a human reading GitHub
 		// (issue #292).
 		{Name: "ingest delivery", OK: ingest.OK, Detail: ingestDetail(status.Data, ingest)},
+		// The parked check sits beside ingest delivery because it is the other half
+		// of the same blindness: ingest reports a set this node SERVES that GitHub
+		// has stopped offering work to, and this reports a set GitHub is holding
+		// work for that this node does not serve at all. On 2026-08-04 scale set 7
+		// held two assigned jobs for 4.5 hours while every signal on both nodes read
+		// healthy, because no signal was about a set nobody polls (issue #164).
+		{Name: "parked scale sets", OK: parked.OK, Detail: parkedScaleSetDetail(status.Data, parked)},
 		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "occupancy", OK: occupancy.OK, Detail: joinReasons(occupancy)},
 		// The reservation check names the head, its repository, and the axis
@@ -1089,6 +1187,10 @@ READ-ONLY COMMANDS (observe/shadow safe)
     Print the load-bearing policy a node runs with, or, with more than one path,
     the keys on which they disagree (exit 5). Each path is a node configuration
     or a status document written by fleet status --output json.
+  fleet scale-sets audit --config path [--output table|json]
+    Read the scale sets GitHub holds for each configured scope and say which of
+    them this node serves. A parked set holding assigned jobs or busy runners
+    exits 5; an audit GitHub would not answer exits 4, never 0.
   fleet version | api-version
 
 GUARDED BOOTSTRAP

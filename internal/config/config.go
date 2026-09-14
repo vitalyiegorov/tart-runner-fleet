@@ -350,6 +350,9 @@ const (
 	defaultUpdateDrainCooldown      = time.Hour
 	minUpdateDrainBound             = time.Minute
 	maxUpdateDrainBound             = 24 * time.Hour
+	// maxParkedScaleSetAuditMinutes is a day. A cadence beyond that is indistinguishable
+	// from off and would leave a stranding unreported for longer than any job lives.
+	maxParkedScaleSetAuditMinutes = 1440
 )
 
 // GuestLiveness bounds how long a `running` instance may go on holding its
@@ -479,10 +482,21 @@ type GitHub struct {
 	// scale-set lookahead with truthful advertised capacity. It is deliberately
 	// opt-in so a release can land before GitHub App permissions and the live
 	// configuration are migrated together through shadow and canary gates.
-	CanonicalJobInventory bool                 `json:"canonicalJobInventory,omitempty"`
-	App                   GitHubApp            `json:"app"`
-	Installations         []GitHubInstallation `json:"installations"`
-	Scopes                []GitHubScope        `json:"scopes"`
+	CanonicalJobInventory bool `json:"canonicalJobInventory,omitempty"`
+	// ParkedScaleSetAuditMinutes is how often the authority re-reads the scale
+	// sets GitHub holds for each configured scope and reports the ones this node
+	// does not serve (issue #164, ADR 0054). Absent is the default cadence and an
+	// explicit 0 disables the audit, which is why it is a pointer: the two cases
+	// must not collide, exactly as they must not for an occupancy budget.
+	//
+	// The cadence is deliberately slow. A parked set holding work is a state that
+	// persists for hours, and the audit costs one admin-API listing per scope
+	// plus one read per parked set, so paying that on the poll interval would buy
+	// nothing and spend the rate limit the sessions need.
+	ParkedScaleSetAuditMinutes *int                 `json:"parkedScaleSetAuditMinutes,omitempty"`
+	App                        GitHubApp            `json:"app"`
+	Installations              []GitHubInstallation `json:"installations"`
+	Scopes                     []GitHubScope        `json:"scopes"`
 }
 
 type ScaleSet struct {
@@ -1117,6 +1131,7 @@ func (c Config) Clone() Config {
 	out.MacOS.Maestro.Aliases = append([]string(nil), c.MacOS.Maestro.Aliases...)
 	out.MacOS.Builder.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Builder.OccupancyBudgetSeconds)
 	out.MacOS.Maestro.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Maestro.OccupancyBudgetSeconds)
+	out.GitHub.ParkedScaleSetAuditMinutes = cloneBudget(c.GitHub.ParkedScaleSetAuditMinutes)
 	out.GitHub.ScaleSets = append([]ScaleSet(nil), c.GitHub.ScaleSets...)
 	for i := range out.GitHub.ScaleSets {
 		out.GitHub.ScaleSets[i] = c.GitHub.ScaleSets[i].clone()
@@ -1181,6 +1196,13 @@ func (c Config) Validate() error {
 	}
 	if err := c.GuestLiveness.validate(); err != nil {
 		return err
+	}
+	// A negative cadence is refused rather than read as "off": the operator who
+	// meant to disable the audit writes 0, and reading a typo as silence is how a
+	// detector stops existing without anyone deciding it should.
+	if c.GitHub.ParkedScaleSetAuditMinutes != nil &&
+		(*c.GitHub.ParkedScaleSetAuditMinutes < 0 || *c.GitHub.ParkedScaleSetAuditMinutes > maxParkedScaleSetAuditMinutes) {
+		return errors.New("parked scale set audit minutes must be between 0 and 1440")
 	}
 	if c.Linux.BaseVM == "" || c.Linux.VMPrefix == "" {
 		return errors.New("linux base VM and prefix are required")
@@ -1442,6 +1464,26 @@ func (c Config) validateLegacyAuthority() error {
 		return errors.New("every enabled profile requires one scale set")
 	}
 	return nil
+}
+
+// DefaultParkedScaleSetAuditInterval is the cadence an unconfigured node audits
+// at. It is minutes rather than seconds because the condition it looks for — a
+// scale set GitHub is holding jobs for that nobody polls — lasted 4.5 hours in
+// the incident it exists for, and detecting it two minutes sooner is worth
+// nothing beside the admin-API budget a faster cadence would spend.
+const DefaultParkedScaleSetAuditInterval = 15 * time.Minute
+
+// ParkedScaleSetAuditInterval is the cadence this node audits parked scale sets
+// at. Zero means the operator turned the audit off; absence means they said
+// nothing, which is the default cadence and not silence.
+func (g GitHub) ParkedScaleSetAuditInterval() time.Duration {
+	if g.ParkedScaleSetAuditMinutes == nil {
+		return DefaultParkedScaleSetAuditInterval
+	}
+	if *g.ParkedScaleSetAuditMinutes <= 0 {
+		return 0
+	}
+	return time.Duration(*g.ParkedScaleSetAuditMinutes) * time.Minute
 }
 
 func (g GitHub) multiScopeConfigured() bool {

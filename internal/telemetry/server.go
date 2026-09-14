@@ -255,6 +255,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	admission := admissionResult(snapshot)
 	ingest := ingestResult(snapshot)
 	ingestCheck := adminapi.Check{OK: ingest.OK, Reasons: nonNilStrings(ingest.Reasons)}
+	parked := parkedScaleSetResult(snapshot)
+	parkedCheck := adminapi.Check{OK: parked.OK, Reasons: nonNilStrings(parked.Reasons)}
 	admissionCheck := adminapi.Check{OK: admission.OK, Reasons: nonNilStrings(admission.Reasons)}
 	updateDrainCheck := adminapi.Check{OK: drain.OK, Reasons: nonNilStrings(drain.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
@@ -268,7 +270,9 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Occupancy: occupancyRows(snapshot), OccupancyCheck: &occupancyCheck,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
 			Envelope: envelopeRow(snapshot), AdmissionCheck: &admissionCheck, IngestCheck: &ingestCheck,
-			Stalled: stalledRows(snapshot), ProgressCheck: &progressCheck,
+			ParkedScaleSets: parkedScaleSetRows(snapshot), ParkedScaleSetCheck: &parkedCheck,
+			ParkedScaleSetsAuditedAt: auditedAt(snapshot),
+			Stalled:                  stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
@@ -288,6 +292,33 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 				LoadAverage:          snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
 				AdmissionReason: snapshot.HostPressure.AdmissionReason},
 		}}
+}
+
+// parkedScaleSetRows projects the last audit's parked sets into the versioned
+// DTO. Nil stays nil: a node that audited and found nothing parked publishes no
+// rows, and the audit timestamp beside them is what separates that from a node
+// that never looked.
+func parkedScaleSetRows(snapshot Snapshot) []adminapi.ParkedScaleSet {
+	if len(snapshot.ParkedScaleSets) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.ParkedScaleSet, 0, len(snapshot.ParkedScaleSets))
+	for _, row := range snapshot.ParkedScaleSets {
+		rows = append(rows, adminapi.ParkedScaleSet{Scope: row.Scope, ScaleSetID: row.ScaleSetID, Name: row.Name,
+			Assigned: row.Assigned, Busy: row.Busy, ObservedAt: row.ObservedAt})
+	}
+	return rows
+}
+
+// auditedAt is when the last parked-scale-set audit completed, or nil when none
+// ever has. The absence is the point: it is what makes "not audited" reportable
+// as itself instead of as a pass.
+func auditedAt(snapshot Snapshot) *time.Time {
+	if snapshot.ParkedScaleSetsAuditedAt.IsZero() {
+		return nil
+	}
+	at := snapshot.ParkedScaleSetsAuditedAt
+	return &at
 }
 
 // occupancyRows projects each live instance's hold into the versioned DTO. Nil
@@ -532,6 +563,25 @@ func renderMetrics(snapshot Snapshot) string {
 		label := prometheusLabel(profile)
 		fmt.Fprintf(&output, "fleet_queue_jobs{profile=%s} %d\n", label, queue.Count)
 		fmt.Fprintf(&output, "fleet_queue_oldest_age_seconds{profile=%s} %s\n", label, seconds(age))
+	}
+
+	if len(snapshot.ParkedScaleSets) > 0 {
+		// Per scale set, because the finding IS one set: the alertable series is a
+		// non-zero assigned count on a set this node does not serve. Cardinality is
+		// bounded by the scale sets a scope's runner group holds, which an operator
+		// creates by hand.
+		writeHelpType("fleet_parked_scale_set_assigned_jobs",
+			"Jobs GitHub has assigned to a scale set this node does not serve.", "gauge")
+		for _, row := range snapshot.ParkedScaleSets {
+			fmt.Fprintf(&output, "fleet_parked_scale_set_assigned_jobs{scope=%s,scale_set=%s} %d\n",
+				prometheusLabel(row.Scope), prometheusLabel(strconv.Itoa(row.ScaleSetID)), row.Assigned)
+		}
+		writeHelpType("fleet_parked_scale_set_busy_runners",
+			"Busy runners on a scale set this node does not serve.", "gauge")
+		for _, row := range snapshot.ParkedScaleSets {
+			fmt.Fprintf(&output, "fleet_parked_scale_set_busy_runners{scope=%s,scale_set=%s} %d\n",
+				prometheusLabel(row.Scope), prometheusLabel(strconv.Itoa(row.ScaleSetID)), row.Busy)
+		}
 	}
 
 	writeHelpType("fleet_instances", "Live instances by bounded runner profile.", "gauge")
