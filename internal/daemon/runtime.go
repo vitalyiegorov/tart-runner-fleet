@@ -1380,6 +1380,9 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 		}
 		now = a.now().UTC()
 	}
+	// `now` is the START of this audit, and it schedules the next one: the cadence
+	// is measured between attempts, so a slow or failed audit cannot push the
+	// following one out by its own duration.
 	a.next = now.Add(a.interval)
 	result, err := scalesetaudit.Run(ctx, scalesetaudit.Request{Config: a.config, Key: a.key, Open: a.open,
 		Version: a.version, Now: func() time.Time { return now }})
@@ -1390,7 +1393,12 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 		// parked" on the evidence of a failed request.
 		return err
 	}
-	return a.health.SetParkedScaleSets(parkedScaleSetMetrics(result), now)
+	// The PUBLISHED timestamp is when the audit completed, which is what the
+	// status document's `parkedScaleSetsAuditedAt` promises. Publishing the start
+	// instant instead would understate the age of a reading by however long
+	// GitHub took to produce it -- the one direction that matters, because this
+	// field is read to decide whether the audit is current.
+	return a.health.SetParkedScaleSets(parkedScaleSetMetrics(result), a.now().UTC())
 }
 
 // parkedScaleSetMetrics keeps only the parked sets. A bound set is already

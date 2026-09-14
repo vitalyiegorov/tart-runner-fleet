@@ -50,12 +50,16 @@ parked set holding work is a finding.**
 
 `fleet scale-sets audit` lists, for every configured scope, the scale sets that
 exist in that scope's runner group, and classifies each as **bound** (this node's
-configuration names it, by id or by name) or **parked** (it exists and this node
-does not name it). It reports GitHub's own statistics per set and exits `5` when
-a parked set holds assigned jobs or busy runners, `0` when none does, and `4`
-when GitHub could not be reached or the credential was missing. **Unavailable is
-never a pass**: "GitHub did not answer" and "no set is parked" are the two states
-issue #164 was lost between.
+configuration names it — by the id it serves, or by name only for a set whose id
+it has not yet persisted) or **parked** (it exists and this node does not name
+it, which includes a set GitHub recreated under a configured name with a new id,
+because the node's session still polls the old one). It reports GitHub's own statistics per set and exits `5` when
+a parked set holds assigned jobs or busy runners, and `0` when none does. Every
+other way an audit can fail to produce a trustworthy result — an unreachable
+GitHub, a missing credential, an answer too uncertain to classify — is `4`.
+**Unavailable is never a pass**: "GitHub did not answer" and "no set is parked"
+are the two states issue #164 was lost between. Only a malformed request is the
+usual `2`.
 
 The authority daemon runs the same audit on a slow cadence
 (`github.parkedScaleSetAuditMinutes`, default 15, `0` disables) and publishes

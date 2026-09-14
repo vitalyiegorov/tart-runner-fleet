@@ -162,7 +162,7 @@ suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idl
 | Exit | Meaning |
 | ---: | --- |
 | 0 | Every scale set GitHub holds is either bound here or parked and holding nothing |
-| 4 | GitHub was unreachable or the App credential was missing — **never read as a pass** |
+| 4 | The audit was unavailable or could not produce a trustworthy result — GitHub unreachable, the App credential missing, or an answer too uncertain to classify. **Never read as a pass** |
 | 5 | A parked set holds assigned jobs or busy runners |
 
 **Parked here does not mean parked everywhere.** Under
@@ -177,7 +177,7 @@ listing carried no statistics. There is no polling loop. The authority daemon
 runs the same audit every `github.parkedScaleSetAuditMinutes` (default 15, `0`
 disables) and publishes it as the `parked scale sets` doctor row, the
 `parkedScaleSets` status section and the `fleet_parked_scale_set_assigned_jobs`
-metric.
+and `fleet_parked_scale_set_busy_runners` metrics.
 
 ## Exit codes
 

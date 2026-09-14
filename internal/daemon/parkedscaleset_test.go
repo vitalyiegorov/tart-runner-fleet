@@ -17,10 +17,16 @@ type fakeAuditClient struct {
 	listed  []githubscaleset.ScaleSetSummary
 	listErr error
 	lists   int
+	// spend advances the test clock while GitHub is answering, so the start of an
+	// audit and its completion are distinguishable instants.
+	spend func()
 }
 
 func (f *fakeAuditClient) List(context.Context, string) ([]githubscaleset.ScaleSetSummary, error) {
 	f.lists++
+	if f.spend != nil {
+		f.spend()
+	}
 	return f.listed, f.listErr
 }
 
@@ -55,7 +61,9 @@ func TestTheAuthorityPublishesOneAuditPerCadence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 8, 4, 18, 30, 0, 0, time.UTC)
+	started := time.Date(2026, 8, 4, 18, 30, 0, 0, time.UTC)
+	now := started
+	client.spend = func() { now = now.Add(2 * time.Second) }
 	auditor := &parkedScaleSetAuditor{config: auditConfig(), key: githubscaleset.NewPrivateKeySecret("pem"),
 		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
 		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
@@ -68,11 +76,16 @@ func TestTheAuthorityPublishesOneAuditPerCadence(t *testing.T) {
 		t.Fatalf("only the parked set is published: %#v", snapshot.ParkedScaleSets)
 	}
 	if snapshot.ParkedScaleSets[0].Assigned != 2 || snapshot.ParkedScaleSets[0].Busy != 2 ||
-		!snapshot.ParkedScaleSets[0].ObservedAt.Equal(now) {
+		!snapshot.ParkedScaleSets[0].ObservedAt.Equal(started) {
 		t.Fatalf("the row carries GitHub's counts and when they were read: %#v", snapshot.ParkedScaleSets[0])
 	}
-	if snapshot.ParkedScaleSetsAuditedAt.IsZero() {
-		t.Fatal("a completed audit must mark the node as having audited")
+	// The published timestamp is when the audit COMPLETED, which is what the
+	// status document promises and what an operator reads the reading's age
+	// against; the start instant would understate that age by the time GitHub
+	// spent answering.
+	if !snapshot.ParkedScaleSetsAuditedAt.Equal(started.Add(2 * time.Second)) {
+		t.Fatalf("audited at %s, want the completion instant %s",
+			snapshot.ParkedScaleSetsAuditedAt, started.Add(2*time.Second))
 	}
 
 	// A second call inside the cadence waits rather than spending another
@@ -85,7 +98,9 @@ func TestTheAuthorityPublishesOneAuditPerCadence(t *testing.T) {
 	if client.lists != 1 {
 		t.Fatalf("one listing per cadence: %d", client.lists)
 	}
-	now = now.Add(15 * time.Minute)
+	// The cadence runs from the start of the last audit, so the time GitHub spent
+	// answering does not push the next one out by its own duration.
+	now = started.Add(15 * time.Minute)
 	if err := auditor.Ingest(ctx); err != nil || client.lists != 2 {
 		t.Fatalf("the next cadence audits again: lists=%d err=%v", client.lists, err)
 	}

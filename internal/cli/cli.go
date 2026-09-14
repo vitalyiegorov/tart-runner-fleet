@@ -456,9 +456,11 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 //
 // It is read-only and bounded: one listing per scope, one read per parked set,
 // no loop. Exit 5 is a stranding -- a parked set holding work GitHub has already
-// routed and will offer to nobody else. Exit 4 is an audit that could not be
-// performed, which is never reported as a pass: "GitHub did not answer" and "no
-// set is parked" are the two states issue #164 was lost between.
+// routed and will offer to nobody else. Exit 4 is an audit that was unavailable
+// or could not produce a trustworthy result: an unreachable GitHub, a missing
+// credential, an answer too uncertain to classify. It is never reported as a
+// pass, because "GitHub did not answer" and "no set is parked" are the two
+// states issue #164 was lost between. Only a malformed request is exit 2.
 func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
 	flags := flag.NewFlagSet("fleet scale-sets audit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1190,7 +1192,8 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleet scale-sets audit --config path [--output table|json]
     Read the scale sets GitHub holds for each configured scope and say which of
     them this node serves. A parked set holding assigned jobs or busy runners
-    exits 5; an audit GitHub would not answer exits 4, never 0.
+    exits 5; an audit that was unavailable or could not produce a trustworthy
+    result exits 4, never 0.
   fleet version | api-version
 
 GUARDED BOOTSTRAP

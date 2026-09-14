@@ -981,16 +981,20 @@ suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idl
 suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be
 ```
 
-It exits `5` on a stranding, `0` when no parked set holds work, and `4` when
-GitHub could not be reached or the App credential was missing. **Exit 4 is not a
-pass.** Run it once per node: each node classifies against its OWN configuration,
+It exits `5` on a stranding and `0` when no parked set holds work. It exits `4`
+when the audit was unavailable or could not produce a trustworthy result —
+GitHub unreachable, the App credential missing, or an answer too uncertain to
+classify. **Exit 4 is never a pass**; it means nobody looked, not that nothing is
+parked. (A malformed invocation is exit `2`, as everywhere else.) Run it once per
+node: each node classifies against its OWN configuration,
 and a set parked here is very often bound on the sibling
 ([ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md)) — which is why a
 parked set holding *nothing* is informational and only a parked set holding
 *work* is a finding.
 
-The authority publishes the same audit every 15 minutes
-(`github.parkedScaleSetAuditMinutes`; `0` disables it) as a doctor row:
+The authority publishes the same audit at the configured cadence
+(`github.parkedScaleSetAuditMinutes`, default 15; `0` disables it) as a doctor
+row:
 
 ```sh
 fleet doctor --output json | jq '.checks[] | select(.name == "parked scale sets")'
@@ -1020,8 +1024,13 @@ cancelling a run needs repository `actions: write`, an authority no node in this
 fleet holds, and moving a binding between nodes needs the hub
 ([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md), ADR 0036).
 
-Alert on `fleet_parked_scale_set_assigned_jobs > 0`; it is labelled by scope and
-scale set, and a node that has not audited exports no series at all.
+Alert on
+`fleet_parked_scale_set_assigned_jobs > 0 or fleet_parked_scale_set_busy_runners > 0`.
+Both halves are needed: a set with an assigned job no runner has taken and a set
+whose runner is mid-job are both sets something must be listening to, and the
+check fires on either. They are labelled by scope and scale set, and a node that
+has not audited exports no series at all — which is why the alert is not a
+substitute for the doctor row.
 
 ### A base image whose runner GitHub will refuse
 

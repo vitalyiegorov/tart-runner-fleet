@@ -169,7 +169,13 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 	boundNames := make(map[string]string, len(scope.ScaleSets))
 	for _, set := range scope.ScaleSets {
 		if set.ID > 0 {
+			// A configured id is the node's whole claim about which object it
+			// serves: the session polls THAT id. A set GitHub recreated under the
+			// same name carries a different id, so the node is still polling the
+			// old one and the new one is parked -- reading the name as a binding
+			// would hide exactly the stranding this audit exists for.
 			boundIDs[set.ID] = set.Profile
+			continue
 		}
 		if set.Name != "" {
 			boundNames[set.Name] = set.Profile
@@ -178,9 +184,10 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 	sets := make([]ScaleSet, 0, len(listed))
 	for _, summary := range listed {
 		row := ScaleSet{Scope: scope.Name, ID: summary.ID, Name: summary.Name, State: Parked, ObservedAt: observedAt}
-		// Identity is the configured id first and the name only as a fallback: a
-		// node that has provisioned but not yet persisted an id still serves the
-		// set it created, and calling that parked would be a false finding.
+		// Identity is the configured id, and the name only for a set whose id was
+		// never persisted: a node that has provisioned but not yet written the id
+		// back still serves the set it created, and calling that parked would be a
+		// false finding.
 		if profile, bound := boundIDs[summary.ID]; bound {
 			row.State, row.Profile = Bound, profile
 		} else if profile, bound := boundNames[summary.Name]; bound {

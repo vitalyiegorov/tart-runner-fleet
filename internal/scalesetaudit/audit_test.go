@@ -171,6 +171,30 @@ func TestASetBoundByNameWithoutAPersistedIDIsNotParked(t *testing.T) {
 	}
 }
 
+// A scale set GitHub RECREATED under a name this node configures is parked, not
+// bound. The node's session polls the id it was configured with; a new object
+// carries a new id, so nothing here is listening to it — and matching on the
+// name would report the set as served while its assigned work sat unreachable,
+// which is the exact blindness this audit exists to remove.
+func TestASetRecreatedUnderAConfiguredNameIsParked(t *testing.T) {
+	client := &fakeClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 42, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 2, BusyRunners: 1}},
+	}}
+
+	result, err := Run(context.Background(), auditRequest(sudokuConfig(), client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ScaleSets[0].State != Parked {
+		t.Fatalf("the configured id is 1, so set 42 is not served here: %#v", result.ScaleSets[0])
+	}
+	strandings := result.Strandings()
+	if len(strandings) != 1 || strandings[0].ID != 42 || strandings[0].Assigned != 2 {
+		t.Fatalf("its assigned work must be a finding: %#v", strandings)
+	}
+}
+
 // The runner group is the one the scope declares, so a fleet that does not use
 // the default group audits the group it actually provisions into.
 func TestTheScopesRunnerGroupIsAudited(t *testing.T) {

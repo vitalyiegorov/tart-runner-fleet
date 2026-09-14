@@ -8,8 +8,10 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -47,7 +49,7 @@ func jsonResponse(req *http.Request, status int, body string) *http.Response {
 
 func listRequest(t *testing.T) *http.Request {
 	t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+	req, err := http.NewRequestWithContext(listingContext(context.Background()), http.MethodGet,
 		"https://actions.example/_apis/runtime/runnerscalesets?runnerGroupId=1&name="+auditListName, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -113,15 +115,84 @@ func TestTheTapLeavesEveryOtherRequestAlone(t *testing.T) {
 		t.Fatal("a disarmed tap must observe nothing")
 	}
 
-	// A response to a request this tap never rewrote is not this tap's listing,
-	// however much it looks like one.
+	// An unmarked call to the very same resource is not this tap's listing,
+	// however much it looks like one, and neither is a missing response.
 	tap.arm()
-	tap.afterResponse(nil, jsonResponse(listRequest(t), http.StatusOK, `{"count":0,"value":[]}`))
+	unmarked, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"https://actions.example/_apis/runtime/runnerscalesets?runnerGroupId=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tap.afterResponse(nil, jsonResponse(unmarked, http.StatusOK, `{"count":0,"value":[]}`))
 	tap.afterResponse(nil, nil)
 	if _, observed := tap.take(); observed {
-		t.Fatal("only the request this tap rewrote may be read as its listing")
+		t.Fatal("only the marked call may be read as this tap's listing")
+	}
+
+	// A by-id read rides the marked context too -- Statistics is called inside an
+	// audit -- and must never be mistaken for the group listing.
+	tap.arm()
+	byID, err := http.NewRequestWithContext(listingContext(context.Background()), http.MethodGet,
+		"https://actions.example/_apis/runtime/runnerscalesets/7", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tap.beforeRequest(nil, byID, 0)
+	tap.afterResponse(nil, jsonResponse(byID, http.StatusOK, `{"id":7}`))
+	if _, observed := tap.take(); observed {
+		t.Fatal("a by-id read is not the group listing")
 	}
 }
+
+// TestARetriedListingIsStillRead is the failure mode a pointer or sentinel match
+// hides. retryablehttp shallow-copies the request between attempts and the first
+// attempt has already stripped the sentinel from the URL both attempts share, so
+// a listing that succeeds on its SECOND attempt carries neither marker the naive
+// match looks for -- and the scope would be reported as unread, one step away
+// from being read as "no set is parked".
+func TestARetriedListingIsStillRead(t *testing.T) {
+	tap := &listTap{}
+	tap.arm()
+	attempts := 0
+	retryable := retryablehttp.NewClient()
+	retryable.Logger = nil
+	retryable.RetryMax = 2
+	retryable.RetryWaitMin, retryable.RetryWaitMax = time.Millisecond, time.Millisecond
+	retryable.RequestLogHook = tap.beforeRequest
+	retryable.ResponseLogHook = tap.afterResponse
+	retryable.HTTPClient.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return jsonResponse(req, http.StatusInternalServerError, `{}`), nil
+		}
+		if req.URL.Query().Has("name") {
+			t.Errorf("the sentinel reached GitHub on attempt %d: %q", attempts, req.URL.RawQuery)
+		}
+		return jsonResponse(req, http.StatusOK,
+			`{"count":1,"value":[{"id":7,"name":"studio","statistics":{"totalAssignedJobs":2}}]}`), nil
+	})
+
+	request, err := retryablehttp.FromRequest(listRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := retryable.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != emptyScaleSetListing {
+		t.Fatalf("the client must still see an empty listing: %q %v", body, err)
+	}
+	sets, observed := tap.take()
+	if attempts != 2 || !observed || len(sets) != 1 || sets[0].ID != 7 {
+		t.Fatalf("a retried listing must be read: attempts=%d observed=%v sets=%#v", attempts, observed, sets)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // A refusal, an unreadable body and an undecodable listing are all recorded as
 // nothing, which List reports as an error. None of them may become an empty
