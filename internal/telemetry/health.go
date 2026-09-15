@@ -144,6 +144,10 @@ type ParkedScaleSetMetric struct {
 	Name       string
 	Assigned   int
 	Busy       int
+	// Registered is GitHub's own count of runners registered against the
+	// set. A registered runner is proof of a listener, so a parked set with
+	// one is a sibling's traffic, not a stranding.
+	Registered int
 	ObservedAt time.Time
 }
 
@@ -1425,12 +1429,12 @@ func parkedScaleSetResult(snapshot Snapshot) HealthResult {
 	}
 	var reasons []string
 	for _, row := range snapshot.ParkedScaleSets {
-		if row.Assigned <= 0 && row.Busy <= 0 {
+		if (row.Assigned <= 0 && row.Busy <= 0) || row.Registered > 0 {
 			continue
 		}
 		reasons = append(reasons, fmt.Sprintf(
-			"%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s): "+
-				"something must be listening to this set and, from here, nothing is known to be; "+
+			"%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s) "+
+				"with no runner registered: nothing can be listening to this set; "+
 				"cancel and re-run the workflow, or bind the set on a node",
 			row.Scope, row.ScaleSetID, row.Name, row.Assigned, row.Busy))
 	}

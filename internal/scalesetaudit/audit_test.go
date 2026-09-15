@@ -101,7 +101,7 @@ func TestAParkedScaleSetHoldingAssignedJobsIsAStranding(t *testing.T) {
 	}
 	reason := strandings[0].Reason()
 	for _, want := range []string{"suuudokuuu", "scale set 7", "trf-sudoku-builder-studio", "2 assigned job(s)",
-		"something must be listening to this set and, from here, nothing is known to be"} {
+		"nothing can be listening to this set"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("the finding must say %q: %q", want, reason)
 		}
@@ -326,5 +326,21 @@ func TestTheAuditIsDeterministicallyOrdered(t *testing.T) {
 	}
 	if len(result.ScaleSets) != 4 || result.ScaleSets[0].Scope != "aaa-first" || result.ScaleSets[0].ID != 2 {
 		t.Fatalf("scopes sort by name and sets by id: %#v", result.ScaleSets)
+	}
+}
+
+// A parked set whose work is accompanied by a registered runner is a
+// sibling's normal traffic under ADR 0034's shared labels, not a stranding:
+// GitHub registers a runner only after a listener acquired the job. Without
+// this rule the first live cadence run failed node-b's doctor forever on the
+// mac mini's own builder.
+func TestAParkedSetWithARegisteredRunnerIsASiblingsNotAStranding(t *testing.T) {
+	set := ScaleSet{Scope: "sudoku-repo", ID: 1, Name: "trf-sudoku-builder", State: Parked, Assigned: 1, Busy: 1, Registered: 1}
+	if set.Stranded() {
+		t.Fatal("a registered runner is proof of a listener")
+	}
+	set.Registered = 0
+	if !set.Stranded() {
+		t.Fatal("assigned work with no registered runner is a stranding")
 	}
 }

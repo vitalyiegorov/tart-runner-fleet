@@ -906,7 +906,7 @@ func parkedScaleSetDetail(status adminapi.Status, check adminapi.Check) string {
 	if detail := joinReasons(check); detail != "" && detail != "ok" {
 		return detail
 	}
-	return "no parked scale set holds work"
+	return "no parked scale set is stranded"
 }
 
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an

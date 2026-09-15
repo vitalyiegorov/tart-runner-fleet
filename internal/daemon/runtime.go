@@ -1411,7 +1411,7 @@ func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleS
 			continue
 		}
 		rows = append(rows, telemetry.ParkedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name,
-			Assigned: set.Assigned, Busy: set.Busy, ObservedAt: set.ObservedAt})
+			Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
 	}
 	return rows
 }

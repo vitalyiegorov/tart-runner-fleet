@@ -68,7 +68,7 @@ func TestTheAuditNamesAStrandingAndExitsFive(t *testing.T) {
 	if code != exitDegraded {
 		t.Fatalf("a stranding must exit 5: %d (%s)", code, stderr.String())
 	}
-	for _, want := range []string{"trf-sudoku-builder-studio", "2 assigned job(s)", "nothing is known to be"} {
+	for _, want := range []string{"trf-sudoku-builder-studio", "2 assigned job(s)", "nothing can be listening"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("the finding must name %q: %q", want, stderr.String())
 		}
@@ -219,7 +219,7 @@ func TestTheParkedScaleSetLineDistinguishesThreeStates(t *testing.T) {
 
 	at := time.Date(2026, 8, 4, 18, 30, 0, 0, time.UTC)
 	status.Data.ParkedScaleSetsAuditedAt = &at
-	if detail := parkedScaleSetDetail(status.Data, passing); detail != "no parked scale set holds work" {
+	if detail := parkedScaleSetDetail(status.Data, passing); detail != "no parked scale set is stranded" {
 		t.Fatalf("an audited node says what it found: %q", detail)
 	}
 

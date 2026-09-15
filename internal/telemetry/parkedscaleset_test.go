@@ -31,7 +31,7 @@ func TestAParkedScaleSetHoldingWorkFailsTheCheck(t *testing.T) {
 	}
 	detail := strings.Join(result.Reasons, " ")
 	for _, want := range []string{"suuudokuuu", "scale set 7", "trf-sudoku-builder-studio",
-		"2 assigned job(s)", "nothing is known to be", "cancel and re-run the workflow, or bind the set on a node"} {
+		"2 assigned job(s)", "nothing can be listening", "cancel and re-run the workflow, or bind the set on a node"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("the finding must say %q: %q", want, detail)
 		}
@@ -182,9 +182,34 @@ func TestTheStatusDocumentAndMetricCarryTheAudit(t *testing.T) {
 	for _, want := range []string{
 		`fleet_parked_scale_set_assigned_jobs{scope="suuudokuuu",scale_set="7"} 2`,
 		`fleet_parked_scale_set_busy_runners{scope="suuudokuuu",scale_set="7"} 2`,
+		`fleet_parked_scale_set_registered_runners{scope="suuudokuuu",scale_set="7"} 0`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("the metric must carry %q:\n%s", want, metrics)
 		}
+	}
+}
+
+// A parked set with work AND a registered runner is a sibling's traffic: the
+// row still travels (with its registered count, so an alert can apply the same
+// rule) but the check passes, because a registered runner is proof of a
+// listener.
+func TestAParkedSetWithARegisteredRunnerPassesTheCheck(t *testing.T) {
+	auditedOn := time.Date(2026, 9, 15, 5, 0, 0, 0, time.UTC)
+	health, err := NewHealth(&fakeClock{now: auditedOn}, HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := health.SetParkedScaleSets([]ParkedScaleSetMetric{{Scope: "sudoku-repo", ScaleSetID: 1,
+		Name: "trf-sudoku-builder", Assigned: 1, Busy: 1, Registered: 1, ObservedAt: auditedOn}}, auditedOn); err != nil {
+		t.Fatal(err)
+	}
+	result := parkedScaleSetResult(health.Snapshot())
+	if !result.OK || len(result.Reasons) != 0 {
+		t.Fatalf("a registered runner is a listener: %+v", result)
+	}
+	metrics := renderMetrics(health.Snapshot())
+	if !strings.Contains(metrics, `fleet_parked_scale_set_registered_runners{scope="sudoku-repo",scale_set="1"} 1`) {
+		t.Fatalf("registered must be exported for the alert:\n%s", metrics)
 	}
 }

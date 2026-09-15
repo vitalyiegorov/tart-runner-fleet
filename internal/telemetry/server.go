@@ -305,7 +305,7 @@ func parkedScaleSetRows(snapshot Snapshot) []adminapi.ParkedScaleSet {
 	rows := make([]adminapi.ParkedScaleSet, 0, len(snapshot.ParkedScaleSets))
 	for _, row := range snapshot.ParkedScaleSets {
 		rows = append(rows, adminapi.ParkedScaleSet{Scope: row.Scope, ScaleSetID: row.ScaleSetID, Name: row.Name,
-			Assigned: row.Assigned, Busy: row.Busy, ObservedAt: row.ObservedAt})
+			Assigned: row.Assigned, Busy: row.Busy, Registered: row.Registered, ObservedAt: row.ObservedAt})
 	}
 	return rows
 }
@@ -581,6 +581,14 @@ func renderMetrics(snapshot Snapshot) string {
 		for _, row := range snapshot.ParkedScaleSets {
 			fmt.Fprintf(&output, "fleet_parked_scale_set_busy_runners{scope=%s,scale_set=%s} %d\n",
 				prometheusLabel(row.Scope), prometheusLabel(strconv.Itoa(row.ScaleSetID)), row.Busy)
+		}
+		// Registered is what turns "holds work" into "stranded": a registered
+		// runner is a listener's, so the alert requires this series to be zero.
+		writeHelpType("fleet_parked_scale_set_registered_runners",
+			"Runners GitHub has registered against a scale set this node does not serve.", "gauge")
+		for _, row := range snapshot.ParkedScaleSets {
+			fmt.Fprintf(&output, "fleet_parked_scale_set_registered_runners{scope=%s,scale_set=%s} %d\n",
+				prometheusLabel(row.Scope), prometheusLabel(strconv.Itoa(row.ScaleSetID)), row.Registered)
 		}
 	}
 
