@@ -219,7 +219,7 @@ func TestTheParkedScaleSetLineDistinguishesThreeStates(t *testing.T) {
 
 	at := time.Date(2026, 8, 4, 18, 30, 0, 0, time.UTC)
 	status.Data.ParkedScaleSetsAuditedAt = &at
-	if detail := parkedScaleSetDetail(status.Data, passing); detail != "no parked scale set holds work" {
+	if detail := parkedScaleSetDetail(status.Data, passing); detail != "no parked scale set is stranded" {
 		t.Fatalf("an audited node says what it found: %q", detail)
 	}
 

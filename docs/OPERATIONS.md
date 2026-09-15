@@ -1025,12 +1025,18 @@ fleet holds, and moving a binding between nodes needs the hub
 ([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md), ADR 0036).
 
 Alert on
-`fleet_parked_scale_set_assigned_jobs > 0 or fleet_parked_scale_set_busy_runners > 0`.
-Both halves are needed: a set with an assigned job no runner has taken and a set
-whose runner is mid-job are both sets something must be serving, and the
-check fires on either. They are labelled by scope and scale set, and a node that
-has not audited exports no series at all — which is why the alert is not a
-substitute for the doctor row.
+
+```promql
+(fleet_parked_scale_set_assigned_jobs > 0 or fleet_parked_scale_set_busy_runners > 0)
+  and on (scope, scale_set) fleet_parked_scale_set_registered_runners == 0
+```
+
+which is exactly the doctor row's rule: work on a set this node does not serve,
+with no runner registered against it. A registered runner is a listener's — a
+sibling serving the set under shared labels — so its presence is what turns a
+finding into ordinary traffic. The series are labelled by scope and scale set,
+and a node that has not audited exports no series at all — which is why the
+alert is not a substitute for the doctor row.
 
 ### A base image whose runner GitHub will refuse
 
