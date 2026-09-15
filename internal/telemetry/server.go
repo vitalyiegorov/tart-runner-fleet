@@ -305,7 +305,7 @@ func parkedScaleSetRows(snapshot Snapshot) []adminapi.ParkedScaleSet {
 	rows := make([]adminapi.ParkedScaleSet, 0, len(snapshot.ParkedScaleSets))
 	for _, row := range snapshot.ParkedScaleSets {
 		rows = append(rows, adminapi.ParkedScaleSet{Scope: row.Scope, ScaleSetID: row.ScaleSetID, Name: row.Name,
-			Assigned: row.Assigned, Busy: row.Busy, ObservedAt: row.ObservedAt})
+			Assigned: row.Assigned, Busy: row.Busy, Registered: row.Registered, ObservedAt: row.ObservedAt})
 	}
 	return rows
 }

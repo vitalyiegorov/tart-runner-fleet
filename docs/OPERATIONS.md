@@ -978,7 +978,7 @@ fleet scale-sets audit --config ./state/fleet.json
 ```
 suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
 suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idle=0
-suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be
+suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: nothing can be listening to this set
 ```
 
 It exits `5` on a stranding and `0` when no parked set holds work. It exits `4`
@@ -1001,7 +1001,7 @@ fleet doctor --output json | jq '.checks[] | select(.name == "parked scale sets"
 ```
 
 ```
-FAIL   parked scale sets   suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be; cancel and re-run the workflow, or bind the set on a node
+FAIL   parked scale sets   suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: nothing can be listening to this set; cancel and re-run the workflow, or bind the set on a node
 ```
 
 The row reads `not audited` on a node that has never completed one — an
@@ -1027,7 +1027,7 @@ fleet holds, and moving a binding between nodes needs the hub
 Alert on
 `fleet_parked_scale_set_assigned_jobs > 0 or fleet_parked_scale_set_busy_runners > 0`.
 Both halves are needed: a set with an assigned job no runner has taken and a set
-whose runner is mid-job are both sets something must be listening to, and the
+whose runner is mid-job are both sets something must be serving, and the
 check fires on either. They are labelled by scope and scale set, and a node that
 has not audited exports no series at all — which is why the alert is not a
 substitute for the doctor row.

@@ -31,7 +31,7 @@ func TestAParkedScaleSetHoldingWorkFailsTheCheck(t *testing.T) {
 	}
 	detail := strings.Join(result.Reasons, " ")
 	for _, want := range []string{"suuudokuuu", "scale set 7", "trf-sudoku-builder-studio",
-		"2 assigned job(s)", "nothing is known to be", "cancel and re-run the workflow, or bind the set on a node"} {
+		"2 assigned job(s)", "nothing can be listening", "cancel and re-run the workflow, or bind the set on a node"} {
 		if !strings.Contains(detail, want) {
 			t.Fatalf("the finding must say %q: %q", want, detail)
 		}

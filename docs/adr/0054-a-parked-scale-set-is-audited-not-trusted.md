@@ -71,8 +71,9 @@ sets` doctor row.
 a sibling's configuration, so a parked set is very often legitimately the
 sibling's — that is ADR 0034's ordinary case, and an idle parked set is therefore
 informational and silent. A parked set *with assigned or busy work* is reported
-regardless, and says so: *something must be listening to this set and, from here,
-nothing is known to be.* That sentence is the whole epistemic position; a
+regardless — unless GitHub reports a registered runner, which is itself proof of
+a listener (a sibling's, under the shared labels) — and says so: *nothing can be
+listening to this set.* That sentence is the whole epistemic position; a
 stronger one would be false.
 
 **Three states, never two.** A daemon that predates the check renders `not

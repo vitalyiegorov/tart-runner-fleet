@@ -534,6 +534,7 @@ type ParkedScaleSet struct {
 	Name       string    `json:"name,omitempty"`
 	Assigned   int       `json:"assigned"`
 	Busy       int       `json:"busy"`
+	Registered int       `json:"registered"`
 	ObservedAt time.Time `json:"observedAt"`
 }
 

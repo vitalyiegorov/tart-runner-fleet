@@ -73,13 +73,21 @@ type ScaleSet struct {
 // sets that must have a listener.
 func (s ScaleSet) Holding() bool { return s.Assigned > 0 || s.Busy > 0 }
 
+// Stranded is a Holding set nothing can be serving: work is assigned and not a
+// single runner is registered against the set. A registered runner is itself
+// proof of a listener — GitHub only registers one after a listener acquired
+// the job — so a parked-but-registered set is a sibling's (ADR 0034 shared
+// labels) and a finding here would fail this node's doctor forever on its
+// sibling's normal traffic; the first live cadence run did exactly that.
+func (s ScaleSet) Stranded() bool { return s.Holding() && s.Registered == 0 }
+
 // Reason is the run-facing sentence for one stranding, written from the only
 // thing the audit can honestly claim: this node does not serve the set. It
 // cannot read a sibling's configuration, so it says what is known rather than
 // accusing a node of being absent.
 func (s ScaleSet) Reason() string {
-	return fmt.Sprintf("%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s): "+
-		"something must be listening to this set and, from here, nothing is known to be",
+	return fmt.Sprintf("%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s) "+
+		"with no runner registered: nothing can be listening to this set",
 		s.Scope, s.ID, s.Name, s.Assigned, s.Busy)
 }
 
@@ -211,7 +219,7 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 			row.Registered, row.Idle = statistics.RegisteredRunners, statistics.IdleRunners
 			row.Available, row.Acquired, row.Running = statistics.AvailableJobs, statistics.AcquiredJobs, statistics.RunningJobs
 		}
-		row.Stranding = row.State == Parked && row.Holding()
+		row.Stranding = row.State == Parked && row.Stranded()
 		sets = append(sets, row)
 	}
 	slices.SortFunc(sets, func(a, b ScaleSet) int { return a.ID - b.ID })

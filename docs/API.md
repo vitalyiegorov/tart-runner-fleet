@@ -312,7 +312,7 @@ node does not serve:
    "assigned": 2, "busy": 2, "observedAt": "2026-08-04T18:30:00Z"}],
 "parkedScaleSetsAuditedAt": "2026-08-04T18:30:00Z",
 "parkedScaleSetCheck": {"ok": false, "reasons": [
-  "suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s): something must be listening to this set and, from here, nothing is known to be; cancel and re-run the workflow, or bind the set on a node"]}
+  "suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: nothing can be listening to this set; cancel and re-run the workflow, or bind the set on a node"]}
 ```
 
 All three are additive and absent on a daemon that predates them, which is what
