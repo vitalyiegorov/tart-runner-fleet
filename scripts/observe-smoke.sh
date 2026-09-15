@@ -42,6 +42,7 @@ readyBudgetSeconds=120
 binary="${1:-}"
 work="$(mktemp -d)"
 daemon_pid=''
+watchdog_pid=''
 health_port=''
 diagnose() {
   printf -- '--- fleet status (no --require-ready) ---\n' >&2
@@ -60,6 +61,10 @@ diagnose() {
   fi
 }
 cleanup() {
+  if [ -n "$watchdog_pid" ]; then
+    pkill -P "$watchdog_pid" 2>/dev/null || true
+    kill "$watchdog_pid" 2>/dev/null || true
+  fi
   if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
     kill "$daemon_pid" 2>/dev/null || true
     wait "$daemon_pid" 2>/dev/null || true
@@ -136,6 +141,14 @@ endpoint="unix://$work/fleetd.sock"
   --health-address "127.0.0.1:$health_port" \
   >"$work/fleet.stdout.log" 2>"$work/fleet.stderr.log" &
 daemon_pid=$!
+# A watchdog that outlives this script. The EXIT trap is the normal way the
+# daemon dies, but a harness that SIGKILLs the script (a cancelled gate run, a
+# session torn down mid-sweep) runs no trap, and an observe daemon left behind
+# in tmpfs held its deleted database open for a day: sixteen of them, 9 GiB of
+# swap, and a node that stopped admitting work. Whatever happens to the script,
+# the daemon is gone within the smoke's own budget plus a margin.
+( sleep "$((readyBudgetSeconds + 180))"; kill "$daemon_pid" 2>/dev/null ) >/dev/null 2>&1 &
+watchdog_pid=$!
 
 status=''
 started="$(date +%s)"
@@ -167,4 +180,7 @@ printf '%s\n' "$status" > "$work/status.json"
 # nothing about whether this build reached the observe steady state.
 "$binary" doctor --output json --endpoint "$endpoint" > "$work/doctor.json" || true
 printf 'became ready after %ss\n' "$(( $(date +%s) - started ))"
-exec python3 scripts/observe-smoke-assert.py "$work/status.json"
+# Not `exec`: replacing the shell skips the EXIT trap, and every clean run then
+# left its daemon and its tmpfs work directory behind (the leak that filled
+# node-b's swap). The assert's verdict is still this script's exit status.
+python3 scripts/observe-smoke-assert.py "$work/status.json"
