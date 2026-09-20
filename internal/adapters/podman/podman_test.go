@@ -1140,6 +1140,23 @@ func TestPower(t *testing.T) {
 		{name: "a state this adapter cannot classify establishes nothing",
 			host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "quiesced") },
 			want: domain.InstancePowerUnknown},
+		// The two transient states podman passes through at the boundaries the
+		// fleet reads it: `initialized` (runtime set up, process not started)
+		// and `configured` on the way up, `stopping` on the way down. node-b
+		// logged 45 "power state unreadable" readings for exactly these, one
+		// per instance, every one at cloning or deregistering.
+		{name: "an initialized container is not yet running",
+			host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "initialized") },
+			want: domain.InstancePowerStopped},
+		{name: "a configured container is not yet running",
+			host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "configured") },
+			want: domain.InstancePowerStopped},
+		{name: "a stopping container still holds its resources",
+			host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "stopping") },
+			want: domain.InstancePowerRunning},
+		{name: "podman's own unknown establishes nothing",
+			host: func() *fakePodman { return newFakePodman().with("trf-small-abc", "unknown") },
+			want: domain.InstancePowerUnknown},
 		{
 			name: "an unreadable host fails rather than reporting stopped",
 			host: func() *fakePodman {

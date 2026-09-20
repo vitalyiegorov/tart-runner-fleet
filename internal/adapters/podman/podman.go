@@ -208,20 +208,27 @@ type container struct {
 
 // power reports what podman's textual state establishes about the container.
 //
-// Podman reports `running` and `paused` for a live container and `created`,
-// `exited`, `stopped`, `removing`, and `dead` for one that is not; a paused
-// container still holds its resources, so it counts as running.
+// Podman's state machine (libpod/define.ContainerState) is `configured` →
+// `created` → `initialized` → `running` (or `paused`) → `stopping` → `stopped`
+// / `exited` → `removing`, plus `dead` and its own `unknown`. A paused or
+// stopping container still holds its resources, so both count as running;
+// everything before `running` and after `stopping` does not.
 //
-// A state this adapter does not recognise — including the empty string podman
-// prints when it could not inspect the container — establishes NOTHING, and
-// since issue #252 it says so instead of falling into "not running". The
-// unrecognised case is not hypothetical: it is one podman release away, and it is
-// the exact shape of the tart defect that cost two nightlies.
+// The transient states matter: a container is read at exactly the moments it
+// passes through them. node-b logged 45 "power state unreadable" readings, one
+// per instance, all at cloning (`initialized`) or deregistering (`stopping`),
+// before this table named them.
+//
+// A state this adapter does not recognise — including podman's own `unknown`
+// and the empty string it prints when it could not inspect the container —
+// establishes NOTHING, and since issue #252 it says so instead of falling into
+// "not running". That case is one podman release away, and it is the exact
+// shape of the tart defect that cost two nightlies.
 func (c container) power() (domain.InstancePower, domain.PowerReadFailure) {
 	switch strings.ToLower(strings.TrimSpace(c.State)) {
-	case "running", "paused":
+	case "running", "paused", "stopping":
 		return domain.InstancePowerRunning, domain.PowerReadFailure{}
-	case "created", "exited", "stopped", "removing", "dead":
+	case "configured", "created", "initialized", "exited", "stopped", "removing", "dead":
 		return domain.InstancePowerStopped, domain.PowerReadFailure{}
 	default:
 		return domain.InstancePowerUnknown, domain.PowerReadFailure{Reason: domain.PowerReadOther}
