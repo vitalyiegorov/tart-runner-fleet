@@ -122,6 +122,14 @@ wrong:
 | `Adapter.Reap`, `discharge` | refused a *proven running* VM | refuses everything not *proven stopped* |
 | podman `container.running()` | unrecognised state ⇒ not running | unrecognised state ⇒ Unknown |
 
+Amendment 2026-09-20: the podman table now names the full libpod state
+machine. `initialized` (start) and `stopping` (teardown) are the states a
+container is read in at exactly the moments the fleet reads it, and their
+absence produced 45 `unclassified` readings on node-b — one per instance,
+every one at cloning or deregistering. `stopping` still holds resources and
+counts as running; `configured`, `created`, `initialized` do not. Podman's own
+`unknown` stays Unknown.
+
 ### The tart adapter corroborates the one reading that can be manufactured
 
 `tart` cannot report a VM *running* by failing to read it: the failure path
