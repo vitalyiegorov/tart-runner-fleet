@@ -106,8 +106,11 @@ type Status struct {
 	// audit has ever run here, which is not the same as nothing being parked.
 	ParkedScaleSets          []ParkedScaleSet `json:"parkedScaleSets,omitempty"`
 	ParkedScaleSetsAuditedAt *time.Time       `json:"parkedScaleSetsAuditedAt,omitempty"`
-	// ParkedScaleSetCheck fails when a parked set holds assigned jobs or busy
-	// runners. Absent from a daemon that predates it, which is why
+	// ParkedScaleSetCheck is informational and never fails (ADR 0054 amendment,
+	// 2026-09-21): it is `ok` whenever an audit has run, and its reasons carry
+	// the evidence -- each parked set holding work with no registered runner,
+	// which one node cannot distinguish from a sibling's ordinary backlog.
+	// Absent from a daemon that predates it, which is why
 	// EffectiveParkedScaleSetCheck exists.
 	ParkedScaleSetCheck *Check `json:"parkedScaleSetCheck,omitempty"`
 	// IngestCheck is an additive fleet.v1 field: a scale set GitHub has queued
@@ -372,7 +375,7 @@ func (s Status) EffectiveIngestCheck() Check {
 
 // EffectiveParkedScaleSetCheck reads the parked-scale-set check an older daemon
 // does not publish. Absence is a pass for the reason every additive check treats
-// it so: a controller that cannot audit has not reported a stranding. The
+// it so: a controller that cannot audit has not reported anything. The
 // distinct state -- a daemon that publishes the check and has never run an audit
 // -- is carried by ParkedScaleSetsAuditedAt, which is nil until one completes,
 // and is rendered as "not audited" rather than as health.

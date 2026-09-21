@@ -311,9 +311,17 @@ node does not serve:
   {"scope": "suuudokuuu", "id": 7, "name": "trf-sudoku-builder-studio",
    "assigned": 2, "busy": 2, "observedAt": "2026-08-04T18:30:00Z"}],
 "parkedScaleSetsAuditedAt": "2026-08-04T18:30:00Z",
-"parkedScaleSetCheck": {"ok": false, "reasons": [
-  "suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: nothing can be listening to this set; cancel and re-run the workflow, or bind the set on a node"]}
+"parkedScaleSetCheck": {"ok": true, "reasons": [
+  "suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: it may be stranded, or a sibling may be serving it; audit every node before cancelling a run or binding the set"]}
 ```
+
+**`parkedScaleSetCheck.ok` is `true` whenever an audit has run, and its reasons
+carry the evidence** (ADR 0054 amendment, 2026-09-21). A node reads GitHub's
+per-set statistics from its own chair and cannot tell a stranding from a
+sibling's ordinary backlog: on 2026-09-21 three sets bound on the mac mini read
+`assigned>0 busy>0 registered=0` from the Linux node while their jobs were merely
+queued behind the mini's capacity. A consumer must treat a reason line as
+evidence to correlate with every other node's, never as a verdict.
 
 All three are additive and absent on a daemon that predates them, which is what
 `EffectiveParkedScaleSetCheck()` exists for. **`parkedScaleSetsAuditedAt` is
@@ -325,7 +333,7 @@ two jobs sat assigned to a scale set no daemon polled.
 
 `parkedScaleSets` carries only the PARKED sets, not an inventory: a set this node
 serves is already described by `scopeQueues`, the observations and every other
-check. A parked set holding nothing is still listed and is not a finding — under
+check. A parked set holding nothing is still listed and is never a reason — under
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) it is very often a
 sibling node's, and this node cannot read a sibling's configuration
 ([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md)). The same

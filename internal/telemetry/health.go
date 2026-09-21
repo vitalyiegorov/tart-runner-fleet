@@ -1414,12 +1414,19 @@ func ingestResult(snapshot Snapshot) HealthResult {
 // already routed the work and offers an assigned job to nobody else. `fleet
 // queues` read 0, `fleet doctor` read PASS, and every observation read fresh.
 //
-// The wording is exact about what this node can know. Shared-label federation is
-// the ordinary case (ADR 0034), so a set parked HERE may well be bound on a
-// sibling; the audit cannot read a sibling's configuration and does not pretend
-// to. A parked set holding NOTHING is therefore informational and silent. A
-// parked set holding work is a finding regardless, because something must be
-// listening to it and, from here, nothing is known to be.
+// The wording is exact about what this node can know, and since the 2026-09-21
+// amendment to ADR 0054 the check NEVER fails. Shared-label federation is the
+// ordinary case (ADR 0034), so a set parked HERE may well be bound on a sibling;
+// the audit cannot read a sibling's configuration, a sibling's queue, or the
+// freshness of GitHub's per-set counters. On 2026-09-21 three sets bound on the
+// mac mini read `assigned>0 busy>0 registered=0` from the Linux node while their
+// jobs were merely queued behind the mini's capacity, and node-b's own bound set
+// 16 read `assigned=4 busy=4 registered=0` with an empty local queue. A genuine
+// stranding and that backlog are the same reading from one chair.
+//
+// So a parked set holding work with no registered runner is published as
+// EVIDENCE: the check stays OK and carries the reading in its reasons, and the
+// verdict belongs to a fleet-wide view (the hub, issues #175/#218).
 func parkedScaleSetResult(snapshot Snapshot) HealthResult {
 	// Never audited is not a pass and not a failure: it is the absence of a
 	// reading. An observe-mode daemon has no authority to audit and always reads
@@ -1434,15 +1441,12 @@ func parkedScaleSetResult(snapshot Snapshot) HealthResult {
 		}
 		reasons = append(reasons, fmt.Sprintf(
 			"%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s) "+
-				"with no runner registered: nothing can be listening to this set; "+
-				"cancel and re-run the workflow, or bind the set on a node",
+				"with no runner registered: it may be stranded, or a sibling may be serving it; "+
+				"audit every node before cancelling a run or binding the set",
 			row.Scope, row.ScaleSetID, row.Name, row.Assigned, row.Busy))
 	}
-	if len(reasons) == 0 {
-		return HealthResult{OK: true}
-	}
 	sort.Strings(reasons)
-	return HealthResult{Reasons: reasons}
+	return HealthResult{OK: true, Reasons: reasons}
 }
 
 func (h *Health) QueueHealth() HealthResult {

@@ -60,9 +60,10 @@ type ScaleSet struct {
 	Acquired   int `json:"acquired"`
 	Running    int `json:"running"`
 
-	// Stranding is the finding: a parked set that is holding work. GitHub has
-	// given this set jobs and will give them to nobody else, and from here
-	// nothing is known to be listening to it.
+	// Stranding is the evidence: a parked set that is holding work with no
+	// registered runner. GitHub has given this set jobs and will give them to
+	// nobody else, and from here nothing is known to be listening to it — which
+	// is not the same as nothing listening anywhere (see Stranded).
 	Stranding  bool      `json:"stranding"`
 	ObservedAt time.Time `json:"observedAt"`
 }
@@ -73,21 +74,30 @@ type ScaleSet struct {
 // sets that must have a listener.
 func (s ScaleSet) Holding() bool { return s.Assigned > 0 || s.Busy > 0 }
 
-// Stranded is a Holding set nothing can be serving: work is assigned and not a
-// single runner is registered against the set. A registered runner is itself
-// proof of a listener — GitHub only registers one after a listener acquired
-// the job — so a parked-but-registered set is a sibling's (ADR 0034 shared
-// labels) and a finding here would fail this node's doctor forever on its
-// sibling's normal traffic; the first live cadence run did exactly that.
+// Stranded is the strongest signal ONE node can read: a Holding set with not a
+// single runner registered against it. A registered runner is proof of a
+// listener — GitHub only registers one after a listener acquired the job — so a
+// parked-but-registered set is plainly a sibling's (ADR 0034 shared labels).
+//
+// The converse does not hold, and 2026-09-21 proved it from a live fleet: the
+// mac mini's bound sets (`trf-fleet-large`, `trf-sudoku-builder`,
+// `trf-budgie-builder-2`) each read `assigned>0 busy>0 registered=0` from the
+// Linux node while they were simply queued behind the mini's own capacity, and
+// node-b's OWN bound set 16 read `assigned=4 busy=4 registered=0` with an empty
+// local queue. GitHub's per-set statistics are stale and node-local; a genuine
+// stranding and an ordinary backlog on a sibling are the SAME reading from here.
+// This predicate is therefore evidence, never a verdict: only a fleet-wide view
+// (the hub, issues #175/#218) can say that no node listens to a set.
 func (s ScaleSet) Stranded() bool { return s.Holding() && s.Registered == 0 }
 
-// Reason is the run-facing sentence for one stranding, written from the only
-// thing the audit can honestly claim: this node does not serve the set. It
-// cannot read a sibling's configuration, so it says what is known rather than
-// accusing a node of being absent.
+// Reason is the run-facing sentence for one finding, written from the only thing
+// the audit can honestly claim: this node does not serve the set and saw no
+// registered runner. It cannot read a sibling's configuration or a sibling's
+// queue, so it says the set MAY be stranded and names the confirmation step.
 func (s ScaleSet) Reason() string {
 	return fmt.Sprintf("%s scale set %d (%s) is parked here and holds %d assigned job(s) and %d busy runner(s) "+
-		"with no runner registered: nothing can be listening to this set",
+		"with no runner registered: it may be stranded, or a sibling node may be serving it — "+
+		"confirm with `fleet scale-sets audit` on every node before acting",
 		s.Scope, s.ID, s.Name, s.Assigned, s.Busy)
 }
 
@@ -95,7 +105,8 @@ type Result struct {
 	ScaleSets []ScaleSet `json:"scaleSets"`
 }
 
-// Strandings is the alertable subset, in the order the sets were reported.
+// Strandings is the evidence subset, in the order the sets were reported. It is
+// what an operator must carry to the other nodes, not a list of faults.
 func (r Result) Strandings() []ScaleSet {
 	findings := make([]ScaleSet, 0, len(r.ScaleSets))
 	for _, set := range r.ScaleSets {

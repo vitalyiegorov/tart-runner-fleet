@@ -22,7 +22,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
 | `config policy PATH...` | Print the load-bearing policy one node runs with; with more than one path, the keys on which they disagree |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
-| `scale-sets audit --config PATH` | Read the scale sets GitHub holds for each configured scope and classify each as bound or parked; a parked set holding work exits 5 |
+| `scale-sets audit --config PATH` | Read the scale sets GitHub holds for each configured scope and classify each as bound or parked; a parked set holding work is printed as evidence, and exits 5 only with `--strict` |
 | `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
 | `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
 | `version` | CLI build version |
@@ -152,6 +152,7 @@ issue #164).
 ```sh
 fleet scale-sets audit --config ./state/fleet.json
 fleet scale-sets audit --config ./state/fleet.json --output json
+fleet scale-sets audit --config ./state/fleet.json --strict
 ```
 
 ```
@@ -161,16 +162,22 @@ suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idl
 
 | Exit | Meaning |
 | ---: | --- |
-| 0 | Every scale set GitHub holds is either bound here or parked and holding nothing |
+| 0 | The audit completed. Findings, if any, are printed on stderr as evidence |
 | 4 | The audit was unavailable or could not produce a trustworthy result — GitHub unreachable, the App credential missing, or an answer too uncertain to classify. **Never read as a pass** |
-| 5 | A parked set holds assigned jobs or busy runners |
+| 5 | `--strict` only: a parked set holds assigned jobs or busy runners with no registered runner |
 
-**Parked here does not mean parked everywhere.** Under
+**This command produces evidence, not a verdict.** Under
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) a sibling node may
-legitimately own the set, and this command cannot read a sibling's
-configuration — so a parked set holding nothing is informational and never a
-finding. A parked set holding work is reported regardless, because something must
-be listening to it and, from here, nothing is known to be.
+legitimately own the set, and this command cannot read a sibling's configuration,
+a sibling's queue, or the freshness of GitHub's per-set counters. On 2026-09-21
+three sets bound on the mac mini read `assigned>0 busy>0 registered=0` from the
+Linux node while their jobs were simply queued behind the mini's own capacity,
+and the Linux node's OWN bound set read `assigned=4 busy=4 registered=0` with an
+empty local queue. A genuine stranding and an ordinary backlog are the same
+reading from one chair, so the default exit is `0`: run the audit on EVERY node
+and act only when the same set shows work from all of them. `--strict` exits `5`
+on a finding, for an operator or script that has already done that and accepts
+the false-positive risk.
 
 The cost is bounded: one listing per scope, plus one read per parked set whose
 listing carried no statistics. There is no polling loop. The authority daemon
