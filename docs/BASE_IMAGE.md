@@ -371,6 +371,65 @@ which also is not this). Query `simctl` live, as above and in
 [Seal and verify](#seal-and-verify), rather than trusting a file that nothing
 downstream honors.
 
+### 4b. Slim the simulators and drop the runtimes nobody boots
+
+Measured 2026-09-21 on a clone of the mac mini's promoted base (`macos-tartelet-base-go`,
+epic #331, iteration #332). A stock `iPhone 17 Pro` at steady state ran 203 processes
+and left the 7 GiB `maestro` guest with 79 MB free and 579 MB in the compressor; the
+UI-test step of a tenant job was 92 % of its wall time. Three of the four simulator
+runtimes the Cirrus image ships (tvOS, watchOS, visionOS) are never booted here.
+
+```sh
+tart exec "$BASE" env DEVELOPER_DIR=/Applications/Xcode_26.4.1.app/Contents/Developer bash -lc '
+set -euo pipefail
+brew install mobai-app/tap/simslim                     # MIT, Go; pinned by mobile-ci per version + sha256
+mkdir -p ~/.fleet
+printf "%s" "{\"name\":\"fleet\",\"except\":[\"store\",\"web\"],\"keep\":[\"com.apple.apsd\"]}" > ~/.fleet/simslim.fleet.json
+for udid in $(xcrun simctl list devices -j | python3 -c "
+import sys, json
+for entries in json.load(sys.stdin)[\"devices\"].values():
+    for d in entries:
+        if d[\"name\"] == \"iPhone 17 Pro\" and d.get(\"isAvailable\", True): print(d[\"udid\"])"); do
+  simslim on "$udid" --profile ~/.fleet/simslim.fleet.json --boot-timeout 15m
+  simslim verify "$udid" --profile ~/.fleet/simslim.fleet.json
+  simslim doctor "$udid" --requires push,universal-links,storekit   # what the RN tenants assert on
+  simslim measure "$udid"
+done
+xcrun simctl shutdown all >/dev/null 2>&1 || true
+for r in $(xcrun simctl runtime list -j | python3 -c "
+import sys, json
+for k, v in json.load(sys.stdin).items():
+    if \"iOS\" not in str(v.get(\"runtimeIdentifier\", \"\")): print(k)"); do
+  xcrun simctl runtime delete "$r"
+done
+xcrun simctl runtime dyld_shared_cache update --all || true
+'
+```
+
+The overrides live in the device's own launchd database and persist across reboots
+on iOS 18.5+, so every clone boots slim; `mobile-ci`'s `simulator-slim-profile`
+verifies per run and repairs a device that comes up stock (a re-created device is
+stock again). The profile keeps push, StoreKit and universal links, the three
+features the React Native tenants assert with `simulator-requires`.
+
+| measure | stock | slim |
+| --- | ---: | ---: |
+| image size (`tart list`) | 89 GB | 63 GB |
+| simulator runtimes | 4 | 1 |
+| simulator processes at steady state | 203 | 84 |
+| guest at simulator steady state | 79 MB free, 579 MB compressed | 123 MB free, 0 compressed |
+| `simslim measure` | — | 75 processes, 1020 MB |
+| `simslim doctor` push, universal-links, storekit | — | 3/3 OK |
+
+Two things this step does **not** do, and why:
+
+- **mac-os-debloat** (`balanced` minus a keep list) disabled 148 guest launchd
+  services, and `--status --json` after a reboot showed 37 still disabled: macOS 26.5
+  clears most overrides at boot. It is not in the recipe until that persists.
+- **Do not issue `shutdown -r` through `tart exec`.** The exec never returns once
+  the guest is down and blocks the caller; reboot from the host (`tart stop`,
+  `tart run`) and poll `tart exec "$BASE" true`.
+
 ### 5. Host hygiene
 
 A sealed CI guest must not start an OS update, sleep, or index in the middle of
@@ -634,7 +693,8 @@ in the chain has the same 140 GB virtual disk):
 
 | Image | Used GB |
 | --- | ---: |
-| `macos-tartelet-base-go` (mac-mini today) | 91 |
+| `macos-tartelet-base-go-slim-20260921` (mac-mini today, step 4b) | 63 |
+| `macos-tartelet-base-go` (before step 4b) | 89 |
 | `…-pre-androidsdk-20260720` (before the Android layer) | 87 |
 | `…-pre-prewarm-20260719` | 82 |
 | `ghcr.io/cirruslabs/macos-sequoia-xcode:26.4.1` as pulled | 84 |
