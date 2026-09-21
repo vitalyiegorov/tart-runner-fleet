@@ -203,3 +203,37 @@ func TestThePublishedFindingReachesTheAccessorAndTheDocument(t *testing.T) {
 		t.Fatalf("the document's ingest check must fail with it: %#v", document.Data.IngestCheck)
 	}
 }
+
+// The per-set instance count is what makes a per-set verdict possible, and it
+// is published as a whole set: a malformed row is refused, a later publication
+// replaces the previous one, and nil is an absence rather than an empty fleet.
+func TestThePerSetInstanceCountIsPublishedAsAWholeSet(t *testing.T) {
+	health, _ := newTestHealth(t)
+
+	if err := health.SetScaleSetInstances([]ScaleSetInstanceMetric{{Scope: "budgie", Count: 1}}); err == nil {
+		t.Fatal("a row naming no scale set must be refused")
+	}
+	if err := health.SetScaleSetInstances([]ScaleSetInstanceMetric{
+		{Scope: "budgie", ScaleSetID: 17, Profile: "linux-4x8", Count: -1}}); err == nil {
+		t.Fatal("a negative instance count must be refused")
+	}
+	rows := []ScaleSetInstanceMetric{
+		{Scope: "budgie", ScaleSetID: 17, Profile: "linux-4x8", Count: 0},
+		{Scope: "fleet", ScaleSetID: 12, Profile: "linux-4x8", Count: 1}}
+	if err := health.SetScaleSetInstances(rows); err != nil {
+		t.Fatal(err)
+	}
+	published := health.Snapshot().ScaleSetInstances
+	if len(published) != 2 || published[0].ScaleSetID != 17 || published[0].Count != 0 || published[1].Count != 1 {
+		t.Fatalf("both sets are published, including the empty one: %#v", published)
+	}
+
+	// A tick that could not observe the inventory publishes nothing, which the
+	// detector reads as "not observed" and never as "no instance".
+	if err := health.SetScaleSetInstances(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(health.Snapshot().ScaleSetInstances) != 0 {
+		t.Fatal("an unobserved inventory must leave no per-set count standing")
+	}
+}

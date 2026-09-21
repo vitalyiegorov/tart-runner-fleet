@@ -32,15 +32,15 @@ func strandedListing() []githubscaleset.ScaleSetSummary {
 		Statistics: &githubscaleset.ScaleSetStatistics{AssignedJobs: 3, BusyRunners: 3}}}
 }
 
-func strandedRequest(client Client, local func(string, int, string) (Observation, bool)) Request {
+func strandedRequest(client Client, local func(string, int) (Observation, bool)) Request {
 	return Request{Config: budgieConfig(), Key: githubscaleset.NewPrivateKeySecret("pem"),
 		Open:  func(githubscaleset.GitHubAppAdminConfig) (Client, error) { return client, nil },
 		Now:   func() time.Time { return strandedAt },
 		Local: local}
 }
 
-func observed(instances int, since time.Time) func(string, int, string) (Observation, bool) {
-	return func(string, int, string) (Observation, bool) {
+func observed(instances int, since time.Time) func(string, int) (Observation, bool) {
+	return func(string, int) (Observation, bool) {
 		return Observation{Instances: instances, HoldingSince: since}, true
 	}
 }

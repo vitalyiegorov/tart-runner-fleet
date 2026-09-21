@@ -220,9 +220,8 @@ the false-positive risk.
 
 The BOUND half is a verdict and exits `5` on its own (ADR 0056): a set this node
 serves is one whose queue, instances and reading-age are all this node's own,
-which is exactly what the parked case lacks. When two scale sets share a
-profile, the node's per-profile instance count can decide neither and both are
-reported as unjudged rather than guessed.
+which is exactly what the parked case lacks. The instance count behind it is per scale
+set, not per profile, because every node binds one profile to several sets.
 
 The cost is bounded: one listing per scope, plus one read per set whose listing
 carried no statistics. There is no polling loop. The authority daemon

@@ -41,6 +41,10 @@ type TickResult struct {
 	Applied bool
 	Demands []domain.Demand
 	Queues  map[domain.ProfileID]QueueSummary
+	// ScopeInstances reports the live instances this node holds per scale set,
+	// which is the only form of that count a per-set judgement can use (ADR
+	// 0056). It is nil when the inventory could not be observed.
+	ScopeInstances []ScopeInstance
 	// ScopeQueues reports the same demand without collapsing the scope. The
 	// per-profile aggregate above cannot distinguish an idle scope from a busy one
 	// sharing its profile, which is the question an incident actually asks.
@@ -238,7 +242,8 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
-			Instances: append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
+			ScopeInstances: ScaleSetInstances(e.Bindings, instances),
+			Instances:      append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
 			ExpiredOverdue: expiredOverdue},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }

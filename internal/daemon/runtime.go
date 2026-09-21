@@ -1421,37 +1421,33 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 // UNOBSERVED rather than as zero instances (contributor rule 4) -- a daemon
 // that has not completed a tick knows nothing about its own instances, and
 // reading that silence as "no instance" would invent the finding.
-func (a *parkedScaleSetAuditor) local(scope string, id int, profile string) (scalesetaudit.Observation, bool) {
-	instances, published := a.health.Snapshot().Instances[profile]
-	// Instance counts are published per PROFILE. When this node binds more than
-	// one scale set to a profile, that count belongs to all of them together and
-	// can decide nothing about any one of them: an instance booted for a healthy
-	// set would refute its stranded sibling's finding. Unobserved is the honest
-	// answer, and no surface reads it as health.
-	if profile == "" || !published || a.sharedProfiles()[profile] {
-		return scalesetaudit.Observation{}, false
+func (a *parkedScaleSetAuditor) local(scope string, id int) (scalesetaudit.Observation, bool) {
+	for _, row := range a.health.Snapshot().ScaleSetInstances {
+		if row.Scope != scope || row.ScaleSetID != id {
+			continue
+		}
+		return scalesetaudit.Observation{Instances: row.Count,
+			HoldingSince: a.holding[scalesetaudit.Key{Scope: scope, ID: id}]}, true
 	}
-	return scalesetaudit.Observation{Instances: instances.Count,
-		HoldingSince: a.holding[scalesetaudit.Key{Scope: scope, ID: id}]}, true
+	// No row for this set means the node did not observe it -- it has not
+	// completed a tick, or its inventory was unavailable. That is an absence,
+	// not an absent instance, and it makes no finding.
+	return scalesetaudit.Observation{}, false
 }
 
-// sharedProfiles names the profiles this node binds more than one scale set to,
-// which is what makes a per-profile instance count unusable as a per-set
-// observation.
-func (a *parkedScaleSetAuditor) sharedProfiles() map[string]bool {
-	counts := map[string]int{}
-	for _, scope := range a.config.GitHub.Scopes {
-		for _, set := range scope.ScaleSets {
-			counts[set.Profile]++
-		}
+// scaleSetInstanceMetrics projects the tick's per-set counts, keeping nil as
+// nil: the difference between "observed, none" and "not observed" is the whole
+// of contributor rule 4 on this path.
+func scaleSetInstanceMetrics(rows []app.ScopeInstance) []telemetry.ScaleSetInstanceMetric {
+	if len(rows) == 0 {
+		return nil
 	}
-	shared := make(map[string]bool, len(counts))
-	for profile, count := range counts {
-		if count > 1 {
-			shared[profile] = true
-		}
+	metrics := make([]telemetry.ScaleSetInstanceMetric, 0, len(rows))
+	for _, row := range rows {
+		metrics = append(metrics, telemetry.ScaleSetInstanceMetric{Scope: row.Scope,
+			ScaleSetID: int(row.ScaleSetID), Profile: string(row.Profile), Count: row.Count})
 	}
-	return shared
+	return metrics
 }
 
 // strandedScaleSetMetrics keeps the bound sets GitHub has stopped delivering
@@ -2271,6 +2267,11 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 			Delivered: row.Delivered, Observed: row.Observed, SharedLabels: row.SharedLabels})
 	}
 	_ = e.health.SetScopeQueues(scopeRows)
+	// The per-set instance count is published the same way and for the same
+	// reason: it is the only observation a per-set judgement may use (ADR 0056),
+	// and nil says the inventory was not observed rather than that every set is
+	// empty.
+	_ = e.health.SetScaleSetInstances(scaleSetInstanceMetrics(result.ScopeInstances))
 	for _, instance := range result.Instances {
 		if !instance.Live() {
 			continue

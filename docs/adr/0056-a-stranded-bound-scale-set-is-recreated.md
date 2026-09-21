@@ -57,11 +57,21 @@ The clock the second term needs is produced by `Track`, a pure fold of one audit
 over the previous one: a qualifying reading keeps the instant it was first seen,
 and a reading that stops qualifying — a runner registered, an instance booted,
 the work drained — drops its clock entirely. The authority's existing
-parked-set auditor keeps that map across its cadence and supplies the instance
-count from its own telemetry. A profile the node has published no instance count
-for is reported as **unobserved**, never as zero instances: a daemon that has
-not completed a tick knows nothing about its own instances, and reading that
-silence as "no instance" would invent the finding.
+parked-set auditor keeps that map across its cadence.
+
+**The instance count is per SET, never per profile.** Every node in this fleet
+binds one profile to several scale sets: node-b binds `linux-4x8` from the fleet
+scope and from budgie, the mini binds `maestro` from budgie and from pony. A
+profile total would let one set's healthy runner refute another set's stranding,
+which makes the detector a green no-op on exactly the fleet it was written for —
+all three of 2026-09-21's strandings sat on shared profiles. `app.ScaleSetInstances`
+attributes each live instance to the binding that serves it (the scope whose
+targets name the instance's repository, at the instance's profile), the daemon
+publishes those counts per set each tick beside the per-scope queue rows, and
+the detector reads them by `(scope, id)`. A set the node has published no count
+for is **unobserved**, never zero instances: a daemon that has not completed a
+tick, or whose inventory is unavailable, knows nothing about its own VMs, and
+reading that silence as "no instance" would invent the finding.
 
 Surfaces:
 
@@ -126,13 +136,12 @@ failed.
   delivering: it is a live reading, never a latch.
 - **API cost.** One admin read per uncounted set per audit cadence (15 minutes
   by default), on top of ADR 0054's one listing per scope.
-- **A profile two scale sets share cannot judge either of them.** Instance
-  counts are published per profile, so an instance booted for one set would
-  refute its sibling's finding. Those sets are reported as UNOBSERVED rather
-  than judged on an answer that does not belong to one of them — a missed
-  detection, never an invented one. Per-set instance attribution is the fix and
-  it needs the reconcile loop to publish instances by binding, which is not on
-  this change.
+- **The instance observation gained a per-set form.** `TickResult.ScopeInstances`
+  and `fleet`'s health snapshot now carry an instance count per `(scope, scale
+  set)`, computed by the same attribution the scope queue rows use. The
+  per-profile `InstanceMetrics` are untouched and still drive the envelope; the
+  new rows are additive and internal, and nothing outside the detector reads
+  them yet.
 - **The remedy is resumable.** `recreate` inspects before it deletes: a second
   run after an interrupted one deletes nothing GitHub no longer holds and adopts
   a replacement already created under the same name, and a failed configuration

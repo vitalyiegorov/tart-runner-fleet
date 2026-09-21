@@ -237,7 +237,7 @@ type Request struct {
 	// holds for it (see Observation). It is nil when nothing can see the node,
 	// and a false second return says this particular set was not observed;
 	// neither is reported as zero instances.
-	Local func(scope string, id int, profile string) (Observation, bool)
+	Local func(scope string, id int) (Observation, bool)
 }
 
 // Run audits every configured scope. It never polls: one listing per scope and
@@ -344,7 +344,7 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 		}
 		row.Stranding = row.State == Parked && row.Stranded()
 		if row.State == Bound && request.Local != nil {
-			if observation, observed := request.Local(scope.Name, summary.ID, row.Profile); observed {
+			if observation, observed := request.Local(scope.Name, summary.ID); observed {
 				instances := observation.Instances
 				row.Instances = &instances
 				if !observation.HoldingSince.IsZero() {

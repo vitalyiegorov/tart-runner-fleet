@@ -152,6 +152,23 @@ type ParkedScaleSetMetric struct {
 	ObservedAt time.Time
 }
 
+// ScaleSetInstanceMetric is how many live instances this node holds for one
+// scale set it serves. The per-profile InstanceMetrics beside it cannot answer
+// this: every production node binds one profile to several scale sets, so a
+// profile total would let one set's healthy instance refute another set's
+// stranding (ADR 0056).
+//
+// The rows are published as a whole set each tick. A set with no instance is
+// present with Count 0 -- an observation -- and a set that is missing was not
+// observed at all, which is what a daemon that has not completed a tick, or
+// one whose inventory is unavailable, publishes.
+type ScaleSetInstanceMetric struct {
+	Scope      string
+	ScaleSetID int
+	Profile    string
+	Count      int
+}
+
 // StrandedScaleSetMetric is one scale set this node BINDS that GitHub has
 // stopped delivering work for: its counters say the set holds assigned jobs and
 // busy runners, no runner is registered against it, this node holds no instance
@@ -332,6 +349,9 @@ type Snapshot struct {
 	// which is reported as "not audited" and never as a pass.
 	ParkedScaleSets          []ParkedScaleSetMetric
 	ParkedScaleSetsAuditedAt time.Time
+	// ScaleSetInstances is the per-set instance count the stranded-set detector
+	// reads. Nil is "not observed", never "no instance anywhere".
+	ScaleSetInstances []ScaleSetInstanceMetric
 	// StrandedScaleSets is what the last completed audit found on the sets this
 	// node SERVES. It is empty on every healthy node and on every node that has
 	// never audited; the audit timestamp beside the parked rows is what tells
@@ -379,6 +399,7 @@ type Health struct {
 	queues             map[string]QueueMetrics
 	scopeQueues        []ScopeQueueMetrics
 	parkedScaleSets    []ParkedScaleSetMetric
+	scaleSetInstances  []ScaleSetInstanceMetric
 	strandedScaleSets  []StrandedScaleSetMetric
 	parkedAuditedAt    time.Time
 	instances          map[string]InstanceMetrics
@@ -594,6 +615,22 @@ func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time
 	h.mu.Lock()
 	h.parkedScaleSets = append([]ParkedScaleSetMetric(nil), rows...)
 	h.parkedAuditedAt = observedAt.UTC()
+	h.revision++
+	h.mu.Unlock()
+	return nil
+}
+
+// SetScaleSetInstances publishes this tick's per-set instance counts as a whole
+// set, so a binding removed from configuration stops being reported and an
+// unobservable inventory publishes nothing rather than a fleet of empty sets.
+func (h *Health) SetScaleSetInstances(rows []ScaleSetInstanceMetric) error {
+	for _, row := range rows {
+		if row.Scope == "" || row.ScaleSetID <= 0 || row.Count < 0 {
+			return errInvalidMetric
+		}
+	}
+	h.mu.Lock()
+	h.scaleSetInstances = append([]ScaleSetInstanceMetric(nil), rows...)
 	h.revision++
 	h.mu.Unlock()
 	return nil
@@ -1147,6 +1184,7 @@ func (h *Health) Snapshot() Snapshot {
 		ParkedScaleSets:          append([]ParkedScaleSetMetric(nil), h.parkedScaleSets...),
 		ParkedScaleSetsAuditedAt: h.parkedAuditedAt,
 		StrandedScaleSets:        append([]StrandedScaleSetMetric(nil), h.strandedScaleSets...),
+		ScaleSetInstances:        append([]ScaleSetInstanceMetric(nil), h.scaleSetInstances...),
 		HostPressure:             h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 		SuccessfulTickTTL: h.readyTickTTL,
 	}

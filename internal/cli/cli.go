@@ -566,7 +566,7 @@ func unjudgedBoundSets(result scalesetaudit.Result) int {
 // that set UNOBSERVED. The command says so rather than reading silence as "no
 // instance", which would turn every ordinary boot into a finding.
 func localScaleSetObservation(ctx context.Context, deps dependencies, endpoint string) (
-	func(string, int, string) (scalesetaudit.Observation, bool), bool) {
+	func(string, int) (scalesetaudit.Observation, bool), bool) {
 	client, err := deps.newClient(endpointOrDefault(endpoint), 5*time.Second)
 	if err != nil {
 		return nil, false
@@ -579,7 +579,7 @@ func localScaleSetObservation(ctx context.Context, deps dependencies, endpoint s
 	for _, row := range status.Data.StrandedScaleSets {
 		stranded[scalesetaudit.Key{Scope: row.Scope, ID: row.ScaleSetID}] = row
 	}
-	return func(scope string, id int, _ string) (scalesetaudit.Observation, bool) {
+	return func(scope string, id int) (scalesetaudit.Observation, bool) {
 		row, flagged := stranded[scalesetaudit.Key{Scope: scope, ID: id}]
 		if !flagged {
 			return scalesetaudit.Observation{}, false

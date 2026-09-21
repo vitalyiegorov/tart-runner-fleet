@@ -152,9 +152,10 @@ func TestABoundSetGitHubStoppedDeliveringForIsPublishedAfterTheBootTimeout(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The node is running and holds no instance for the profile: that is an
+	// The node is running and holds no instance for the SET: that is an
 	// observation, published every tick, and not an absence.
-	if err := health.SetInstances("builder", 0, 0, 0); err != nil {
+	if err := health.SetScaleSetInstances([]telemetry.ScaleSetInstanceMetric{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0}}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := auditConfig()
@@ -206,9 +207,10 @@ func TestABoundSetGitHubStoppedDeliveringForIsPublishedAfterTheBootTimeout(t *te
 	}
 }
 
-// A node that has not published an instance count for the profile cannot make
-// the finding: an unobserved instance count is not an absent instance.
-func TestAnUnobservedProfileMakesNoStrandedFinding(t *testing.T) {
+// A node that has not published an instance count for the set cannot make the
+// finding: an unobserved instance count is not an absent instance. A daemon
+// that has not completed a tick reads exactly this way.
+func TestAnUnobservedSetMakesNoStrandedFinding(t *testing.T) {
 	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
 		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
 			AssignedJobs: 3, BusyRunners: 3}},
@@ -230,18 +232,21 @@ func TestAnUnobservedProfileMakesNoStrandedFinding(t *testing.T) {
 		}
 	}
 	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
-		t.Fatalf("an unobserved profile makes no finding: %#v", rows)
+		t.Fatalf("an unobserved set makes no finding: %#v", rows)
 	}
 }
 
-// TestASharedProfileLeavesItsBoundSetsUnjudged is CodeRabbit's finding on #341:
-// instance counts are published per PROFILE, so when two scale sets share one
-// profile an instance booted for either reads as an instance for both. That
-// answer cannot support a per-set verdict, and reporting it would silently hide
-// a stranding behind its sibling's healthy traffic.
+// TestASharedProfileIsJudgedPerScaleSet is the defect the first cut of this
+// detector shipped with: instance counts were read per PROFILE, and every
+// production node binds one profile to many scale sets -- node-b binds
+// `linux-4x8` from six scopes, the mini binds `maestro` from budgie and pony.
+// A per-profile answer therefore let one set's healthy instance refute another
+// set's stranding, which made the detector a no-op on exactly the fleet it was
+// written for.
 //
-// The node says "not observed" instead, which no surface reads as health.
-func TestASharedProfileLeavesItsBoundSetsUnjudged(t *testing.T) {
+// The observation is per SET: the set with no instance of its own is the
+// finding, and its sibling that is running one is not.
+func TestASharedProfileIsJudgedPerScaleSet(t *testing.T) {
 	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
 		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
 			AssignedJobs: 3, BusyRunners: 3}},
@@ -252,7 +257,10 @@ func TestASharedProfileLeavesItsBoundSetsUnjudged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := health.SetInstances("builder", 0, 0, 0); err != nil {
+	// Both sets run the same profile; only set 2 has an instance of its own.
+	if err := health.SetScaleSetInstances([]telemetry.ScaleSetInstanceMetric{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0},
+		{Scope: "suuudokuuu", ScaleSetID: 2, Profile: "builder", Count: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := auditConfig()
@@ -269,10 +277,11 @@ func TestASharedProfileLeavesItsBoundSetsUnjudged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
-		t.Fatalf("an instance count two sets share cannot judge either: %#v", rows)
+	rows := health.Snapshot().StrandedScaleSets
+	if len(rows) != 1 || rows[0].ScaleSetID != 1 {
+		t.Fatalf("only the set with no instance of its own is a finding: %#v", rows)
 	}
-	if !health.Ingest().OK {
-		t.Fatal("an unjudged set must not fail the node on an observation it does not have")
+	if health.Ingest().OK {
+		t.Fatal("the finding must fail the node's ingest-delivery check")
 	}
 }
