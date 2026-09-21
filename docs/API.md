@@ -353,7 +353,7 @@ appears as a reason on `ingestCheck`, which is `ok: false` while one stands.
   {"scope": "budgie", "id": 17, "name": "trf-budgie-linux-amd64-4x8", "profile": "linux-4x8",
    "assigned": 3, "busy": 3, "holdingSince": "2026-09-21T08:00:00Z",
    "observedAt": "2026-09-21T12:00:00Z",
-   "reason": "budgie scale set 17 (trf-budgie-linux-amd64-4x8) is bound here and has held 3 assigned job(s) and 3 busy runner(s) for 4h0m0s with no runner registered and no instance on this node: GitHub is delivering nothing for this set -- recreate the set (`fleet scale-sets recreate trf-budgie-linux-amd64-4x8 --config <path> --confirm recreate-scale-set --reason <text>`) and restart the daemon"}]
+   "reason": "budgie scale set 17 (trf-budgie-linux-amd64-4x8) is bound here and has held 3 assigned job(s) and 3 busy runner(s) for 4h0m0s with no runner registered and no instance on this node, and the node's queue for it is empty: GitHub is delivering nothing for this set -- recreate the set (`fleet scale-sets recreate trf-budgie-linux-amd64-4x8 --config <path> --confirm recreate-scale-set --reason <text>`) and restart the daemon"}]
 ```
 
 The field is additive, absent on a daemon that predates it, and absent on a
