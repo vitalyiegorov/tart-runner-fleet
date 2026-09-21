@@ -158,6 +158,13 @@ func TestABoundSetGitHubStoppedDeliveringForIsPublishedAfterTheBootTimeout(t *te
 		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0}}); err != nil {
 		t.Fatal(err)
 	}
+	// ...and holds nothing queued for it either. Both halves come from the same
+	// tick, and both are required: a set the node holds work for is waiting on
+	// capacity, not stranded (#336 follow-up).
+	if err := health.SetScopeQueues([]telemetry.ScopeQueueMetrics{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0}}); err != nil {
+		t.Fatal(err)
+	}
 	cfg := auditConfig()
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
@@ -263,6 +270,11 @@ func TestASharedProfileIsJudgedPerScaleSet(t *testing.T) {
 		{Scope: "suuudokuuu", ScaleSetID: 2, Profile: "builder", Count: 1}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := health.SetScopeQueues([]telemetry.ScopeQueueMetrics{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0},
+		{Scope: "suuudokuuu", ScaleSetID: 2, Profile: "builder", Count: 0}}); err != nil {
+		t.Fatal(err)
+	}
 	cfg := auditConfig()
 	cfg.GitHub.Scopes[0].ScaleSets = append(cfg.GitHub.Scopes[0].ScaleSets,
 		config.ScaleSet{Profile: "builder", Name: "trf-sudoku-builder-two", ID: 2, MaxCapacity: 2})
@@ -283,5 +295,90 @@ func TestASharedProfileIsJudgedPerScaleSet(t *testing.T) {
 	}
 	if health.Ingest().OK {
 		t.Fatal("the finding must fail the node's ingest-delivery check")
+	}
+}
+
+// TestASetTheNodeHoldsQueuedWorkForIsNotPublishedAsStranded is the live false
+// positive of 2026-09-21 ~17:00 UTC, on the two Macs, within minutes of their
+// adopting the release that first carried this detector.
+//
+// `budgie` set 9 (`trf-budgie-builder-2`) read assigned=2 busy=2 registered=0
+// with no instance for an hour and the doctor told the operator to RECREATE it,
+// while `fleet queues` on the same node at the same instant reported `jobs: 1,
+// delivered: 1` for that very set: GitHub was delivering, and both Mac slots
+// were simply busy with Maestro shards. Recreating the set would have destroyed
+// a healthy object and the job queued against it.
+func TestASetTheNodeHoldsQueuedWorkForIsNotPublishedAsStranded(t *testing.T) {
+	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 1, Name: "trf-budgie-builder-2", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 2, BusyRunners: 2}},
+	}}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := health.SetScaleSetInstances([]telemetry.ScaleSetInstanceMetric{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	// The node holds one job for the set and the broker delivered it: there is a
+	// listener, and the set is waiting on this node's capacity.
+	if err := health.SetScopeQueues([]telemetry.ScopeQueueMetrics{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 1, Delivered: 1,
+			OldestEnqueuedAt: time.Date(2026, 9, 21, 15, 14, 0, 0, time.UTC)}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := auditConfig()
+	cfg.GitHub.Scopes[0].ScaleSets[0].Name = "trf-budgie-builder-2"
+	now := time.Date(2026, 9, 21, 16, 0, 0, 0, time.UTC)
+	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
+		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
+		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+
+	for _, at := range []time.Time{now, now.Add(cfg.Timeouts.Boot + time.Hour)} {
+		now = at
+		if err := auditor.Ingest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
+		t.Fatalf("a set this node holds queued work for is waiting on capacity, not stranded: %#v", rows)
+	}
+	if !health.Ingest().OK {
+		t.Fatalf("a healthy set must not fail the ingest-delivery check: %v", health.Ingest().Reasons)
+	}
+}
+
+// A node that published its instance rows and no queue row for a set has not
+// observed that set's queue. An unobserved queue is not an empty one, and a
+// detector that read it as empty would make the same false finding on every
+// daemon whose tick published only half of itself (contributor rule 4).
+func TestASetWithNoPublishedQueueRowMakesNoStrandedFinding(t *testing.T) {
+	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+	}}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := health.SetScaleSetInstances([]telemetry.ScaleSetInstanceMetric{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := auditConfig()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
+		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
+		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+
+	for _, at := range []time.Time{now, now.Add(cfg.Timeouts.Boot + 15*time.Minute)} {
+		now = at
+		if err := auditor.Ingest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
+		t.Fatalf("an unobserved queue makes no finding: %#v", rows)
 	}
 }

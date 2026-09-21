@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-09-21. Closes issue #336. Stands beside
+Accepted, 2026-09-21; amended the same evening after a live false positive (see
+the amendment under Decision). Closes issue #336. Stands beside
 [ADR 0054](0054-a-parked-scale-set-is-audited-not-trusted.md), which handles the
 sets this node does NOT serve, and whose 2026-09-21 amendment deliberately made
 the parked reading evidence rather than a verdict.
@@ -47,8 +48,9 @@ the set under guard.**
 The predicate is stated once, in `internal/scalesetaudit`, as two named terms:
 
 - `Starving()` — this node serves the set, GitHub reports assigned jobs **and**
-  busy runners, no runner is registered, and this node holds **no instance** for
-  the set's profile.
+  busy runners, no runner is registered, this node holds **no instance** for the
+  set, and this node's own **queue for the set is empty** (see the amendment
+  below; the last term was added after a live false positive).
 - `Wedging(now, bootTimeout)` — a `Starving` reading that has stood longer than
   `timeouts.boot`, the bound the node already declares on how long a runner may
   take to register. No new knob is introduced; the axis already exists.
@@ -72,6 +74,54 @@ the detector reads them by `(scope, id)`. A set the node has published no count
 for is **unobserved**, never zero instances: a daemon that has not completed a
 tick, or whose inventory is unavailable, knows nothing about its own VMs, and
 reading that silence as "no instance" would invent the finding.
+
+### Amendment 2026-09-21 (evening): a set this node holds queued work for is waiting on capacity
+
+The rule above shipped in v0.1.594 and made a **false positive within the hour**,
+on both Macs, as soon as they adopted it. `budgie` set 9
+(`trf-budgie-builder-2`, mac mini) and set 10 (`trf-budgie-builder-2-studio`,
+mac studio) read `assigned=2 busy=2 registered=0` with no instance for an hour,
+and the doctor told the operator to **recreate** them:
+
+```
+FAIL ingest delivery budgie-org scale set 9 (trf-budgie-builder-2) is bound here
+and has held 2 assigned job(s) and 2 busy runner(s) for 1h0m0s with no runner
+registered and no instance on this node: ...
+```
+
+At that same instant `fleet queues` on the same node reported `jobs: 1,
+delivered: 1, oldestEnqueuedAt 15:14Z` for set 9. GitHub **was** delivering for
+it. Both Mac slots were busy with hours-long Maestro shards, so the delivered
+job had nowhere to run: the set was waiting on **capacity**. Recreating it would
+have deleted a healthy GitHub object and lost the job queued against it — a
+destructive action on evidence that said the opposite.
+
+This is a **property/oracle defect**, not a world-model or fleet defect: the
+production reading was correct and the invariant judged it wrongly. The
+Context above already states the missing term — every one of the three
+2026-09-21 strandings had *"this node's queue: empty"* in its row, and a
+stranded set's local queue is empty **by construction**, because a set nothing
+is offered for delivers nothing to queue. The predicate simply never read it.
+
+**`Starving()` therefore requires the node's own queue for the set to be empty.**
+The observation already existed on the axis the detector uses: the daemon
+publishes a per-`(scope, scale set)` queue row every tick beside the per-set
+instance row, from the same tick, and the auditor now reads both from one
+snapshot. No new knob, no new pass, no new state; `Queued` joins `Instances` in
+the same `Observation`.
+
+A set with **no published queue row** is `unobserved`, exactly as a set with no
+instance row is, and makes no finding (contributor rule 4). A queue nobody read
+is not an empty queue.
+
+Because the term is part of `Starving()` and not merely of the verdict, `Track`
+never starts a clock for a set the node holds work for. A set that waited on
+capacity for an hour and then drains cannot become a finding retroactively: its
+clock begins at the first audit that sees it genuinely offered nothing.
+
+`WedgedReason` now states the term, so the sentence carries all its evidence:
+*"...with no runner registered and no instance on this node, and the node's
+queue for it is empty"*.
 
 Surfaces:
 
@@ -130,10 +180,13 @@ failed.
   #175/#218) is still required for the parked case, and this ADR does not
   reduce that argument: it only removes the cases where one node had the facts
   all along.
-- **A false positive costs a recreation.** It requires a set to hold work with
-  no registered runner and no instance for longer than `timeouts.boot` (3
-  minutes by default), and the finding clears itself the moment GitHub resumes
-  delivering: it is a live reading, never a latch.
+- **A false positive costs a recreation, and one was made.** The rule requires a
+  set to hold work with no registered runner, no instance **and an empty local
+  queue** for longer than `timeouts.boot` (3 minutes by default), and the
+  finding clears itself the moment GitHub resumes delivering: it is a live
+  reading, never a latch. The first form of the rule omitted the queue term and
+  reported two healthy sets on 2026-09-21 evening; no set was recreated on that
+  advice, and the term is now part of the predicate.
 - **API cost.** One admin read per uncounted set per audit cadence (15 minutes
   by default), on top of ADR 0054's one listing per scope.
 - **The instance observation gained a per-set form.** `TickResult.ScopeInstances`

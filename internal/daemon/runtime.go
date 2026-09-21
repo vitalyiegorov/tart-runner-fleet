@@ -1415,23 +1415,40 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 }
 
 // local is how the audit sees the node it runs on: the instances this node
-// holds for the set's profile, and since when the current reading has stood.
+// holds for the set, how deep its own queue for the set is, and since when the
+// current reading has stood. Both counts come from the same tick, which is why
+// they are read from one snapshot.
 //
-// A profile the node has published no instance count for is reported as
-// UNOBSERVED rather than as zero instances (contributor rule 4) -- a daemon
-// that has not completed a tick knows nothing about its own instances, and
-// reading that silence as "no instance" would invent the finding.
+// A set the node has published no instance row OR no queue row for is reported
+// as UNOBSERVED rather than as zero (contributor rule 4) -- a daemon that has
+// not completed a tick knows neither about itself, and reading that silence as
+// "no instance, no queued work" would invent the finding.
 func (a *parkedScaleSetAuditor) local(scope string, id int) (scalesetaudit.Observation, bool) {
-	for _, row := range a.health.Snapshot().ScaleSetInstances {
-		if row.Scope != scope || row.ScaleSetID != id {
+	snapshot := a.health.Snapshot()
+	instances, counted := 0, false
+	for _, row := range snapshot.ScaleSetInstances {
+		if row.Scope == scope && row.ScaleSetID == id {
+			instances, counted = row.Count, true
+			break
+		}
+	}
+	if !counted {
+		// No row for this set means the node did not observe it -- it has not
+		// completed a tick, or its inventory was unavailable. That is an absence,
+		// not an absent instance, and it makes no finding.
+		return scalesetaudit.Observation{}, false
+	}
+	for _, row := range snapshot.ScopeQueues {
+		if row.Scope != scope || int(row.ScaleSetID) != id {
 			continue
 		}
-		return scalesetaudit.Observation{Instances: row.Count,
+		// The scope-queue row is per SET for the same reason the instance row is:
+		// one profile is bound to several sets on every production node. Count is
+		// the depth the node schedules against, so a set with work here is waiting
+		// on capacity and can never be a stranding (#336 follow-up, ADR 0056).
+		return scalesetaudit.Observation{Instances: instances, Queued: row.Count,
 			HoldingSince: a.holding[scalesetaudit.Key{Scope: scope, ID: id}]}, true
 	}
-	// No row for this set means the node did not observe it -- it has not
-	// completed a tick, or its inventory was unavailable. That is an absence,
-	// not an absent instance, and it makes no finding.
 	return scalesetaudit.Observation{}, false
 }
 

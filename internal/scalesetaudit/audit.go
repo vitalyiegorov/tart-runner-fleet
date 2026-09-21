@@ -67,25 +67,29 @@ type ScaleSet struct {
 	Stranding  bool      `json:"stranding"`
 	ObservedAt time.Time `json:"observedAt"`
 
-	// Instances is how many instances this node holds for a set it serves, and
-	// HoldingSince is the first instant the Starving reading below was seen for
-	// it. Both are nil when the node could not observe itself -- a CLI run with
-	// no daemon to ask -- because an unobserved instance count is not an absent
-	// instance (contributor rule 4), and a set nothing is known about cannot be
-	// a finding.
+	// Instances is how many instances this node holds for a set it serves,
+	// Queued is how deep this node's own queue for that set is, and HoldingSince
+	// is the first instant the Starving reading below was seen for it. All three
+	// are nil when the node could not observe itself -- a CLI run with no daemon
+	// to ask -- because an unobserved count is not a zero count (contributor
+	// rule 4), and a set nothing is known about cannot be a finding.
 	Instances    *int       `json:"instances,omitempty"`
+	Queued       *int       `json:"queued,omitempty"`
 	HoldingSince *time.Time `json:"holdingSince,omitempty"`
 	// Wedged is the bound-set finding of issue #336: see Wedging.
 	Wedged bool `json:"wedged,omitempty"`
 }
 
 // Observation is what this node knows about a set it SERVES: the instances it
-// holds for the set, and since when the Starving reading has stood. It is
-// answered by whoever can see the node (the daemon's own telemetry, or the
-// daemon's published document for a CLI run), and its absence is reported as
-// absence.
+// holds for the set, how much work of its own it is holding queued for the set,
+// and since when the Starving reading has stood. It is answered by whoever can
+// see the node (the daemon's own telemetry, or the daemon's published document
+// for a CLI run), and its absence is reported as absence -- a caller that
+// cannot answer EVERY term must answer false, because a queue nobody read is
+// not an empty queue.
 type Observation struct {
 	Instances    int
+	Queued       int
 	HoldingSince time.Time
 }
 
@@ -121,15 +125,25 @@ func (s ScaleSet) Stranded() bool { return s.Holding() && s.Registered == 0 }
 // Starving is the bound half of the same reading, and the only one a node has
 // standing to judge: this node SERVES the set, GitHub says the set holds work
 // (jobs assigned AND runners busy), not one runner is registered against it,
-// and this node holds no instance for it. Every term is a fact about this node
-// or about the object this node polls -- nothing here is a claim about a
-// sibling, which is what made the parked reading evidence-only (ADR 0054).
+// this node holds no instance for it, and this node's own queue for it is
+// EMPTY. Every term is a fact about this node or about the object this node
+// polls -- nothing here is a claim about a sibling, which is what made the
+// parked reading evidence-only (ADR 0054).
+//
+// The empty queue is the term the first cut of this predicate left out, and
+// 2026-09-21 ~17:00 UTC billed the omission: within an hour of both Macs
+// adopting the release, `budgie` set 9 and set 10 were reported stranded while
+// `fleet queues` showed `jobs: 1, delivered: 1` for each. A job this node was
+// handed for the set is proof GitHub is delivering for it; what the set lacks
+// is a free slot, and recreating it would have destroyed a healthy object and
+// its queued work. A stranded set's local queue is empty by construction, so
+// the term costs the detector nothing it could honestly claim.
 //
 // It is still not a fault on its own: a runner that has not finished booting
 // reads exactly this way, which is what Wedging adds.
 func (s ScaleSet) Starving() bool {
 	return s.State == Bound && s.Assigned > 0 && s.Busy > 0 && s.Registered == 0 &&
-		s.Instances != nil && *s.Instances == 0
+		s.Instances != nil && *s.Instances == 0 && s.Queued != nil && *s.Queued == 0
 }
 
 // Wedging is issue #336: a Starving reading that has stood longer than a boot
@@ -156,7 +170,8 @@ func (s ScaleSet) WedgedReason() string {
 		held = s.ObservedAt.Sub(*s.HoldingSince).Round(time.Second).String()
 	}
 	return fmt.Sprintf("%s scale set %d (%s) is bound here and has held %d assigned job(s) and %d busy runner(s) "+
-		"for %s with no runner registered and no instance on this node: GitHub is delivering nothing for this set "+
+		"for %s with no runner registered and no instance on this node, and the node's queue for it is empty: "+
+		"GitHub is delivering nothing for this set "+
 		"-- recreate the set (`fleet scale-sets recreate %s --config <path> --confirm recreate-scale-set "+
 		"--reason <text>`) and restart the daemon",
 		s.Scope, s.ID, s.Name, s.Assigned, s.Busy, held, s.Name)
@@ -345,8 +360,8 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 		row.Stranding = row.State == Parked && row.Stranded()
 		if row.State == Bound && request.Local != nil {
 			if observation, observed := request.Local(scope.Name, summary.ID); observed {
-				instances := observation.Instances
-				row.Instances = &instances
+				instances, queued := observation.Instances, observation.Queued
+				row.Instances, row.Queued = &instances, &queued
 				if !observation.HoldingSince.IsZero() {
 					since := observation.HoldingSince.UTC()
 					row.HoldingSince = &since
