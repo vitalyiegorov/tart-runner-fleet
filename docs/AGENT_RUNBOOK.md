@@ -169,8 +169,13 @@ report, never a licence to recreate.
 ```sh
 "$FLEET" doctor --endpoint "$ENDPOINT" --output json | jq '.checks[] | select(.name == "ingest delivery")'
 "$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.strandedScaleSets'
-# cross-read the node's own queue for the set the row names
-"$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.scopeQueues[] | select(.scaleSetId == 9)'
+# cross-read the node's own queue for the set the row names. A scale-set id is
+# SCOPE-LOCAL, so both terms come from the finding: strandedScaleSets[].scope
+# and strandedScaleSets[].id.
+SCOPE=budgie; SET_ID=9
+"$FLEET" status --endpoint "$ENDPOINT" --output json | \
+  jq --arg scope "$SCOPE" --argjson id "$SET_ID" \
+  '.data.scopeQueues[] | select(.scope == $scope and .scaleSetId == $id)'
 "$FLEET" scale-sets audit --config "$ROOT/state/fleet.json"   # exits 5 on a bound finding
 ```
 
