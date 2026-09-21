@@ -155,13 +155,22 @@ editing `fleet.db`.
 `FAIL  ingest delivery` naming a scale set, or `fleet status -o json | jq
 '.data.strandedScaleSets'` returning a row, means a set this node SERVES is
 holding work on GitHub that is never delivered: `assigned>0 busy>0
-registered=0`, no instance here, for longer than `timeouts.boot`. It happened
-three times on 2026-09-21 with jobs queued for hours while every check passed
-(issue #336, [ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md)).
+registered=0`, no instance here, **this node's queue for the set empty**, for
+longer than `timeouts.boot`. It happened three times on 2026-09-21 with jobs
+queued for hours while every check passed (issue #336,
+[ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md)).
+
+The empty local queue is part of the finding, not a detail. A set this node
+holds **delivered** work for has a listener by proof and is waiting on capacity
+— every slot busy — however stale GitHub's counters look. Cross-read it before
+acting; a row and a non-empty queue for the same set is a detector defect to
+report, never a licence to recreate.
 
 ```sh
 "$FLEET" doctor --endpoint "$ENDPOINT" --output json | jq '.checks[] | select(.name == "ingest delivery")'
 "$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.strandedScaleSets'
+# cross-read the node's own queue for the set the row names
+"$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.scopeQueues[] | select(.scaleSetId == 9)'
 "$FLEET" scale-sets audit --config "$ROOT/state/fleet.json"   # exits 5 on a bound finding
 ```
 

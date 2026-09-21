@@ -39,9 +39,9 @@ func strandedRequest(client Client, local func(string, int) (Observation, bool))
 		Local: local}
 }
 
-func observed(instances int, since time.Time) func(string, int) (Observation, bool) {
+func observed(instances, queued int, since time.Time) func(string, int) (Observation, bool) {
 	return func(string, int) (Observation, bool) {
-		return Observation{Instances: instances, HoldingSince: since}, true
+		return Observation{Instances: instances, Queued: queued, HoldingSince: since}, true
 	}
 }
 
@@ -59,7 +59,7 @@ func TestABoundSetGitHubHoldsWorkForWithNoRunnerAndNoInstanceIsStranded(t *testi
 	client := &fakeClient{listed: strandedListing()}
 	since := strandedAt.Add(-4 * time.Hour)
 
-	result, err := Run(context.Background(), strandedRequest(client, observed(0, since)))
+	result, err := Run(context.Background(), strandedRequest(client, observed(0, 0, since)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +70,9 @@ func TestABoundSetGitHubHoldsWorkForWithNoRunnerAndNoInstanceIsStranded(t *testi
 	set := result.ScaleSets[0]
 	if set.Assigned != 3 || set.Busy != 3 || set.Registered != 0 {
 		t.Fatalf("the counters GitHub answered must be carried: %#v", set)
+	}
+	if set.Queued == nil || *set.Queued != 0 {
+		t.Fatalf("the local queue reading must be carried: %#v", set)
 	}
 	if set.Instances == nil || *set.Instances != 0 || set.HoldingSince == nil || !set.HoldingSince.Equal(since) {
 		t.Fatalf("the local observation must be carried: %#v", set)
@@ -86,7 +89,7 @@ func TestABoundSetGitHubHoldsWorkForWithNoRunnerAndNoInstanceIsStranded(t *testi
 	}
 	reason := wedged[0].WedgedReason()
 	for _, want := range []string{"budgie", "scale set 17", "trf-budgie-linux-amd64-4x8", "3 assigned job(s)",
-		"no runner registered", "recreate the set"} {
+		"no runner registered", "the node's queue for it is empty", "recreate the set"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("the finding must say %q: %q", want, reason)
 		}
@@ -100,7 +103,7 @@ func TestABootInProgressIsNotAStranding(t *testing.T) {
 	client := &fakeClient{listed: strandedListing()}
 	fresh := strandedAt.Add(-30 * time.Second)
 
-	result, err := Run(context.Background(), strandedRequest(client, observed(0, fresh)))
+	result, err := Run(context.Background(), strandedRequest(client, observed(0, 0, fresh)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,12 +117,69 @@ func TestABootInProgressIsNotAStranding(t *testing.T) {
 func TestAnInstanceForTheSetRefutesTheFinding(t *testing.T) {
 	client := &fakeClient{listed: strandedListing()}
 
-	result, err := Run(context.Background(), strandedRequest(client, observed(1, strandedAt.Add(-4*time.Hour))))
+	result, err := Run(context.Background(), strandedRequest(client, observed(1, 0, strandedAt.Add(-4*time.Hour))))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.ScaleSets[0].Wedged {
 		t.Fatalf("an instance for the set refutes the finding: %#v", result.ScaleSets[0])
+	}
+}
+
+// TestASetTheNodeHoldsQueuedWorkForIsWaitingOnCapacity is the live false
+// positive of 2026-09-21 ~17:00 UTC, on the release that first carried this
+// detector: `budgie` set 9 (`trf-budgie-builder-2`) on the mac mini and set 10
+// (`trf-budgie-builder-2-studio`) on the studio read assigned=2 busy=2
+// registered=0 with no instance for an hour, and the doctor told the operator
+// to RECREATE them -- while `fleet queues` on the same node at the same instant
+// showed `jobs: 1, delivered: 1` for the set. GitHub was delivering; both Mac
+// slots were simply busy with Maestro shards, and the sets were waiting on
+// capacity.
+//
+// The stranding signature always carried this term -- ADR 0056 states that a
+// stranded set's local queue is empty by construction -- and the predicate did
+// not read it. A set this node is holding delivered work for has a listener by
+// proof: recreating it would destroy a healthy set and its queued jobs.
+func TestASetTheNodeHoldsQueuedWorkForIsWaitingOnCapacity(t *testing.T) {
+	client := &fakeClient{listed: []githubscaleset.ScaleSetSummary{{ID: 17, Name: "trf-budgie-builder-2",
+		Statistics: &githubscaleset.ScaleSetStatistics{AssignedJobs: 2, BusyRunners: 2}}}}
+
+	result, err := Run(context.Background(), strandedRequest(client, observed(0, 1, strandedAt.Add(-time.Hour))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := result.ScaleSets[0]
+	if set.Queued == nil || *set.Queued != 1 {
+		t.Fatalf("the node's own queue depth for the set must be carried: %#v", set)
+	}
+	if set.Starving() {
+		t.Fatalf("a set this node holds queued work for is not starving: %#v", set)
+	}
+	if set.Wedged || len(result.Wedged()) != 0 {
+		t.Fatalf("a set waiting on capacity is not a finding: %#v", set)
+	}
+	// The clock must not merely be judged -- it must never start, so an hour of
+	// capacity waiting cannot become a verdict the moment the queue drains.
+	if tracked := Track(nil, result, strandedAt); len(tracked) != 0 {
+		t.Fatalf("a set waiting on capacity keeps no clock: %#v", tracked)
+	}
+}
+
+// A node that has published no queue row for a set it serves has not observed
+// that set's queue, and an unobserved queue is never an empty one (contributor
+// rule 4). The daemon publishes the instance rows and the scope-queue rows from
+// the same tick, so this is the shape of a partial publication.
+func TestAnUnobservedQueueMakesNoBoundFinding(t *testing.T) {
+	client := &fakeClient{listed: strandedListing()}
+
+	result, err := Run(context.Background(), strandedRequest(client, func(string, int) (Observation, bool) {
+		return Observation{}, false
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ScaleSets[0].Queued != nil || result.ScaleSets[0].Wedged {
+		t.Fatalf("an unobserved queue makes no finding: %#v", result.ScaleSets[0])
 	}
 }
 
@@ -148,7 +208,7 @@ func TestABoundSetWithoutListedStatisticsIsRead(t *testing.T) {
 	client := &fakeClient{listed: []githubscaleset.ScaleSetSummary{{ID: 17, Name: "trf-budgie-linux-amd64-4x8"}},
 		statistics: map[int]githubscaleset.ScaleSetStatistics{17: {AssignedJobs: 3, BusyRunners: 3}}}
 
-	result, err := Run(context.Background(), strandedRequest(client, observed(0, strandedAt.Add(-4*time.Hour))))
+	result, err := Run(context.Background(), strandedRequest(client, observed(0, 0, strandedAt.Add(-4*time.Hour))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +224,8 @@ func TestABoundSetWithoutListedStatisticsIsRead(t *testing.T) {
 // pure fold over one audit: a reading that qualifies starts its clock and keeps
 // it, and a reading that stops qualifying drops it.
 func TestTrackStartsKeepsAndDropsTheClock(t *testing.T) {
-	holding := ScaleSet{Scope: "budgie", ID: 17, State: Bound, Assigned: 3, Busy: 3, Instances: new(int)}
+	holding := ScaleSet{Scope: "budgie", ID: 17, State: Bound, Assigned: 3, Busy: 3,
+		Instances: new(int), Queued: new(int)}
 	first := Track(nil, Result{ScaleSets: []ScaleSet{holding}}, strandedAt)
 	key := Key{Scope: "budgie", ID: 17}
 	if since, ok := first[key]; !ok || !since.Equal(strandedAt) {
@@ -181,5 +242,12 @@ func TestTrackStartsKeepsAndDropsTheClock(t *testing.T) {
 	delivered.Registered = 2
 	if cleared := Track(kept, Result{ScaleSets: []ScaleSet{delivered}}, later); len(cleared) != 0 {
 		t.Fatalf("a set with a registered runner drops its clock: %#v", cleared)
+	}
+
+	queued := holding
+	one := 1
+	queued.Queued = &one
+	if cleared := Track(kept, Result{ScaleSets: []ScaleSet{queued}}, later); len(cleared) != 0 {
+		t.Fatalf("a set the node holds queued work for drops its clock: %#v", cleared)
 	}
 }

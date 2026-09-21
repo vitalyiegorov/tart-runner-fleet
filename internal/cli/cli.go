@@ -584,7 +584,10 @@ func localScaleSetObservation(ctx context.Context, deps dependencies, endpoint s
 		if !flagged {
 			return scalesetaudit.Observation{}, false
 		}
-		return scalesetaudit.Observation{Instances: 0, HoldingSince: row.HoldingSince}, true
+		// The daemon publishes a row only for a set it has already judged against
+		// every term, so the two counts the predicate re-derives here are the ones
+		// that row stands on: no instance, and an empty queue.
+		return scalesetaudit.Observation{Instances: 0, Queued: 0, HoldingSince: row.HoldingSince}, true
 	}, true
 }
 
