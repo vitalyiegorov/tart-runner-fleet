@@ -23,9 +23,11 @@ Linux VM held one of its two slots.
 
 ## Decision
 
-- A job that does not need macOS runs on the Linux node. Consumer workflows
-  and mobile-ci's reusable-workflow defaults name `trf-linux-amd64-2x4` /
-  `trf-linux-amd64-4x8`, never a Mac's Linux label.
+- A job that does not need macOS runs on the Linux node. This is the target
+  policy: consumer workflows and mobile-ci's reusable-workflow defaults name
+  `trf-linux-amd64-2x4` / `trf-linux-amd64-4x8`, never a Mac's Linux label.
+  Consumers migrate under this decision one by one (`docs/MULTI_NODE_PLAN.md`
+  tracks the remaining ones, suuudokuuu's Android lane among them).
 - The fleet's own workflows (CI verified builds, release build and publish,
   main release) move in the same change.
 - Once every consumer has moved, the Macs' Linux scale sets are retired
