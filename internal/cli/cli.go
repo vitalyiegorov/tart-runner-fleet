@@ -985,7 +985,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// Unlike ingest, it never fails: a node cannot distinguish a stranding from
 		// a sibling's backlog, so this row is evidence for an operator and the
 		// verdict belongs to the fleet-wide view (ADR 0054 amendment, 2026-09-21).
-		{Name: "parked scale sets", OK: parked.OK, Detail: parkedScaleSetDetail(status.Data, parked)},
+		{Name: "parked scale sets", OK: true, Detail: parkedScaleSetDetail(status.Data, parked)},
 		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "occupancy", OK: occupancy.OK, Detail: joinReasons(occupancy)},
 		// The reservation check names the head, its repository, and the axis

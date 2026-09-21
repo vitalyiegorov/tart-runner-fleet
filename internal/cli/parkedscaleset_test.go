@@ -288,3 +288,19 @@ func TestAParkedSetHoldingWorkIsAnInformationalDoctorRow(t *testing.T) {
 		}
 	}
 }
+
+// A pre-amendment daemon publishes parkedScaleSetCheck.ok=false; the doctor
+// row stays informational regardless of what the daemon said, so the command
+// does not exit degraded on a verdict the fleet has retracted.
+func TestALegacyFailingParkedCheckStillRendersInformational(t *testing.T) {
+	status := healthyStatus()
+	status.Data.ParkedScaleSetCheck = &adminapi.Check{OK: false, Reasons: []string{"legacy verdict"}}
+	client := &fakeClient{status: status, metrics: "fleet_up 1"}
+	var stdout, stderr bytes.Buffer
+	if code := runDoctor(context.Background(), client, "", &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("a legacy parked verdict must not degrade the doctor, got exit %d: %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "PASS   parked scale sets") {
+		t.Fatalf("the row must render PASS:\n%s", stdout.String())
+	}
+}

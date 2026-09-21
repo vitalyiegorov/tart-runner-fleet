@@ -1055,7 +1055,7 @@ alert is not a substitute for the doctor row.
 **This alert is advisory. Do not page on it from a single node.** The expression
 fires on the mac mini's ordinary backlog as readily as on a stranding. Page only
 when the same `(scope, scale_set)` pair satisfies it from EVERY node's audit —
-`count by (scope, scale_set) (...) == count(up{job="fleet"})` on a fleet where
+`count by (scope, scale_set) (...) == scalar(count(up{job="fleet"}))` on a fleet where
 every node scrapes — or route it to a ticket and confirm by hand with
 `fleet scale-sets audit` on each node. Until the hub lands (issues #175/#218)
 nothing in this fleet can make that judgement automatically.
