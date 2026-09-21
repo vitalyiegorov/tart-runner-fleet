@@ -31,7 +31,7 @@ jobs:
     # Tag pushes and manual dispatch already require write access, so this is
     # a fork containment guard rather than an authorization gate.
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'
-    runs-on: [self-hosted, linux-tiered, linux-medium]
+    runs-on: [self-hosted, trf-linux-amd64-4x8]
     timeout-minutes: 20
     env:
       VERSION: ${{ inputs.version || github.ref_name }}
@@ -109,7 +109,7 @@ jobs:
     needs: build
     permissions:
       contents: write
-    runs-on: [self-hosted, linux-tiered, linux-small]
+    runs-on: [self-hosted, trf-linux-amd64-2x4]
     timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
