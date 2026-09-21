@@ -2,7 +2,17 @@
 
 ## Status
 
-Accepted, and **amended on 2026-09-21** — see *A node's audit is evidence, the
+Accepted, and **amended on 2026-09-21**, and **scoped to parked sets only** by
+[ADR 0056](0056-a-stranded-bound-scale-set-is-recreated.md), 2026-09-21: nothing
+in this record covers a set the auditing node BINDS. The `parked scale sets` row
+stays informational exactly as the amendment below decided; a bound set GitHub
+has stopped delivering for is a different case with different evidence, and it
+fails the `ingest delivery` row instead. The one sentence here that ADR 0056
+overrides is the Decision's aside that a bound set is "left uncounted rather
+than paid for": a bound set whose listing carried no statistics is now read,
+because those counters are the whole evidence for that finding.
+
+The 2026-09-21 amendment is *A node's audit is evidence, the
 verdict is the hub's* at the end of this record, which supersedes the parts of
 the Decision below that make a node-side reading a failing finding. Closes the
 detection half of issue #164 for the federation topology
@@ -212,6 +222,12 @@ it does, the node reports what it saw and names who must confirm it.
 - **This is a blocking argument for the hub.** The cross-node correlation this
   amendment defers is the smallest useful thing the hub must do (issues
   #175/#218).
+- **Not addressed here: a set this node SERVES that GitHub has stopped
+  delivering for.** That is issue #336 and
+  [ADR 0056](0056-a-stranded-bound-scale-set-is-recreated.md). The facts this
+  amendment found missing — whose queue, whose instance, how old the reading is
+  — are all this node's own when the set is bound, which is why a verdict is
+  available there and not here.
 - **Not addressed: a node-to-node audit exchange.** Nodes do not talk to each
   other; an admin socket is local and unauthenticated by design. Correlation
   happens where the operator or the hub stands, not between daemons.

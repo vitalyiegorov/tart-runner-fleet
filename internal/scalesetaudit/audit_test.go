@@ -137,10 +137,11 @@ func TestAnIdleParkedSetIsInformationalRatherThanAFinding(t *testing.T) {
 }
 
 // A listing without statistics is not evidence of an empty set. The one
-// question that matters is answered by a read per PARKED set, and by no read at
-// all for a set this node serves — that is the whole of the audit's rate-limit
-// budget: one list per scope, one get per parked set.
-func TestAListingWithoutStatisticsIsReadPerParkedSetOnly(t *testing.T) {
+// question that matters is answered by one read per uncounted set — bound or
+// parked, since issue #336 made a bound set's counters the evidence for a
+// finding of its own — and that is the whole of the audit's rate-limit budget:
+// one list per scope, one get per set the listing left uncounted.
+func TestAListingWithoutStatisticsIsReadPerUncountedSet(t *testing.T) {
 	client := &fakeClient{listed: []githubscaleset.ScaleSetSummary{
 		{ID: 1, Name: "trf-sudoku-builder"},
 		{ID: 7, Name: "trf-sudoku-builder-studio"},
@@ -150,8 +151,8 @@ func TestAListingWithoutStatisticsIsReadPerParkedSetOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.lists != 1 || len(client.reads) != 1 || client.reads[0] != 7 {
-		t.Fatalf("one list per scope and one read per parked set: lists=%d reads=%v", client.lists, client.reads)
+	if client.lists != 1 || len(client.reads) != 2 || client.reads[0] != 1 || client.reads[1] != 7 {
+		t.Fatalf("one list per scope and one read per uncounted set: lists=%d reads=%v", client.lists, client.reads)
 	}
 	if len(result.Strandings()) != 1 {
 		t.Fatalf("the read must reach the finding: %#v", result.ScaleSets)

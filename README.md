@@ -148,6 +148,10 @@ the action. Mutations are refused unless the daemon runs in `authority` mode.
 fleet scale-sets provision --config PATH --apply --write \
   --confirm provision-scale-sets --reason "operator reason"
 
+# recreate a bound scale set GitHub has stopped delivering for (ADR 0056)
+fleet scale-sets recreate NAME --config PATH \
+  --confirm recreate-scale-set --reason "operator reason"
+
 # close one dead-lettered cleanup that can never complete
 fleet operations discharge --operation op-ID --instance trf-ID \
   --confirm discharge-dead-letter --reason "operator reason"
@@ -324,8 +328,8 @@ ENDPOINT="unix://$ROOT/state/fleetd.sock"
 - Every read-only command above is safe to run at any time, in any mode.
 - Use `-o json` for parsing (`apiVersion: fleet.v1`; UTC RFC3339 timestamps;
   arrays are never `null`). Never scrape human tables, `launchctl`, or SQLite.
-- Guarded commands need an exact `--confirm` token, and `scale-sets provision`
-  and `operations discharge` also need `--reason`. Do not run them without an
+- Guarded commands need an exact `--confirm` token, and `scale-sets provision`,
+  `scale-sets recreate` and `operations discharge` also need `--reason`. Do not run them without an
   explicit operational task.
 - Never hand-edit `state/`, delete VMs without fresh ownership evidence, or
   treat exit 4/5 as an empty queue.

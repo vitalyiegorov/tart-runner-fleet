@@ -20,6 +20,7 @@ type scaleSetAdmin interface {
 	GetRunnerScaleSet(context.Context, int, string) (*scaleset.RunnerScaleSet, error)
 	CreateRunnerScaleSet(context.Context, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	UpdateRunnerScaleSet(context.Context, int, *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
+	DeleteRunnerScaleSet(context.Context, int) error
 }
 
 // ScaleSetSpec is a bounded desired-state description. An exact object is reused.
@@ -117,6 +118,23 @@ func (p Provisioner) Ensure(ctx context.Context, spec ScaleSetSpec) (scaleset.Ru
 		return scaleset.RunnerScaleSet{}, operations.ErrUncertain
 	}
 	return *created, nil
+}
+
+// Delete removes one runner scale set on GitHub, by id.
+//
+// It is the fleet's only destructive call against the scale-set admin API and
+// it is deliberately narrow: an id, no name resolution, no listing, no "delete
+// what does not match". The one caller is `fleet scale-sets recreate`, which
+// repairs a set GitHub has stale counters for (issue #336, ADR 0056) and which
+// reaches this method through a port the provisioning path does not hold.
+func (p Provisioner) Delete(ctx context.Context, id int) error {
+	if p.Client == nil || id <= 0 {
+		return operations.ErrInvalid
+	}
+	if err := p.Client.DeleteRunnerScaleSet(ctx, id); err != nil {
+		return fmt.Errorf("delete runner scale set: %w", err)
+	}
+	return nil
 }
 
 func (p Provisioner) Inspect(ctx context.Context, spec ScaleSetSpec) (ScaleSetPlan, error) {

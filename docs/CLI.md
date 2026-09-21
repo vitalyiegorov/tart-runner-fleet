@@ -153,7 +153,41 @@ issue #164).
 fleet scale-sets audit --config ./state/fleet.json
 fleet scale-sets audit --config ./state/fleet.json --output json
 fleet scale-sets audit --config ./state/fleet.json --strict
+fleet scale-sets audit --config ./state/fleet.json --endpoint unix:///path/fleetd.sock
 ```
+
+A **bound** set — one this node serves — is judged too, and it is a verdict
+rather than evidence: GitHub reporting assigned jobs and busy runners with no
+registered runner, while this node holds no instance for the set and the reading
+has stood longer than `timeouts.boot`, exits **5** with or without `--strict`
+and names `fleet scale-sets recreate` as the remedy (issue #336,
+[ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md)). The instance
+count and the age of the reading come from the daemon on this node, which
+`--endpoint` reaches; with no daemon to ask, the command reports those sets as
+**unjudged** rather than guessing either way.
+
+### Recreating a stranded scale set
+
+`scale-sets recreate` is the guarded remedy for a bound set GitHub holds stale
+counters for. It deletes the named set, provisions a replacement with the same
+name, labels and runner group, and writes the new id into the configuration
+atomically. It is refused without the exact token and a reason, refuses a name
+the configuration does not carry (exit 3) or that more than one scope carries
+(exit 6, until `--scope` names one), and refuses a replacement that came back
+with the same id (exit 6 — the delete did not take).
+
+```sh
+fleet scale-sets recreate trf-budgie-linux-amd64-4x8 --config ./state/fleet.json \
+  --confirm recreate-scale-set --reason "stranded bound set, #336"
+```
+
+```
+budgie	linux-4x8	trf-budgie-linux-amd64-4x8	17 -> 19
+restart the daemon so it binds scale set 19; this command does not restart it
+```
+
+It does not restart the daemon: binding the new id is a service action with its
+own evidence. The jobs assigned to the deleted set are lost with it.
 
 ```
 suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
