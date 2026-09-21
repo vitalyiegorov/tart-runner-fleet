@@ -146,12 +146,18 @@ func TestABoundSetTheDaemonHasNotFlaggedIsNotAFinding(t *testing.T) {
 type fakeRecreateClient struct {
 	deleted []int
 	created []string
-	newID   int
-	err     error
+	// heldID is what GitHub still holds under the set's name: the stranded
+	// object, until this client deletes it.
+	heldID int
+	newID  int
+	err    error
 }
 
 func (f *fakeRecreateClient) Inspect(context.Context, githubscaleset.ScaleSetSpec) (githubscaleset.ScaleSetPlan, error) {
-	return githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetCreate}, nil
+	if f.heldID <= 0 {
+		return githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetCreate}, nil
+	}
+	return githubscaleset.ScaleSetPlan{Action: githubscaleset.ScaleSetReuse, ID: f.heldID}, nil
 }
 
 func (f *fakeRecreateClient) Ensure(_ context.Context, spec githubscaleset.ScaleSetSpec) (scaleset.RunnerScaleSet, error) {
@@ -164,6 +170,7 @@ func (f *fakeRecreateClient) Delete(_ context.Context, id int) error {
 		return f.err
 	}
 	f.deleted = append(f.deleted, id)
+	f.heldID = 0
 	return nil
 }
 
@@ -201,7 +208,7 @@ func recreateDeps(t *testing.T, client *fakeRecreateClient, written *config.Conf
 // to perform by hand three times on 2026-09-21, with a program compiled in
 // /tmp. It is now one guarded command, and it says exactly what changed.
 func TestRecreateIsGuardedAndReportsTheSubstitution(t *testing.T) {
-	client := &fakeRecreateClient{newID: 19}
+	client := &fakeRecreateClient{heldID: 17, newID: 19}
 	var written config.Config
 	deps := recreateDeps(t, client, &written)
 	var stdout, stderr bytes.Buffer
@@ -257,7 +264,7 @@ func TestRecreateRefusesWithoutTheExactConfirmation(t *testing.T) {
 			"--confirm", "recreate-scale-set", "--reason", "stranded"}, code: exitNotFound},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			client := &fakeRecreateClient{newID: 19}
+			client := &fakeRecreateClient{heldID: 17, newID: 19}
 			var stdout, stderr bytes.Buffer
 			if code := executeWith(context.Background(), tt.args, &stdout, &stderr,
 				recreateDeps(t, client, nil)); code != tt.code {
@@ -273,7 +280,7 @@ func TestRecreateRefusesWithoutTheExactConfirmation(t *testing.T) {
 // A failed recreation must not leave a configuration naming an object that was
 // never created.
 func TestAFailedRecreateWritesNothing(t *testing.T) {
-	client := &fakeRecreateClient{newID: 19, err: errors.New("GitHub refused")}
+	client := &fakeRecreateClient{heldID: 17, newID: 19, err: errors.New("GitHub refused")}
 	written := config.Config{}
 	deps := recreateDeps(t, client, &written)
 	deps.writeConfig = func(string, config.Config) error {
@@ -338,7 +345,7 @@ func TestRecreateSurfacesEachFailureWithItsOwnExit(t *testing.T) {
 		}, code: exitUnsafe, text: "--scope"},
 		"the same id back": {edit: func(d *dependencies) {
 			d.openRecreate = func(githubscaleset.GitHubAppAdminConfig) (provision.Recreater, error) {
-				return &fakeRecreateClient{newID: 17}, nil
+				return &fakeRecreateClient{heldID: 17, newID: 17}, nil
 			}
 		}, code: exitUnsafe},
 		"nothing to recreate": {edit: func(d *dependencies) {
@@ -362,7 +369,7 @@ func TestRecreateSurfacesEachFailureWithItsOwnExit(t *testing.T) {
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			deps := recreateDeps(t, &fakeRecreateClient{newID: 19}, nil)
+			deps := recreateDeps(t, &fakeRecreateClient{heldID: 17, newID: 19}, nil)
 			tt.edit(&deps)
 			args := []string{"scale-sets", "recreate", "repo-large", "--config", "fleet.json",
 				"--confirm", "recreate-scale-set", "--reason", "stranded"}
@@ -382,5 +389,30 @@ func TestRecreateSurfacesEachFailureWithItsOwnExit(t *testing.T) {
 	// The real port is wired, and it refuses an empty credential like the others.
 	if _, err := defaultDependencies().openRecreate(githubscaleset.GitHubAppAdminConfig{}); err == nil {
 		t.Fatal("the real recreater must refuse an empty credential")
+	}
+}
+
+// A write that failed after the replacement exists must still report the new
+// id: the object is already on GitHub, and an operator who cannot see its id
+// cannot bind it by hand.
+func TestAFailedWriteStillReportsTheReplacementID(t *testing.T) {
+	deps := recreateDeps(t, &fakeRecreateClient{heldID: 17, newID: 19}, nil)
+	deps.writeConfig = func(string, config.Config) error { return errors.New("read-only file system") }
+	var stdout, stderr bytes.Buffer
+
+	code := executeWith(context.Background(), []string{"scale-sets", "recreate", "repo-large",
+		"--config", "fleet.json", "--confirm", "recreate-scale-set", "--reason", "stranded"},
+		&stdout, &stderr, deps)
+
+	if code != exitFailure {
+		t.Fatalf("an unwritable configuration is a failure: %d", code)
+	}
+	if !strings.Contains(stdout.String(), "17 -> 19") {
+		t.Fatalf("the substitution must be reported before the write is attempted: %q", stdout.String())
+	}
+	for _, want := range []string{"persist config", "19"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("the operator must be told %q: %q", want, stderr.String())
+		}
 	}
 }

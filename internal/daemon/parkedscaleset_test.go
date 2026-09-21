@@ -233,3 +233,46 @@ func TestAnUnobservedProfileMakesNoStrandedFinding(t *testing.T) {
 		t.Fatalf("an unobserved profile makes no finding: %#v", rows)
 	}
 }
+
+// TestASharedProfileLeavesItsBoundSetsUnjudged is CodeRabbit's finding on #341:
+// instance counts are published per PROFILE, so when two scale sets share one
+// profile an instance booted for either reads as an instance for both. That
+// answer cannot support a per-set verdict, and reporting it would silently hide
+// a stranding behind its sibling's healthy traffic.
+//
+// The node says "not observed" instead, which no surface reads as health.
+func TestASharedProfileLeavesItsBoundSetsUnjudged(t *testing.T) {
+	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+		{ID: 2, Name: "trf-sudoku-builder-two", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+	}}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := health.SetInstances("builder", 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	cfg := auditConfig()
+	cfg.GitHub.Scopes[0].ScaleSets = append(cfg.GitHub.Scopes[0].ScaleSets,
+		config.ScaleSet{Profile: "builder", Name: "trf-sudoku-builder-two", ID: 2, MaxCapacity: 2})
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
+		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
+		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+
+	for _, at := range []time.Time{now, now.Add(cfg.Timeouts.Boot + 15*time.Minute)} {
+		now = at
+		if err := auditor.Ingest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
+		t.Fatalf("an instance count two sets share cannot judge either: %#v", rows)
+	}
+	if !health.Ingest().OK {
+		t.Fatal("an unjudged set must not fail the node on an observation it does not have")
+	}
+}

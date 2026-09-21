@@ -1423,11 +1423,35 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 // reading that silence as "no instance" would invent the finding.
 func (a *parkedScaleSetAuditor) local(scope string, id int, profile string) (scalesetaudit.Observation, bool) {
 	instances, published := a.health.Snapshot().Instances[profile]
-	if profile == "" || !published {
+	// Instance counts are published per PROFILE. When this node binds more than
+	// one scale set to a profile, that count belongs to all of them together and
+	// can decide nothing about any one of them: an instance booted for a healthy
+	// set would refute its stranded sibling's finding. Unobserved is the honest
+	// answer, and no surface reads it as health.
+	if profile == "" || !published || a.sharedProfiles()[profile] {
 		return scalesetaudit.Observation{}, false
 	}
 	return scalesetaudit.Observation{Instances: instances.Count,
 		HoldingSince: a.holding[scalesetaudit.Key{Scope: scope, ID: id}]}, true
+}
+
+// sharedProfiles names the profiles this node binds more than one scale set to,
+// which is what makes a per-profile instance count unusable as a per-set
+// observation.
+func (a *parkedScaleSetAuditor) sharedProfiles() map[string]bool {
+	counts := map[string]int{}
+	for _, scope := range a.config.GitHub.Scopes {
+		for _, set := range scope.ScaleSets {
+			counts[set.Profile]++
+		}
+	}
+	shared := make(map[string]bool, len(counts))
+	for profile, count := range counts {
+		if count > 1 {
+			shared[profile] = true
+		}
+	}
+	return shared
 }
 
 // strandedScaleSetMetrics keeps the bound sets GitHub has stopped delivering

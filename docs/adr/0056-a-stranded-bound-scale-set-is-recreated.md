@@ -126,6 +126,19 @@ failed.
   delivering: it is a live reading, never a latch.
 - **API cost.** One admin read per uncounted set per audit cadence (15 minutes
   by default), on top of ADR 0054's one listing per scope.
+- **A profile two scale sets share cannot judge either of them.** Instance
+  counts are published per profile, so an instance booted for one set would
+  refute its sibling's finding. Those sets are reported as UNOBSERVED rather
+  than judged on an answer that does not belong to one of them — a missed
+  detection, never an invented one. Per-set instance attribution is the fix and
+  it needs the reconcile loop to publish instances by binding, which is not on
+  this change.
+- **The remedy is resumable.** `recreate` inspects before it deletes: a second
+  run after an interrupted one deletes nothing GitHub no longer holds and adopts
+  a replacement already created under the same name, and a failed configuration
+  write still prints the new id. A repair that could only be performed once
+  would strand the node on its own remedy — configuration naming a deleted set —
+  which is worse than the fault.
 - **Not addressed: automatic recreation.** Deleting a GitHub object on a
   daemon's own judgement is a far larger authority than this fleet grants any
   node, and a stale counter is not distinguishable from a GitHub outage at the

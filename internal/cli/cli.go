@@ -640,14 +640,19 @@ func runScaleSetRecreate(ctx context.Context, args []string, stdout, stderr io.W
 		}
 		return exitFailure
 	}
-	// The write comes last and is the only durable effect on this node: the
-	// GitHub object already exists, and a configuration still naming the deleted
-	// id would leave the daemon polling nothing.
+	// The substitution is reported BEFORE the write is attempted. The GitHub
+	// object already exists at this point, and an operator whose disk refused
+	// the write still has to bind the replacement by hand -- which they cannot
+	// do without its id.
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%d -> %d\n", result.Scope, result.Profile, result.Name, result.OldID, result.NewID)
+	// The write is the only durable effect on this node: a configuration still
+	// naming the deleted id would leave the daemon polling nothing.
 	if err := deps.writeConfig(*path, result.Config); err != nil {
 		fmt.Fprintf(stderr, "persist config: %v\n", err)
+		fmt.Fprintf(stderr, "scale set %d exists on GitHub: write its id into %s by hand, then restart the daemon\n",
+			result.NewID, *path)
 		return exitFailure
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%s\t%d -> %d\n", result.Scope, result.Profile, result.Name, result.OldID, result.NewID)
 	fmt.Fprintf(stdout, "restart the daemon so it binds scale set %d; this command does not restart it\n", result.NewID)
 	return exitSuccess
 }

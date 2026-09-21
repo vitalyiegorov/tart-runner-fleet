@@ -169,7 +169,12 @@ count and the age of the reading come from the daemon on this node, which
 ### Recreating a stranded scale set
 
 `scale-sets recreate` is the guarded remedy for a bound set GitHub holds stale
-counters for. It deletes the named set, provisions a replacement with the same
+counters for. It refuses a set the configuration carries no id for — there is no
+object to replace — and it is resumable: a second run after an interrupted one
+deletes nothing that GitHub no longer holds and adopts a replacement already
+created under the same name. If the configuration cannot be written after the
+replacement exists, the new id is still printed, because binding it by hand is
+then the only way forward. It deletes the named set, provisions a replacement with the same
 name, labels and runner group, and writes the new id into the configuration
 atomically. It is refused without the exact token and a reason, refuses a name
 the configuration does not carry (exit 3) or that more than one scope carries
@@ -198,9 +203,9 @@ suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idl
 | ---: | --- |
 | 0 | The audit completed. Findings, if any, are printed on stderr as evidence |
 | 4 | The audit was unavailable or could not produce a trustworthy result — GitHub unreachable, the App credential missing, or an answer too uncertain to classify. **Never read as a pass** |
-| 5 | `--strict` only: a parked set holds assigned jobs or busy runners with no registered runner |
+| 5 | A **bound** set is stranded — GitHub holds work for it, no runner is registered, this node holds no instance and the reading outlived `timeouts.boot` (ADR 0056). With `--strict`, also: a parked set holds assigned jobs or busy runners with no registered runner |
 
-**This command produces evidence, not a verdict.** Under
+**The PARKED half of this command produces evidence, not a verdict.** Under
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) a sibling node may
 legitimately own the set, and this command cannot read a sibling's configuration,
 a sibling's queue, or the freshness of GitHub's per-set counters. On 2026-09-21
@@ -213,8 +218,14 @@ and act only when the same set shows work from all of them. `--strict` exits `5`
 on a finding, for an operator or script that has already done that and accepts
 the false-positive risk.
 
-The cost is bounded: one listing per scope, plus one read per parked set whose
-listing carried no statistics. There is no polling loop. The authority daemon
+The BOUND half is a verdict and exits `5` on its own (ADR 0056): a set this node
+serves is one whose queue, instances and reading-age are all this node's own,
+which is exactly what the parked case lacks. When two scale sets share a
+profile, the node's per-profile instance count can decide neither and both are
+reported as unjudged rather than guessed.
+
+The cost is bounded: one listing per scope, plus one read per set whose listing
+carried no statistics. There is no polling loop. The authority daemon
 runs the same audit every `github.parkedScaleSetAuditMinutes` (default 15, `0`
 disables) and publishes it as the `parked scale sets` doctor row, the
 `parkedScaleSets` status section and the `fleet_parked_scale_set_assigned_jobs`

@@ -74,6 +74,13 @@ func Recreate(ctx context.Context, request RecreateRequest) (RecreateResult, err
 	}
 	scope := cfg.GitHub.Scopes[scopeIndex]
 	set := scope.ScaleSets[setIndex]
+	// A set the configuration carries no id for names no object to replace.
+	// Provisioning one and calling it a recreation would tell an operator a
+	// stranded set had been repaired when nothing was touched.
+	if set.ID <= 0 {
+		return RecreateResult{}, fmt.Errorf("scale set %q carries no id in this configuration; "+
+			"provision it instead: %w", set.Name, operations.ErrConflict)
+	}
 	key, err := request.LoadKey(ctx, cfg.GitHub.App.KeychainService, cfg.GitHub.App.KeychainAccount,
 		cfg.GitHub.App.PrivateKeyFile)
 	if err != nil {
@@ -95,20 +102,32 @@ func Recreate(ctx context.Context, request RecreateRequest) (RecreateResult, err
 	if err != nil {
 		return RecreateResult{}, fmt.Errorf("open GitHub scope %q: %w", scope.Name, err)
 	}
-	if set.ID > 0 {
+	spec := githubscaleset.ScaleSetSpec{Name: set.Name, RunnerGroup: scope.RunnerGroup,
+		Labels: cfg.ProfileLabelSets()[set.Profile].Advertise(set.Labels)}
+	// What GitHub holds under this name decides whether the delete still has
+	// anything to do, which is what makes an interrupted run resumable: a second
+	// attempt must not fail on a delete GitHub can no longer perform, because
+	// abandoning the repair there leaves the node polling a set that no longer
+	// exists -- a worse state than the stranding.
+	plan, err := client.Inspect(ctx, spec)
+	if err != nil {
+		return RecreateResult{}, fmt.Errorf("inspect %s/%s: %w", scope.Name, set.Profile, err)
+	}
+	if plan.ID == set.ID {
 		if err := client.Delete(ctx, set.ID); err != nil {
 			return RecreateResult{}, fmt.Errorf("delete scale set %d (%s/%s): %w", set.ID, scope.Name, set.Name, err)
 		}
 	}
-	spec := githubscaleset.ScaleSetSpec{Name: set.Name, RunnerGroup: scope.RunnerGroup,
-		Labels: cfg.ProfileLabelSets()[set.Profile].Advertise(set.Labels)}
+	// plan.ID other than the configured one is the replacement an interrupted
+	// run already created: it is adopted, never deleted. plan.ID == 0 is the
+	// same run interrupted one step earlier, with the delete already taken.
 	created, err := client.Ensure(ctx, spec)
 	if err != nil {
 		return RecreateResult{}, fmt.Errorf("provision %s/%s: %w", scope.Name, set.Profile, err)
 	}
 	// The same id back is not a replacement: it means GitHub still holds the
 	// object the delete was supposed to remove, and the set is still stranded.
-	if created.ID <= 0 || (set.ID > 0 && created.ID == set.ID) {
+	if created.ID <= 0 || created.ID == set.ID {
 		return RecreateResult{}, operations.ErrUncertain
 	}
 	cfg.GitHub.Scopes[scopeIndex].ScaleSets[setIndex].ID = created.ID

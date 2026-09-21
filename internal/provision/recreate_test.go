@@ -250,3 +250,82 @@ func TestRecreateSelectsTheNamedScope(t *testing.T) {
 		t.Fatal("the other scope's set must be untouched")
 	}
 }
+
+// TestRecreateResumesAfterAnInterruptedRun is the operational hole CodeRabbit
+// found on #341: the delete succeeds, the create or the write then fails, and
+// the operator runs the command again. The second run must not fail on a delete
+// GitHub can no longer perform -- that leaves the node polling a set that no
+// longer exists, which is a worse state than the one being repaired.
+func TestRecreateResumesAfterAnInterruptedRun(t *testing.T) {
+	// The old object is gone and nothing carries its name: the delete took, the
+	// create did not. The retry provisions and reports, deleting nothing.
+	client := recreaterFor(t, 19)
+	client.plans = map[string]githubscaleset.ScaleSetPlan{}
+
+	result, err := Recreate(context.Background(), recreateRequest(client, "repo-large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deleted) != 0 {
+		t.Fatalf("a set GitHub no longer holds must not be deleted again: %v", client.deleted)
+	}
+	if result.OldID != 17 || result.NewID != 19 {
+		t.Fatalf("the substitution is still reported: %#v", result)
+	}
+
+	// The replacement exists under the same name with a new id: the create took
+	// and the write did not. The retry adopts it rather than deleting it.
+	adopting := recreaterFor(t, 21)
+	adopting.plans = map[string]githubscaleset.ScaleSetPlan{
+		"repo-large": {Action: githubscaleset.ScaleSetReuse, ID: 19}}
+	adopting.ensure = func(githubscaleset.ScaleSetSpec) (scaleset.RunnerScaleSet, error) {
+		return scaleset.RunnerScaleSet{ID: 19, Name: "repo-large"}, nil
+	}
+
+	result, err = Recreate(context.Background(), recreateRequest(adopting, "repo-large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adopting.deleted) != 0 {
+		t.Fatalf("a replacement already created must never be deleted: %v", adopting.deleted)
+	}
+	if result.NewID != 19 {
+		t.Fatalf("the replacement's id must be reported so the operator can persist it: %#v", result)
+	}
+}
+
+// A set the configuration carries no id for is refused: there is no object to
+// replace, `Ensure` would adopt or create one, and reporting that as a
+// recreation would tell an operator a stranded set had been repaired when it
+// had not been touched.
+func TestRecreateRefusesASetWithNoConfiguredID(t *testing.T) {
+	client := recreaterFor(t, 19)
+	request := recreateRequest(client, "repo-large")
+	for index, set := range request.Config.GitHub.Scopes[0].ScaleSets {
+		if set.Name == "repo-large" {
+			request.Config.GitHub.Scopes[0].ScaleSets[index].ID = 0
+		}
+	}
+
+	if _, err := Recreate(context.Background(), request); !errors.Is(err, operations.ErrConflict) {
+		t.Fatalf("a set with no configured id is a conflict: %v", err)
+	}
+	if len(client.deleted) != 0 || len(client.created) != 0 {
+		t.Fatalf("nothing may be touched on a refusal: %v %v", client.deleted, client.created)
+	}
+}
+
+// An inspection GitHub would not answer stops the run before the delete.
+func TestRecreateStopsWhenTheInspectionFails(t *testing.T) {
+	client := recreaterFor(t, 19)
+	client.inspect = func(githubscaleset.ScaleSetSpec) (githubscaleset.ScaleSetPlan, error) {
+		return githubscaleset.ScaleSetPlan{}, errors.New("GitHub is unreachable")
+	}
+
+	if _, err := Recreate(context.Background(), recreateRequest(client, "repo-large")); err == nil {
+		t.Fatal("an unanswered inspection must surface")
+	}
+	if len(client.deleted) != 0 {
+		t.Fatalf("nothing may be deleted on an unread plan: %v", client.deleted)
+	}
+}
