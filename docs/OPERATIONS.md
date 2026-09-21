@@ -219,7 +219,9 @@ fleet scale-sets audit --config fleet.json
 ```
 
 The authority repeats it every `github.parkedScaleSetAuditMinutes` (default 15;
-`0` disables it) and reports the result on the `parked scale sets` doctor row.
+`0` disables it) and reports the result on the `parked scale sets` doctor row,
+which is informational and never fails: one node's audit is evidence, and the
+verdict needs every node's.
 See *A scale set GitHub is holding jobs for that nobody polls* below and
 [ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md).
 
@@ -978,19 +980,27 @@ fleet scale-sets audit --config ./state/fleet.json
 ```
 suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
 suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idle=0
-suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: nothing can be listening to this set
+suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: it may be stranded, or a sibling node may be serving it — confirm with `fleet scale-sets audit` on every node before acting
+evidence: 1 parked set(s) hold work with no registered runner; a sibling node may be serving them -- run this audit on every node before acting
 ```
 
-It exits `5` on a stranding and `0` when no parked set holds work. It exits `4`
+It exits `0` whenever the audit completed, printing its findings as evidence, and
+`5` on a finding only with `--strict`. It exits `4`
 when the audit was unavailable or could not produce a trustworthy result —
 GitHub unreachable, the App credential missing, or an answer too uncertain to
 classify. **Exit 4 is never a pass**; it means nobody looked, not that nothing is
-parked. (A malformed invocation is exit `2`, as everywhere else.) Run it once per
-node: each node classifies against its OWN configuration,
-and a set parked here is very often bound on the sibling
-([ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md)) — which is why a
-parked set holding *nothing* is informational and only a parked set holding
-*work* is a finding.
+parked. (A malformed invocation is exit `2`, as everywhere else.)
+
+**Run it on EVERY node before acting.** Each node classifies against its OWN
+configuration, and a set parked here is very often bound on the sibling
+([ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md)). Worse, GitHub's
+per-set statistics are node-blind and often stale: on 2026-09-21 three sets bound
+on the mac mini (`trf-fleet-large`, `trf-sudoku-builder`, `trf-budgie-builder-2`)
+read `assigned>0 busy>0 registered=0` from the Linux node while their jobs were
+merely queued behind the mini's capacity, and the Linux node's own bound set 16
+read `assigned=4 busy=4 registered=0` with an empty local queue. A genuine
+stranding looks identical. Only work that shows on the SAME set from every
+node's audit is a stranding.
 
 The authority publishes the same audit at the configured cadence
 (`github.parkedScaleSetAuditMinutes`, default 15; `0` disables it) as a doctor
@@ -1001,12 +1011,16 @@ fleet doctor --output json | jq '.checks[] | select(.name == "parked scale sets"
 ```
 
 ```
-FAIL   parked scale sets   suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: nothing can be listening to this set; cancel and re-run the workflow, or bind the set on a node
+PASS   parked scale sets   evidence: 1 parked set(s) hold work (suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s) and 2 busy runner(s) with no runner registered: it may be stranded, or a sibling may be serving it; audit every node before cancelling a run or binding the set); a sibling may be serving them -- confirm with `fleet scale-sets audit` on every node before acting
 ```
 
-The row reads `not audited` on a node that has never completed one — an
-observe-mode daemon never audits, because it holds no GitHub App authority — and
-`not reported by this daemon` on a build older than the check. Neither is health.
+**The row never FAILS.** It is informational by decision (ADR 0054 amendment,
+2026-09-21): a doctor that fails on a sibling's ordinary backlog is a doctor an
+operator learns to ignore, and one node cannot tell the two apart. It reads
+`no parked scale set holds work` when the audit found none, `not audited` on a
+node that has never completed one — an observe-mode daemon never audits, because
+it holds no GitHub App authority — and `not reported by this daemon` on a build
+older than the check. Neither of the last two is health.
 
 **The remedy is manual, and there are exactly two.**
 
@@ -1033,10 +1047,18 @@ Alert on
 
 which is exactly the doctor row's rule: work on a set this node does not serve,
 with no runner registered against it. A registered runner is a listener's — a
-sibling serving the set under shared labels — so its presence is what turns a
-finding into ordinary traffic. The series are labelled by scope and scale set,
+sibling serving the set under shared labels — so its presence is what turns the
+reading into ordinary traffic. The series are labelled by scope and scale set,
 and a node that has not audited exports no series at all — which is why the
 alert is not a substitute for the doctor row.
+
+**This alert is advisory. Do not page on it from a single node.** The expression
+fires on the mac mini's ordinary backlog as readily as on a stranding. Page only
+when the same `(scope, scale_set)` pair satisfies it from EVERY node's audit —
+`count by (scope, scale_set) (...) == scalar(count(up{job="fleet"}))` on a fleet where
+every node scrapes — or route it to a ticket and confirm by hand with
+`fleet scale-sets audit` on each node. Until the hub lands (issues #175/#218)
+nothing in this fleet can make that judgement automatically.
 
 ### A base image whose runner GitHub will refuse
 

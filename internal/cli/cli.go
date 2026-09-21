@@ -378,7 +378,7 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 	}
 	if len(args) == 0 || args[0] != "provision" {
 		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text] [--reconcile-drift]")
-		fmt.Fprintln(stderr, "       fleet scale-sets audit --config path [--output table|json]")
+		fmt.Fprintln(stderr, "       fleet scale-sets audit --config path [--output table|json] [--strict]")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet scale-sets provision", flag.ContinueOnError)
@@ -455,17 +455,23 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 // and reports the ones this node does not serve.
 //
 // It is read-only and bounded: one listing per scope, one read per parked set,
-// no loop. Exit 5 is a stranding -- a parked set holding work GitHub has already
-// routed and will offer to nobody else. Exit 4 is an audit that was unavailable
-// or could not produce a trustworthy result: an unreachable GitHub, a missing
-// credential, an answer too uncertain to classify. It is never reported as a
-// pass, because "GitHub did not answer" and "no set is parked" are the two
-// states issue #164 was lost between. Only a malformed request is exit 2.
+// no loop. What it produces is EVIDENCE, not a verdict: one node reads GitHub's
+// per-set statistics, and on 2026-09-21 an ordinary backlog queued behind a
+// sibling's capacity read exactly like a stranding from here (ADR 0054
+// amendment). So the default exit is 0 with the findings printed, and only
+// --strict -- for an operator who accepts the false positive -- exits 5.
+//
+// Exit 4 is an audit that was unavailable or could not produce a trustworthy
+// result: an unreachable GitHub, a missing credential, an answer too uncertain
+// to classify. It is never reported as a pass, because "GitHub did not answer"
+// and "no set is parked" are the two states issue #164 was lost between. Only a
+// malformed request is exit 2.
 func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
 	flags := flag.NewFlagSet("fleet scale-sets audit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	path := flags.String("config", "", "fleet configuration path")
 	output := flags.String("output", "table", "output format: table or json")
+	strict := flags.Bool("strict", false, "exit 5 when a parked set holds work with no registered runner")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *path == "" ||
 		(*output != "table" && *output != "json") {
 		return exitUsage
@@ -509,7 +515,11 @@ func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr, set.Reason())
 	}
 	if len(strandings) > 0 {
-		return exitDegraded
+		fmt.Fprintf(stderr, "evidence: %d parked set(s) hold work with no registered runner; "+
+			"a sibling node may be serving them -- run this audit on every node before acting\n", len(strandings))
+		if *strict {
+			return exitDegraded
+		}
 	}
 	return exitSuccess
 }
@@ -890,12 +900,18 @@ func ingestDetail(status adminapi.Status, check adminapi.Check) string {
 }
 
 // parkedScaleSetDetail says whether a scale set GitHub is holding work for is
-// one no daemon is known to poll.
+// one this node does not serve.
 //
 // Three states, never two. A daemon that predates the check says so. A daemon
 // that publishes it and has never completed an audit says "not audited" -- an
 // observe-mode node never audits, and rendering that as health is exactly the
 // PASS issue #164 spent 4.5 hours reading.
+//
+// The row never FAILS (ADR 0054 amendment, 2026-09-21). One node cannot tell a
+// stranding from a sibling's ordinary backlog: on 2026-09-21 three of the mac
+// mini's bound sets read `assigned>0 busy>0 registered=0` from the Linux node
+// while their jobs were merely queued behind the mini's capacity. So the line
+// carries the reading as evidence and names the confirmation step.
 func parkedScaleSetDetail(status adminapi.Status, check adminapi.Check) string {
 	if status.ParkedScaleSetCheck == nil {
 		return "not reported by this daemon"
@@ -904,9 +920,10 @@ func parkedScaleSetDetail(status adminapi.Status, check adminapi.Check) string {
 		return "not audited"
 	}
 	if detail := joinReasons(check); detail != "" && detail != "ok" {
-		return detail
+		return fmt.Sprintf("evidence: %d parked set(s) hold work (%s); a sibling may be serving them -- "+
+			"confirm with `fleet scale-sets audit` on every node before acting", len(check.Reasons), detail)
 	}
-	return "no parked scale set is stranded"
+	return "no parked scale set holds work"
 }
 
 // axisOrUnjudged renders a plan that judged nothing as a word rather than as an
@@ -964,7 +981,11 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// work for that this node does not serve at all. On 2026-08-04 scale set 7
 		// held two assigned jobs for 4.5 hours while every signal on both nodes read
 		// healthy, because no signal was about a set nobody polls (issue #164).
-		{Name: "parked scale sets", OK: parked.OK, Detail: parkedScaleSetDetail(status.Data, parked)},
+		//
+		// Unlike ingest, it never fails: a node cannot distinguish a stranding from
+		// a sibling's backlog, so this row is evidence for an operator and the
+		// verdict belongs to the fleet-wide view (ADR 0054 amendment, 2026-09-21).
+		{Name: "parked scale sets", OK: true, Detail: parkedScaleSetDetail(status.Data, parked)},
 		{Name: "queue SLO", OK: queueSLO.OK, Detail: joinReasons(queueSLO)},
 		{Name: "occupancy", OK: occupancy.OK, Detail: joinReasons(occupancy)},
 		// The reservation check names the head, its repository, and the axis
@@ -1189,11 +1210,12 @@ READ-ONLY COMMANDS (observe/shadow safe)
     Print the load-bearing policy a node runs with, or, with more than one path,
     the keys on which they disagree (exit 5). Each path is a node configuration
     or a status document written by fleet status --output json.
-  fleet scale-sets audit --config path [--output table|json]
+  fleet scale-sets audit --config path [--output table|json] [--strict]
     Read the scale sets GitHub holds for each configured scope and say which of
-    them this node serves. A parked set holding assigned jobs or busy runners
-    exits 5; an audit that was unavailable or could not produce a trustworthy
-    result exits 4, never 0.
+    them this node serves. A parked set holding assigned jobs or busy runners is
+    printed as evidence -- a sibling node may be serving it -- and exits 5 only
+    with --strict; an audit that was unavailable or could not produce a
+    trustworthy result exits 4, never 0.
   fleet version | api-version
 
 GUARDED BOOTSTRAP

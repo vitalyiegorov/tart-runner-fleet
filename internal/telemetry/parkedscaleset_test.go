@@ -20,21 +20,29 @@ func parkedSnapshot(rows []ParkedScaleSetMetric, at time.Time) Snapshot {
 	return Snapshot{Now: auditedOn, ParkedScaleSets: rows, ParkedScaleSetsAuditedAt: at}
 }
 
-// TestAParkedScaleSetHoldingWorkFailsTheCheck is issue #164's Case A as the
-// doctor row an operator reads. Two jobs sat assigned to set 7 for 4.5 hours
-// while `fleet doctor` returned PASS.
-func TestAParkedScaleSetHoldingWorkFailsTheCheck(t *testing.T) {
+// TestAParkedScaleSetHoldingWorkIsPublishedAsEvidence is issue #164's Case A as
+// the doctor row an operator reads, under the 2026-09-21 amendment to ADR 0054:
+// the reading is published in full and the check still PASSES, because from one
+// node it is indistinguishable from a sibling's ordinary backlog.
+func TestAParkedScaleSetHoldingWorkIsPublishedAsEvidence(t *testing.T) {
 	result := parkedScaleSetResult(parkedSnapshot([]ParkedScaleSetMetric{studioSet()}, auditedOn))
 
-	if result.OK {
-		t.Fatal("work GitHub has routed to a set nobody polls must not read as healthy")
+	if !result.OK {
+		t.Fatal("a node-side reading is evidence, not a verdict: it must never fail the check")
+	}
+	if len(result.Reasons) != 1 {
+		t.Fatalf("the evidence must be published: %#v", result.Reasons)
 	}
 	detail := strings.Join(result.Reasons, " ")
 	for _, want := range []string{"suuudokuuu", "scale set 7", "trf-sudoku-builder-studio",
-		"2 assigned job(s)", "nothing can be listening", "cancel and re-run the workflow, or bind the set on a node"} {
+		"2 assigned job(s)", "it may be stranded", "a sibling may be serving it",
+		"audit every node before cancelling a run or binding the set"} {
 		if !strings.Contains(detail, want) {
-			t.Fatalf("the finding must say %q: %q", want, detail)
+			t.Fatalf("the evidence must say %q: %q", want, detail)
 		}
+	}
+	if strings.Contains(detail, "nothing can be listening") {
+		t.Fatalf("one node cannot claim a fleet-wide fact: %q", detail)
 	}
 }
 
@@ -45,19 +53,22 @@ func TestAnIdleParkedSetIsNotAFinding(t *testing.T) {
 	idle := studioSet()
 	idle.Assigned, idle.Busy = 0, 0
 
-	if result := parkedScaleSetResult(parkedSnapshot([]ParkedScaleSetMetric{idle}, auditedOn)); !result.OK {
-		t.Fatalf("a sibling's idle set is not this node's fault: %v", result.Reasons)
+	result := parkedScaleSetResult(parkedSnapshot([]ParkedScaleSetMetric{idle}, auditedOn))
+	if !result.OK || len(result.Reasons) != 0 {
+		t.Fatalf("a sibling's idle set is not evidence of anything: %v", result.Reasons)
 	}
 }
 
-// A busy runner with no assigned job still means something is listening, so it
-// is the same finding: both halves are read, and either alone is enough.
-func TestABusyRunnerAloneIsStillAFinding(t *testing.T) {
+// A busy runner with no assigned job still means something is holding work, so
+// it is the same evidence line: both halves are read, and either alone is
+// enough.
+func TestABusyRunnerAloneIsStillEvidence(t *testing.T) {
 	busy := studioSet()
 	busy.Assigned = 0
 
-	if result := parkedScaleSetResult(parkedSnapshot([]ParkedScaleSetMetric{busy}, auditedOn)); result.OK {
-		t.Fatal("a parked set running a job must be reported")
+	result := parkedScaleSetResult(parkedSnapshot([]ParkedScaleSetMetric{busy}, auditedOn))
+	if !result.OK || len(result.Reasons) != 1 {
+		t.Fatalf("a parked set running a job must be reported, and must not fail: %#v", result)
 	}
 }
 
@@ -100,15 +111,15 @@ func TestAnAuditThatFoundNothingIsStillPublished(t *testing.T) {
 	if snapshot.ParkedScaleSetsAuditedAt.IsZero() || len(snapshot.ParkedScaleSets) != 0 {
 		t.Fatalf("an empty audit is still an audit: %#v", snapshot.ParkedScaleSets)
 	}
-	if result := parkedScaleSetResult(snapshot); !result.OK {
-		t.Fatalf("nothing parked is a pass: %v", result.Reasons)
+	if result := parkedScaleSetResult(snapshot); !result.OK || len(result.Reasons) != 0 {
+		t.Fatalf("nothing parked is a pass with nothing to say: %v", result.Reasons)
 	}
 
 	if err := health.SetParkedScaleSets([]ParkedScaleSetMetric{studioSet()}, auditedOn); err != nil {
 		t.Fatal(err)
 	}
-	if result := parkedScaleSetResult(health.Snapshot()); result.OK {
-		t.Fatalf("the published audit must reach the check: %#v", health.Snapshot().ParkedScaleSets)
+	if result := parkedScaleSetResult(health.Snapshot()); !result.OK || len(result.Reasons) != 1 {
+		t.Fatalf("the published audit must reach the check as evidence: %#v", health.Snapshot().ParkedScaleSets)
 	}
 }
 
@@ -175,8 +186,9 @@ func TestTheStatusDocumentAndMetricCarryTheAudit(t *testing.T) {
 	if envelope.Data.ParkedScaleSetsAuditedAt == nil || !envelope.Data.ParkedScaleSetsAuditedAt.Equal(auditedOn) {
 		t.Fatalf("the audit time must travel: %#v", envelope.Data.ParkedScaleSetsAuditedAt)
 	}
-	if envelope.Data.ParkedScaleSetCheck.OK {
-		t.Fatal("a parked set holding work must fail the published check")
+	if !envelope.Data.ParkedScaleSetCheck.OK || len(envelope.Data.ParkedScaleSetCheck.Reasons) != 1 {
+		t.Fatalf("a parked set holding work is published as evidence on a passing check: %#v",
+			envelope.Data.ParkedScaleSetCheck)
 	}
 	metrics := renderMetrics(health.Snapshot())
 	for _, want := range []string{

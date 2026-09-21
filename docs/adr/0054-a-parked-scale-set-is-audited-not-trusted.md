@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted. Closes the detection half of issue #164 for the federation topology
+Accepted, and **amended on 2026-09-21** — see *A node's audit is evidence, the
+verdict is the hub's* at the end of this record, which supersedes the parts of
+the Decision below that make a node-side reading a failing finding. Closes the
+detection half of issue #164 for the federation topology
 [ADR 0034](0034-a-node-serves-the-scale-sets-it-owns.md) permits, and stands
 beside [ADR 0026](0026-queued-demand-expires-on-proven-absence.md), which handles
 the opposite direction: demand the fleet believes in that GitHub no longer has.
@@ -121,3 +124,94 @@ one the fleet provisions with or come to hold a different authority.
 - **An observe node is unaffected.** It never audits and publishes no rows, which
   its status document states as an absence and its doctor row reads as `not
   audited`.
+
+## Amendment, 2026-09-21: a node's audit is evidence, the verdict is the hub's
+
+**Status.** Accepted, amending the Decision above. The detection stays; the
+`finding` becomes evidence.
+
+### What the live fleet showed
+
+The first cadence runs after #324/#325/#326 landed produced, on 2026-09-21, a
+set of readings that the Decision above cannot tell apart from issue #164:
+
+- The mac mini had real jobs **QUEUED** — behind its own capacity, with no runner
+  booted yet — on three sets it **binds**: fleet-repo `trf-fleet-large` (2 jobs),
+  suuudokuuu `trf-sudoku-builder` (2), budgie `trf-budgie-builder-2` (1). From
+  node-b those sets are parked, and each read `assigned=2 busy=2 registered=0
+  acquired=0 running=0`. `Stranded()` was therefore true for all three, and
+  node-b's doctor FAILED on the mini's ordinary backlog.
+- node-b's **own bound** set, budgie `trf-budgie-linux-amd64-2x4` (id 16), read
+  `assigned=4 busy=4 registered=0` while node-b's queue for it held **0** jobs
+  and the only budgie run in progress was on macOS. GitHub's per-set counters are
+  stale or incoherent even for a set the reading node serves.
+- The genuinely stranded sets seen on 2026-09-14 (rnw `maestro-studio`, the
+  budgie builders) carried **the same signature** as those false positives.
+
+The registered-runner exception added in #326 does not rescue the predicate: a
+job GitHub has assigned but for which no runner has yet booted reads
+`registered=0` for as long as the boot takes, and a node behind its capacity can
+sit there for many minutes. The signature is shared by a real stranding, a
+sibling's backlog, and a stale counter.
+
+### Decision
+
+**A node-side audit produces evidence. Only a fleet-wide view produces a
+verdict.** One node knows its own configuration and GitHub's per-set counters.
+It cannot read a sibling's configuration, a sibling's queue, or the age of the
+counters it was handed. "No node listens to this set" is a statement about the
+whole fleet, and the hub (issues #175/#218, ADR 0036) is the only place that can
+make it.
+
+Concretely, and replacing the corresponding sentences above:
+
+1. The `parked scale sets` doctor row is **informational and never FAILS**.
+   `parkedScaleSetCheck.ok` is `true` whenever an audit has completed, and its
+   `reasons` carry one evidence line per parked set holding work with no
+   registered runner. The row renders `no parked scale set holds work` when there
+   is none, and otherwise `evidence: <n> parked set(s) hold work (…); a sibling
+   may be serving them — confirm with `fleet scale-sets audit` on every node
+   before acting`. The three states are untouched: `not reported by this daemon`,
+   `not audited`, and a completed audit.
+2. `fleet scale-sets audit` exits **`0` by default** with its findings printed as
+   evidence and a footer naming the confirmation step, and exits `5` only with
+   the new **`--strict`** flag — for an operator or script that has already
+   audited every node and accepts the false-positive risk. Exit `4` is unchanged:
+   unavailable is still never a pass.
+3. `Stranded()` keeps its name and is documented as *the strongest signal one
+   node can read*; `Reason()` says the set **may be stranded**, never that
+   nothing can be listening.
+4. The Prometheus gauges are unchanged. The runbook alert becomes advisory: page
+   only when the same `(scope, scale_set)` pair shows work from EVERY node's
+   audit.
+
+### Why not tighten the predicate instead
+
+Two tightenings were considered and rejected as unavailable from one node:
+
+- **Require `acquired == 0 && running == 0`.** The mini's queued jobs read
+  exactly that. It removes no false positive and would hide a stranding whose
+  counters happen to be non-zero.
+- **Wait for the same reading to persist across N audits.** A backlog behind a
+  saturated node persists for hours; that is precisely the shape of the incident
+  it would have to be distinguished from. A timer cannot separate them; a second
+  node's answer can, in one reading.
+
+The honest fix is a second observer, and the fleet does not have one yet. Until
+it does, the node reports what it saw and names who must confirm it.
+
+### Consequences
+
+- **The 4.5-hour silence of issue #164 is still visible**, in the status
+  document, the metrics, the `scale-sets audit` output and the doctor row's
+  detail. What changed is that the surfaces no longer claim more than one node
+  can know, and no longer fail a node for a sibling's healthy traffic.
+- **A FAIL nobody can trust is worse than a PASS with evidence.** A doctor row
+  that fails whenever a sibling is busy is a row an operator silences, and a
+  silenced row detects nothing at all.
+- **This is a blocking argument for the hub.** The cross-node correlation this
+  amendment defers is the smallest useful thing the hub must do (issues
+  #175/#218).
+- **Not addressed: a node-to-node audit exchange.** Nodes do not talk to each
+  other; an admin socket is local and unauthenticated by design. Correlation
+  happens where the operator or the hub stands, not between daemons.

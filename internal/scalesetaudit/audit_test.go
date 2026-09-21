@@ -99,12 +99,18 @@ func TestAParkedScaleSetHoldingAssignedJobsIsAStranding(t *testing.T) {
 	if strandings[0].State != Parked || !strandings[0].ObservedAt.Equal(auditedAt) {
 		t.Fatalf("a stranding carries its state and when it was seen: %#v", strandings[0])
 	}
+	// The sentence is evidence, not a verdict: one node cannot tell a stranding
+	// from a sibling's ordinary backlog (ADR 0054 amendment, 2026-09-21), so it
+	// says the set MAY be stranded and names the confirmation step.
 	reason := strandings[0].Reason()
 	for _, want := range []string{"suuudokuuu", "scale set 7", "trf-sudoku-builder-studio", "2 assigned job(s)",
-		"nothing can be listening to this set"} {
+		"it may be stranded", "a sibling node may be serving it", "on every node before acting"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("the finding must say %q: %q", want, reason)
 		}
+	}
+	if strings.Contains(reason, "nothing can be listening") {
+		t.Fatalf("a node-side audit must not claim a fleet-wide fact: %q", reason)
 	}
 }
 
@@ -341,6 +347,6 @@ func TestAParkedSetWithARegisteredRunnerIsASiblingsNotAStranding(t *testing.T) {
 	}
 	set.Registered = 0
 	if !set.Stranded() {
-		t.Fatal("assigned work with no registered runner is a stranding")
+		t.Fatal("assigned work with no registered runner is the strongest signal one node can read")
 	}
 }

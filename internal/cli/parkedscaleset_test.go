@@ -52,25 +52,36 @@ func auditDeps(t *testing.T, auditor *fakeAuditor) dependencies {
 	return deps
 }
 
-// TestTheAuditNamesAStrandingAndExitsFive is issue #164's Case A end to end at
-// the command an operator runs. GitHub holds sets 1 and 7 for the scope; the
-// configuration binds only 1; set 7 reports assigned 2 / busy 2.
-func TestTheAuditNamesAStrandingAndExitsFive(t *testing.T) {
-	deps := auditDeps(t, &fakeAuditor{listed: []githubscaleset.ScaleSetSummary{
+// strandingAuditDeps is issue #164's Case A: GitHub holds sets 1 and 7 for the
+// scope, the configuration binds only 1, and set 7 reports assigned 2 / busy 2
+// with no registered runner.
+func strandingAuditDeps(t *testing.T) dependencies {
+	t.Helper()
+	return auditDeps(t, &fakeAuditor{listed: []githubscaleset.ScaleSetSummary{
 		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{}},
 		{ID: 7, Name: "trf-sudoku-builder-studio", Statistics: &githubscaleset.ScaleSetStatistics{
 			AssignedJobs: 2, BusyRunners: 2}},
 	}})
+}
+
+// TestTheAuditNamesAStrandingAsEvidenceAndExitsZero is the 2026-09-21 amendment
+// to ADR 0054 at the command an operator runs. On that day three sets bound on
+// the mac mini read exactly like set 7 does here — work assigned, no runner yet
+// registered — while their jobs were merely queued behind the mini's capacity.
+// One node therefore reports the reading and exits 0; the verdict is the hub's.
+func TestTheAuditNamesAStrandingAsEvidenceAndExitsZero(t *testing.T) {
+	deps := strandingAuditDeps(t)
 	var stdout, stderr bytes.Buffer
 
 	code := executeWith(context.Background(), []string{"scale-sets", "audit", "--config", "fleet.json"}, &stdout, &stderr, deps)
 
-	if code != exitDegraded {
-		t.Fatalf("a stranding must exit 5: %d (%s)", code, stderr.String())
+	if code != exitSuccess {
+		t.Fatalf("a node-side reading must not fail the command: %d (%s)", code, stderr.String())
 	}
-	for _, want := range []string{"trf-sudoku-builder-studio", "2 assigned job(s)", "nothing can be listening"} {
+	for _, want := range []string{"trf-sudoku-builder-studio", "2 assigned job(s)", "it may be stranded",
+		"evidence: 1 parked set(s) hold work", "run this audit on every node before acting"} {
 		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("the finding must name %q: %q", want, stderr.String())
+			t.Fatalf("the evidence must name %q: %q", want, stderr.String())
 		}
 	}
 	if !strings.Contains(stdout.String(), "bound") || !strings.Contains(stdout.String(), "parked") {
@@ -78,6 +89,35 @@ func TestTheAuditNamesAStrandingAndExitsFive(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "PRIVATE-KEY-SENTINEL") {
 		t.Fatal("the App key must never reach an operator surface")
+	}
+}
+
+// --strict is for the operator who has already audited every node and accepts
+// the false positive: the same reading then exits 5, which is what a script may
+// gate on.
+func TestStrictTurnsTheEvidenceIntoADegradedExit(t *testing.T) {
+	deps := strandingAuditDeps(t)
+	var stdout, stderr bytes.Buffer
+
+	code := executeWith(context.Background(), []string{"scale-sets", "audit", "--config", "fleet.json", "--strict"},
+		&stdout, &stderr, deps)
+
+	if code != exitDegraded {
+		t.Fatalf("--strict exits 5 on a stranding: %d (%s)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trf-sudoku-builder-studio") {
+		t.Fatalf("--strict still names the set: %q", stderr.String())
+	}
+
+	// And --strict changes nothing when no parked set holds work.
+	quiet := auditDeps(t, &fakeAuditor{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 9, Name: "trf-sudoku-builder-mini", Statistics: &githubscaleset.ScaleSetStatistics{IdleRunners: 1}},
+	}})
+	stdout.Reset()
+	stderr.Reset()
+	if code := executeWith(context.Background(), []string{"scale-sets", "audit", "--config", "fleet.json", "--strict"},
+		&stdout, &stderr, quiet); code != exitSuccess || stderr.Len() != 0 {
+		t.Fatalf("--strict on a clean audit is still 0: %d %q", code, stderr.String())
 	}
 }
 
@@ -219,14 +259,48 @@ func TestTheParkedScaleSetLineDistinguishesThreeStates(t *testing.T) {
 
 	at := time.Date(2026, 8, 4, 18, 30, 0, 0, time.UTC)
 	status.Data.ParkedScaleSetsAuditedAt = &at
-	if detail := parkedScaleSetDetail(status.Data, passing); detail != "no parked scale set is stranded" {
+	if detail := parkedScaleSetDetail(status.Data, passing); detail != "no parked scale set holds work" {
 		t.Fatalf("an audited node says what it found: %q", detail)
 	}
+}
 
-	stranded := adminapi.Check{OK: false, Reasons: []string{
+// TestAParkedSetHoldingWorkIsAnInformationalDoctorRow is the 2026-09-21
+// amendment to ADR 0054: the row carries the reading and still PASSES, because
+// one node cannot tell a stranding from a sibling's backlog and a doctor that
+// FAILS on a sibling's ordinary traffic teaches an operator to ignore it.
+func TestAParkedSetHoldingWorkIsAnInformationalDoctorRow(t *testing.T) {
+	status := healthyStatus()
+	at := time.Date(2026, 9, 21, 9, 0, 0, 0, time.UTC)
+	status.Data.ParkedScaleSetsAuditedAt = &at
+	evidence := adminapi.Check{OK: true, Reasons: []string{
 		"suuudokuuu scale set 7 (trf-sudoku-builder-studio) is parked here and holds 2 assigned job(s)"}}
-	status.Data.ParkedScaleSetCheck = &stranded
-	if detail := parkedScaleSetDetail(status.Data, stranded); !strings.Contains(detail, "scale set 7") {
-		t.Fatalf("the finding must reach the line: %q", detail)
+	status.Data.ParkedScaleSetCheck = &evidence
+
+	check := status.Data.EffectiveParkedScaleSetCheck()
+	if !check.OK {
+		t.Fatal("the parked row must never fail a node's doctor")
+	}
+	detail := parkedScaleSetDetail(status.Data, check)
+	for _, want := range []string{"evidence: 1 parked set(s) hold work", "scale set 7",
+		"a sibling may be serving them", "fleet scale-sets audit"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("the line must say %q: %q", want, detail)
+		}
+	}
+}
+
+// A pre-amendment daemon publishes parkedScaleSetCheck.ok=false; the doctor
+// row stays informational regardless of what the daemon said, so the command
+// does not exit degraded on a verdict the fleet has retracted.
+func TestALegacyFailingParkedCheckStillRendersInformational(t *testing.T) {
+	status := healthyStatus()
+	status.Data.ParkedScaleSetCheck = &adminapi.Check{OK: false, Reasons: []string{"legacy verdict"}}
+	client := &fakeClient{status: status, metrics: "fleet_up 1"}
+	var stdout, stderr bytes.Buffer
+	if code := runDoctor(context.Background(), client, "", &stdout, &stderr); code != exitSuccess {
+		t.Fatalf("a legacy parked verdict must not degrade the doctor, got exit %d: %s", code, stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "PASS   parked scale sets") {
+		t.Fatalf("the row must render PASS:\n%s", stdout.String())
 	}
 }
