@@ -1363,6 +1363,11 @@ type parkedScaleSetAuditor struct {
 	health   *telemetry.Health
 	now      func() time.Time
 	next     time.Time
+	// holding is how long each bound set has read "GitHub holds work, no runner
+	// registered, no instance here". A reading shorter than the node's boot
+	// timeout is an ordinary boot; one longer than it is issue #336, and the
+	// map is the only state this auditor keeps between cadences.
+	holding map[scalesetaudit.Key]time.Time
 }
 
 func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
@@ -1385,7 +1390,7 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 	// following one out by its own duration.
 	a.next = now.Add(a.interval)
 	result, err := scalesetaudit.Run(ctx, scalesetaudit.Request{Config: a.config, Key: a.key, Open: a.open,
-		Version: a.version, Now: func() time.Time { return now }})
+		Version: a.version, Now: func() time.Time { return now }, Local: a.local})
 	if err != nil {
 		// An audit that failed publishes nothing. The last completed audit keeps
 		// standing, and a node that has never completed one keeps reading "not
@@ -1398,7 +1403,69 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 	// instant instead would understate the age of a reading by however long
 	// GitHub took to produce it -- the one direction that matters, because this
 	// field is read to decide whether the audit is current.
-	return a.health.SetParkedScaleSets(parkedScaleSetMetrics(result), a.now().UTC())
+	// The clock each bound reading persists against is folded AFTER the audit, so
+	// this run is judged against what the previous one saw and a first sighting
+	// can never be a finding.
+	a.holding = scalesetaudit.Track(a.holding, result, now)
+	// Both halves of one audit are published together, and neither failure hides
+	// the other: a node that could publish its parked rows and not its findings
+	// would read healthier than it is.
+	return errors.Join(a.health.SetStrandedScaleSets(strandedScaleSetMetrics(result)),
+		a.health.SetParkedScaleSets(parkedScaleSetMetrics(result), a.now().UTC()))
+}
+
+// local is how the audit sees the node it runs on: the instances this node
+// holds for the set's profile, and since when the current reading has stood.
+//
+// A profile the node has published no instance count for is reported as
+// UNOBSERVED rather than as zero instances (contributor rule 4) -- a daemon
+// that has not completed a tick knows nothing about its own instances, and
+// reading that silence as "no instance" would invent the finding.
+func (a *parkedScaleSetAuditor) local(scope string, id int) (scalesetaudit.Observation, bool) {
+	for _, row := range a.health.Snapshot().ScaleSetInstances {
+		if row.Scope != scope || row.ScaleSetID != id {
+			continue
+		}
+		return scalesetaudit.Observation{Instances: row.Count,
+			HoldingSince: a.holding[scalesetaudit.Key{Scope: scope, ID: id}]}, true
+	}
+	// No row for this set means the node did not observe it -- it has not
+	// completed a tick, or its inventory was unavailable. That is an absence,
+	// not an absent instance, and it makes no finding.
+	return scalesetaudit.Observation{}, false
+}
+
+// scaleSetInstanceMetrics projects the tick's per-set counts, keeping nil as
+// nil: the difference between "observed, none" and "not observed" is the whole
+// of contributor rule 4 on this path.
+func scaleSetInstanceMetrics(rows []app.ScopeInstance) []telemetry.ScaleSetInstanceMetric {
+	if len(rows) == 0 {
+		return nil
+	}
+	metrics := make([]telemetry.ScaleSetInstanceMetric, 0, len(rows))
+	for _, row := range rows {
+		metrics = append(metrics, telemetry.ScaleSetInstanceMetric{Scope: row.Scope,
+			ScaleSetID: int(row.ScaleSetID), Profile: string(row.Profile), Count: row.Count})
+	}
+	return metrics
+}
+
+// strandedScaleSetMetrics keeps the bound sets GitHub has stopped delivering
+// for. Each row is a verdict and fails the node's ingest-delivery check, so the
+// detector's own sentence travels with it rather than being rebuilt downstream.
+func strandedScaleSetMetrics(result scalesetaudit.Result) []telemetry.StrandedScaleSetMetric {
+	findings := result.Wedged()
+	rows := make([]telemetry.StrandedScaleSetMetric, 0, len(findings))
+	for _, set := range findings {
+		row := telemetry.StrandedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name,
+			Profile: set.Profile, Assigned: set.Assigned, Busy: set.Busy, ObservedAt: set.ObservedAt,
+			Reason: set.WedgedReason()}
+		if set.HoldingSince != nil {
+			row.HoldingSince = *set.HoldingSince
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 // parkedScaleSetMetrics keeps only the parked sets. A bound set is already
@@ -2200,6 +2267,11 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 			Delivered: row.Delivered, Observed: row.Observed, SharedLabels: row.SharedLabels})
 	}
 	_ = e.health.SetScopeQueues(scopeRows)
+	// The per-set instance count is published the same way and for the same
+	// reason: it is the only observation a per-set judgement may use (ADR 0056),
+	// and nil says the inventory was not observed rather than that every set is
+	// empty.
+	_ = e.health.SetScaleSetInstances(scaleSetInstanceMetrics(result.ScopeInstances))
 	for _, instance := range result.Instances {
 		if !instance.Live() {
 			continue

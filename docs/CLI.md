@@ -153,7 +153,46 @@ issue #164).
 fleet scale-sets audit --config ./state/fleet.json
 fleet scale-sets audit --config ./state/fleet.json --output json
 fleet scale-sets audit --config ./state/fleet.json --strict
+fleet scale-sets audit --config ./state/fleet.json --endpoint unix:///path/fleetd.sock
 ```
+
+A **bound** set — one this node serves — is judged too, and it is a verdict
+rather than evidence: GitHub reporting assigned jobs and busy runners with no
+registered runner, while this node holds no instance for the set and the reading
+has stood longer than `timeouts.boot`, exits **5** with or without `--strict`
+and names `fleet scale-sets recreate` as the remedy (issue #336,
+[ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md)). The instance
+count and the age of the reading come from the daemon on this node, which
+`--endpoint` reaches; with no daemon to ask, the command reports those sets as
+**unjudged** rather than guessing either way.
+
+### Recreating a stranded scale set
+
+`scale-sets recreate` is the guarded remedy for a bound set GitHub holds stale
+counters for. It refuses a set the configuration carries no id for — there is no
+object to replace — and it is resumable: a second run after an interrupted one
+deletes nothing that GitHub no longer holds and adopts a replacement already
+created under the same name. If the configuration cannot be written after the
+replacement exists, the new id is still printed, because binding it by hand is
+then the only way forward. It deletes the named set, provisions a replacement with the same
+name, labels and runner group, and writes the new id into the configuration
+atomically. It is refused without the exact token and a reason, refuses a name
+the configuration does not carry (exit 3) or that more than one scope carries
+(exit 6, until `--scope` names one), and refuses a replacement that came back
+with the same id (exit 6 — the delete did not take).
+
+```sh
+fleet scale-sets recreate trf-budgie-linux-amd64-4x8 --config ./state/fleet.json \
+  --confirm recreate-scale-set --reason "stranded bound set, #336"
+```
+
+```
+budgie	linux-4x8	trf-budgie-linux-amd64-4x8	17 -> 19
+restart the daemon so it binds scale set 19; this command does not restart it
+```
+
+It does not restart the daemon: binding the new id is a service action with its
+own evidence. The jobs assigned to the deleted set are lost with it.
 
 ```
 suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
@@ -164,9 +203,9 @@ suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idl
 | ---: | --- |
 | 0 | The audit completed. Findings, if any, are printed on stderr as evidence |
 | 4 | The audit was unavailable or could not produce a trustworthy result — GitHub unreachable, the App credential missing, or an answer too uncertain to classify. **Never read as a pass** |
-| 5 | `--strict` only: a parked set holds assigned jobs or busy runners with no registered runner |
+| 5 | A **bound** set is stranded — GitHub holds work for it, no runner is registered, this node holds no instance and the reading outlived `timeouts.boot` (ADR 0056). With `--strict`, also: a parked set holds assigned jobs or busy runners with no registered runner |
 
-**This command produces evidence, not a verdict.** Under
+**The PARKED half of this command produces evidence, not a verdict.** Under
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) a sibling node may
 legitimately own the set, and this command cannot read a sibling's configuration,
 a sibling's queue, or the freshness of GitHub's per-set counters. On 2026-09-21
@@ -179,8 +218,13 @@ and act only when the same set shows work from all of them. `--strict` exits `5`
 on a finding, for an operator or script that has already done that and accepts
 the false-positive risk.
 
-The cost is bounded: one listing per scope, plus one read per parked set whose
-listing carried no statistics. There is no polling loop. The authority daemon
+The BOUND half is a verdict and exits `5` on its own (ADR 0056): a set this node
+serves is one whose queue, instances and reading-age are all this node's own,
+which is exactly what the parked case lacks. The instance count behind it is per scale
+set, not per profile, because every node binds one profile to several sets.
+
+The cost is bounded: one listing per scope, plus one read per set whose listing
+carried no statistics. There is no polling loop. The authority daemon
 runs the same audit every `github.parkedScaleSetAuditMinutes` (default 15, `0`
 disables) and publishes it as the `parked scale sets` doctor row, the
 `parkedScaleSets` status section and the `fleet_parked_scale_set_assigned_jobs`

@@ -217,6 +217,30 @@ Two configuration rules follow, and both are checked rather than documented:
 Scale-set capacity is bounded by the budget too, so a node advertises the number
 of slots it can actually serve rather than the number its `maxActive` allows.
 
+### Recreating a stranded scale set
+
+Drift repair is for an object that no longer matches configuration. A different
+fault needs the opposite action: a set this node serves that GitHub reports as
+holding work — `assigned>0 busy>0 registered=0` — while nothing is delivered,
+no instance exists for it, and the reading outlives `timeouts.boot`. GitHub's
+counters for the object are stale, no update clears them, and only a NEW id
+starts receiving work again (issue #336,
+[`ADR 0056`](docs/adr/0056-a-stranded-bound-scale-set-is-recreated.md)).
+
+The node detects it: `fleet doctor` fails its `ingest delivery` row naming the
+set, `fleet status -o json` carries it in `strandedScaleSets`, and
+`fleet scale-sets audit` exits 5. The remedy is guarded:
+
+```sh
+"$FLEET" scale-sets recreate trf-budgie-linux-amd64-4x8 --config fleet.json   --confirm recreate-scale-set --reason "stranded bound set, #336"
+```
+
+It deletes the set, provisions a replacement with the same name and labels, and
+writes the new id into `fleet.json`. Restart the daemon afterwards; the command
+deliberately does not. Jobs already assigned to the deleted set are lost and
+must be re-run, so never point this at a set the audit calls *parked* — that one
+may be a sibling's (`ADR 0054`).
+
 ### Repairing a drifted scale set
 
 `scale-sets provision` creates what is missing and reuses what already matches.

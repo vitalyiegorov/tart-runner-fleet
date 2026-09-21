@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -149,6 +150,46 @@ type ParkedScaleSetMetric struct {
 	// one is a sibling's traffic, not a stranding.
 	Registered int
 	ObservedAt time.Time
+}
+
+// ScaleSetInstanceMetric is how many live instances this node holds for one
+// scale set it serves. The per-profile InstanceMetrics beside it cannot answer
+// this: every production node binds one profile to several scale sets, so a
+// profile total would let one set's healthy instance refute another set's
+// stranding (ADR 0056).
+//
+// The rows are published as a whole set each tick. A set with no instance is
+// present with Count 0 -- an observation -- and a set that is missing was not
+// observed at all, which is what a daemon that has not completed a tick, or
+// one whose inventory is unavailable, publishes.
+type ScaleSetInstanceMetric struct {
+	Scope      string
+	ScaleSetID int
+	Profile    string
+	Count      int
+}
+
+// StrandedScaleSetMetric is one scale set this node BINDS that GitHub has
+// stopped delivering work for: its counters say the set holds assigned jobs and
+// busy runners, no runner is registered against it, this node holds no instance
+// for it, and that reading has stood longer than a boot takes (issue #336, ADR
+// 0056).
+//
+// Unlike ParkedScaleSetMetric every term here is a fact about THIS node and the
+// object it polls, so the row is a verdict rather than evidence, and a row
+// published here fails the ingest-delivery check by construction. Reason is the
+// detector's own sentence, carried rather than rebuilt so the command surface
+// and the doctor row can never word the same fault differently.
+type StrandedScaleSetMetric struct {
+	Scope        string
+	ScaleSetID   int
+	Name         string
+	Profile      string
+	Assigned     int
+	Busy         int
+	HoldingSince time.Time
+	ObservedAt   time.Time
+	Reason       string
 }
 
 // QueueTierMetrics is one priority tier's share of one scope's queue. Rank
@@ -308,6 +349,14 @@ type Snapshot struct {
 	// which is reported as "not audited" and never as a pass.
 	ParkedScaleSets          []ParkedScaleSetMetric
 	ParkedScaleSetsAuditedAt time.Time
+	// ScaleSetInstances is the per-set instance count the stranded-set detector
+	// reads. Nil is "not observed", never "no instance anywhere".
+	ScaleSetInstances []ScaleSetInstanceMetric
+	// StrandedScaleSets is what the last completed audit found on the sets this
+	// node SERVES. It is empty on every healthy node and on every node that has
+	// never audited; the audit timestamp beside the parked rows is what tells
+	// those two apart, exactly as it does there.
+	StrandedScaleSets []StrandedScaleSetMetric
 	// QueueSLO is how long queued work may wait before it is a finding. It is
 	// carried on the snapshot so a check that needs it stays a pure function of
 	// one observation.
@@ -350,6 +399,8 @@ type Health struct {
 	queues             map[string]QueueMetrics
 	scopeQueues        []ScopeQueueMetrics
 	parkedScaleSets    []ParkedScaleSetMetric
+	scaleSetInstances  []ScaleSetInstanceMetric
+	strandedScaleSets  []StrandedScaleSetMetric
 	parkedAuditedAt    time.Time
 	instances          map[string]InstanceMetrics
 	observations       map[string]ObservationMetric
@@ -564,6 +615,44 @@ func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time
 	h.mu.Lock()
 	h.parkedScaleSets = append([]ParkedScaleSetMetric(nil), rows...)
 	h.parkedAuditedAt = observedAt.UTC()
+	h.revision++
+	h.mu.Unlock()
+	return nil
+}
+
+// SetScaleSetInstances publishes this tick's per-set instance counts as a whole
+// set, so a binding removed from configuration stops being reported and an
+// unobservable inventory publishes nothing rather than a fleet of empty sets.
+func (h *Health) SetScaleSetInstances(rows []ScaleSetInstanceMetric) error {
+	for _, row := range rows {
+		if row.Scope == "" || row.ScaleSetID <= 0 || row.Count < 0 {
+			return errInvalidMetric
+		}
+	}
+	h.mu.Lock()
+	h.scaleSetInstances = append([]ScaleSetInstanceMetric(nil), rows...)
+	h.revision++
+	h.mu.Unlock()
+	return nil
+}
+
+// SetStrandedScaleSets publishes the bound sets the last completed audit found
+// GitHub has stopped delivering for. A later audit that found none clears them:
+// the fault is a live reading, never a latch, and a set GitHub resumed
+// delivering for must stop failing the node the moment it does.
+//
+// A row that names no scale set or carries no sentence is refused rather than
+// published, because a row here fails the node's ingest-delivery check and a
+// check must never fail on a malformed publication.
+func (h *Health) SetStrandedScaleSets(rows []StrandedScaleSetMetric) error {
+	for _, row := range rows {
+		if row.Scope == "" || row.ScaleSetID <= 0 || row.Assigned < 0 || row.Busy < 0 ||
+			strings.TrimSpace(row.Reason) == "" {
+			return errInvalidMetric
+		}
+	}
+	h.mu.Lock()
+	h.strandedScaleSets = append([]StrandedScaleSetMetric(nil), rows...)
 	h.revision++
 	h.mu.Unlock()
 	return nil
@@ -1094,6 +1183,8 @@ func (h *Health) Snapshot() Snapshot {
 		QueueSLO:                 h.queueSLO,
 		ParkedScaleSets:          append([]ParkedScaleSetMetric(nil), h.parkedScaleSets...),
 		ParkedScaleSetsAuditedAt: h.parkedAuditedAt,
+		StrandedScaleSets:        append([]StrandedScaleSetMetric(nil), h.strandedScaleSets...),
+		ScaleSetInstances:        append([]ScaleSetInstanceMetric(nil), h.scaleSetInstances...),
 		HostPressure:             h.hostPressure, ObservationTTL: h.criticalObservationTTL,
 		SuccessfulTickTTL: h.readyTickTTL,
 	}
@@ -1378,10 +1469,17 @@ func (h *Health) Ingest() HealthResult { return ingestResult(h.Snapshot()) }
 // ingestResult is the check as a pure function of one snapshot, so the status
 // document and the health accessor can never disagree.
 func ingestResult(snapshot Snapshot) HealthResult {
-	if snapshot.QueueSLO <= 0 {
-		return HealthResult{OK: true}
-	}
 	var reasons []string
+	// A set this node binds that GitHub has stopped delivering for is the same
+	// fault as an undelivered queue and is reported on the same row, even when
+	// the queue SLO is disabled: the node's own queue for such a set is EMPTY --
+	// that is the shape of issue #336 -- so no queue-derived rule could see it.
+	for _, row := range snapshot.StrandedScaleSets {
+		reasons = append(reasons, row.Reason)
+	}
+	if snapshot.QueueSLO <= 0 {
+		return ingestVerdict(reasons)
+	}
 	for _, row := range snapshot.ScopeQueues {
 		undelivered := row.Observed - row.Delivered
 		if undelivered <= 0 || row.OldestEnqueuedAt.IsZero() {
@@ -1398,6 +1496,10 @@ func ingestResult(snapshot Snapshot) HealthResult {
 		}
 		reasons = append(reasons, reason)
 	}
+	return ingestVerdict(reasons)
+}
+
+func ingestVerdict(reasons []string) HealthResult {
 	if len(reasons) == 0 {
 		return HealthResult{OK: true}
 	}

@@ -66,6 +66,34 @@ type ScaleSet struct {
 	// is not the same as nothing listening anywhere (see Stranded).
 	Stranding  bool      `json:"stranding"`
 	ObservedAt time.Time `json:"observedAt"`
+
+	// Instances is how many instances this node holds for a set it serves, and
+	// HoldingSince is the first instant the Starving reading below was seen for
+	// it. Both are nil when the node could not observe itself -- a CLI run with
+	// no daemon to ask -- because an unobserved instance count is not an absent
+	// instance (contributor rule 4), and a set nothing is known about cannot be
+	// a finding.
+	Instances    *int       `json:"instances,omitempty"`
+	HoldingSince *time.Time `json:"holdingSince,omitempty"`
+	// Wedged is the bound-set finding of issue #336: see Wedging.
+	Wedged bool `json:"wedged,omitempty"`
+}
+
+// Observation is what this node knows about a set it SERVES: the instances it
+// holds for the set, and since when the Starving reading has stood. It is
+// answered by whoever can see the node (the daemon's own telemetry, or the
+// daemon's published document for a CLI run), and its absence is reported as
+// absence.
+type Observation struct {
+	Instances    int
+	HoldingSince time.Time
+}
+
+// Key identifies one scale set across audits, which is what a reading has to
+// persist against.
+type Key struct {
+	Scope string
+	ID    int
 }
 
 // Holding reports whether GitHub says this set has work. Assigned jobs and busy
@@ -89,6 +117,71 @@ func (s ScaleSet) Holding() bool { return s.Assigned > 0 || s.Busy > 0 }
 // This predicate is therefore evidence, never a verdict: only a fleet-wide view
 // (the hub, issues #175/#218) can say that no node listens to a set.
 func (s ScaleSet) Stranded() bool { return s.Holding() && s.Registered == 0 }
+
+// Starving is the bound half of the same reading, and the only one a node has
+// standing to judge: this node SERVES the set, GitHub says the set holds work
+// (jobs assigned AND runners busy), not one runner is registered against it,
+// and this node holds no instance for it. Every term is a fact about this node
+// or about the object this node polls -- nothing here is a claim about a
+// sibling, which is what made the parked reading evidence-only (ADR 0054).
+//
+// It is still not a fault on its own: a runner that has not finished booting
+// reads exactly this way, which is what Wedging adds.
+func (s ScaleSet) Starving() bool {
+	return s.State == Bound && s.Assigned > 0 && s.Busy > 0 && s.Registered == 0 &&
+		s.Instances != nil && *s.Instances == 0
+}
+
+// Wedging is issue #336: a Starving reading that has stood longer than a boot
+// takes. Three times on 2026-09-21 a bound set read assigned=3 busy=3
+// registered=0 for hours while the node's queue for it was empty and nothing
+// was ever delivered; GitHub's counters for the set were stale, and the only
+// remedy that worked was deleting the set and provisioning a replacement.
+//
+// The boot timeout is the node's own declared bound on how long a runner may
+// take to register, so no second knob is introduced: below it the reading is
+// an ordinary boot, above it nothing is coming.
+func (s ScaleSet) Wedging(now time.Time, bootTimeout time.Duration) bool {
+	if !s.Starving() || bootTimeout <= 0 || s.HoldingSince == nil || s.HoldingSince.IsZero() {
+		return false
+	}
+	return now.Sub(*s.HoldingSince) > bootTimeout
+}
+
+// WedgedReason is the operator-facing sentence, and unlike the parked one it is
+// a verdict: every fact in it is this node's own.
+func (s ScaleSet) WedgedReason() string {
+	held := "an unknown time"
+	if s.HoldingSince != nil {
+		held = s.ObservedAt.Sub(*s.HoldingSince).Round(time.Second).String()
+	}
+	return fmt.Sprintf("%s scale set %d (%s) is bound here and has held %d assigned job(s) and %d busy runner(s) "+
+		"for %s with no runner registered and no instance on this node: GitHub is delivering nothing for this set "+
+		"-- recreate the set (`fleet scale-sets recreate %s --config <path> --confirm recreate-scale-set "+
+		"--reason <text>`) and restart the daemon",
+		s.Scope, s.ID, s.Name, s.Assigned, s.Busy, held, s.Name)
+}
+
+// Track is where the persistence Wedging needs comes from: a pure fold of one
+// audit over the previous one. A qualifying reading keeps the instant it was
+// first seen; a reading that stops qualifying -- a runner registered, an
+// instance booted, the work drained -- drops its clock entirely, so the timer
+// can only ever measure one unbroken stretch of the same fault.
+func Track(previous map[Key]time.Time, result Result, now time.Time) map[Key]time.Time {
+	tracked := make(map[Key]time.Time, len(result.ScaleSets))
+	for _, set := range result.ScaleSets {
+		if !set.Starving() {
+			continue
+		}
+		key := Key{Scope: set.Scope, ID: set.ID}
+		since := now.UTC()
+		if earlier, ok := previous[key]; ok && !earlier.IsZero() {
+			since = earlier
+		}
+		tracked[key] = since
+	}
+	return tracked
+}
 
 // Reason is the run-facing sentence for one finding, written from the only thing
 // the audit can honestly claim: this node does not serve the set and saw no
@@ -117,6 +210,18 @@ func (r Result) Strandings() []ScaleSet {
 	return findings
 }
 
+// Wedged is the finding subset: the bound sets this node serves and GitHub has
+// stopped delivering for. Unlike Strandings these are faults, not evidence.
+func (r Result) Wedged() []ScaleSet {
+	findings := make([]ScaleSet, 0, len(r.ScaleSets))
+	for _, set := range r.ScaleSets {
+		if set.Wedged {
+			findings = append(findings, set)
+		}
+	}
+	return findings
+}
+
 type Request struct {
 	Config config.Config
 	// Key is the GitHub App private key when the caller already holds one — the
@@ -128,6 +233,11 @@ type Request struct {
 	Open    func(githubscaleset.GitHubAppAdminConfig) (Client, error)
 	Version string
 	Now     func() time.Time
+	// Local answers, for a set this node's configuration binds, what the node
+	// holds for it (see Observation). It is nil when nothing can see the node,
+	// and a false second return says this particular set was not observed;
+	// neither is reported as zero instances.
+	Local func(scope string, id int) (Observation, bool)
 }
 
 // Run audits every configured scope. It never polls: one listing per scope and
@@ -167,7 +277,7 @@ func Run(ctx context.Context, request Request) (Result, error) {
 		if err != nil {
 			return Result{}, fmt.Errorf("open GitHub scope %q: %w", scope.Name, err)
 		}
-		sets, err := auditScope(ctx, client, scope, observedAt)
+		sets, err := auditScope(ctx, client, scope, observedAt, request)
 		if err != nil {
 			return Result{}, fmt.Errorf("audit GitHub scope %q: %w", scope.Name, err)
 		}
@@ -176,7 +286,8 @@ func Run(ctx context.Context, request Request) (Result, error) {
 	return result, nil
 }
 
-func auditScope(ctx context.Context, client Client, scope config.GitHubScope, observedAt time.Time) ([]ScaleSet, error) {
+func auditScope(ctx context.Context, client Client, scope config.GitHubScope, observedAt time.Time,
+	request Request) ([]ScaleSet, error) {
 	if client == nil {
 		return nil, operations.ErrInvalid
 	}
@@ -213,12 +324,13 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 			row.State, row.Profile = Bound, profile
 		}
 		statistics := summary.Statistics
-		if statistics == nil && row.State == Parked {
+		if statistics == nil {
 			// The listing carried no counts, so the one question that matters —
-			// is this set holding work? — is unanswered. One read per parked set
-			// answers it; a bound set is left uncounted rather than paid for,
-			// because a set this node serves is already reported by every other
-			// signal the node publishes.
+			// is this set holding work? — is unanswered, and one read per set
+			// answers it. A bound set is read too since issue #336: its counters
+			// are the whole evidence for Wedging, and the other signals the node
+			// publishes about a set it serves are exactly the ones that read
+			// healthy for hours while nothing was delivered.
 			read, err := client.Statistics(ctx, summary.ID)
 			if err != nil {
 				return nil, err
@@ -231,6 +343,17 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 			row.Available, row.Acquired, row.Running = statistics.AvailableJobs, statistics.AcquiredJobs, statistics.RunningJobs
 		}
 		row.Stranding = row.State == Parked && row.Stranded()
+		if row.State == Bound && request.Local != nil {
+			if observation, observed := request.Local(scope.Name, summary.ID); observed {
+				instances := observation.Instances
+				row.Instances = &instances
+				if !observation.HoldingSince.IsZero() {
+					since := observation.HoldingSince.UTC()
+					row.HoldingSince = &since
+				}
+			}
+		}
+		row.Wedged = row.Wedging(observedAt, request.Config.Timeouts.Boot)
 		sets = append(sets, row)
 	}
 	slices.SortFunc(sets, func(a, b ScaleSet) int { return a.ID - b.ID })

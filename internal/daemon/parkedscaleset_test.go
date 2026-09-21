@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,5 +131,157 @@ func TestAFailedAuditPublishesNothing(t *testing.T) {
 
 	if err := (*parkedScaleSetAuditor)(nil).Ingest(context.Background()); !errors.Is(err, operations.ErrInvalid) {
 		t.Fatalf("an unwired auditor is invalid: %v", err)
+	}
+}
+
+// TestABoundSetGitHubStoppedDeliveringForIsPublishedAfterTheBootTimeout is
+// issue #336 in the daemon: node-b's own set read assigned=3 busy=3
+// registered=0 for hours with an empty queue and no instance, every check
+// passed, and no job was ever delivered.
+//
+// One reading is not the finding — a booting runner reads the same way — so the
+// first audit only starts the clock, and the audit after the boot timeout
+// publishes the verdict.
+func TestABoundSetGitHubStoppedDeliveringForIsPublishedAfterTheBootTimeout(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+	}}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The node is running and holds no instance for the SET: that is an
+	// observation, published every tick, and not an absence.
+	if err := health.SetScaleSetInstances([]telemetry.ScaleSetInstanceMetric{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := auditConfig()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
+		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
+		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+
+	if err := auditor.Ingest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
+		t.Fatalf("the first reading only starts the clock: %#v", rows)
+	}
+	if !health.Ingest().OK {
+		t.Fatal("a single reading must not fail the node: a booting runner reads the same way")
+	}
+
+	now = now.Add(cfg.Timeouts.Boot + 15*time.Minute)
+	if err := auditor.Ingest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows := health.Snapshot().StrandedScaleSets
+	if len(rows) != 1 || rows[0].ScaleSetID != 1 || rows[0].Assigned != 3 || rows[0].Busy != 3 {
+		t.Fatalf("the set this node serves and GitHub stopped delivering for must be published: %#v", rows)
+	}
+	if rows[0].Profile != "builder" || !rows[0].HoldingSince.Equal(time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("the row carries the profile and when the reading began: %#v", rows[0])
+	}
+	ingest := health.Ingest()
+	if ingest.OK {
+		t.Fatal("a set nothing is being delivered for must fail the ingest-delivery check")
+	}
+	if !strings.Contains(strings.Join(ingest.Reasons, " "), "recreate the set") {
+		t.Fatalf("the failure must name the remedy: %v", ingest.Reasons)
+	}
+
+	// GitHub resumed delivering: the finding is a live reading, not a latch.
+	client.listed[0].Statistics.RegisteredRunners = 2
+	now = now.Add(15 * time.Minute)
+	if err := auditor.Ingest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
+		t.Fatalf("a delivering set must clear the finding: %#v", rows)
+	}
+	if !health.Ingest().OK {
+		t.Fatal("a cleared finding must stop failing the node")
+	}
+}
+
+// A node that has not published an instance count for the set cannot make the
+// finding: an unobserved instance count is not an absent instance. A daemon
+// that has not completed a tick reads exactly this way.
+func TestAnUnobservedSetMakesNoStrandedFinding(t *testing.T) {
+	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+	}}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := auditConfig()
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
+		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
+		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+
+	for _, at := range []time.Time{now, now.Add(cfg.Timeouts.Boot + 15*time.Minute)} {
+		now = at
+		if err := auditor.Ingest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rows := health.Snapshot().StrandedScaleSets; len(rows) != 0 {
+		t.Fatalf("an unobserved set makes no finding: %#v", rows)
+	}
+}
+
+// TestASharedProfileIsJudgedPerScaleSet is the defect the first cut of this
+// detector shipped with: instance counts were read per PROFILE, and every
+// production node binds one profile to many scale sets -- node-b binds
+// `linux-4x8` from six scopes, the mini binds `maestro` from budgie and pony.
+// A per-profile answer therefore let one set's healthy instance refute another
+// set's stranding, which made the detector a no-op on exactly the fleet it was
+// written for.
+//
+// The observation is per SET: the set with no instance of its own is the
+// finding, and its sibling that is running one is not.
+func TestASharedProfileIsJudgedPerScaleSet(t *testing.T) {
+	client := &fakeAuditClient{listed: []githubscaleset.ScaleSetSummary{
+		{ID: 1, Name: "trf-sudoku-builder", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+		{ID: 2, Name: "trf-sudoku-builder-two", Statistics: &githubscaleset.ScaleSetStatistics{
+			AssignedJobs: 3, BusyRunners: 3}},
+	}}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both sets run the same profile; only set 2 has an instance of its own.
+	if err := health.SetScaleSetInstances([]telemetry.ScaleSetInstanceMetric{
+		{Scope: "suuudokuuu", ScaleSetID: 1, Profile: "builder", Count: 0},
+		{Scope: "suuudokuuu", ScaleSetID: 2, Profile: "builder", Count: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := auditConfig()
+	cfg.GitHub.Scopes[0].ScaleSets = append(cfg.GitHub.Scopes[0].ScaleSets,
+		config.ScaleSet{Profile: "builder", Name: "trf-sudoku-builder-two", ID: 2, MaxCapacity: 2})
+	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	auditor := &parkedScaleSetAuditor{config: cfg, key: githubscaleset.NewPrivateKeySecret("pem"),
+		open:     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil },
+		interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+
+	for _, at := range []time.Time{now, now.Add(cfg.Timeouts.Boot + 15*time.Minute)} {
+		now = at
+		if err := auditor.Ingest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := health.Snapshot().StrandedScaleSets
+	if len(rows) != 1 || rows[0].ScaleSetID != 1 {
+		t.Fatalf("only the set with no instance of its own is a finding: %#v", rows)
+	}
+	if health.Ingest().OK {
+		t.Fatal("the finding must fail the node's ingest-delivery check")
 	}
 }

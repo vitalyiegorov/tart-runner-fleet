@@ -27,15 +27,19 @@ import (
 )
 
 const (
-	exitSuccess         = 0
-	exitFailure         = 1
-	exitUsage           = 2
-	exitNotFound        = 3
-	exitUnavailable     = 4
-	exitDegraded        = 5
-	exitUnsafe          = 6
-	updateReadyAttempts = 150
-	updateReadyDelay    = 2 * time.Second
+	exitSuccess     = 0
+	exitFailure     = 1
+	exitUsage       = 2
+	exitNotFound    = 3
+	exitUnavailable = 4
+	exitDegraded    = 5
+	exitUnsafe      = 6
+	// recreateConfirmation is the exact token `scale-sets recreate` requires. It
+	// names the mutation, as every other guarded confirmation in this surface
+	// does, so no confirmation can be copied from one command to another.
+	recreateConfirmation = "recreate-scale-set"
+	updateReadyAttempts  = 150
+	updateReadyDelay     = 2 * time.Second
 )
 
 // defaultVersion is reported when no build identity was injected, which is the
@@ -56,9 +60,13 @@ type dependencies struct {
 	openProvision            func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
 	openReconcilingProvision func(githubscaleset.GitHubAppAdminConfig) (provision.Client, error)
 	openAudit                func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error)
-	writeConfig              func(string, config.Config) error
-	command                  autoupdate.Command
-	version                  string
+	// openRecreate is the only port in this surface that can delete a GitHub
+	// object. It is separate from openProvision so `provision` holds a client
+	// that cannot delete a scale set at all (ADR 0056).
+	openRecreate func(githubscaleset.GitHubAppAdminConfig) (provision.Recreater, error)
+	writeConfig  func(string, config.Config) error
+	command      autoupdate.Command
+	version      string
 }
 
 // buildVersion reports the injected build identity, falling back to the
@@ -117,6 +125,9 @@ func defaultDependencies() dependencies {
 		},
 		openAudit: func(cfg githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) {
 			return githubscaleset.NewAuditor(cfg)
+		},
+		openRecreate: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Recreater, error) {
+			return githubscaleset.NewProvisioner(cfg)
 		},
 		writeConfig: atomicWriteConfig,
 		command:     execCommand{},
@@ -376,9 +387,14 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 	if len(args) > 0 && args[0] == "audit" {
 		return runScaleSetAudit(ctx, args[1:], stdout, stderr, deps)
 	}
+	if len(args) > 0 && args[0] == "recreate" {
+		return runScaleSetRecreate(ctx, args[1:], stdout, stderr, deps)
+	}
 	if len(args) == 0 || args[0] != "provision" {
 		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text] [--reconcile-drift]")
 		fmt.Fprintln(stderr, "       fleet scale-sets audit --config path [--output table|json] [--strict]")
+		fmt.Fprintln(stderr, "       fleet scale-sets recreate NAME --config path [--scope name] "+
+			"--confirm recreate-scale-set --reason text")
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet scale-sets provision", flag.ContinueOnError)
@@ -402,20 +418,9 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		fmt.Fprintln(stderr, "mutation flags require --apply")
 		return exitUsage
 	}
-	file, err := deps.openConfig(*path)
-	if err != nil {
-		fmt.Fprintf(stderr, "open config: %v\n", err)
-		return exitFailure
-	}
-	cfg, decodeErr := config.Decode(file)
-	closeErr := file.Close()
-	if decodeErr != nil {
-		fmt.Fprintf(stderr, "invalid config: %v\n", decodeErr)
-		return exitFailure
-	}
-	if closeErr != nil {
-		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
-		return exitFailure
+	cfg, code := readConfig(*path, stderr, deps)
+	if code != exitSuccess {
+		return code
 	}
 	// Repairing an existing GitHub object is a strictly larger authority than
 	// creating a missing one, so it needs its own opt-in rather than riding along
@@ -472,27 +477,19 @@ func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writ
 	path := flags.String("config", "", "fleet configuration path")
 	output := flags.String("output", "table", "output format: table or json")
 	strict := flags.Bool("strict", false, "exit 5 when a parked set holds work with no registered runner")
+	endpoint := flags.String("endpoint", adminapi.DefaultEndpoint(),
+		"local endpoint of the daemon that observes this node's own sets")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *path == "" ||
 		(*output != "table" && *output != "json") {
 		return exitUsage
 	}
-	file, err := deps.openConfig(*path)
-	if err != nil {
-		fmt.Fprintf(stderr, "open config: %v\n", err)
-		return exitFailure
+	cfg, code := readConfig(*path, stderr, deps)
+	if code != exitSuccess {
+		return code
 	}
-	cfg, decodeErr := config.Decode(file)
-	closeErr := file.Close()
-	if decodeErr != nil {
-		fmt.Fprintf(stderr, "invalid config: %v\n", decodeErr)
-		return exitFailure
-	}
-	if closeErr != nil {
-		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
-		return exitFailure
-	}
+	local, observed := localScaleSetObservation(ctx, deps, *endpoint)
 	result, err := scalesetaudit.Run(ctx, scalesetaudit.Request{Config: cfg, LoadKey: deps.loadPrivateKey,
-		Open: deps.openAudit, Version: deps.buildVersion(), Now: time.Now})
+		Open: deps.openAudit, Version: deps.buildVersion(), Now: time.Now, Local: local})
 	if err != nil {
 		fmt.Fprintf(stderr, "audit scale sets: %v\n", err)
 		if errors.Is(err, operations.ErrInvalid) {
@@ -510,6 +507,17 @@ func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writ
 				set.Scope, set.ID, set.Name, set.State, set.Assigned, set.Busy, set.Registered, set.Idle)
 		}
 	}
+	// The bound finding is a verdict and exits 5 on its own, with or without
+	// --strict: every term in it is this node's own reading of an object this
+	// node polls, which is exactly what the parked evidence can never be.
+	wedged := result.Wedged()
+	for _, set := range wedged {
+		fmt.Fprintln(stderr, set.WedgedReason())
+	}
+	if !observed && unjudgedBoundSets(result) > 0 {
+		fmt.Fprintf(stderr, "%d bound sets were not judged: this node could not be observed at %s, and an "+
+			"unobserved instance count is not an absent instance\n", unjudgedBoundSets(result), endpointOrDefault(*endpoint))
+	}
 	strandings := result.Strandings()
 	for _, set := range strandings {
 		fmt.Fprintln(stderr, set.Reason())
@@ -521,7 +529,153 @@ func runScaleSetAudit(ctx context.Context, args []string, stdout, stderr io.Writ
 			return exitDegraded
 		}
 	}
+	if len(wedged) > 0 {
+		return exitDegraded
+	}
 	return exitSuccess
+}
+
+func endpointOrDefault(endpoint string) string {
+	if strings.TrimSpace(endpoint) == "" {
+		return adminapi.DefaultEndpoint()
+	}
+	return endpoint
+}
+
+// unjudgedBoundSets counts the sets this node serves that read like issue #336
+// -- GitHub holds work for them and no runner is registered -- and that the
+// audit could not judge, because nothing could say whether this node holds an
+// instance for them or how long the reading has stood.
+func unjudgedBoundSets(result scalesetaudit.Result) int {
+	unjudged := 0
+	for _, set := range result.ScaleSets {
+		if set.State == scalesetaudit.Bound && set.Assigned > 0 && set.Busy > 0 && set.Registered == 0 &&
+			set.Instances == nil {
+			unjudged++
+		}
+	}
+	return unjudged
+}
+
+// localScaleSetObservation asks the daemon on this node what it sees of the
+// sets this node serves. Only the daemon can answer: the instance count is its
+// own, and the clock a stranding has to outlive is kept across its audits,
+// which one command run cannot reconstruct.
+//
+// A daemon that cannot be reached, or that reports nothing about a set, leaves
+// that set UNOBSERVED. The command says so rather than reading silence as "no
+// instance", which would turn every ordinary boot into a finding.
+func localScaleSetObservation(ctx context.Context, deps dependencies, endpoint string) (
+	func(string, int) (scalesetaudit.Observation, bool), bool) {
+	client, err := deps.newClient(endpointOrDefault(endpoint), 5*time.Second)
+	if err != nil {
+		return nil, false
+	}
+	status, err := client.Status(ctx)
+	if err != nil {
+		return nil, false
+	}
+	stranded := make(map[scalesetaudit.Key]adminapi.StrandedScaleSet, len(status.Data.StrandedScaleSets))
+	for _, row := range status.Data.StrandedScaleSets {
+		stranded[scalesetaudit.Key{Scope: row.Scope, ID: row.ScaleSetID}] = row
+	}
+	return func(scope string, id int) (scalesetaudit.Observation, bool) {
+		row, flagged := stranded[scalesetaudit.Key{Scope: scope, ID: id}]
+		if !flagged {
+			return scalesetaudit.Observation{}, false
+		}
+		return scalesetaudit.Observation{Instances: 0, HoldingSince: row.HoldingSince}, true
+	}, true
+}
+
+// runScaleSetRecreate deletes one runner scale set on GitHub and provisions a
+// replacement under the same name, then writes the new id into the
+// configuration.
+//
+// It is the second guarded operator mutation in this surface, and it follows
+// `operations discharge` exactly: an exact --confirm token, a non-empty
+// --reason, and a fail-closed refusal. It is needed because a stranded bound
+// set cannot be repaired in place -- GitHub's counters for the object are the
+// fault (issue #336, ADR 0056) -- and until now the only remedy was a program
+// an operator compiled in /tmp against the SDK.
+//
+// It does NOT restart the daemon. Binding the new id is a service action with
+// its own evidence, and a command that deletes a GitHub object and restarts the
+// controller in one breath leaves nobody able to say which half failed.
+func runScaleSetRecreate(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	flags := flag.NewFlagSet("fleet scale-sets recreate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	path := flags.String("config", "", "fleet configuration path")
+	scope := flags.String("scope", "", "scope name, when one scale-set name is carried by more than one scope")
+	confirm := flags.String("confirm", "", "exact mutation confirmation")
+	reason := flags.String("reason", "", "operator reason recorded outside secret material")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(stderr, "usage: fleet scale-sets recreate NAME --config path [--scope name] "+
+			"--confirm recreate-scale-set --reason text")
+		return exitUsage
+	}
+	name := args[0]
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *path == "" {
+		return exitUsage
+	}
+	if *confirm != recreateConfirmation || strings.TrimSpace(*reason) == "" {
+		fmt.Fprintf(stderr, "unsafe recreate: require --confirm %s and a non-empty --reason\n", recreateConfirmation)
+		return exitUnsafe
+	}
+	cfg, code := readConfig(*path, stderr, deps)
+	if code != exitSuccess {
+		return code
+	}
+	result, err := provision.Recreate(ctx, provision.RecreateRequest{Config: cfg, Scope: *scope, Name: name,
+		LoadKey: deps.loadPrivateKey, Open: deps.openRecreate, Version: deps.buildVersion()})
+	if err != nil {
+		fmt.Fprintf(stderr, "recreate scale set: %v\n", err)
+		switch {
+		case errors.Is(err, operations.ErrNotFound):
+			return exitNotFound
+		case errors.Is(err, operations.ErrConflict), errors.Is(err, operations.ErrUncertain):
+			return exitUnsafe
+		case errors.Is(err, operations.ErrInvalid):
+			return exitUsage
+		}
+		return exitFailure
+	}
+	// The substitution is reported BEFORE the write is attempted. The GitHub
+	// object already exists at this point, and an operator whose disk refused
+	// the write still has to bind the replacement by hand -- which they cannot
+	// do without its id.
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%d -> %d\n", result.Scope, result.Profile, result.Name, result.OldID, result.NewID)
+	// The write is the only durable effect on this node: a configuration still
+	// naming the deleted id would leave the daemon polling nothing.
+	if err := deps.writeConfig(*path, result.Config); err != nil {
+		fmt.Fprintf(stderr, "persist config: %v\n", err)
+		fmt.Fprintf(stderr, "scale set %d exists on GitHub: write its id into %s by hand, then restart the daemon\n",
+			result.NewID, *path)
+		return exitFailure
+	}
+	fmt.Fprintf(stdout, "restart the daemon so it binds scale set %d; this command does not restart it\n", result.NewID)
+	return exitSuccess
+}
+
+// readConfig is the one way this surface opens a configuration: open, decode,
+// close, and report each failure as itself.
+func readConfig(path string, stderr io.Writer, deps dependencies) (config.Config, int) {
+	file, err := deps.openConfig(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "open config: %v\n", err)
+		return config.Config{}, exitFailure
+	}
+	cfg, decodeErr := config.Decode(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		fmt.Fprintf(stderr, "invalid config: %v\n", decodeErr)
+		return config.Config{}, exitFailure
+	}
+	if closeErr != nil {
+		fmt.Fprintf(stderr, "close config: %v\n", closeErr)
+		return config.Config{}, exitFailure
+	}
+	return cfg, exitSuccess
 }
 
 func atomicWriteConfig(path string, cfg config.Config) error {
@@ -1215,13 +1369,25 @@ READ-ONLY COMMANDS (observe/shadow safe)
     them this node serves. A parked set holding assigned jobs or busy runners is
     printed as evidence -- a sibling node may be serving it -- and exits 5 only
     with --strict; an audit that was unavailable or could not produce a
-    trustworthy result exits 4, never 0.
+    trustworthy result exits 4, never 0. A set this node SERVES that GitHub has
+    stopped delivering for is a verdict, not evidence: it exits 5 on its own and
+    names the remedy (issue #336, ADR 0056). Judging those needs the daemon
+    beside it, which is what --endpoint reaches; without it they are reported as
+    unjudged.
   fleet version | api-version
 
 GUARDED BOOTSTRAP
   fleet scale-sets provision --config path
   fleet scale-sets provision --config path --apply --write \
     --confirm provision-scale-sets --reason "operator reason"
+
+GUARDED SCALE-SET RECREATION
+  fleet scale-sets recreate NAME --config path [--scope name] \
+    --confirm recreate-scale-set --reason "operator reason"
+  Deletes the named scale set on GitHub and provisions a replacement with the
+  same name and labels, then writes the new id into the configuration. It is
+  the remedy for a set GitHub holds stale counters for (ADR 0056) and it does
+  not restart the daemon: restart it yourself so the node binds the new id.
 
 GUARDED DEAD-LETTER DISCHARGE
   fleet operations discharge --operation op-ID --instance trf-ID \

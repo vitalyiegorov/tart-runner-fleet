@@ -27,6 +27,16 @@ type fakeScaleSetAdmin struct {
 	lookupErr    error
 	createErr    error
 	createResult *scaleset.RunnerScaleSet
+	deleted      []int
+	deleteErr    error
+}
+
+// DeleteRunnerScaleSet satisfies the admin interface. The destructive call is
+// recorded rather than performed, and every test that does not name it asserts
+// by omission that nothing was deleted.
+func (f *fakeScaleSetAdmin) DeleteRunnerScaleSet(_ context.Context, id int) error {
+	f.deleted = append(f.deleted, id)
+	return f.deleteErr
 }
 
 func (f *fakeScaleSetAdmin) GetRunnerGroupByName(_ context.Context, name string) (*scaleset.RunnerGroup, error) {
@@ -277,5 +287,36 @@ func TestExactScaleSetNormalizesOnlySafeSystemLabels(t *testing.T) {
 	badDesired.Labels = []scaleset.Label{{Name: "bad label", Type: "System"}}
 	if exactScaleSet(actual, badDesired) {
 		t.Fatal("unsafe desired label accepted")
+	}
+}
+
+// TestDeleteRemovesOneScaleSetByID is the destructive half of the remedy issue
+// #336 needed: the object carrying GitHub's stale counters is deleted by id,
+// and nothing else about it is looked up, matched or inferred.
+func TestDeleteRemovesOneScaleSetByID(t *testing.T) {
+	fake := &fakeScaleSetAdmin{}
+	provisioner := Provisioner{Client: fake}
+
+	if err := provisioner.Delete(context.Background(), 17); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deleted) != 1 || fake.deleted[0] != 17 {
+		t.Fatalf("exactly the named set must be deleted: %v", fake.deleted)
+	}
+
+	// An unwired client or an id GitHub cannot hold is refused before the call.
+	if err := (Provisioner{}).Delete(context.Background(), 17); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("an unwired provisioner is invalid: %v", err)
+	}
+	if err := provisioner.Delete(context.Background(), 0); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("an id no set can have is invalid: %v", err)
+	}
+	if len(fake.deleted) != 1 {
+		t.Fatalf("a refusal must not reach GitHub: %v", fake.deleted)
+	}
+
+	fake.deleteErr = errors.New("GitHub refused")
+	if err := provisioner.Delete(context.Background(), 17); err == nil {
+		t.Fatal("a refused delete must surface")
 	}
 }

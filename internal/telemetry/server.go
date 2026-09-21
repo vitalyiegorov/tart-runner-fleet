@@ -271,6 +271,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Reservation: reservationRow(snapshot), ReservationCheck: &reservationCheck,
 			Envelope: envelopeRow(snapshot), AdmissionCheck: &admissionCheck, IngestCheck: &ingestCheck,
 			ParkedScaleSets: parkedScaleSetRows(snapshot), ParkedScaleSetCheck: &parkedCheck,
+			StrandedScaleSets:        strandedScaleSetRows(snapshot),
 			ParkedScaleSetsAuditedAt: auditedAt(snapshot),
 			Stalled:                  stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
@@ -306,6 +307,22 @@ func parkedScaleSetRows(snapshot Snapshot) []adminapi.ParkedScaleSet {
 	for _, row := range snapshot.ParkedScaleSets {
 		rows = append(rows, adminapi.ParkedScaleSet{Scope: row.Scope, ScaleSetID: row.ScaleSetID, Name: row.Name,
 			Assigned: row.Assigned, Busy: row.Busy, Registered: row.Registered, ObservedAt: row.ObservedAt})
+	}
+	return rows
+}
+
+// strandedScaleSetRows projects the bound sets GitHub has stopped delivering
+// for. Nil stays nil: a healthy node publishes no rows, and the audit timestamp
+// beside the parked rows is what separates that from a node that never looked.
+func strandedScaleSetRows(snapshot Snapshot) []adminapi.StrandedScaleSet {
+	if len(snapshot.StrandedScaleSets) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.StrandedScaleSet, 0, len(snapshot.StrandedScaleSets))
+	for _, row := range snapshot.StrandedScaleSets {
+		rows = append(rows, adminapi.StrandedScaleSet{Scope: row.Scope, ScaleSetID: row.ScaleSetID, Name: row.Name,
+			Profile: row.Profile, Assigned: row.Assigned, Busy: row.Busy, HoldingSince: row.HoldingSince,
+			ObservedAt: row.ObservedAt, Reason: row.Reason})
 	}
 	return rows
 }

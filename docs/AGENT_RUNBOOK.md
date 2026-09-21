@@ -150,6 +150,34 @@ stopped retrying and can never complete, discharge it with the guarded command i
 [`OPERATIONS.md`](OPERATIONS.md#dead-letters) — never by swapping the plist or
 editing `fleet.db`.
 
+## A queue that GitHub says is busy and the node says is empty
+
+`FAIL  ingest delivery` naming a scale set, or `fleet status -o json | jq
+'.data.strandedScaleSets'` returning a row, means a set this node SERVES is
+holding work on GitHub that is never delivered: `assigned>0 busy>0
+registered=0`, no instance here, for longer than `timeouts.boot`. It happened
+three times on 2026-09-21 with jobs queued for hours while every check passed
+(issue #336, [ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md)).
+
+```sh
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json | jq '.checks[] | select(.name == "ingest delivery")'
+"$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.strandedScaleSets'
+"$FLEET" scale-sets audit --config "$ROOT/state/fleet.json"   # exits 5 on a bound finding
+```
+
+The remedy is to recreate the set — the counters belong to the GitHub object and
+no update clears them — and then to restart the daemon:
+
+```sh
+"$FLEET" scale-sets recreate NAME --config "$ROOT/state/fleet.json" \
+  --confirm recreate-scale-set --reason "stranded bound set, #336"
+```
+
+Never run this against a set the audit calls **parked**: that row is evidence, a
+sibling node may be serving the set, and deleting it takes its assigned jobs
+with it (ADR 0054). The jobs on the recreated set are lost too and must be
+re-run.
+
 ## Handle a reproducible defect
 
 1. Preserve the coherent JSON, relevant runner/job state, bounded logs, and

@@ -341,6 +341,26 @@ counts are exported as `fleet_parked_scale_set_assigned_jobs` and
 `fleet_parked_scale_set_busy_runners`, labelled by scope and scale set; a node
 that has not audited exports neither series at all.
 
+`strandedScaleSets` is the other half of the same audit, and unlike the parked
+rows it is a **verdict**: a set this node SERVES that GitHub reports as holding
+work with no registered runner, for which this node holds no instance, and whose
+reading has stood longer than `timeouts.boot` (issue #336,
+[ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md)). Every row also
+appears as a reason on `ingestCheck`, which is `ok: false` while one stands.
+
+```json
+"strandedScaleSets": [
+  {"scope": "budgie", "id": 17, "name": "trf-budgie-linux-amd64-4x8", "profile": "linux-4x8",
+   "assigned": 3, "busy": 3, "holdingSince": "2026-09-21T08:00:00Z",
+   "observedAt": "2026-09-21T12:00:00Z",
+   "reason": "budgie scale set 17 (trf-budgie-linux-amd64-4x8) is bound here and has held 3 assigned job(s) and 3 busy runner(s) for 4h0m0s with no runner registered and no instance on this node: GitHub is delivering nothing for this set -- recreate the set (`fleet scale-sets recreate trf-budgie-linux-amd64-4x8 --config <path> --confirm recreate-scale-set --reason <text>`) and restart the daemon"}]
+```
+
+The field is additive, absent on a daemon that predates it, and absent on a
+healthy node. Its absence therefore means *no finding or no detector*, never
+*audited and clean* — that is what `parkedScaleSetsAuditedAt` beside it is for.
+The remedy is `fleet scale-sets recreate`; see `docs/OPERATIONS.md`.
+
 `admissionCheck` says whether this node is taking work at all, and when it is not,
 which guardrail refused it and by how much:
 

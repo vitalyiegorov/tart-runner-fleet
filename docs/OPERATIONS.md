@@ -1032,8 +1032,11 @@ older than the check. Neither of the last two is health.
    with its id and restart the daemon; the session picks the assignment up. Use
    this when the set is one the fleet means to keep serving.
 
-Do not delete the scale set on GitHub to "clear" it: deletion takes every job
-already assigned to it with it. Nothing re-routes the work automatically —
+Do not delete a PARKED scale set on GitHub to "clear" it: deletion takes every
+job already assigned to it with it, and the set is very likely a sibling's. (A
+set this node BINDS that GitHub has stopped delivering for is the opposite case
+and is recreated deliberately — see *A bound set GitHub has stopped delivering
+for* below, and [ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md).) Nothing re-routes the work automatically —
 cancelling a run needs repository `actions: write`, an authority no node in this
 fleet holds, and moving a binding between nodes needs the hub
 ([ADR 0054](adr/0054-a-parked-scale-set-is-audited-not-trusted.md), ADR 0036).
@@ -1059,6 +1062,47 @@ when the same `(scope, scale_set)` pair satisfies it from EVERY node's audit —
 every node scrapes — or route it to a ticket and confirm by hand with
 `fleet scale-sets audit` on each node. Until the hub lands (issues #175/#218)
 nothing in this fleet can make that judgement automatically.
+
+### A bound set GitHub has stopped delivering for
+
+`fleet doctor` reports **`FAIL  ingest delivery`** when a set this node SERVES
+reads `assigned>0 busy>0 registered=0` on GitHub while this node holds no
+instance for it and that reading has stood longer than `timeouts.boot`. The row
+names the set and the remedy. Issue #336,
+[ADR 0056](adr/0056-a-stranded-bound-scale-set-is-recreated.md).
+
+This is the one scale-set condition a single node may judge alone: the queue,
+the instance and the age of the reading are all its own. It happened three times
+on 2026-09-21 — node-b's set 17, the mini's set 2, the studio's set 6 — with
+jobs queued for hours while every check, including this row, read PASS.
+
+```sh
+fleet status --output json | jq '.data.strandedScaleSets'
+fleet scale-sets audit --config ./state/fleet.json          # exits 5 on a bound finding
+```
+
+The remedy is to recreate the set. GitHub routes a queued job to a scale-set
+**id**, the stale counters belong to the object, and no update clears them:
+
+```sh
+"$FLEET" scale-sets recreate trf-budgie-linux-amd64-4x8 \
+  --config "$STATE_DIR/fleet.json" \
+  --confirm recreate-scale-set --reason "stranded bound set, #336"
+# repo	linux-4x8	trf-budgie-linux-amd64-4x8	17 -> 19
+# restart the daemon so it binds scale set 19; this command does not restart it
+```
+
+Then restart the daemon and confirm delivery resumes (it did within ~60 s on
+all three occasions):
+
+```sh
+fleet queues --output json
+fleet doctor --output json | jq '.checks[] | select(.name == "ingest delivery")'
+```
+
+The jobs already assigned to the deleted set are lost with it and must be
+re-run. Do not use this command on a PARKED set: that set is very likely a
+sibling's, and the parked row is evidence, not a verdict (ADR 0054).
 
 ### A base image whose runner GitHub will refuse
 

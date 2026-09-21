@@ -113,6 +113,12 @@ type Status struct {
 	// Absent from a daemon that predates it, which is why
 	// EffectiveParkedScaleSetCheck exists.
 	ParkedScaleSetCheck *Check `json:"parkedScaleSetCheck,omitempty"`
+	// StrandedScaleSets is the other half of the same audit: the sets this node
+	// SERVES that GitHub has stopped delivering work for (issue #336, ADR 0056).
+	// Unlike the parked rows these are verdicts -- every term is this node's own
+	// reading of the object it polls -- and each one fails IngestCheck. Absent
+	// from a daemon that predates the detector, and absent from a healthy one.
+	StrandedScaleSets []StrandedScaleSet `json:"strandedScaleSets,omitempty"`
 	// IngestCheck is an additive fleet.v1 field: a scale set GitHub has queued
 	// work for that this node's own broker session has not delivered (issue
 	// #292). Absent from a daemon that predates it.
@@ -539,6 +545,24 @@ type ParkedScaleSet struct {
 	Busy       int       `json:"busy"`
 	Registered int       `json:"registered"`
 	ObservedAt time.Time `json:"observedAt"`
+}
+
+// StrandedScaleSet is one runner scale set this node binds that GitHub has
+// stopped delivering for: GitHub reports assigned jobs and busy runners on it,
+// no runner is registered, this node holds no instance for it, and the reading
+// has stood longer than the node's boot timeout. HoldingSince is when the
+// reading was first seen, and the remedy is to recreate the set
+// (`fleet scale-sets recreate`), because the counters are GitHub's own.
+type StrandedScaleSet struct {
+	Scope        string    `json:"scope"`
+	ScaleSetID   int       `json:"id"`
+	Name         string    `json:"name,omitempty"`
+	Profile      string    `json:"profile,omitempty"`
+	Assigned     int       `json:"assigned"`
+	Busy         int       `json:"busy"`
+	HoldingSince time.Time `json:"holdingSince"`
+	ObservedAt   time.Time `json:"observedAt"`
+	Reason       string    `json:"reason,omitempty"`
 }
 
 // QueueTier is one priority tier's share of a scope queue. `tier` is the
