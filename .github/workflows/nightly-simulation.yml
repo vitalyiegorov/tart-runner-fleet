@@ -39,7 +39,7 @@ jobs:
     # Only this repository owns the self-hosted fleet these labels resolve to.
     # A fork must not schedule nightly work it cannot serve.
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'
-    runs-on: [self-hosted, linux-tiered, linux-large]
+    runs-on: [self-hosted, trf-linux-amd64-4x8]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -55,10 +55,13 @@ jobs:
 
   race:
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'
-    # `linux-xl` rather than `linux-large`: the race detector's shadow memory
-    # multiplies a sweep that already sizes its own budgets from measured
-    # throughput, and 6x12 is the largest profile this node offers.
-    runs-on: [self-hosted, linux-tiered, linux-xl]
+    # node-b's amd64 container, like the sweep (#264: the mini's Linux VMs die
+    # on Virtualization.framework's vsock thread ~25 min into a long job).
+    # 4x8 is the largest profile node-b offers; the race detector's shadow
+    # memory fits because the sweep sizes its own budgets from measured
+    # throughput. If this arm ever OOMs, the remedy is a node-b 6x12 profile,
+    # not a move back to the mini.
+    runs-on: [self-hosted, trf-linux-amd64-4x8]
     timeout-minutes: 40
     # Serialized behind the sweep on purpose. Both arms run on the same physical
     # node, and two multi-gigabyte race-instrumented Go builds against one host is
