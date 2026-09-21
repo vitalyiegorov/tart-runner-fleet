@@ -188,6 +188,15 @@ Run these on the Mac Studio. Nothing here contacts mac-mini.
 
 - Tart installed, and at least **200 GB free** — the image needs roughly 90 GB,
   the fleet's `minFreeDiskGb` guard defaults to 60 GB, and clones grow.
+  **Measured on mac-studio's 2026-09-21 rebuild: 135 GB free was enough, but
+  only because the OCI cache was deleted right after the clone.** The pull
+  itself writes about 90 GB (`df` on the data volume went 291 → 381 GB), and
+  `tart clone` from the cache is an APFS clone that costs nothing — so the
+  cache is a free copy at first and an increasingly expensive one as the clone
+  diverges. `tart delete ghcr.io/cirruslabs/macos-sequoia-xcode:26.4.1` once
+  the clone boots is the lever; it frees nothing immediately and unpins
+  everything the build is about to rewrite. Note the digest form of that name
+  is not accepted by `tart delete` — use the tag.
 - No fleet daemon in authority yet, or the fleet idle. Building an image while
   guests run competes for the host and for Apple's 2-concurrent-macOS-VM limit.
 
@@ -226,6 +235,21 @@ silently corrupt image that every future clone inherits.
 The image's default credentials are `admin` / `admin`.
 
 ### 3. Provision
+
+Inventory first; this image ships more than the recipe installs. Measured on
+mac-studio, 2026-09-21, on a clone of the pinned digest before any
+provisioning ran:
+
+| already in the image | version |
+| --- | --- |
+| `node@24` | v24.15.0 |
+| `python3` | 3.14.4 |
+| `openjdk@17` (already registered in `/Library/Java/JavaVirtualMachines`) | 17.0.19 |
+| `pod`, via `~/.rbenv/shims` — so `cocoapods` is a real capability of this image, not a `builder`-only extra | 1.16.2 |
+| `~/actions-runner` | replaced by the step below |
+| `~/android-sdk` | removed by [step 4b](#4b-slim-the-simulators-and-drop-the-runtimes-nobody-boots) |
+
+Only Maestro was actually missing. Everything else below is idempotent.
 
 ```sh
 tart exec "$BASE" env MAESTRO_VERSION=2.6.1 SIMULATOR_DEVICE_TYPE='iPhone 17 Pro' \
@@ -421,6 +445,28 @@ features the React Native tenants assert with `simulator-requires`.
 | `simslim measure` | — | 75 processes, 1020 MB |
 | `simslim doctor` push, universal-links, storekit | — | 3/3 OK |
 
+The same step, measured 2026-09-21 on **mac-studio**, built from the pinned
+Cirrus ancestor rather than from a promoted base (issue #335). The guest ran at
+6 vCPU / 12288 MiB for both readings, so the before and after columns are
+comparable to each other but not to the mac-mini table above:
+
+| measure | stock | slim |
+| --- | ---: | ---: |
+| image size (`tart list`) | 84 GB | 48 GB |
+| guest Data volume consumed (`diskutil apfs list`) | 65.1 GB | 29.3 GB |
+| simulator runtimes | 4 | 1 |
+| simulator processes at steady state | 194 | 82 |
+| simulator RSS at steady state | 23 416 MB | 8 484 MB |
+| guest at simulator steady state | 691 MB free, 444 MB compressed | 2 203 MB free, 417 MB compressed |
+| `simslim measure` | — | 84 processes, 1.08 GB |
+| `simslim doctor` push, universal-links, storekit | — | 3/3 OK |
+
+The 84 → 48 GB drop is the answer to the open question the
+[Size expectations](#size-expectations) section left: the non-iOS simulator
+runtimes really are the only large remaining target, and removing them plus
+the Android SDK, the Command Line Tools and the caches recovers 36 GB.
+
+
 Two things this step does **not** do, and why:
 
 - **mac-os-debloat** (`balanced` minus a keep list) disabled 148 guest launchd
@@ -429,6 +475,22 @@ Two things this step does **not** do, and why:
 - **Do not issue `shutdown -r` through `tart exec`.** The exec never returns once
   the guest is down and blocks the caller; reboot from the host (`tart stop`,
   `tart run`) and poll `tart exec "$BASE" true`.
+- **Do not delete `/Library/Java`.** mac-mini's hand-written trim removed it
+  because the Android layer had installed a Temurin JDK there. On an image
+  built by this recipe that directory holds the `openjdk-17.jdk` symlink
+  [step 3](#3-provision) creates, and the Maestro launcher is a Gradle start
+  script that fails outright without a JDK. Remove a Temurin bundle by name if
+  one is there; never the directory.
+- **`xcrun simctl list runtimes` lies inside the session that deleted them.**
+  Immediately after `xcrun simctl runtime delete`, the same `tart exec` session
+  still lists tvOS, watchOS and visionOS. A new session reports one iOS runtime
+  and `xcrun simctl list devices` shows the others as `Unavailable`. Verify the
+  trim from a fresh exec, or from a clone.
+- **`simslim verify` and `simslim doctor` need the device booted.** They read
+  live state and exit non-zero with `simulator must be booted to read its
+  state` against a shut-down device. In the block above that is free — `simslim
+  on` leaves the device booted — but a verification pass on a fresh clone has
+  to `xcrun simctl boot` first.
 
 ### 5. Host hygiene
 
@@ -555,7 +617,18 @@ effectively corrupt base, and nothing says so until a job fails against it.
 Always call `shutdown` by its absolute path, and always verify the guest
 actually stopped before trusting the seal.
 
-Stop the base from inside, so the guest filesystem is consistent:
+Stop the base from inside, so the guest filesystem is consistent. `tart stop`
+from the host is **not** equivalent: measured on mac-studio it returned in
+about one second on a guest with a booted simulator, which is a forced stop,
+not a graceful one. Use it only as the fallback after an in-guest halt has not
+taken effect. When `tart exec` is unavailable (see the wedge below), halt over
+SSH instead — the guest answers on `tart ip "$BASE"` with the image's default
+credentials:
+
+```sh
+ssh admin@"$(tart ip "$BASE")" 'sync; sudo /sbin/shutdown -h now'
+```
+
 
 ```sh
 tart exec "$BASE" sync || true
@@ -622,6 +695,24 @@ print(any(v["Name"] == name and v["Running"] for v in rows))
 done
 ```
 
+#### A forced stop can wedge the guest agent on the next boot
+
+Measured on mac-studio, 2026-09-21. After a `tart stop` that returned instantly,
+the next `tart run` of the **same base** never became reachable: `tart exec`
+failed for twenty minutes with
+
+```
+Failed to connect to the VM using its control socket: ... is the Tart Guest Agent running?
+```
+
+while `tart ip` already answered and an SSH session showed the guest fully
+booted with `org.cirruslabs.tart-guest-daemon` running (kickstarting it did not
+restore the vsock link). It is a wedged VM instance, not a damaged image:
+clones of that same disk booted and answered `tart exec` in 16–18 seconds both
+before and after. Diagnose in that order — `tart ip`, then SSH, then a clone —
+before concluding an image is corrupt, and finish the work over SSH rather than
+re-sealing a base you cannot reach.
+
 From here the base stays **stopped forever**. Maintenance follows mac-mini's
 discipline, which is also [ADR 0011](adr/0011-atomic-production-updates.md)'s
 shape: clone a dated candidate, change the candidate, verify it, then promote by
@@ -639,7 +730,7 @@ every layer was renamed rather than overwritten.
   "macosBurst": {
     "enabled": true,
     "baseVm": "macos-maestro-base",
-    "baseImageCapabilities": ["ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
+    "baseImageCapabilities": ["cocoapods", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
     "vmPrefix": "trf-macos",
     "maestro": { "id": "maestro", "label": "trf-macos-arm64-4x7",
                  "cpu": 4, "memoryMb": 7168, "maxActive": 2,
@@ -652,6 +743,13 @@ Use a distinct name. mac-mini's `macos-tartelet-base-go` carries the Android
 toolchain and the Tartelet-era history; a mac-studio image that answered to the same
 name would make two materially different images indistinguishable in an
 incident.
+
+**Reconciled 2026-09-21 (issue #335): mac-studio's `macosBurst.baseVm` is now
+`macos-tartelet-base-slim-20260921`, and its `macosBurst.baseImageRunnerVersion`
+is `2.337.0`** — the release `actions/runner` was serving when the image was
+built, not the `2.336.0` this document's example still shows. The node's
+top-level `baseImageRunnerVersion` belongs to the Linux base and was left
+alone.
 
 **`macosBurst.baseVm` in the checked-in config is the source of truth, not the
 name suggested above.** Observed on mac-studio: the config committed there points
@@ -667,10 +765,16 @@ assumption produces a base nothing points at.
 `macosBurst.baseImageCapabilities` must equal what the manifest inside the image
 says, for the same reason `baseVm` must equal the Tart name: one of them is
 checked against the machine and the other against every other node that
-advertises the same label. The list above omits `android-build-sdk` and
-`cocoapods` deliberately — this recipe is Maestro-only and installs neither, and
-a mac-studio that advertises `macos-maestro` beside mac-mini must therefore either
-carry them or share only labels whose consumers do not need them.
+advertises the same label. The list above omits `android-build-sdk`
+deliberately — this recipe is Maestro-only and installs no Android toolchain,
+and a mac-studio that advertises `macos-maestro` beside mac-mini must therefore
+either carry it or share only labels whose consumers do not need it.
+`cocoapods` **is** on the list: an earlier revision of this document dropped it
+on the reasoning that the recipe installs no pods, but the Cirrus image already
+ships `pod` 1.16.2 through `~/.rbenv/shims`, which is the first entry on the
+daemon's runner `PATH`. A capability is a fact about the image, not about the
+steps that were run, so verify each one on that exact `PATH` before writing the
+manifest and list what answers.
 
 At mac-studio's current `hostBudget` (6 vCPU / 16384 MiB) `builder` fits, so it
 is no longer configured out of reach the way an earlier revision of this
@@ -693,6 +797,7 @@ in the chain has the same 140 GB virtual disk):
 
 | Image | Used GB |
 | --- | ---: |
+| `macos-tartelet-base-slim-20260921` (mac-studio today, rebuilt from the pinned digest, step 4b) | 48 |
 | `macos-tartelet-base-go-slim-20260921` (mac-mini today, step 4b) | 63 |
 | `macos-tartelet-base-go` (before step 4b) | 89 |
 | `…-pre-androidsdk-20260720` (before the Android layer) | 87 |
@@ -728,10 +833,12 @@ reason to build rather than transfer is *where the bytes come from*:
 | Reproducible later | no, it is a copy of a hand-built artifact | yes, the digest is pinned |
 
 If the image must be smaller, the only large remaining target is the non-iOS
-simulator runtimes the Cirrus image ships. Removing tvOS, watchOS, and visionOS
-runtimes with `xcrun simctl runtime delete` plausibly recovers meaningful space.
-This is **untested here** — measure before and after with `tart list`, and treat
-it as an optional trim on a candidate clone, never on a promoted base.
+simulator runtimes the Cirrus image ships. That is no longer a conjecture:
+[step 4b](#4b-slim-the-simulators-and-drop-the-runtimes-nobody-boots) deletes
+the tvOS, watchOS and visionOS runtimes and the Android SDK, the Command Line
+Tools and the caches with them, and mac-studio's 2026-09-21 rebuild measured
+**84 → 48 GB**. Do it on a candidate clone and measure with `tart list`, never
+on a promoted base.
 
 ## Known unknowns
 
@@ -753,14 +860,25 @@ Stated so a future operator does not mistake inference for measurement.
 - **The 84 → 82 GB dip** between the pulled image and the pre-prewarm snapshot
   is unexplained. It is most likely `brew cleanup` plus sparse-file accounting,
   but no measurement confirms it.
-- **The optional simulator-runtime trim is unquantified**, as noted above.
+- ~~**The optional simulator-runtime trim is unquantified**~~ — quantified on
+  2026-09-21: with `simslim` and the Android/Command-Line-Tools/cache trim it
+  is worth 36 GB on mac-studio (84 → 48 GB). See
+  [step 4b](#4b-slim-the-simulators-and-drop-the-runtimes-nobody-boots).
 - **mac-studio's config exists and disagrees with this document's suggested
   `baseVm`.** An earlier draft of this section assumed `fleet.json` did not
   exist yet; it does, and its `macosBurst.baseVm` is `macos-tartelet-base`,
   not `macos-maestro-base`. See
   [Wire it to the mac-studio configuration](#wire-it-to-the-mac-studio-configuration)
   — the config is the authoritative value, not the fragment above.
-- **mac-studio's image now carries the `builder` toolchain — measured, not
+- **Superseded 2026-09-21: mac-studio's image is Maestro-only again.** The
+  image described in the next bullet was deleted by the operator, and the
+  rebuild below it (`macos-tartelet-base-slim-20260921`, issue #335) follows
+  this recipe exactly: no Android SDK, no Temurin JDK, no
+  `ci.limit.max*.plist`. mac-studio still declares the `builder` label, so a
+  `builder` job that lands there will fail on missing tooling until a separate
+  image update adds it back — the same gap this document has always named,
+  now with nothing papering over it.
+- **mac-studio's image once carried the `builder` toolchain — measured, not
   assumed.** This document's recipe is Maestro-only, but the image was
   subsequently extended for parity with mac-mini (issue #202) and verified by
   probing a clone of the sealed image on 2026-08-05:
