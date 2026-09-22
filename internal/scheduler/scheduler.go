@@ -1530,27 +1530,51 @@ func fairShareRanks(occupancy map[string]int, demands []domain.Demand) map[domai
 // bookkeeping charge against a cap, not a guest.
 const reservedChargePrefix = "reserved-"
 
-// activeScopeCounts is activeRepoCounts folded to the owning scope: how many of
-// this node's slots each GitHub scope currently holds. Deriving it from the one
-// occupancy function rather than re-deriving occupancy is the whole point --
-// "holds a slot" is stated once, and a teardown that has released its
-// repository slot has released its scope's share of the node at the same edge.
+// activeScopeCounts is how much of this node each GitHub scope is holding: the
+// instances of that scope that are physically on the machine.
 //
-// The reserved head's own charge is the one instance it must not count. That
-// charge exists so the head's repository cap reserves a slot for work that has
+// **It asks a different question from `activeRepoCounts`, and folding one into
+// the other was the whole of issue #350.** `activeRepoCounts` answers "how many
+// of this repository's concurrent cap slots are spent?", and ADR 0043 releases
+// that slot EARLY, at deregistration, precisely so a cap cannot block a
+// replacement the fleet has already committed to. Fair share asks "how much of
+// this node does this scope hold?" -- and the answer to that is the host vector,
+// which `ConsumesHostResources` already names and which the same instance goes
+// on holding for one or two lifecycle edges longer (ADR 0043, issue #247).
+//
+// The two answers differ on four observations, and a scope in any of them reads
+// as holding NOTHING while its guest occupies a core:
+//
+//	state            holds the vector   charged to the cap
+//	online-idle      yes                no   (a warm runner between jobs)
+//	deregistering    yes                no   (ADR 0043's early cap release)
+//	stopping         yes (until the guest is proven idle)   no
+//	failed           yes                no
+//
+// Live trace, mac mini, 2026-09-22 (`tests/replay`): `budgie` held one of the
+// mini's two `maestro` slots and had an older `maestro` queued; `pony` held
+// nothing and had two. At 14:16Z the other slot was handed to BUDGIE. The rank
+// read `budgie` at zero, so both scopes ranked zero, the tie fell through to
+// ADR 0004's aged FIFO, and FIFO gives it to whoever queued first -- which, for
+// a scope that has been streaming work for hours, it always is. With the vector
+// read instead, `budgie` reads one, `pony` reads zero, and ADR 0057 decides the
+// tick as it was written to.
+//
+// Two instances are still not occupancy, and for reasons that survive the
+// change. A guest whose vector is genuinely released -- `stopping` with the
+// guest proven idle, or a VM proven absent (ADR 0022) -- holds nothing, and the
+// slot it released is the one being given away on that very tick. And the
+// reserved head's synthetic charge is a cap bookkeeping entry for work that has
 // not started; reading it as occupancy would make the head's scope yield the
-// very vector the head is queued and waiting for, which is the starvation this
-// rule exists to end, inverted.
+// very vector the head is queued and waiting for, which is this rule's
+// starvation inverted.
 func activeScopeCounts(instances []domain.Instance) map[string]int {
-	running := make([]domain.Instance, 0, len(instances))
-	for _, instance := range instances {
-		if !strings.HasPrefix(instance.ID, reservedChargePrefix) {
-			running = append(running, instance)
-		}
-	}
 	counts := make(map[string]int)
-	for repo, count := range activeRepoCounts(running) {
-		counts[scopeOf(repo)] += count
+	for _, instance := range instances {
+		if !instance.ConsumesHostResources() || strings.HasPrefix(instance.ID, reservedChargePrefix) {
+			continue
+		}
+		counts[scopeOf(instance.Repo)]++
 	}
 	return counts
 }

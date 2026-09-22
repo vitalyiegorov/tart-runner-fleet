@@ -55,7 +55,11 @@ previous snapshot rather than emitting repeated healthy messages. Track:
   the incumbent must not hold a higher **effective tier** (ADR 0037, declared
   tier plus escalation). With all three satisfied, a wait longer than one job on
   that node is a defect to report with the queue rows and the instance list, not
-  a queue to clear;
+  a queue to clear. **Read occupancy from the VECTOR, not from what looks busy:
+  a scope whose only instance is `online-idle`, `draining`, `deregistering` or
+  `stopping` is still on that core and still holds its share of the node (ADR
+  0057's amendment, issue #350). `fleet instances` shows the state; a guest in
+  any of them counts;**
 - instances by lifecycle state and owned Tart identity;
 - retrying or dead operations and their bounded, redacted error class, read
   from `operations.failures` (`kind`, `code`, `count`, `attempts`) rather than

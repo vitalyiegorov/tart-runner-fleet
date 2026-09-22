@@ -1630,25 +1630,28 @@ func acrossThePlatformBarrier(band []domain.Demand, waiting, candidate domain.De
 	return false
 }
 
-// scopeOccupancy is how many of this node's slots each GitHub scope holds at the
+// scopeOccupancy is how much of this node each GitHub scope is holding at the
 // moment the plan was made. It is derived from observed instances only, never
 // from the scheduler's own arithmetic, so it cannot excuse a decision by
 // inheriting the reasoning that made it.
-// The release edge is ADR 0043's, not `TearingDown`: an instance that has not
-// reached deregistration is still holding its scope's slot, exactly as it is
-// still charged to its repository's cap. This oracle judges teardown ticks --
-// they are the ticks a slot changes hands -- so reading a DRAINING instance as
-// gone would let a scope look empty while it is still running the job that
-// filled it, and report the fleet for a fairness it had already delivered.
+//
+// **The edge is the HOST VECTOR, not ADR 0043's repository-slot release.** The
+// two are different questions and they differ on four observations -- a warm
+// `online-idle` runner, `deregistering`, `stopping` before the guest is proven
+// idle, and `failed` -- in every one of which the guest is occupying a core
+// while its repository's cap slot is already free. Reading the cap edge here
+// makes a scope that is physically holding one of two slots look empty, which
+// is issue #350: the oracle would then excuse the very tick that handed that
+// scope the other slot, over a scope holding nothing.
+//
+// This is the same seam #345's sweep found and mislabelled. It moved this
+// function from `TearingDown` to ADR 0043's edge and called it an oracle
+// defect; the direction was right and it stopped one edge short, and stopping
+// short left the fleet's own reading unchallenged.
 func scopeOccupancy(observation tickObservation) map[string]int {
 	counts := map[string]int{}
 	for _, instance := range observation.Instances {
-		switch instance.State {
-		case domain.InstanceOnlineIdle, domain.InstanceDeregistering, domain.InstanceStopping,
-			domain.InstanceDeleted, domain.InstanceFailed:
-			continue
-		}
-		if instance.Live() {
+		if instance.ConsumesHostResources() {
 			counts[simScopeOf(instance.Repo)]++
 		}
 	}

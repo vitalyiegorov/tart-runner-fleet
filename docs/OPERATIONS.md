@@ -1579,6 +1579,14 @@ a wait is a defect:
 - **no higher effective tier** on the incumbent -- a declared tier still
   overtakes, bounded by escalation (ADR 0037).
 
+Read occupancy from the host vector rather than from what looks busy. A scope
+whose only instance is `online-idle`, `draining`, `deregistering` or `stopping`
+is still occupying that core and still holds its share of the node, even though
+its repository's cap slot may already be released (ADR 0043 releases the cap
+early on purpose, and ADR 0057's amendment for issue #350 says fair share does
+not borrow that edge). A scope looks empty only once its guest has stopped
+charging the host.
+
 With all three satisfied, a wait longer than one job on that node is a fleet
 defect, not a policy: report it with the queue rows and the instance list.
 
