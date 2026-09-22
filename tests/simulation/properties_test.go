@@ -1572,6 +1572,20 @@ func yieldsOnScopeShare(cfg worldConfig, observation tickObservation, overtaker,
 // the observed queue and the observed instances, never from the plan, so it
 // judges the tick rather than agreeing with it.
 func scopeFairShareRanks(cfg worldConfig, observation tickObservation) map[domain.DemandKey]int {
+	next := scopeOccupancy(observation)
+	band := scopeFairShareBand(cfg, observation)
+	ranks := make(map[domain.DemandKey]int, len(band))
+	for _, demand := range band {
+		scope := simScopeOf(demand.Key.Repo)
+		ranks[demand.Key] = next[scope]
+		next[scope]++
+	}
+	return ranks
+}
+
+// scopeFairShareBand is the tick's aged band in age order, which is the order
+// the fleet's own `normalizedDemands` establishes once per tick.
+func scopeFairShareBand(cfg worldConfig, observation tickObservation) []domain.Demand {
 	band := make([]domain.Demand, 0, len(observation.Demands))
 	for _, demand := range observation.Demands {
 		if aged(cfg, observation.Now, demand) {
@@ -1584,14 +1598,36 @@ func scopeFairShareRanks(cfg worldConfig, observation tickObservation) map[domai
 		}
 		return band[i].Key.String() < band[j].Key.String()
 	})
-	next := scopeOccupancy(observation)
-	ranks := make(map[domain.DemandKey]int, len(band))
-	for _, demand := range band {
-		scope := simScopeOf(demand.Key.Repo)
-		ranks[demand.Key] = next[scope]
-		next[scope]++
+	return band
+}
+
+// acrossThePlatformBarrier reports whether a demand of the OTHER platform lies
+// between these two in the aged band. ADR 0057 does not reorder across one, so
+// neither does this oracle: the two platforms share an envelope, ADR 0049 owns
+// that boundary, and a fleet that left this pair in age order was obeying the
+// rule rather than breaking it.
+func acrossThePlatformBarrier(band []domain.Demand, waiting, candidate domain.Demand) bool {
+	first, second := -1, -1
+	for index, demand := range band {
+		switch demand.Key {
+		case waiting.Key:
+			first = index
+		case candidate.Key:
+			second = index
+		}
 	}
-	return ranks
+	if first < 0 || second < 0 {
+		return false
+	}
+	if first > second {
+		first, second = second, first
+	}
+	for _, between := range band[first+1 : second] {
+		if between.Platform != waiting.Platform {
+			return true
+		}
+	}
+	return false
 }
 
 // scopeOccupancy is how many of this node's slots each GitHub scope holds at the
@@ -1648,33 +1684,17 @@ func scopeShareChecker(cfg worldConfig) checker {
 	passedOver := map[string]int{}
 	return func(w *world, observation tickObservation) []finding {
 		admitted := admittedDemands(observation)
-		// A tick that admits nothing decides nothing. A tick with a teardown in
-		// flight, on the other hand, is exactly the tick this property is about --
-		// the slot a scope is waiting for is released by a teardown, and property
-		// (b)'s exemption for those ticks is what let the incident run for three
-		// hours without a single finding. Fairness is a question about WHO is
-		// admitted, not about what fits, so the mid-transition envelope is no
-		// excuse here.
-		if len(admitted) == 0 {
-			return nil
-		}
 		occupancy := scopeOccupancy(observation)
-		// One count per SCOPE per tick. A scope with three demands queued was
-		// passed over once, not three times, and crediting it once per demand
-		// would fail the bound on the first tick of any batch.
-		passed := map[string]domain.Demand{}
-		overtakers := map[string]domain.Demand{}
-		cleared := map[string]bool{}
+		// Per SCOPE and PROFILE, never per scope alone: one scope may be waiting
+		// for a `maestro` and content about its `large` on the same tick, and
+		// letting the contented profile speak for the scope would hide a pass-over
+		// the other profile really suffered.
+		passed := map[string]map[domain.ProfileID]domain.Demand{}
+		overtakers := map[string]map[domain.ProfileID]domain.Demand{}
+		// waiting is every scope that holds none of this node and has aged work
+		// queued, whether or not this tick passed it over. It is what ENDS an
+		// episode: a scope with nothing left to wait for is not waiting.
 		waiting := map[string]bool{}
-		var findings []finding
-		// The plannable queue, not `feasibleDemands`: feasibility here is PROVEN by
-		// the tick itself. `scopeOvertaker` only names an admission of the waiting
-		// demand's own profile, so a slot of that exact shape was available and
-		// went to someone else. Asking the feasibility helper instead would skip
-		// the decisive ticks, because the instance whose departure freed the slot
-		// is still charged against the profile's MaxActive while it tears down --
-		// which is another way of saying the oracle would exempt the only ticks
-		// that matter.
 		for _, demand := range observation.Demands {
 			scope := simScopeOf(demand.Key.Repo)
 			// The aged band only. Fair share is a key INSIDE it (ADR 0057); the
@@ -1687,20 +1707,26 @@ func scopeShareChecker(cfg worldConfig) checker {
 			waiting[scope] = true
 			overtaker, taken := scopeOvertaker(cfg, observation, occupancy, admitted, demand)
 			if !taken {
-				delete(passed, scope)
-				cleared[scope] = true
 				continue
 			}
-			if _, already := passed[scope]; !already && !cleared[scope] {
-				passed[scope] = demand
-				overtakers[scope] = overtaker
+			if _, already := passed[scope][demand.Profile]; already {
+				continue
 			}
+			if passed[scope] == nil {
+				passed[scope] = map[domain.ProfileID]domain.Demand{}
+				overtakers[scope] = map[domain.ProfileID]domain.Demand{}
+			}
+			passed[scope][demand.Profile] = demand
+			overtakers[scope][demand.Profile] = overtaker
 		}
-		// The count is cumulative across ONE waiting episode and no further. A
-		// scope that was admitted this tick, or that has no aged queued work left
-		// to be passed over, is not waiting any more, and carrying its count into
-		// the next episode would report a bound nobody breached.
+		// The count is cumulative across ONE waiting episode and no further, and
+		// the episode ends here -- on every tick, admitting or not. A scope that
+		// was admitted, or whose aged queue is gone (a cancellation retires it as
+		// readily as an admission does), is not waiting any more, and carrying its
+		// count into the next episode would report a bound nobody breached.
+		admittedScopes := map[string]bool{}
 		for _, demand := range admitted {
+			admittedScopes[simScopeOf(demand.Key.Repo)] = true
 			delete(passedOver, simScopeOf(demand.Key.Repo))
 		}
 		for scope := range passedOver {
@@ -1708,18 +1734,26 @@ func scopeShareChecker(cfg worldConfig) checker {
 				delete(passedOver, scope)
 			}
 		}
-		for scope, demand := range passed {
+		var findings []finding
+		for scope, byProfile := range passed {
+			if admittedScopes[scope] {
+				continue
+			}
+			// One count per scope per tick, however many of its profiles were
+			// passed over: a scope with three demands queued was passed over once.
 			passedOver[scope]++
 			if passedOver[scope] != cfg.ScopeShareN+1 {
 				continue
 			}
 			passedOver[scope] = 0
-			overtaker := overtakers[scope]
-			findings = append(findings, finding{Kind: findingScopeShare, Tick: observation.Tick,
-				Detail: fmt.Sprintf("scope %q holds none of this node and its %s (%s old) was passed over %d times, this tick by %s of scope %q which already holds %d\n%s",
-					scope, demand.Key, observation.Now.Sub(demand.CreatedAt), cfg.ScopeShareN+1,
-					overtaker.Key, simScopeOf(overtaker.Key.Repo), occupancy[simScopeOf(overtaker.Key.Repo)],
-					w.dumpPlan(observation))})
+			for profile, demand := range byProfile {
+				overtaker := overtakers[scope][profile]
+				findings = append(findings, finding{Kind: findingScopeShare, Tick: observation.Tick,
+					Detail: fmt.Sprintf("scope %q holds none of this node and its %s (%s old) was passed over %d times, this tick by %s of scope %q which already holds %d\n%s",
+						scope, demand.Key, observation.Now.Sub(demand.CreatedAt), cfg.ScopeShareN+1,
+						overtaker.Key, simScopeOf(overtaker.Key.Repo), occupancy[simScopeOf(overtaker.Key.Repo)],
+						w.dumpPlan(observation))})
+			}
 		}
 		sort.Slice(findings, func(i, j int) bool { return findings[i].Detail < findings[j].Detail })
 		return findings
@@ -1727,31 +1761,58 @@ func scopeShareChecker(cfg worldConfig) checker {
 }
 
 // scopeOvertaker names the admission that took the slot this demand's scope was
-// waiting for: same profile, and a scope that comes out of this tick holding
-// more of the node than the waiting one does. A declared tier and the
-// control-plane class are excluded, because both are written invariants that
-// outrank fair share by design (ADR 0004, ADR 0037).
+// waiting for: an admission whose own fair-share rank is WORSE than the waiting
+// demand's, which is to say one the key of ADR 0057 says should have gone
+// second. A declared tier and the control-plane class are excluded, because both
+// are written invariants that outrank fair share by design (ADR 0004, ADR 0037).
 //
-// "Comes out of this tick" is what the plain occupancy reading missed. A batch
-// starts together and therefore ENDS together, so the tick that frees two slots
-// reads zero for every scope — and on 2026-09-21/22 both of those slots went
-// straight back to the scope whose batch had just vacated them. Counting the
-// tick's own admissions is what makes that visible.
+// The rank is what makes this a property rather than a preference. Two scopes
+// asking this node for their second slot each are equals, and age decides
+// between equals; a scope asking for its first slot losing to a scope asking for
+// its third is the incident. Ranking the tick's own admissions in order is what
+// catches the batch: a batch starts together and therefore ENDS together, so the
+// tick that frees two slots reads zero occupancy for every scope, and on
+// 2026-09-21/22 both of those slots went straight back to the scope whose batch
+// had just vacated them.
 func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[string]int,
 	admitted []domain.Demand, waiting domain.Demand) (domain.Demand, bool) {
 	classes := cfg.Scheduler.RepoSchedulingClasses
+	ranks := scopeFairShareRanks(cfg, observation)
+	waitingRank, ranked := ranks[waiting.Key]
+	if !ranked {
+		return domain.Demand{}, false
+	}
 	taking := map[string]int{}
 	for _, candidate := range admitted {
 		if candidate.Key == waiting.Key {
 			return domain.Demand{}, false
 		}
-		if candidate.Profile == waiting.Profile {
-			taking[simScopeOf(candidate.Key.Repo)]++
-		}
 	}
 	for _, candidate := range admitted {
 		scope := simScopeOf(candidate.Key.Repo)
-		if candidate.Profile != waiting.Profile || occupancy[scope]+taking[scope] < 2 {
+		candidateRank, candidateRanked := ranks[candidate.Key]
+		if !candidateRanked {
+			candidateRank = occupancy[scope]
+		}
+		// One profile, because the admission is also the FEASIBILITY evidence: a
+		// slot of exactly this shape was available and went to someone else. The
+		// waiting demand's own feasibility is otherwise unknowable on a tick whose
+		// envelope is mid-teardown, and a demand that could not have been admitted
+		// was not passed over (seed 2, tick 43: a six-core `builder` "passed over"
+		// by a one-core `small` against two free cores).
+		if candidate.Profile != waiting.Profile {
+			taking[scope]++
+			continue
+		}
+		if acrossThePlatformBarrier(scopeFairShareBand(cfg, observation), waiting, candidate) {
+			taking[scope]++
+			continue
+		}
+		// An admission also SPENDS its scope's next slot, so a second admission of
+		// one scope on one tick is asking for one more than the first did.
+		candidateRank += taking[scope]
+		taking[scope]++
+		if candidateRank <= waitingRank {
 			continue
 		}
 		if outranksOnTier(cfg, observation.Now, candidate, waiting) {
