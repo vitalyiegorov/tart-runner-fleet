@@ -142,7 +142,7 @@ the two stages of the bring-up.
 | Key | Meaning |
 | --- | --- |
 | `backend` | `podman` is the only value this release implements. Omit the whole block for an observe-only node. |
-| `image` | The OCI reference every runner container is created from. It takes the place of `linux.baseVm`, which stays in the file because the schema requires it and means nothing on this node. Pin it by digest in production. |
+| `image` | The OCI reference every runner container is created from. It takes the place of `linux.baseVm`, which means nothing on this node. A node that declares Linux profiles must still name a `baseVm` even when a container backend supersedes it; only a node with no Linux profiles at all may omit it (ADR 0058). Pin the image by digest in production. |
 | `binary` | Optional. Empty resolves `podman` through `PATH`, which is what a distribution package installs. |
 | `kvmProfiles` | The profile IDs whose containers get `--device /dev/kvm`. Per ADR 0034 this is the Android emulator profile and nothing else; a profile named here that the node does not declare is a refused configuration. |
 | `holdCommand` | Optional. What keeps a created container alive and idle until the JIT bootstrap runs inside it; the default is `sleep infinity`. |

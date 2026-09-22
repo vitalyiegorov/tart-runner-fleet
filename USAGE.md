@@ -126,6 +126,44 @@ Each GitHub scope exposes only the variants its `scaleSets` list names, so a
 wide matrix costs one scale set per variant *per scope that wants it* rather
 than one in every scope.
 
+### A node declares the execution technology it has
+
+A node may boot Linux guests, macOS guests, or both, and it says which in its
+own file. Declaring Linux execution means declaring `linuxProfiles`: a profile
+is the only thing a Linux job can be placed on, so a node with none can never
+boot a Linux guest whatever else its file says.
+
+A Mac that has finished ADR 0055's migration therefore omits `linuxProfiles`
+and `baseVm` entirely and keeps `macosBurst` enabled. A node that declares
+neither Linux profiles nor `macosBurst` is refused — *"a node must have at
+least one execution technology"* — because a node that can boot nothing can
+never serve a job and looks exactly like a healthy idle one.
+
+Two consequences are worth knowing before editing a file:
+
+- **The admission envelope is not a Linux setting.** `maxLinuxCpu`,
+  `maxLinuxMemoryMb`, and `maxLinuxWhenMacosIdle` are named for Linux but, by
+  default, are the node's **shared** cross-platform envelope and slot count; a
+  macOS guest is charged against all three. Keep them when you retire Linux.
+  `fleet config validate` refuses a zero envelope, because a node with one
+  admits nothing at all while reporting healthy. (`vmPrefix` stays required on
+  every node too.)
+- **Retire the scale sets before the profiles.** On a node with no Linux
+  execution, a scale set whose profile the node does not declare fails
+  validation, naming the set, its scope, and its profile. Without that check a
+  daemon would long-poll a set it can never place a job from, and GitHub would
+  go on assigning work to it forever.
+
+`fleet doctor` on such a node reports `guest console: no Linux guests booted on
+this node` and a `runner version` row naming the macOS image alone. Neither is
+an unavailable observation — both absences are proved from the configuration,
+not unread from a host — and `fleet instances` and `fleet queues` simply carry
+no `linux-*` row.
+
+The step-by-step retirement is the amendment in
+[`ADR 0055`](docs/adr/0055-linux-work-runs-on-the-linux-node.md); the rule is
+[`ADR 0058`](docs/adr/0058-a-node-declares-the-execution-technology-it-has.md).
+
 ### Second-pilot mode
 
 By default the envelope above is a static configured vector, which suits a

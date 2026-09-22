@@ -198,7 +198,12 @@ The `arch` component is the node's own: it is `arm64` unless the node declares
 
 Profiles are configuration, not built-ins:
 [`config/fleet.example.json`](config/fleet.example.json) ships this matrix, and
-each scope exposes only the variants it wants. Every scale set also advertises
+each scope exposes only the variants it wants. A node declares only the
+profiles it can actually boot — a Linux node declares no macOS profile, and a
+Mac that has handed its Linux work to the Linux node declares no
+`linuxProfiles` at all
+([ADR 0055](docs/adr/0055-linux-work-runs-on-the-linux-node.md),
+[ADR 0058](docs/adr/0058-a-node-declares-the-execution-technology-it-has.md)). Every scale set also advertises
 `self-hosted` plus whatever grouping labels the operator adds
 (`linux-tiered`, `macOS`, `ARM64`, `linux-ci`, …).
 
@@ -361,4 +366,4 @@ authority long enough to build and verify its successor.
 - [`docs/FLEET_ARCHITECTURE_PLAN.md`](docs/FLEET_ARCHITECTURE_PLAN.md) — target architecture, SLOs, sequencing
 - [`docs/MULTI_NODE_PLAN.md`](docs/MULTI_NODE_PLAN.md) — three independent nodes, workload placement, phased delivery
 - [`docs/BASE_IMAGE.md`](docs/BASE_IMAGE.md) — macOS base image provenance, and building a Maestro-only image from a pinned public image
-- [`docs/adr/`](docs/adr) — 34 architecture decision records
+- [`docs/adr/`](docs/adr) — 57 architecture decision records

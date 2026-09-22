@@ -1104,6 +1104,35 @@ The jobs already assigned to the deleted set are lost with it and must be
 re-run. Do not use this command on a PARKED set: that set is very likely a
 sibling's, and the parked row is evidence, not a verdict (ADR 0054).
 
+### Retiring Linux execution from a Mac
+
+Once ADR 0055's migration has moved every consumer off a Mac's Linux labels,
+that Mac's `linuxProfiles`, its Linux scale sets, and its
+`linux-runner-base-go` image are inventory rather than capability. Retiring
+them is a guarded, mostly reversible procedure, and the step-by-step lives with
+the decision rather than here:
+[`ADR 0055`, amendment 2026-09-22](adr/0055-linux-work-runs-on-the-linux-node.md#amendment-2026-09-22-retiring-linux-from-the-macs-the-procedure).
+
+Three things are worth repeating where an operator will meet them:
+
+- **There is no `fleet scale-sets retire`.** The three subcommands are
+  `provision`, `audit`, and `recreate`, and `recreate` is a delete-then-create
+  that always leaves a new GitHub object behind — it is explicitly the wrong
+  tool for a parked set. The GitHub objects are deleted by hand.
+- **Do not delete `maxLinuxCpu`, `maxLinuxMemoryMb`, or
+  `maxLinuxWhenMacosIdle`.** They are named for Linux and are the node's shared
+  cross-platform admission envelope; a node that loses them admits nothing at
+  all while `fleet doctor` still passes. `fleet config validate` refuses a zero
+  envelope, which is the backstop rather than the plan.
+- **Validate before restarting.** `fleet config validate --mode authority`
+  names any Linux scale set still listed against a node that no longer declares
+  Linux profiles. A daemon that polls such a set holds GitHub's jobs forever
+  (#164).
+
+After the restart, `fleet instances` and `fleet queues` carry no `linux-*` row,
+`fleet doctor` reads `no Linux guests booted on this node`, and
+`fleet config policy` publishes a new digest — all three are expected.
+
 ### A base image whose runner GitHub will refuse
 
 `fleet doctor` reports `FAIL  runner version` when a base image carries an
@@ -1184,7 +1213,11 @@ fleet doctor --endpoint "$ENDPOINT" --output json |
 ```
 
 The check passes loudly too: it prints `serial console captured`,
-`serial console NOT captured`, or `no Linux guests booted on this node`. The
+`serial console NOT captured`, or `no Linux guests booted on this node`. That
+last line is the reading on a node that declares no `linuxProfiles` — a Linux
+node whose backend is podman, or a Mac that has completed ADR 0055's
+retirement. It is a proved absence, not an unread observation: the node has no
+Linux guest to lose a console for, so there is nothing to remedy. The
 remedy is operational, not a rebuild: verify `tart run --help` advertises
 `--serial-path` on that node's tart build, set `linuxSerialLogDirectory` in
 `fleet.json`, reload the daemon, and confirm the next instance start creates a
