@@ -492,6 +492,116 @@ Two things this step does **not** do, and why:
   on` leaves the device booted — but a verification pass on a fresh clone has
   to `xcrun simctl boot` first.
 
+### 4c. Bake mobile-ci simulator templates
+
+Done on both Macs on 2026-09-22, right after [step 4b](#4b-slim-the-simulators-and-drop-the-runtimes-nobody-boots),
+per `rnw-community/mobile-ci`'s own instruction to add this "right after its
+'Prewarm the simulators' and 'Slim the simulators' steps
+(`docs/BASE_IMAGE.md`)" (`docs/self-hosted-runners.md` at `v2.3.0`, "Templates
+the image can bake"). `simulator-lease`'s `template-strategy: auto` looks for
+a shut-down, available device whose name matches its device type and runtime
+and clones it instead of creating and slimming a fresh one — seconds instead
+of the ~2 minutes a lease otherwise pays for create + boot + `simslim on`.
+
+Naming is the whole contract between mobile-ci and this image; quoting it
+exactly from the source doc:
+
+> **The naming rule is the contract between this repo and the image:**
+>
+> ```text
+> mobile-ci-template-<device-type-slug>-<runtime-slug>
+> ```
+>
+> where each slug is the name lowercased with every run of non-alphanumeric
+> characters collapsed to a single `-`, and the runtime slug is taken from the
+> last dot-separated component of the runtime identifier
+
+A template must be **shut down** (a booted device is refused) and slimmed with
+mobile-ci's own profile, `profiles/ci.json` — `{"except":["store","web"]}` —
+not the fleet's `~/.fleet/simslim.fleet.json` from step 4b, so a lease that
+runs `simslim verify --profile profiles/ci.json` against the clone sees a
+matching profile.
+
+Guest script, run once per base and asserted rather than trusted — see the
+trap below:
+
+```sh
+set -euo pipefail
+export DEVELOPER_DIR=/Applications/Xcode_26.4.1.app/Contents/Developer
+mkdir -p ~/.fleet; cat > ~/.fleet/simslim.ci.json <<'J'
+{"name":"ci","description":"mobile-ci default: store + web stay on, every other category is disabled.","except":["store","web"]}
+J
+profile=~/.fleet/simslim.ci.json
+slug(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'; }
+bake(){
+  dt="$1"
+  dtid=$(xcrun simctl list devicetypes -j | python3 -c "import sys,json; print([d['identifier'] for d in json.load(sys.stdin)['devicetypes'] if d['name']==sys.argv[1]][0])" "$dt")
+  rt=$(xcrun simctl list runtimes -j | python3 -c "import sys,json; rs=[r for r in json.load(sys.stdin)['runtimes'] if r['isAvailable'] and 'iOS' in r['identifier']]; rs.sort(key=lambda r:[int(x) for x in r['version'].split('.')]); print(rs[-1]['identifier'])")
+  name="mobile-ci-template-$(slug "$dt")-$(slug "${rt##*.}")"
+  if xcrun simctl list devices -j | python3 -c "import sys,json; d=json.load(sys.stdin)['devices']; sys.exit(0 if any(x['name']==sys.argv[1] for v in d.values() for x in v) else 1)" "$name"; then echo "$name already exists"; return 0; fi
+  udid=$(xcrun simctl create "$name" "$dtid" "$rt"); echo "created $name $udid"
+  xcrun simctl boot "$udid"; xcrun simctl bootstatus "$udid" -b >/dev/null
+  simslim on "$udid" --profile "$profile" --boot-timeout 15m
+  simslim verify "$udid" --profile "$profile" | tail -1
+  simslim measure "$udid" | tail -3
+  xcrun simctl shutdown "$udid"; echo "baked $name (shutdown)"
+}
+bake 'iPad Pro 11-inch (M4)'
+bake 'iPhone 17 Pro'
+xcrun simctl list devices | grep "mobile-ci-template"
+```
+
+**The trap this recipe avoids.** A first attempt piped the script into
+`tart exec` on stdin. `tart exec` does not forward stdin, so the guest ran an
+empty script and reported success — no template existed, and nothing on
+either side said so. The script must be delivered as an argument, base64-
+encoded so quoting inside `bake()` survives the trip through the guest shell,
+and the bake must be verified by asserting the two `baked …` lines the script
+itself prints for `iPad Pro 11-inch (M4)` and `iPhone 17 Pro`, not by trusting
+the exit code alone:
+
+```sh
+script_b64=$(base64 < bake-templates.sh)
+tart exec "$BASE" bash -lc "echo $script_b64 | base64 -d | bash -s" 2>&1 | tee /tmp/bake.log
+grep -c '^baked ' /tmp/bake.log   # must print 2
+```
+
+**Orchestration, both Macs.** The base was already the promoted, slimmed image
+from step 4b, so this reused the running-guest pattern rather than a fresh
+pull:
+
+1. Pause new spawns on the node — set `minFreeDiskGb=9999` so the scheduler
+   refuses to admit a new clone — and kickstart the daemon so the change takes
+   effect immediately rather than at the next poll.
+2. Wait until the node reports **fewer than 2 tenant VMs** running (Apple's
+   2-concurrent-macOS-VM limit; the bake needs a slot of its own).
+3. `tart clone` the promoted base to a dated working copy
+   (`macos-tartelet-base-tpl-20260922`), `tart run` it, and wait for
+   `tart exec ... true` to succeed.
+4. Deliver and run the guest script exactly as above (base64 argument, not
+   stdin), and verify both `baked …` lines.
+5. `xcrun simctl shutdown all` (idempotent — the script already shuts down
+   each template it creates) and stop the guest by absolute path
+   (`/sbin/shutdown -h now`, see [Then stop the guest](#then-stop-the-guest));
+   poll until `tart list` shows it stopped.
+6. `tart clone` the stopped, sealed working copy to the name the node
+   configuration will reference, write the new name into `macosBurst.baseVm`,
+   and restore `minFreeDiskGb` to its normal floor.
+7. Kickstart the daemon again so it picks up the new `baseVm` and resumes
+   admitting spawns.
+
+**Measured 2026-09-22, both Macs.** `simslim verify` and mobile-ci's
+`profiles/ci.json` reported the same outcome on every device on both hosts:
+**matches the profile: all 146 expected daemons disabled.**
+
+| host | base before | base after | templates | processes / footprint |
+| --- | --- | --- | --- | --- |
+| mac-mini | `macos-tartelet-base-go-slim3-20260921` (49 GB) | `macos-tartelet-base-tpl-20260922` (51 GB) | `ipad-pro-11-inch-m4-ios-26-4`, `iphone-17-pro-ios-26-4` | 81 / 1.07 GB, 70 / 907 MB |
+| mac-studio | `macos-tartelet-base-slim-20260921` (48 GB) | `macos-tartelet-base-tpl-20260922` (53 GB) | same | 84 / 1.08 GB, 81 / 1.07 GB |
+
+The image manifest gained the capability `ios-simulator-templates` — see
+[The macOS capability vocabulary](#the-macos-capability-vocabulary).
+
 ### 5. Host hygiene
 
 A sealed CI guest must not start an OS update, sleep, or index in the middle of
@@ -538,7 +648,7 @@ set -euo pipefail
 sudo install -d -o root -g wheel -m 0755 /usr/local/share/tart-runner-fleet
 sudo tee /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null <<JSON
 {"schemaVersion": 1, "image": "macos-tartelet-base", "sealedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
- "capabilities": ["android-build-sdk", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime"]}
+ "capabilities": ["android-build-sdk", "ios-simulator-prewarmed", "ios-simulator-templates", "jvm", "maestro-cli", "node-runtime"]}
 JSON
 sudo chmod 0644 /usr/local/share/tart-runner-fleet/image-capabilities.json
 python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
@@ -586,6 +696,7 @@ audited for.
 | --- | --- |
 | `xcode` | Xcode installed, first-launch complete, and a GPU the guest can see |
 | `ios-simulator-prewarmed` | the simulator runtimes of [step 4](#4-prewarm-the-simulators) already booted once |
+| `ios-simulator-templates` | the mobile-ci `mobile-ci-template-*` simulator devices of [step 4c](#4c-bake-mobile-ci-simulator-templates) are shut down and present for `simulator-lease`'s `template-strategy: auto` to clone |
 | `android-build-sdk` | an Android SDK and NDK a job can build an APK against |
 | `jvm` | a JDK registered where the Maestro launcher finds it |
 | `maestro-cli` | the pinned `maestro` CLI of [step 3](#3-provision), with its jars |
