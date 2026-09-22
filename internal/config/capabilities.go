@@ -147,6 +147,34 @@ func (c Config) capabilityPlatform(profile string) (string, bool) {
 	return "", false
 }
 
+// validateRetiredLinuxExecution refuses a scale set a node with no Linux
+// execution could only strand.
+//
+// ADR 0055 retires the Macs' Linux profiles, and the dangerous half of that
+// edit is the half an operator forgets: deleting `linuxProfiles` while a Linux
+// scale set is still listed leaves a daemon that long-polls a set it can never
+// place a job from. GitHub goes on assigning to it and the jobs wait forever —
+// the stranding of issue #164, self-inflicted and invisible, because a node
+// holding work it cannot run looks exactly like a quiet one.
+//
+// The rule is deliberately scoped to a node that declares no Linux profile at
+// all. On a node that still executes Linux, an unknown profile is already named
+// by the authority checks, and repeating it here would report one mistake twice.
+func (c Config) validateRetiredLinuxExecution() error {
+	if c.ExecutesLinux() {
+		return nil
+	}
+	for _, scoped := range c.ScopedScaleSets() {
+		if _, known := c.capabilityPlatform(scoped.ScaleSet.Profile); known {
+			continue
+		}
+		return fmt.Errorf("scale set %q in %s routes to profile %q, which this node does not declare; "+
+			"a node with no Linux execution cannot serve a Linux scale set, so retire the set before "+
+			"removing linuxProfiles (ADR 0055)", scoped.Name(), scoped.Scope, scoped.ScaleSet.Profile)
+	}
+	return nil
+}
+
 // validateCapabilities refuses a scale set that requires something the image for
 // its own platform does not provide. It sits beside the existing profile and
 // scale-set cross-checks for the reason ADR 0034's amendment gives: this is a

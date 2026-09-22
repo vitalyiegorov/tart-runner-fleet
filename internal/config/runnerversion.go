@@ -90,10 +90,19 @@ func (c Config) RunnerVersionFloorOrDefault() string {
 // disabled boots no macOS guest, so no macOS row is produced: an image nothing
 // is routed to is not a compliance hole, and reporting one would make the check
 // unreadable on the Linux-only nodes.
+//
+// A node that declares no Linux profile is the same statement on the other
+// platform (ADR 0055). It is an absence this package can prove from the file
+// alone — not an unread observation — so it is reported as no row rather than
+// as an unknown version, which the check would otherwise have to render as a
+// compliance hole on the one node the retirement was performed for.
 func (c Config) RunnerImages() []RunnerImage {
 	floor := c.RunnerVersionFloorOrDefault()
-	images := []RunnerImage{{Platform: capabilityPlatformLinux, VM: c.Linux.BaseVM,
-		Version: strings.TrimSpace(c.Linux.BaseImageRunnerVersion), Floor: floor}}
+	images := make([]RunnerImage, 0, 2)
+	if c.ExecutesLinux() {
+		images = append(images, RunnerImage{Platform: capabilityPlatformLinux, VM: c.Linux.BaseVM,
+			Version: strings.TrimSpace(c.Linux.BaseImageRunnerVersion), Floor: floor})
+	}
 	if c.MacOS.Enabled {
 		images = append(images, RunnerImage{Platform: capabilityPlatformMacOS, VM: c.MacOS.BaseVM,
 			Version: strings.TrimSpace(c.MacOS.BaseImageRunnerVersion), Floor: floor})

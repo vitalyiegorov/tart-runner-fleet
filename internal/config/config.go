@@ -1163,6 +1163,22 @@ func cloneBudget(seconds *int) *int {
 	return &copied
 }
 
+// ExecutesLinux reports whether this node boots Linux guests at all.
+//
+// It is the one predicate the rest of the fleet asks, stated once here rather
+// than re-derived at each call site, and it asks about PROFILES rather than
+// about `baseVm`. A profile is the only thing a Linux job can be placed on: the
+// scheduler admits against a profile, a scale set routes to a profile, and a
+// label resolves to a profile. A node that declares none can never boot a Linux
+// guest whatever else its file happens to still carry, which is precisely the
+// state ADR 0055 leaves a Mac in once its Linux consumers have moved.
+//
+// `baseVm` cannot answer the question. The schema keeps it on every node — an
+// observe-only Linux node and a podman container node both carry a Tart base VM
+// name they will never clone (ADR 0034) — so a predicate on the field would
+// call node-b a Tart Linux host.
+func (c Config) ExecutesLinux() bool { return len(c.Linux.Profiles) > 0 }
+
 func (c Config) Validate() error {
 	if c.PollInterval <= 0 || c.ReservationAge <= 0 {
 		return errors.New("intervals must be positive")
@@ -1204,9 +1220,30 @@ func (c Config) Validate() error {
 		(*c.GitHub.ParkedScaleSetAuditMinutes < 0 || *c.GitHub.ParkedScaleSetAuditMinutes > maxParkedScaleSetAuditMinutes) {
 		return errors.New("parked scale set audit minutes must be between 0 and 1440")
 	}
-	if c.Linux.BaseVM == "" || c.Linux.VMPrefix == "" {
+	if !c.ExecutesLinux() && !c.MacOS.Enabled {
+		return errors.New("a node must have at least one execution technology: declare linuxProfiles or enable macosBurst")
+	}
+	// `baseVm` is the one Linux key a node that boots no Linux guest may omit:
+	// it names an image, and an image nothing is routed to is not a setting.
+	// `vmPrefix` stays required because it is a well-formedness key of the
+	// schema on every node, not a statement about Linux.
+	if c.Linux.VMPrefix == "" || (c.ExecutesLinux() && c.Linux.BaseVM == "") {
 		return errors.New("linux base VM and prefix are required")
 	}
+	// The next two are NOT Linux-only, whatever their names say, and a node that
+	// retires its Linux execution must keep them. Under ADR 0012 -- which is the
+	// default, and what both Macs run -- `maxLinuxCpu`/`maxLinuxMemoryMb` are the
+	// node's SHARED cross-platform admission envelope, and `maxLinuxWhenMacosIdle`
+	// is its slot count; a macOS guest is charged against all three
+	// (scheduler.staticFree). Under ADR 0018's elastic envelope they still seed
+	// the bound before the physical total narrows it (scheduler.elasticFree), and
+	// `physicalBound` takes a minimum, so a zero here is a zero there too.
+	//
+	// Accepting a zero envelope on a macOS-only node would therefore produce a
+	// daemon that starts, reports healthy, polls its scale sets, and admits
+	// nothing at all, forever -- an empty queue on a healthy host, which is
+	// exactly what a fault looks like (#230) and exactly what this fleet's
+	// incident history says nobody spots.
 	if c.Linux.MaxInstances < 1 || c.Linux.MaxInstances > 4 {
 		return errors.New("linux max instances must be between 1 and 4")
 	}
@@ -1284,6 +1321,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateExecutor(); err != nil {
+		return err
+	}
+	if err := c.validateRetiredLinuxExecution(); err != nil {
 		return err
 	}
 	if err := c.validateCapabilities(); err != nil {
