@@ -58,6 +58,22 @@ func TestSimFuzzContainerNode(t *testing.T) {
 	sweep(t, "TestSimFuzzContainerNode", containerNodeWorld())
 }
 
+// TestSimFuzzMacOSOnlyNode is the same sweep on the Mac of ADR 0055: both macOS
+// profiles, no Linux profile at all. It is its own arm for the reason every
+// other world is -- the seed stream is a function of the world, so one binary
+// exploring two worlds must explore each of them fully.
+//
+// It exercises what no other arm can: two macOS profiles as the ONLY admission
+// question a node has. budgetedWorld and federatedWorld each declare a single
+// macOS profile, and containerNodeWorld declares none, so the `builder` beside
+// `maestro` cohort on a host with no Linux work in it was unreachable by the
+// generator before this world existed -- and it is the arrangement both Macs
+// are about to run in production.
+func TestSimFuzzMacOSOnlyNode(t *testing.T) {
+	t.Parallel()
+	sweep(t, "TestSimFuzzMacOSOnlyNode", macOSOnlyNodeWorld())
+}
+
 func sweep(t *testing.T, name string, cfg worldConfig) {
 	t.Helper()
 	for offset := range *seedsFlag {

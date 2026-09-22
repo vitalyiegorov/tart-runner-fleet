@@ -295,22 +295,28 @@ func planTick(in Input) Plan {
 			switch {
 			case containsSpawn(attempted.Operations):
 				plan = fillLinuxRemainder(in, attempted, linux, macos)
-			case mode == domain.HostIdle:
-				// On a fully idle host a macOS head that will not spawn is resource-
-				// infeasible: nothing is live to drain and make room for it, so it is
-				// NOT waiting on drainable work. The bounded one-shot handoff latch is
-				// wrong here — it drains the queue by a single job and re-wedges.
-				// Admit feasible work behind it in the residual envelope every tick.
-				plan = planBehindInfeasibleMacHead(in, plan, linux, macos)
-			case len(linux) == 0:
-				plan = attempted
-			case in.Config.MixedPlatformAdmission:
-				// A live macOS cohort blocks the head, but nothing Linux is live to
-				// drain: the head simply does not fit beside the cohort. Fill the
-				// residual envelope with Linux every tick instead of the bounded
-				// one-shot handoff backfill. The infeasible-head remainder planner
-				// admits feasible Linux (and a feasible macOS profile behind the head
-				// when no Linux fits) without ever latching or draining.
+			case mode == domain.HostIdle, len(linux) == 0, in.Config.MixedPlatformAdmission:
+				// One rule, three ways of arriving at it: the macOS head will not
+				// spawn and there is no Linux work this tick that draining could hand
+				// the host to. So the head is not waiting on drainable work, and the
+				// bounded one-shot handoff latch is wrong — it drains the queue by a
+				// single job and re-wedges. Admit feasible work behind the head in the
+				// residual envelope, every tick, without latching or draining.
+				//
+				//   - HostIdle: nothing is live to drain at all.
+				//   - len(linux) == 0: nothing Linux is QUEUED, so there is no handoff
+				//     to perform. This arm used to return the attempted plan unchanged,
+				//     which admitted nothing. It was unreachable in practice while every
+				//     node carried Linux profiles; ADR 0055 retires them from the Macs
+				//     and makes it a macOS-only node's steady state, wedging exactly the
+				//     builder-beside-maestro arrangement ADR 0055 exists to enable.
+				//   - MixedPlatformAdmission: a live macOS cohort blocks the head and
+				//     nothing Linux is live to drain; the head simply does not fit
+				//     beside the cohort.
+				//
+				// The remainder planner admits feasible Linux, and a feasible macOS
+				// profile behind the head when no Linux fits, under the same envelope,
+				// MaxActive, repository-cap, and cohort rules as everything else.
 				plan = planBehindInfeasibleMacHead(in, plan, linux, macos)
 			default:
 				// A busy macOS instance (a live foreign cohort) blocks the head while
