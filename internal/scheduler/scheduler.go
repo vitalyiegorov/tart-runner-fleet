@@ -828,7 +828,7 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		// a key inside this band, and a rule the macOS pass applies and this one
 		// does not is not a rule. It decides both what is admitted here and, when
 		// the band stops being feasible, which head mints the reservation.
-		for _, candidate := range agedOrder(in, aged) {
+		for _, candidate := range agedQueueOrder(in, aged) {
 			profile := in.Config.Profiles[candidate.Profile]
 			selected := spawnedDemands(plan.Operations)
 			if axis := admissionAxis(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps); axis != ReservationAxisNone {
@@ -1339,7 +1339,49 @@ func effectiveTier(now time.Time, demand domain.Demand, config Config) int {
 // issue #224.
 func priorityOrder(in Input, demands []domain.Demand) []domain.Demand {
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
-	return append(agedOrder(in, aged), youngPriorityOrder(in, young, in.Prior.DRRCursor, in.Config)...)
+	return append(agedQueueOrder(in, aged), youngPriorityOrder(in, young, in.Prior.DRRCursor, in.Config)...)
+}
+
+// agedQueueOrder puts one pass's aged candidates into the order the WHOLE
+// queue's aged band has this tick, rather than ordering the pass's own slice.
+//
+// Every pass sees a subset: `planLinux` one platform, `appendMacSpawns` the
+// other, the remainder passes a residue of both. ADR 0057's key is a statement
+// about the band, and two of its three clauses -- the platform barrier and a
+// scope's own FIFO across vectors -- are invisible inside a subset that does not
+// contain the demand being protected. Ordering the subset therefore produced
+// exactly the inversion the barrier exists to prevent: seed 1, tick 127 of the
+// mini arm, a control-plane `xl` promoted over a same-scope peer in the Linux
+// pass and, by that promotion, over the macOS `builder` that had been queued
+// between them since before either.
+//
+// So the band is ordered once, from `normalizedDemands`, and a pass reads its
+// candidates out of that order. It is the same thing `priorityRank` already says
+// about the whole queue, said where the admission actually happens.
+func agedQueueOrder(in Input, demands []domain.Demand) []domain.Demand {
+	if len(demands) < 2 {
+		return demands
+	}
+	band, _ := splitAged(in.Now, in.Config.FairnessAge, normalizedDemands(in))
+	rank := make(map[domain.DemandKey]int, len(band))
+	for index, demand := range agedOrder(in, band) {
+		rank[demand.Key] = index
+	}
+	// A candidate the normalized queue does not contain keeps the place the
+	// caller gave it, behind everything the band ranks. There is no such demand
+	// today; ranking one at zero if there ever were would put an unranked demand
+	// at the head of the queue, which is the one answer that could not be right.
+	ranked := make(map[domain.DemandKey]int, len(demands))
+	for index, demand := range demands {
+		if place, known := rank[demand.Key]; known {
+			ranked[demand.Key] = place
+			continue
+		}
+		ranked[demand.Key] = len(band) + index
+	}
+	ordered := append([]domain.Demand(nil), demands...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ranked[ordered[i].Key] < ranked[ordered[j].Key] })
+	return ordered
 }
 
 // byTier orders one band by effective priority tier, highest first. The sort is

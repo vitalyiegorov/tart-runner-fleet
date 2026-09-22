@@ -49,8 +49,13 @@ previous snapshot rather than emitting repeated healthy messages. Track:
   more than one GitHub scope, read age BESIDE occupancy: a scope whose queue is
   ageing while every instance in `instances` belongs to another scope is the
   2026-09-21/22 shape, and ADR 0057 says the next freed slot is that scope's.
-  A wait longer than one job on that node is a defect to report, not a queue to
-  clear;
+  Three conditions qualify that before you report anything: the two demands
+  must ask for the **same profile**, neither may be separated from the other by
+  a demand of the **other platform** (the aged band's barrier, ADR 0049), and
+  the incumbent must not hold a higher **effective tier** (ADR 0037, declared
+  tier plus escalation). With all three satisfied, a wait longer than one job on
+  that node is a defect to report with the queue rows and the instance list, not
+  a queue to clear;
 - instances by lifecycle state and owned Tart identity;
 - retrying or dead operations and their bounded, redacted error class, read
   from `operations.failures` (`kind`, `code`, `count`, `attempts`) rather than

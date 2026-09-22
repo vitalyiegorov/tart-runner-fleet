@@ -42,6 +42,18 @@ GitHub involvement: `TestScopeFairShareBoundsTheWaitBehindAStreamingScope`
 measured 61 ticks of wait for the second scope behind a batch of six, and the
 wait is unbounded in the size of the batch and the length of the stream.
 
+**It is not the only defect that window carried, and this decision claims only
+its own half.** PR #347 found a second one in the same hours: with no Linux
+demand queued — the steady state of a macOS-only node under ADR 0055 — a macOS
+head that could not spawn (a `builder` that does not fit beside a live
+`maestro`) returned the attempted plan unchanged, so a feasible `maestro`
+behind it was never admitted at all. The mini's queue at 03:32Z carried that
+arrangement too. The two are independent, and the evidence that they are is
+that every reproduction here fails identically against #347's fixed planner:
+the wedge is "nothing is admitted", this is "a slot IS admitted and goes back
+to the scope that already holds the node". Neither decision fixes the other's
+defect, and this one adds nothing to `planTick`'s arms.
+
 ## Decision
 
 Inside the aged band, among the demands of **one profile** — the demands
@@ -107,7 +119,12 @@ promotion gate.
 ## Consequences
 
 - A scope with queued work waits at most one job length behind the slot that
-  frees next, instead of behind another scope's whole backlog.
+  frees next, instead of behind another scope's whole backlog -- **when the two
+  scopes ask for the same profile, are not separated in the band by a demand of
+  the other platform, and the incumbent holds no higher effective tier.** All
+  three are conditions of the key, not caveats about it, and an operator reads
+  them before calling a wait a defect (`docs/AGENT_RUNBOOK.md`,
+  `docs/OPERATIONS.md`).
 - Throughput is unchanged: the same slots are filled on the same ticks by the
   same number of guests. Only the owner of the next one changes.
 - A scope that is the only one queuing sees byte-for-byte the old behaviour:

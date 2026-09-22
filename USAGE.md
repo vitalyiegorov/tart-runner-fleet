@@ -375,7 +375,10 @@ continues to block new Linux admission until its instances become idle.
    for the very same slot -- a GitHub scope that already holds instances on this
    node yields to a scope that holds none, and only then does age decide
    ([ADR 0057](docs/adr/0057-a-scope-that-holds-a-slot-yields-the-next-one.md)).
-   A node serving one scope is unaffected: one scope is one order, which is age.
+   The key is confined: it never compares two profiles, never moves a demand
+   past one of the other platform, never moves a demand past an older demand of
+   its own scope, and never outranks a declared tier. A node serving one scope
+   is unaffected: one scope is one order, which is age.
 4. Young control-plane work may receive one bounded priority quantum so the
    manager can build its successor.
 5. Within each young scheduling lane, lower dominant-resource-share profiles

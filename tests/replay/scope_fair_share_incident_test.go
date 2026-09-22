@@ -22,6 +22,13 @@ import (
 // `pony`'s three jobs, so on every tick that freed a slot the aged band's pure
 // FIFO handed it back to `budgie`. Three hours of a twenty-minute job waiting.
 //
+// That window carried a second, independent defect -- PR #347: with no Linux
+// demand queued, a macOS `builder` head that could not fit beside a live
+// `maestro` admitted nothing at all. This replay is deliberately NOT that
+// arrangement: one profile, a slot that has genuinely been released, and a plan
+// that does admit something. It reconstructs the ordering decision alone, and it
+// fails identically on #347's fixed planner.
+//
 // The decisive tick is reconstructed below: 01:12Z, the moment the first
 // `budgie` instance reached `stopping` and released its slot (ADR 0043), with
 // the next shard of `budgie`'s batch one minute OLDER than `pony`'s jobs.
