@@ -73,11 +73,10 @@ is property (r)'s cross-platform inversion.
   (ADR 0043). The reserved head's own synthetic charge is excluded: it is a
   cap bookkeeping entry for work that has not started, and reading it as
   occupancy would make a scope yield the vector its own head is waiting for.
-- **Demands of different profiles keep their relative places exactly.** Asking
-  which scope holds more slots is only meaningful between demands that want
-  the same slot, and confining the key there leaves the band's aged FIFO
-  across vectors, the reserved head it mints, and the handoffs that hang off
-  it untouched.
+- **Only demands of one profile are ever exchanged.** Asking which scope holds
+  more slots is only meaningful between demands that want the same slot, and
+  confining the key there leaves the band's aged FIFO between vectors, the
+  reserved head it mints, and the handoffs that hang off it as they were.
 - **The platform boundary is a barrier.** A demand is never reordered past a
   demand of the other platform: ADR 0049 owns that boundary, the two platforms
   share one envelope, and a demand that crosses it takes a vector rather than

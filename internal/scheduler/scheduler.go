@@ -1365,9 +1365,10 @@ func agedOrder(in Input, demands []domain.Demand) []domain.Demand {
 
 // byScopeFairShare is ADR 0057. Among the demands of one profile -- the ones
 // competing for the very same slot -- a scope that already holds slots on this
-// node yields to a scope that holds none. Demands of different profiles keep
-// their relative places exactly, so the band's aged FIFO across vectors, the
-// reserved head it mints, and the handoffs that hang off it are untouched.
+// node yields to a scope that holds none. Only those demands are ever exchanged:
+// two profiles are two different questions about the node, and a demand never
+// crosses the platform boundary (`fairShareSegments`) or an older demand of its
+// own scope (`fairShareRanks`).
 //
 // It answers the 2026-09-21/22 incident on both Macs. The young lanes have
 // round-robined repositories since ADR 0005 (`fairOrder`, inside one resource
