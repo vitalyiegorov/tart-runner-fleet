@@ -931,8 +931,13 @@ func TestBlockedMacHandoffBackfillsOnlyOneAgedSmallestTier(t *testing.T) {
 		Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning}
 
 	plan := PlanTick(input([]domain.Demand{youngSmall, secondSmall, agedSmall, agedLarge, macJob}, []domain.Instance{holder}, State{}))
-	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{agedSmall.Key}) {
-		t.Fatalf("bounded drain backfill = %#v, want %#v", got, agedSmall.Key)
+	// ADR 0057 decides WHICH of the two aged `small` demands takes the one
+	// backfill slot, and it is the second: `b/repo` is already asking this node
+	// for a slot with its older `large`, `c/repo` is asking for nothing. What
+	// this test pins is unchanged -- exactly one spawn, of the smallest aged
+	// tier, and no macOS spawn overlapping the drain.
+	if got := spawnedKeys(plan); !reflect.DeepEqual(got, []domain.DemandKey{secondSmall.Key}) {
+		t.Fatalf("bounded drain backfill = %#v, want %#v", got, secondSmall.Key)
 	}
 	if plan.Next.MacHandoff == nil || plan.Next.MacHandoff.Demand != macJob.Key || !plan.Next.MacHandoff.BackfillAdmitted {
 		t.Fatalf("durable mac handoff = %#v", plan.Next.MacHandoff)

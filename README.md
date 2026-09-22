@@ -61,7 +61,11 @@ flowchart LR
   resource share and packed for maximum cardinality; aging promotes old work to
   global FIFO so a large job cannot starve; a `control-plane` target gets one
   bounded quantum ahead of *young* standard work
-  ([ADR 0004](docs/adr/0004-bounded-control-plane-priority.md)).
+  ([ADR 0004](docs/adr/0004-bounded-control-plane-priority.md)). Inside the aged
+  band a GitHub scope that already holds slots on this node yields the next one
+  to a scope that holds none, so one scope's batch cannot own a two-slot Mac
+  while another scope waits
+  ([ADR 0057](docs/adr/0057-a-scope-that-holds-a-slot-yields-the-next-one.md)).
 
 ## Quickstart
 

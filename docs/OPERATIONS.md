@@ -1560,6 +1560,17 @@ they hold the defaults.
 head-of-line blocking, not a fault. The aged global-FIFO head reserves its turn,
 and admission behind that reservation is bounded on purpose.
 
+A breach with NO idle cores, on a node whose slots are all held by one GitHub
+scope while another scope's queue ages, is the 2026-09-21/22 shape. It is
+answered by ordering, not by capacity: inside the aged band, among demands of
+one profile, a scope already holding slots yields the next one to a scope
+holding none (ADR 0057). Read it from the published queues and instances --
+group `.data.queues[].scope` against the repositories in `.data.instances[]` --
+and expect the waiting scope to be admitted on the next slot that frees, not
+after the holding scope's backlog drains. A wait longer than one job on that
+node is a fleet defect, not a policy: report it with the queue rows and the
+instance list.
+
 Both halves of the answer are published. Do not reconstruct them:
 
 ```sh

@@ -98,6 +98,12 @@ type worldConfig struct {
 	// stop that actually releases the vector, and each of those is a tick the
 	// fleet cannot skip.
 	OccupancyGraceTicks int
+	// ScopeShareN bounds property (s): a GitHub scope that holds none of this
+	// node's slots may be passed over by a scope that holds one for at most this
+	// many ticks in a row. Two is a transition budget, not a tolerance -- a slot
+	// released this tick may be claimed by a plan made before the release was
+	// observed -- and the incident it bounds ran for three hours.
+	ScopeShareN int
 	// Priority is the demand priority policy this world declares (issue #224).
 	// The zero policy is every world that predates it: one default tier and aged
 	// FIFO, with every tier oracle inert.
@@ -238,6 +244,7 @@ func defaultWorld() worldConfig {
 		DrainChurnN:            1,
 		HearingH:               2,
 		OccupancyGraceTicks:    12,
+		ScopeShareN:            2,
 		TeardownReleaseTicks:   12,
 		GuestDeathReleaseTicks: 24,
 	}

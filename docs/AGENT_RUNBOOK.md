@@ -45,7 +45,12 @@ report only transitions or anomalies. Compare the current snapshot with the
 previous snapshot rather than emitting repeated healthy messages. Track:
 
 - controller version, mode, readiness, and observation freshness;
-- queued jobs by profile and age, plus admission reasons;
+- queued jobs by profile and age, plus admission reasons. On a node serving
+  more than one GitHub scope, read age BESIDE occupancy: a scope whose queue is
+  ageing while every instance in `instances` belongs to another scope is the
+  2026-09-21/22 shape, and ADR 0057 says the next freed slot is that scope's.
+  A wait longer than one job on that node is a defect to report, not a queue to
+  clear;
 - instances by lifecycle state and owned Tart identity;
 - retrying or dead operations and their bounded, redacted error class, read
   from `operations.failures` (`kind`, `code`, `count`, `attempts`) rather than
