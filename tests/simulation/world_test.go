@@ -291,16 +291,61 @@ func containerNodeWorld() worldConfig {
 	// and mixed-profile settings describe a case that can no longer occur.
 	cfg.Scheduler.MixedPlatformAdmission = false
 	cfg.Scheduler.MixedProfileCohorts = false
+	return cfg.servingOnly(domain.PlatformLinux)
+}
+
+// macOSOnlyNodeWorld is the Mac that ADR 0055's retirement leaves behind: both
+// macOS profiles, no Linux profile at all, on the mini's ten cores.
+//
+// It is the mirror of containerNodeWorld and it was a blind spot until this
+// change. budgetedWorld and federatedWorld each declare one macOS profile and
+// no Linux, but both keep MixedPlatformAdmission on and neither has two macOS
+// profiles competing for a host with no Linux work in it — so no world has ever
+// exercised `builder` and `maestro` as the ONLY two things a node can run.
+// That is precisely the mini's arrangement the day its Linux profiles go away,
+// and the arrangement ADR 0055 says the macOS slots are now spent on.
+//
+// The envelope is deliberately inherited rather than zeroed. `LinuxCapacity` is
+// named for Linux but is the shared cross-platform admission bound under ADR
+// 0012, and `scheduler.staticFree` charges a macOS guest against it; a world
+// that zeroed it would admit nothing and would pass every safety property
+// vacuously while proving the node works. `internal/config` refuses that file
+// for the same reason.
+func macOSOnlyNodeWorld() worldConfig {
+	cfg := defaultWorld()
+	cfg.Name = "mac-mini-macos-only"
+	// Both relaxations are off, which is what both Macs actually run today
+	// (neither `mac-mini.json` nor `mac-studio.json` sets either key), so this
+	// world models production rather than an aspiration. There is no Linux cohort
+	// left to mix with in any case.
+	//
+	// The `mixedProfileCohorts: true` variant — ADR 0055's "a builder and a
+	// maestro" — was swept over 200 seeds against this same fix and is clean; it
+	// is not a second arm because a world is only worth its own seed stream if it
+	// can reach states the others cannot, and the fix below makes both variants
+	// take the same planner path.
+	cfg.Scheduler.MixedPlatformAdmission = false
+	cfg.Scheduler.MixedProfileCohorts = false
+	return cfg.servingOnly(domain.PlatformMacOS)
+}
+
+// servingOnly narrows a world to the profiles of one platform, keeping the
+// three coupled fields — the scheduler's profile map, the bindings derived from
+// it, and the generator's draw list — in agreement. They are set together
+// because a world whose generator can draw a profile the scheduler does not
+// declare is a world-model defect, not a fleet defect, and it is the kind that
+// wastes an investigation.
+func (c worldConfig) servingOnly(platform domain.Platform) worldConfig {
 	profiles := map[domain.ProfileID]domain.Profile{}
 	for id, profile := range simProfiles() {
-		if profile.Platform == domain.PlatformLinux {
+		if profile.Platform == platform {
 			profiles[id] = profile
 		}
 	}
-	cfg.Scheduler.Profiles = profiles
-	cfg.Bindings = simBindings(profiles)
-	cfg.Profiles = sortedProfileIDs(profiles)
-	return cfg
+	c.Scheduler.Profiles = profiles
+	c.Bindings = simBindings(profiles)
+	c.Profiles = sortedProfileIDs(profiles)
+	return c
 }
 
 // simFederatedScope is the one GitHub scope two nodes serve together. It is a

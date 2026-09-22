@@ -872,14 +872,19 @@ func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
 // guestConsole is the node's answer to the doctor check's one question: does
 // this machine boot Linux guests through Tart, and are their consoles captured?
 //
-// BootsLinuxGuests asks about the OPERATING SYSTEM as well as the base image,
-// and that is not incidental. `linux.baseVm` is a Tart base VM name, but the
-// schema keeps it in every node's file — an observe-only Linux node or a podman
-// container node carries one it will never clone (ADR 0034) — so a predicate on
-// the field alone would fail every Linux node in CI and in production for a
-// console no such node can lose.
+// BootsLinuxGuests asks about the OPERATING SYSTEM as well as the execution
+// this node declares, and neither half is incidental. Only a Mac boots a Tart
+// guest whose kernel can die with a console nobody kept — an observe-only Linux
+// node and a podman container node have no such guest — and only a node that
+// declares Linux profiles can route work to one at all.
+//
+// It asks `Config.ExecutesLinux` rather than reading `linux.baseVm` because the
+// field cannot answer either question. The schema keeps a base VM name in every
+// node's file, including nodes that will never clone it (ADR 0034), and after
+// ADR 0055's retirement a Mac may still carry the name of an image no profile
+// routes to. An image nothing can be booted from loses no console.
 func guestConsole(goos string, cfg config.Config) telemetry.GuestConsoleMetric {
-	return telemetry.GuestConsoleMetric{BootsLinuxGuests: goos == "darwin" && cfg.Linux.BaseVM != "",
+	return telemetry.GuestConsoleMetric{BootsLinuxGuests: goos == "darwin" && cfg.ExecutesLinux(),
 		SerialLogConfigured: cfg.Linux.SerialLogDirectory != ""}
 }
 

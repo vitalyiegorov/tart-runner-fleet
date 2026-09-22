@@ -224,13 +224,26 @@ and it does not touch `suuudokuuu` or the open question above.
 
 Until geekom is authority, mac-mini's Linux profiles are exactly how the
 fleet serves any Linux job at all, so this is end-state reasoning, not
-today's configuration. Mechanically, `internal/config/config.go:555-563`
-requires Linux profiles to stay in `fleet.json` even after every scope's Linux
-scale sets move to geekom, but once **no scope lists a Linux scale set** on
-mac-mini, no Linux demand can reach it. At that point, revisit
-`maxLinuxWhenMacosIdle`, `mixedPlatformAdmission`, and `mixedProfileCohorts` on
-mac-mini: with Linux unreachable they describe a situation that can no longer
-occur, and their settings should be made to say so.
+today's configuration. Once **no scope lists a Linux scale set** on mac-mini,
+no Linux demand can reach it, and the declarations can go: since ADR 0058 a
+node may declare no Linux execution at all — `linuxProfiles` empty or absent
+and `baseVm` absent — provided `macosBurst` is enabled. (This used to be
+impossible: `Config.Validate` demanded a Linux base VM of every node, which is
+why earlier revisions of this plan recorded the schema as an obstacle to the
+retirement.)
+
+Two keys do **not** go with them. `maxLinuxCpu` and `maxLinuxMemoryMb` are
+named for Linux but are the node's shared cross-platform admission envelope
+under ADR 0012, and `maxLinuxWhenMacosIdle` is its slot count; a macOS guest is
+charged against all three, so a node that deletes them admits nothing at all
+while reporting healthy. `fleet config validate` refuses a zero envelope.
+`mixedPlatformAdmission` and `mixedProfileCohorts` are the settings genuinely
+worth revisiting: with Linux unreachable the first describes a situation that
+can no longer occur, and the second is what decides whether ADR 0055's "a
+builder and a maestro" is allowed to happen at all.
+
+The full step-by-step is the amendment in
+[ADR 0055](adr/0055-linux-work-runs-on-the-linux-node.md#amendment-2026-09-22-retiring-linux-from-the-macs-the-procedure).
 
 The same argument, and the same retirement, applies to mac-studio's Linux
 declarations once geekom is live: they exist today only because geekom does
@@ -609,7 +622,17 @@ adapter. Do not start Part B before Phase 2 is green on geekom in observe mode.
       `mac-mini.json`, re-render, re-provision mac-mini. Watch `fleet queues` on
       mac-mini go to zero for `small`/`medium`/`large`/`xl` and geekom's rise.
 - [ ] Delete mac-mini's Linux scale sets in GitHub once mac-mini reports no Linux
-      instances and no Linux demand for a full day.
+      instances and no Linux demand for a full day. There is no `fleet` command
+      for this — `scale-sets` has `provision`, `audit`, and `recreate` only, and
+      `recreate` re-creates what it deleted — so it is a manual deletion through
+      GitHub, per ADR 0055's amendment.
+- [ ] Retire mac-mini's Linux declarations: delete `linuxProfiles`, `baseVm`, and
+      `baseImageCapabilities`. Keep `vmPrefix` and keep the admission envelope
+      (`maxLinuxCpu`, `maxLinuxMemoryMb`, `maxLinuxWhenMacosIdle`) — they are not
+      Linux-only. `fleet config validate --mode authority` must pass before the
+      restart; it names any Linux scale set still listed.
+- [ ] `tart delete linux-runner-base-go` on mac-mini, last and only once every
+      step above holds. This one is irreversible.
 - [ ] Confirm the arithmetic on mac-mini: `builder` and `maestro` now coexist, and
       `fleet queues` no longer shows `builder` waiting behind a Linux guest.
 - [ ] Revisit `maxLinuxWhenMacosIdle`, `mixedPlatformAdmission`,
