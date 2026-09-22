@@ -3,6 +3,7 @@ package simulation_test
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -99,6 +100,12 @@ const (
 	// nothing in the harness compared two demands across the boundary at all --
 	// which is how issue #225 ran in production for two hours.
 	findingCrossPlatformInversion findingKind = "cross_platform_inversion"
+	// findingScopeShare is property (s): a GitHub scope that holds none of this
+	// node's slots, with feasible work queued, is not passed over indefinitely by
+	// a scope that holds them all. It is the 2026-09-21/22 oracle (ADR 0057), and
+	// the bound on property (b)'s fair-share exemption -- without it, "the rule
+	// explains this pass-over" would excuse every pass-over forever.
+	findingScopeShare findingKind = "scope_share"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -325,6 +332,12 @@ func defaultCheckers(cfg worldConfig) []checker {
 		crossPlatformInversionChecker(cfg),
 		escalationChecker(cfg),
 		tierStarvationChecker(cfg),
+		// (s) precedes (b) for the same causal reason every other ordering oracle
+		// does: a scope holding the whole node is WHY the other scope's queue is
+		// not draining, and (b) would report the age symptom of it -- or, as on
+		// 2026-09-21/22, report nothing at all, because the scope taking every slot
+		// was winning on age honestly every time.
+		scopeShareChecker(cfg),
 		boundedStarvationChecker(cfg),
 		quiescenceChecker(cfg),
 	}
@@ -1412,7 +1425,8 @@ func boundedStarvationChecker(cfg worldConfig) checker {
 		for _, demand := range feasibleDemands(cfg, observation) {
 			overtaker, overtaken := youngestOvertaker(admitted, demand)
 			if !overtaken || !aged(cfg, observation.Now, demand) || holdsReservation(observation, demand) ||
-				outranksOnTier(cfg, observation.Now, overtaker, demand) {
+				outranksOnTier(cfg, observation.Now, overtaker, demand) ||
+				yieldsOnScopeShare(cfg, observation, overtaker, demand) {
 				// A declared priority tier that outranks this demand IS the written
 				// invariant now, exactly as the reserved head is (issue #224). The
 				// exemption is not open-ended: escalation raises the waiting demand
@@ -1423,6 +1437,13 @@ func boundedStarvationChecker(cfg worldConfig) checker {
 				// idleness. It is re-checked first on every later tick and wins the
 				// first vector large enough for it, so residual admission ahead of it
 				// is the decision, not a violation of it.
+				// ADR 0057: a pass-over the per-scope fair share explains IS the
+				// written invariant too. Age between two scopes is now decided by
+				// what each scope already holds of this node, and this oracle read
+				// the old rule -- which is why it reported the fix as a defect on the
+				// federated arm's seed 1. The exemption is not open-ended either:
+				// property (s) fails if a scope holding NONE of the node goes on
+				// being passed over by one that holds it all.
 				continue
 			}
 			signature := starvationSignature(cfg, observation.Now, demand, overtaker)
@@ -1515,6 +1536,295 @@ func starvationSignature(cfg worldConfig, now time.Time, waiting, overtaker doma
 		return sigControlPlaneOvertakesAgedWork
 	}
 	return ""
+}
+
+// yieldsOnScopeShare reports whether ADR 0057's per-scope fair share explains
+// this pass-over: the overtaker's scope is asking this node for less than the
+// waiting demand's scope is, counting what each already runs and what each has
+// queued ahead. That is the rule deciding the tick, not a lane defect.
+//
+// It is the rank rather than plain occupancy because the consequence of the rule
+// is not confined to the two demands the rule compared. Seed 48 tick 121 of the
+// container arm is the case: fair share ordered one scope's `large` ahead of
+// another scope's older `large`, the promoted one took four of five free cores,
+// and the demand left waiting was a THIRD demand of the older scope that had
+// been going to lose those cores to its own sibling anyway. Comparing profiles
+// here would report that as starvation by a younger demand it never competed
+// with.
+//
+// Both halves of the rank are bounded. The occupancy half is property (s): a
+// scope holding none of the node cannot be passed over indefinitely by one that
+// holds it all. The queued-ahead half is bounded by each scope's own FIFO --
+// every admission of the scope ahead retires the demand that outranked this one.
+//
+// Only aged demands carry a rank, because fair share is a key inside the aged
+// band. A young overtaker is never exempted here; it is answered by the lane
+// rules above.
+func yieldsOnScopeShare(cfg worldConfig, observation tickObservation, overtaker, waiting domain.Demand) bool {
+	ranks := scopeFairShareRanks(cfg, observation)
+	overtakerRank, overtakerRanked := ranks[overtaker.Key]
+	waitingRank, waitingRanked := ranks[waiting.Key]
+	return overtakerRanked && waitingRanked && overtakerRank < waitingRank
+}
+
+// scopeFairShareRanks is ADR 0057's key as an oracle reads it: for every aged
+// demand, the slot number its scope is asking this node for. It is derived from
+// the observed queue and the observed instances, never from the plan, so it
+// judges the tick rather than agreeing with it.
+func scopeFairShareRanks(cfg worldConfig, observation tickObservation) map[domain.DemandKey]int {
+	next := scopeOccupancy(observation)
+	band := scopeFairShareBand(cfg, observation)
+	ranks := make(map[domain.DemandKey]int, len(band))
+	for _, demand := range band {
+		scope := simScopeOf(demand.Key.Repo)
+		ranks[demand.Key] = next[scope]
+		next[scope]++
+	}
+	return ranks
+}
+
+// scopeFairShareBand is the tick's aged band in age order, which is the order
+// the fleet's own `normalizedDemands` establishes once per tick.
+func scopeFairShareBand(cfg worldConfig, observation tickObservation) []domain.Demand {
+	band := make([]domain.Demand, 0, len(observation.Demands))
+	for _, demand := range observation.Demands {
+		if aged(cfg, observation.Now, demand) {
+			band = append(band, demand)
+		}
+	}
+	sort.Slice(band, func(i, j int) bool {
+		if !band[i].CreatedAt.Equal(band[j].CreatedAt) {
+			return band[i].CreatedAt.Before(band[j].CreatedAt)
+		}
+		return band[i].Key.String() < band[j].Key.String()
+	})
+	return band
+}
+
+// acrossThePlatformBarrier reports whether a demand of the OTHER platform lies
+// between these two in the aged band. ADR 0057 does not reorder across one, so
+// neither does this oracle: the two platforms share an envelope, ADR 0049 owns
+// that boundary, and a fleet that left this pair in age order was obeying the
+// rule rather than breaking it.
+func acrossThePlatformBarrier(band []domain.Demand, waiting, candidate domain.Demand) bool {
+	first, second := -1, -1
+	for index, demand := range band {
+		switch demand.Key {
+		case waiting.Key:
+			first = index
+		case candidate.Key:
+			second = index
+		}
+	}
+	if first < 0 || second < 0 {
+		return false
+	}
+	if first > second {
+		first, second = second, first
+	}
+	for _, between := range band[first+1 : second] {
+		if between.Platform != waiting.Platform {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeOccupancy is how many of this node's slots each GitHub scope holds at the
+// moment the plan was made. It is derived from observed instances only, never
+// from the scheduler's own arithmetic, so it cannot excuse a decision by
+// inheriting the reasoning that made it.
+// The release edge is ADR 0043's, not `TearingDown`: an instance that has not
+// reached deregistration is still holding its scope's slot, exactly as it is
+// still charged to its repository's cap. This oracle judges teardown ticks --
+// they are the ticks a slot changes hands -- so reading a DRAINING instance as
+// gone would let a scope look empty while it is still running the job that
+// filled it, and report the fleet for a fairness it had already delivered.
+func scopeOccupancy(observation tickObservation) map[string]int {
+	counts := map[string]int{}
+	for _, instance := range observation.Instances {
+		switch instance.State {
+		case domain.InstanceOnlineIdle, domain.InstanceDeregistering, domain.InstanceStopping,
+			domain.InstanceDeleted, domain.InstanceFailed:
+			continue
+		}
+		if instance.Live() {
+			counts[simScopeOf(instance.Repo)]++
+		}
+	}
+	return counts
+}
+
+// simScopeOf is the GitHub scope owning a repository slug, the oracle's own copy
+// of the rule the scheduler states: a scope is the owner of `owner/repo`.
+func simScopeOf(repo string) string {
+	if owner, _, found := strings.Cut(repo, "/"); found {
+		return owner
+	}
+	return repo
+}
+
+// ---------------------------------------------------------------------------
+// (s) Bounded scope share.
+// ---------------------------------------------------------------------------
+
+// scopeShareChecker is the ADR 0057 oracle, and the bound that keeps property
+// (b)'s fair-share exemption from becoming the starvation it was written to end.
+//
+// It states the incident directly: a scope that holds NONE of this node's slots,
+// with feasible work queued, may be passed over by a scope that holds one at
+// most ScopeShareN times. The count is cumulative rather than consecutive, and
+// that is the difference between an oracle that sees this incident and one that
+// does not: the ticks between two pass-overs are teardown ticks, and a bound
+// that a teardown resets is a bound a batch resets for free. On 2026-09-21/22 it was passed over for three
+// hours, and no property in the harness could see it -- (b) only ever compared
+// ages, and the scope taking every slot was winning on age, honestly, every
+// time.
+func scopeShareChecker(cfg worldConfig) checker {
+	passedOver := map[string]int{}
+	return func(w *world, observation tickObservation) []finding {
+		admitted := admittedDemands(observation)
+		occupancy := scopeOccupancy(observation)
+		// Per SCOPE and PROFILE, never per scope alone: one scope may be waiting
+		// for a `maestro` and content about its `large` on the same tick, and
+		// letting the contented profile speak for the scope would hide a pass-over
+		// the other profile really suffered.
+		passed := map[string]map[domain.ProfileID]domain.Demand{}
+		overtakers := map[string]map[domain.ProfileID]domain.Demand{}
+		// waiting is every scope that holds none of this node and has aged work
+		// queued, whether or not this tick passed it over. It is what ENDS an
+		// episode: a scope with nothing left to wait for is not waiting.
+		waiting := map[string]bool{}
+		for _, demand := range observation.Demands {
+			scope := simScopeOf(demand.Key.Repo)
+			// The aged band only. Fair share is a key INSIDE it (ADR 0057); the
+			// young lanes have their own bounded order -- shortest vector first,
+			// then the repository round-robin of ADR 0005 -- and a young demand
+			// passed over is that order working, not a scope holding the node.
+			if occupancy[scope] > 0 || !aged(cfg, observation.Now, demand) || holdsReservation(observation, demand) {
+				continue
+			}
+			waiting[scope] = true
+			overtaker, taken := scopeOvertaker(cfg, observation, occupancy, admitted, demand)
+			if !taken {
+				continue
+			}
+			if _, already := passed[scope][demand.Profile]; already {
+				continue
+			}
+			if passed[scope] == nil {
+				passed[scope] = map[domain.ProfileID]domain.Demand{}
+				overtakers[scope] = map[domain.ProfileID]domain.Demand{}
+			}
+			passed[scope][demand.Profile] = demand
+			overtakers[scope][demand.Profile] = overtaker
+		}
+		// The count is cumulative across ONE waiting episode and no further, and
+		// the episode ends here -- on every tick, admitting or not. A scope that
+		// was admitted, or whose aged queue is gone (a cancellation retires it as
+		// readily as an admission does), is not waiting any more, and carrying its
+		// count into the next episode would report a bound nobody breached.
+		admittedScopes := map[string]bool{}
+		for _, demand := range admitted {
+			admittedScopes[simScopeOf(demand.Key.Repo)] = true
+			delete(passedOver, simScopeOf(demand.Key.Repo))
+		}
+		for scope := range passedOver {
+			if !waiting[scope] {
+				delete(passedOver, scope)
+			}
+		}
+		var findings []finding
+		for scope, byProfile := range passed {
+			if admittedScopes[scope] {
+				continue
+			}
+			// One count per scope per tick, however many of its profiles were
+			// passed over: a scope with three demands queued was passed over once.
+			passedOver[scope]++
+			if passedOver[scope] != cfg.ScopeShareN+1 {
+				continue
+			}
+			passedOver[scope] = 0
+			for profile, demand := range byProfile {
+				overtaker := overtakers[scope][profile]
+				findings = append(findings, finding{Kind: findingScopeShare, Tick: observation.Tick,
+					Detail: fmt.Sprintf("scope %q holds none of this node and its %s (%s old) was passed over %d times, this tick by %s of scope %q which already holds %d\n%s",
+						scope, demand.Key, observation.Now.Sub(demand.CreatedAt), cfg.ScopeShareN+1,
+						overtaker.Key, simScopeOf(overtaker.Key.Repo), occupancy[simScopeOf(overtaker.Key.Repo)],
+						w.dumpPlan(observation))})
+			}
+		}
+		sort.Slice(findings, func(i, j int) bool { return findings[i].Detail < findings[j].Detail })
+		return findings
+	}
+}
+
+// scopeOvertaker names the admission that took the slot this demand's scope was
+// waiting for: an admission whose own fair-share rank is WORSE than the waiting
+// demand's, which is to say one the key of ADR 0057 says should have gone
+// second. A declared tier and the control-plane class are excluded, because both
+// are written invariants that outrank fair share by design (ADR 0004, ADR 0037).
+//
+// The rank is what makes this a property rather than a preference. Two scopes
+// asking this node for their second slot each are equals, and age decides
+// between equals; a scope asking for its first slot losing to a scope asking for
+// its third is the incident. Ranking the tick's own admissions in order is what
+// catches the batch: a batch starts together and therefore ENDS together, so the
+// tick that frees two slots reads zero occupancy for every scope, and on
+// 2026-09-21/22 both of those slots went straight back to the scope whose batch
+// had just vacated them.
+func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[string]int,
+	admitted []domain.Demand, waiting domain.Demand) (domain.Demand, bool) {
+	classes := cfg.Scheduler.RepoSchedulingClasses
+	ranks := scopeFairShareRanks(cfg, observation)
+	waitingRank, ranked := ranks[waiting.Key]
+	if !ranked {
+		return domain.Demand{}, false
+	}
+	taking := map[string]int{}
+	for _, candidate := range admitted {
+		if candidate.Key == waiting.Key {
+			return domain.Demand{}, false
+		}
+	}
+	for _, candidate := range admitted {
+		scope := simScopeOf(candidate.Key.Repo)
+		candidateRank, candidateRanked := ranks[candidate.Key]
+		if !candidateRanked {
+			candidateRank = occupancy[scope]
+		}
+		// One profile, because the admission is also the FEASIBILITY evidence: a
+		// slot of exactly this shape was available and went to someone else. The
+		// waiting demand's own feasibility is otherwise unknowable on a tick whose
+		// envelope is mid-teardown, and a demand that could not have been admitted
+		// was not passed over (seed 2, tick 43: a six-core `builder` "passed over"
+		// by a one-core `small` against two free cores).
+		if candidate.Profile != waiting.Profile {
+			taking[scope]++
+			continue
+		}
+		if acrossThePlatformBarrier(scopeFairShareBand(cfg, observation), waiting, candidate) {
+			taking[scope]++
+			continue
+		}
+		// An admission also SPENDS its scope's next slot, so a second admission of
+		// one scope on one tick is asking for one more than the first did.
+		candidateRank += taking[scope]
+		taking[scope]++
+		if candidateRank <= waitingRank {
+			continue
+		}
+		if outranksOnTier(cfg, observation.Now, candidate, waiting) {
+			continue
+		}
+		if classes[candidate.Key.Repo] == domain.SchedulingControlPlane &&
+			classes[waiting.Key.Repo] != domain.SchedulingControlPlane {
+			continue
+		}
+		return candidate, true
+	}
+	return domain.Demand{}, false
 }
 
 // holdsReservation reports whether this demand is the one the plan is reserving

@@ -469,9 +469,15 @@ func TestASameRepositoryCandidateThatCannotFitDoesNotSpendTheHeadsSpareSlot(t *t
 	plan := Plan{Status: PlanReady, Next: State{Reservation: &domain.Reservation{
 		Demand: head.Key, Profile: "xl", Resources: cfg.Profiles["xl"].Resources}}}
 
-	want := []domain.DemandKey{sameRepo.Key, otherRepo.Key}
+	// ADR 0057 decides the ORDER of the two, and it is the other scope first:
+	// `b/repo` is already asking this node for a slot with the reserved head, so
+	// its `maestro` is its second ask while `mac-a`'s is its first. What this test
+	// pins is not the order -- it is that the `builder` never spends the head's
+	// spare slot, and that the older same-repository `maestro` is therefore still
+	// admitted rather than dropped from the candidate list.
+	want := []domain.DemandKey{otherRepo.Key, sameRepo.Key}
 	if got := spawnedKeys(fillMacRemainder(in, plan, demands, nil)); !reflect.DeepEqual(got, want) {
-		t.Fatalf("remainder admitted %#v, want the older same-repository demand first, %#v", got, want)
+		t.Fatalf("remainder admitted %#v, want both, the unfitting builder refused, %#v", got, want)
 	}
 }
 

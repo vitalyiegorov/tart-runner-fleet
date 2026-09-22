@@ -824,7 +824,11 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
 	if len(aged) > 0 {
-		for _, candidate := range aged {
+		// The aged band's own order, not the raw age list: ADR 0057's fair share is
+		// a key inside this band, and a rule the macOS pass applies and this one
+		// does not is not a rule. It decides both what is admitted here and, when
+		// the band stops being feasible, which head mints the reservation.
+		for _, candidate := range agedQueueOrder(in, aged) {
 			profile := in.Config.Profiles[candidate.Profile]
 			selected := spawnedDemands(plan.Operations)
 			if axis := admissionAxis(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps); axis != ReservationAxisNone {
@@ -1335,7 +1339,49 @@ func effectiveTier(now time.Time, demand domain.Demand, config Config) int {
 // issue #224.
 func priorityOrder(in Input, demands []domain.Demand) []domain.Demand {
 	aged, young := splitAged(in.Now, in.Config.FairnessAge, demands)
-	return append(byTier(in, aged), youngPriorityOrder(in, young, in.Prior.DRRCursor, in.Config)...)
+	return append(agedQueueOrder(in, aged), youngPriorityOrder(in, young, in.Prior.DRRCursor, in.Config)...)
+}
+
+// agedQueueOrder puts one pass's aged candidates into the order the WHOLE
+// queue's aged band has this tick, rather than ordering the pass's own slice.
+//
+// Every pass sees a subset: `planLinux` one platform, `appendMacSpawns` the
+// other, the remainder passes a residue of both. ADR 0057's key is a statement
+// about the band, and two of its three clauses -- the platform barrier and a
+// scope's own FIFO across vectors -- are invisible inside a subset that does not
+// contain the demand being protected. Ordering the subset therefore produced
+// exactly the inversion the barrier exists to prevent: seed 1, tick 127 of the
+// mini arm, a control-plane `xl` promoted over a same-scope peer in the Linux
+// pass and, by that promotion, over the macOS `builder` that had been queued
+// between them since before either.
+//
+// So the band is ordered once, from `normalizedDemands`, and a pass reads its
+// candidates out of that order. It is the same thing `priorityRank` already says
+// about the whole queue, said where the admission actually happens.
+func agedQueueOrder(in Input, demands []domain.Demand) []domain.Demand {
+	if len(demands) < 2 {
+		return demands
+	}
+	band, _ := splitAged(in.Now, in.Config.FairnessAge, normalizedDemands(in))
+	rank := make(map[domain.DemandKey]int, len(band))
+	for index, demand := range agedOrder(in, band) {
+		rank[demand.Key] = index
+	}
+	// A candidate the normalized queue does not contain keeps the place the
+	// caller gave it, behind everything the band ranks. There is no such demand
+	// today; ranking one at zero if there ever were would put an unranked demand
+	// at the head of the queue, which is the one answer that could not be right.
+	ranked := make(map[domain.DemandKey]int, len(demands))
+	for index, demand := range demands {
+		if place, known := rank[demand.Key]; known {
+			ranked[demand.Key] = place
+			continue
+		}
+		ranked[demand.Key] = len(band) + index
+	}
+	ordered := append([]domain.Demand(nil), demands...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ranked[ordered[i].Key] < ranked[ordered[j].Key] })
+	return ordered
 }
 
 // byTier orders one band by effective priority tier, highest first. The sort is
@@ -1350,6 +1396,173 @@ func byTier(in Input, demands []domain.Demand) []domain.Demand {
 		return effectiveTier(in.Now, ordered[i], in.Config) > effectiveTier(in.Now, ordered[j], in.Config)
 	})
 	return ordered
+}
+
+// agedOrder is the aged band's order: ADR 0004's aged FIFO, ADR 0037's declared
+// tier over it, and ADR 0057's per-scope fair share between the demands that are
+// asking for the same thing.
+func agedOrder(in Input, demands []domain.Demand) []domain.Demand {
+	return byScopeFairShare(in, byTier(in, demands))
+}
+
+// byScopeFairShare is ADR 0057. Among the demands of one profile -- the ones
+// competing for the very same slot -- a scope that already holds slots on this
+// node yields to a scope that holds none. Only those demands are ever exchanged:
+// two profiles are two different questions about the node, and a demand never
+// crosses the platform boundary (`fairShareSegments`) or an older demand of its
+// own scope (`fairShareRanks`).
+//
+// It answers the 2026-09-21/22 incident on both Macs. The young lanes have
+// round-robined repositories since ADR 0005 (`fairOrder`, inside one resource
+// bucket), but the aged band never did -- and on a two-slot Mac running
+// 30-to-60-minute jobs every demand is aged within minutes, so the one band that
+// was pure FIFO was also the only band that ever ran. A scope that queues a
+// batch then owns every slot until that batch drains, because a batch that
+// arrived first is older than anything another scope will ever queue: on the
+// mini the `pony` scope waited three hours for a twenty-minute job behind a
+// continuously refilled `budgie` batch, both scopes aged, and the older one was
+// the one already running. Age cannot express that question. Occupancy can.
+//
+// The occupancy it reads is the one `activeRepoCounts` already charges
+// repository caps against, folded to the scope: one notion of "holds a slot",
+// stated once, and no new configuration. The tier stays above it because a
+// declared tier is how one class of work overtakes another and escalation
+// already bounds that (`effectiveTier`); fair share is a statement about equals.
+//
+// Within one scope the key is constant and the sort is stable, so FIFO survives
+// exactly where it was never the problem.
+func byScopeFairShare(in Input, demands []domain.Demand) []domain.Demand {
+	if len(demands) < 2 {
+		return demands
+	}
+	share := fairShareRanks(activeScopeCounts(in.Instances.Value), demands)
+	ordered := append([]domain.Demand(nil), demands...)
+	for _, segment := range fairShareSegments(demands) {
+		if len(segment) < 2 {
+			continue
+		}
+		competing := make([]domain.Demand, 0, len(segment))
+		for _, index := range segment {
+			competing = append(competing, demands[index])
+		}
+		sort.SliceStable(competing, func(i, j int) bool {
+			left, right := competing[i], competing[j]
+			if leftTier, rightTier := effectiveTier(in.Now, left, in.Config), effectiveTier(in.Now, right, in.Config); leftTier != rightTier {
+				return leftTier > rightTier
+			}
+			return share[left.Key] < share[right.Key]
+		})
+		for slot, index := range segment {
+			ordered[index] = competing[slot]
+		}
+	}
+	return ordered
+}
+
+// fairShareSegments are the index runs fair share may permute: one profile, and
+// no demand of the OTHER platform in between.
+//
+// The platform boundary is a barrier, not a scope question, and ADR 0049 owns
+// it: an aged head keeps its place across that boundary, and the two platforms
+// share one envelope, so a demand that crosses it takes a vector rather than a
+// turn. The simulator says the same thing twice -- seed 82 tick 104 and seed 2
+// tick 47 of the mini arm, both property (r) -- and a rule that has to be
+// exempted from another property is a rule stated wrongly. Fair share asks who
+// gets the next slot of a profile; it does not ask which platform the node
+// runs.
+func fairShareSegments(demands []domain.Demand) [][]int {
+	open := make(map[domain.ProfileID][]int, len(demands))
+	var segments [][]int
+	for index, demand := range demands {
+		for profile, run := range open {
+			if profile == demand.Profile || demands[run[0]].Platform == demand.Platform {
+				continue
+			}
+			segments = append(segments, run)
+			delete(open, profile)
+		}
+		open[demand.Profile] = append(open[demand.Profile], index)
+	}
+	for _, run := range open {
+		segments = append(segments, run)
+	}
+	sort.Slice(segments, func(i, j int) bool { return segments[i][0] < segments[j][0] })
+	return segments
+}
+
+// fairShareRanks is the slot number each queued demand is asking its scope to
+// hold: a scope already running two instances asks for its third with its first
+// queued demand, a scope running none asks for its first. Ordering by that
+// number is one round of round-robin per slot, seeded by what the node is
+// actually running instead of restarted from zero every tick.
+//
+// It is what makes the rule hold on the tick that frees SEVERAL slots at once --
+// the shape a batch produces, because a batch starts together and therefore ends
+// together. Ordering on occupancy alone would read zero for every scope on that
+// tick and hand the whole node back to the batch.
+//
+// It is counted over the WHOLE band rather than inside one profile, which is
+// what keeps a scope's own FIFO intact across vectors: a `builder` of this scope
+// queued earlier raises the rank of its `xl`, so the fair-share key can never
+// lift one demand of a scope past an older demand of the same scope. The
+// simulator found that directly -- seed 2, tick 47 of the mini arm, a scope's
+// younger Linux `xl` taking the vector the same scope's older macOS `builder`
+// was waiting for, which is property (r)'s cross-platform inversion.
+//
+// The demands arrive in age order, so within a scope the ranks ascend and FIFO
+// survives untouched.
+func fairShareRanks(occupancy map[string]int, demands []domain.Demand) map[domain.DemandKey]int {
+	next := make(map[string]int, len(occupancy))
+	for scope, count := range occupancy {
+		next[scope] = count
+	}
+	ranks := make(map[domain.DemandKey]int, len(demands))
+	for _, demand := range demands {
+		scope := scopeOf(demand.Key.Repo)
+		ranks[demand.Key] = next[scope]
+		next[scope]++
+	}
+	return ranks
+}
+
+// reservedChargePrefix names the synthetic instance `chargeReservedHead` adds
+// for the repository slot an aged reserved head is holding open. It is a
+// bookkeeping charge against a cap, not a guest.
+const reservedChargePrefix = "reserved-"
+
+// activeScopeCounts is activeRepoCounts folded to the owning scope: how many of
+// this node's slots each GitHub scope currently holds. Deriving it from the one
+// occupancy function rather than re-deriving occupancy is the whole point --
+// "holds a slot" is stated once, and a teardown that has released its
+// repository slot has released its scope's share of the node at the same edge.
+//
+// The reserved head's own charge is the one instance it must not count. That
+// charge exists so the head's repository cap reserves a slot for work that has
+// not started; reading it as occupancy would make the head's scope yield the
+// very vector the head is queued and waiting for, which is the starvation this
+// rule exists to end, inverted.
+func activeScopeCounts(instances []domain.Instance) map[string]int {
+	running := make([]domain.Instance, 0, len(instances))
+	for _, instance := range instances {
+		if !strings.HasPrefix(instance.ID, reservedChargePrefix) {
+			running = append(running, instance)
+		}
+	}
+	counts := make(map[string]int)
+	for repo, count := range activeRepoCounts(running) {
+		counts[scopeOf(repo)] += count
+	}
+	return counts
+}
+
+// scopeOf is the GitHub scope that owns a repository slug: the owner of
+// `owner/repo`. A slug with no owner is its own scope, which keeps the function
+// total without inventing a name for malformed input.
+func scopeOf(repo string) string {
+	if owner, _, found := strings.Cut(repo, "/"); found {
+		return owner
+	}
+	return repo
 }
 
 // youngPriorityOrder implements two bounded lanes. Control-plane work can
@@ -2038,7 +2251,7 @@ func chargeReservedHead(in Input, reservation *domain.Reservation) Input {
 	profile := in.Config.Profiles[reservation.Profile]
 	charged := append([]domain.Instance(nil), in.Instances.Value...)
 	charged = append(charged, domain.Instance{
-		ID: "reserved-" + reservation.Demand.String(), Repo: reservation.Demand.Repo, Demand: reservation.Demand,
+		ID: reservedChargePrefix + reservation.Demand.String(), Repo: reservation.Demand.Repo, Demand: reservation.Demand,
 		Platform: profile.Platform, Profile: reservation.Profile, Route: profile.Route,
 		State: domain.InstancePlanned, Power: domain.InstancePowerRunning,
 	})

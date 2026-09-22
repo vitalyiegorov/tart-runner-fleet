@@ -132,13 +132,22 @@ func TestCapHeldReservedHeadLendsItsVector(t *testing.T) {
 // too small for either demand, so nothing was admitted and the guarantee was
 // never exercised. Asserting the `medium` IS admitted on the same tick is what
 // makes the refusal of the peer mean something.
+//
+// ADR 0057 narrows WHEN the rule binds, and the peer's scope is the whole of the
+// narrowing: the guarantee is aged FIFO's, and aged FIFO between two scopes is
+// now decided by what each scope already holds. The arrangement below is
+// therefore the one ADR 0057 is silent about -- the peer's scope holds a slot of
+// this node too, so neither scope is yielding to the other and the head's age is
+// decisive exactly as it always was. The peer that holds NOTHING is the next
+// test, and it is the one case where the vector does move.
 func TestCapHeldReservedHeadRefusesAPeerThatCouldTakeItsVector(t *testing.T) {
 	cfg := capHeldConfig()
 	head := capHeldDemand(cfg, "c/repo", 9, 13*time.Minute, "xl")
 	peer := capHeldDemand(cfg, "a/repo", 10, 9*time.Minute, "xl")
 	smaller := capHeldDemand(cfg, "b/repo", 11, 8*time.Minute, "medium")
+	occupancy := append(issue226Occupancy(cfg), liveInstance(cfg, "trf-small-a", "a/repo", "small"))
 
-	plan := PlanTick(capHeldInput(cfg, []domain.Demand{peer, smaller, head}, issue226Occupancy(cfg), State{}))
+	plan := PlanTick(capHeldInput(cfg, []domain.Demand{peer, smaller, head}, occupancy, State{}))
 
 	spawned := spawnedKeys(plan)
 	if containsDemandKey(spawned, peer.Key) {
@@ -148,6 +157,31 @@ func TestCapHeldReservedHeadRefusesAPeerThatCouldTakeItsVector(t *testing.T) {
 	if !containsDemandKey(spawned, smaller.Key) {
 		t.Fatalf("the refusal above must be the no-jump rule and not an empty envelope: the `medium` "+
 			"the head outranks has to be admitted on this very tick, got %v", spawned)
+	}
+}
+
+// TestACapHeldHeadYieldsItsVectorToAScopeHoldingNothing is ADR 0057 on the
+// same tick, and the reason the rule is stated about scopes rather than about
+// ages.
+//
+// `c/repo` is at its repository cap: it holds two of this node's slots and
+// cannot start the head it queued, whatever capacity frees. `a/repo` holds
+// nothing and asks for the same vector. Aged FIFO alone answers "the head is
+// older, hold the vector for it", which is how one scope on a two-slot Mac held
+// both slots for hours on 2026-09-21/22 while another scope's twenty-minute job
+// aged past three hours. Fair share answers "the scope holding none goes first",
+// and the answer is bounded by construction: `a/repo` holds a slot the moment it
+// is admitted, so the very next tick reads the key the other way.
+func TestACapHeldHeadYieldsItsVectorToAScopeHoldingNothing(t *testing.T) {
+	cfg := capHeldConfig()
+	head := capHeldDemand(cfg, "c/repo", 9, 13*time.Minute, "xl")
+	peer := capHeldDemand(cfg, "a/repo", 10, 9*time.Minute, "xl")
+
+	plan := PlanTick(capHeldInput(cfg, []domain.Demand{peer, head}, issue226Occupancy(cfg), State{}))
+
+	if spawned := spawnedKeys(plan); len(spawned) != 1 || spawned[0] != peer.Key {
+		t.Fatalf("ADR 0057: a cap-held head whose scope already holds two slots yields the vector "+
+			"to a scope holding none, got %v", spawned)
 	}
 }
 

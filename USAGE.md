@@ -371,22 +371,30 @@ continues to block new Linux admission until its instances become idle.
 
 1. Fresh observations are mandatory; unavailable data fails closed.
 2. Aged work wins global FIFO and cannot starve.
-3. Young control-plane work may receive one bounded priority quantum so the
+3. Inside the aged band, among the demands of one profile -- the ones competing
+   for the very same slot -- a GitHub scope that already holds instances on this
+   node yields to a scope that holds none, and only then does age decide
+   ([ADR 0057](docs/adr/0057-a-scope-that-holds-a-slot-yields-the-next-one.md)).
+   The key is confined: it never compares two profiles, never moves a demand
+   past one of the other platform, never moves a demand past an older demand of
+   its own scope, and never outranks a declared tier. A node serving one scope
+   is unaffected: one scope is one order, which is age.
+4. Young control-plane work may receive one bounded priority quantum so the
    manager can build its successor.
-4. Within each young scheduling lane, lower dominant-resource-share profiles
+5. Within each young scheduling lane, lower dominant-resource-share profiles
    are considered first and exact packing maximizes admitted job count.
-5. A declared priority tier orders demand INSIDE each of those bands, never
+6. A declared priority tier orders demand INSIDE each of those bands, never
    across them: an aged demand still precedes a fresh one of any tier, and a
    waiting demand climbs one tier per configured escalation threshold, so a tier
    costs everything below it at most rank x threshold of extra waiting
    (ADR 0037). A fleet that declares no tier is unaffected.
-6. Compatible small Linux work may use one durable backfill budget while a
+7. Compatible small Linux work may use one durable backfill budget while a
    macOS handoff is draining; it cannot postpone the handoff indefinitely.
    This bounded backfill applies only to the default shared policy; exclusive
    macOS cohorts do not admit Linux backfill.
-7. A single deterministic state machine owns each instance from planned clone
+8. A single deterministic state machine owns each instance from planned clone
    through registration, assignment, drain, deregistration, stop, and deletion.
-8. External effects are durable, leased, idempotent, and retried with bounded
+9. External effects are durable, leased, idempotent, and retried with bounded
    backoff; restart resumes state instead of guessing from process presence.
 
 ## Automatic updates
