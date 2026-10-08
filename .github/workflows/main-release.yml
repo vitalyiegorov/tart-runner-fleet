@@ -126,9 +126,11 @@ jobs:
           ACTUAL_LINUX_CONTENTS="$(tar -tzf "dist/$LINUX_ARCHIVE" | LC_ALL=C sort)"
           test "$ACTUAL_LINUX_CONTENTS" = "$EXPECTED_LINUX_CONTENTS"
 
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-          echo "LINUX_ARCHIVE=$LINUX_ARCHIVE" >> "$GITHUB_ENV"
+          {
+            echo "VERSION=$VERSION"
+            echo "ARCHIVE=$ARCHIVE"
+            echo "LINUX_ARCHIVE=$LINUX_ARCHIVE"
+          } >> "$GITHUB_ENV"
 
       - name: Publish immutable production release
         run: |
