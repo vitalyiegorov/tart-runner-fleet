@@ -2,6 +2,7 @@ package simulation_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
@@ -13,7 +14,7 @@ import (
 // world-model state into the captured scope snapshot, with no local broker
 // assignment for the foreign job.
 func TestMixedPlatformScopeSnapshotPreservesLocalInventory(t *testing.T) {
-	for _, cfg := range []worldConfig{macOSOnlyNodeWorld(), containerNodeWorld()} {
+	for _, cfg := range []worldConfig{macOSOnlyNodeWorld(), containerNodeWorld(), foreignArchitectureWorld("arm64"), foreignArchitectureWorld("amd64")} {
 		t.Run(cfg.Name, func(t *testing.T) {
 			for seed := int64(1); seed <= 24; seed++ {
 				t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
@@ -29,13 +30,20 @@ func TestMixedPlatformScopeSnapshotPreservesLocalInventory(t *testing.T) {
 					w.captureSnapshot()
 					snapshot := w.restQueue[len(w.restQueue)-1]
 					foreign := domain.PlatformLinux
+					arch := "arm64"
 					if cfg.Bindings[0].Profile.Platform == domain.PlatformLinux {
 						foreign = domain.PlatformMacOS
+					}
+					if strings.HasPrefix(cfg.Name, "mixed-architecture-") {
+						foreign = domain.PlatformLinux
+						if strings.HasSuffix(cfg.Name, "arm64") {
+							arch = "amd64"
+						}
 					}
 					snapshot.jobs = append(snapshot.jobs, githubscaleset.WorkflowJob{
 						ID: 100000 + seed, RunID: 100000 + seed, RunAttempt: 1,
 						Repository: githubscaleset.Repository{Owner: "a", Name: "repo"},
-						Status:     "queued", Labels: []string{"self-hosted", "trf-" + string(foreign) + "-arm64-4x8"}, CreatedAt: w.now})
+						Status:     "queued", Labels: []string{"self-hosted", "trf-" + string(foreign) + "-" + arch + "-4x8"}, CreatedAt: w.now})
 					snapshot.outstanding++
 					w.deliverSnapshots()
 					if len(w.findings) > 0 {
@@ -61,4 +69,15 @@ func TestMixedPlatformScopeSnapshotPreservesLocalInventory(t *testing.T) {
 			}
 		})
 	}
+}
+
+func foreignArchitectureWorld(arch string) worldConfig {
+	cfg := containerNodeWorld()
+	cfg.Name = "mixed-architecture-" + arch
+	for i := range cfg.Bindings {
+		profile := cfg.Bindings[i].Profile
+		canonical := fmt.Sprintf("trf-linux-%s-%dx%d", arch, profile.Resources.CPU, profile.Resources.MemoryMB/1024)
+		cfg.Bindings[i].ScaleSetLabels = append(cfg.Bindings[i].ScaleSetLabels, canonical)
+	}
+	return cfg
 }
