@@ -43,6 +43,7 @@ func TestIssue356ForeignPlatformQueueDoesNotPoisonLocalInventory(t *testing.T) {
 	}
 }
 
+// TestForeignPlatformClassificationKeepsUnknownRoutingClosed preserves strict routing for unproven routes.
 func TestForeignPlatformClassificationKeepsUnknownRoutingClosed(t *testing.T) {
 	binding := Binding{ScaleSetID: 1, ScaleSetLabels: []string{"self-hosted", "local"}, Profile: domain.Profile{ID: "local", Route: "local", Platform: domain.PlatformMacOS}}
 	cases := [][]string{
