@@ -1351,3 +1351,27 @@ Stated so a future operator does not mistake inference for measurement.
   and the verification here ran in the base at 4 vCPU / 8192 MiB while the
   profile is 6 vCPU / 12 GiB. More resources, same layer — but the first real
   Android job on mac-studio is still the first real Android job.
+
+## MacBook portable overflow pilot (issue #358)
+
+[ADR 0060](adr/0060-portable-linux-overflow.md) permits isolated validation of
+one portable browser workload; it does not reactivate the retired Mac Linux
+pool. Reuse the pinned Ubuntu ARM64 candidate, keep its name outside the fleet
+VM namespace, and leave it unregistered until project and lifecycle evidence
+passes. Read fresh fleet.v1 readiness, admission, ordinary envelope, configured
+floors, allocations, Tart state, and actual disk before each bounded stage.
+Unavailable use/ownership evidence holds the stage.
+
+Pin the exact consumer workflow head and lockfile. The current Knee-doctor
+ordinary browser shard contract is 2 CPU / 4 GiB with two workers; its CPU-heavy
+job remains separate. Validate the complete selected shard on Chromium and
+WebKit against the same previews/fixtures as AMD64. A public preview response,
+browser launch, or test enumeration alone is not a passing shard.
+
+For future portable routing, keep canonical ARM64 and AMD64 labels truthful
+and isolate architecture-dependent caches with `runner.arch`. Advertise only a
+job-scoped alias whose complete consumers were validated. Prepare both nodes'
+candidate configurations using the existing provision/validate/audit tools,
+canonical inventory and truthful set capacity; do not change production files
+from an image setup script. Initial one-job activation and rollback require
+ADR 0015 evidence. Linux-only native/emulator/release jobs stay AMD64-pinned.

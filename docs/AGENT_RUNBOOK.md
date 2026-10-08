@@ -206,6 +206,33 @@ sibling node may be serving the set, and deleting it takes its assigned jobs
 with it (ADR 0054). The jobs on the recreated set are lost too and must be
 re-run.
 
+## Validate portable MacBook Linux overflow
+
+Issue #358 and [ADR 0060](adr/0060-portable-linux-overflow.md) start with an
+unregistered, isolated ARM64 guest. A mixed-architecture inventory fix does not
+authorize production routing. Pin the consumer source, lockfile, tool versions,
+image digest, and complete shard selection; retain every failed artifact. Test
+the same selection on AMD64 and ARM64 before changing its workflow labels.
+Missing fixture access or skipped required assertions leaves compatibility
+unverified.
+
+Before each stage, read fresh readiness, admission, ordinary resource envelope,
+configured floors, allocations, actual disk, and host-use evidence. Distinguish
+a Tart allocation from a competing host compiler or owned-device consumer.
+Unknown use or insufficient capacity holds the stage; preserve healthy work.
+For a reused stopped Linux candidate, follow the existing
+[control-socket procedure](LINUX_BASE_IMAGE.md#remove-the-stale-control-socket-before-every-reboot)
+only after confirming its exact ownership, stopped state, and unused socket.
+Do not infer guest-agent failure from a DHCP lease or a failed `tart exec`.
+
+Keep proposed configuration and workflow patches outside the live configuration
+until compatibility, full controller CI, and ADR 0015 promotion evidence pass.
+One exact-scope canary must prove the GitHub job and ephemeral runner lifecycle;
+withdraw future overflow capacity and drain owned work for rollback. Preserve
+the incumbent configuration, images, macOS capacity, and required proofs. Shared
+labels alone neither move existing AMD64 jobs nor guarantee Omarchy-first
+placement. Studio and Mini expansion requires separate evidence.
+
 ## Handle a reproducible defect
 
 1. Preserve the coherent JSON, relevant runner/job state, bounded logs, and

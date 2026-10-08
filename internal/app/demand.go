@@ -385,7 +385,7 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 			return false, err
 		}
 		if len(matched) == 0 {
-			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedPlatform(bindings, job) {
+			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedCapability(bindings, job) {
 				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
 			}
 			continue
@@ -425,9 +425,9 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 var foreignJobRoutePattern = regexp.MustCompile(`(?i)^trf-(linux|macos)-(arm64|amd64)-[1-9][0-9]*x[1-9][0-9]*$`)
 
 // Repository snapshots include sibling nodes' work. Only an explicit canonical
-// route to a platform absent from this repository's bindings proves work is
-// foreign; unknown shapes on a served platform still fail closed.
-func jobRequiresUnservedPlatform(bindings []Binding, job githubscaleset.WorkflowJob) bool {
+// route to an OS/architecture absent from this repository's bindings proves
+// work is foreign; unknown shapes on a served capability still fail closed.
+func jobRequiresUnservedCapability(bindings []Binding, job githubscaleset.WorkflowJob) bool {
 	var route []string
 	for _, label := range job.Labels {
 		if match := foreignJobRoutePattern.FindStringSubmatch(label); match != nil {
@@ -451,7 +451,20 @@ func jobRequiresUnservedPlatform(bindings []Binding, job githubscaleset.Workflow
 		if binding.accepts(job.Repository.Owner + "/" + job.Repository.Name) {
 			accepted = true
 			if strings.EqualFold(string(binding.Profile.Platform), route[1]) {
-				return false
+				known := false
+				for _, label := range binding.ScaleSetLabels {
+					local := foreignJobRoutePattern.FindStringSubmatch(label)
+					if local == nil || !strings.EqualFold(local[1], route[1]) {
+						continue
+					}
+					if strings.EqualFold(local[2], route[2]) {
+						return false
+					}
+					known = true
+				}
+				if !known {
+					return false
+				}
 			}
 		}
 	}
