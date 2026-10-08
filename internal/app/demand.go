@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -384,7 +385,7 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 			return false, err
 		}
 		if len(matched) == 0 {
-			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") {
+			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedPlatform(bindings, job) {
 				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
 			}
 			continue
@@ -419,6 +420,42 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 	}
 	expired, err := c.expireGhostDemand(ctx, bindings, snapshot.ObservedAt())
 	return changed || expired, err
+}
+
+var foreignJobRoutePattern = regexp.MustCompile(`(?i)^trf-(linux|macos)-(arm64|amd64)-[1-9][0-9]*x[1-9][0-9]*$`)
+
+// Repository snapshots include sibling nodes' work. Only an explicit canonical
+// route to a platform absent from this repository's bindings proves work is
+// foreign; unknown shapes on a served platform still fail closed.
+func jobRequiresUnservedPlatform(bindings []Binding, job githubscaleset.WorkflowJob) bool {
+	var route []string
+	for _, label := range job.Labels {
+		if match := foreignJobRoutePattern.FindStringSubmatch(label); match != nil {
+			if route != nil {
+				return false
+			}
+			route = match
+		}
+	}
+	if route == nil {
+		return false
+	}
+	for _, label := range job.Labels {
+		if !strings.EqualFold(label, route[0]) && !strings.EqualFold(label, "self-hosted") &&
+			!strings.EqualFold(label, route[1]) {
+			return false
+		}
+	}
+	accepted := false
+	for _, binding := range bindings {
+		if binding.accepts(job.Repository.Owner + "/" + job.Repository.Name) {
+			accepted = true
+			if strings.EqualFold(string(binding.Profile.Platform), route[1]) {
+				return false
+			}
+		}
+	}
+	return accepted
 }
 
 // matchingBindings returns every scale set a repository-wide queued job may

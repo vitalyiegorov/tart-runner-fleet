@@ -450,3 +450,7 @@ See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for first promotion and rollback,
 [`docs/CLI.md`](docs/CLI.md) for the complete command contract,
 [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md) for the agent cockpit, and
 [`AGENTS.md`](AGENTS.md) for the coding-agent safety rules.
+
+### Canonical inventory on a platform-specific node
+
+A complete repository queue may include canonical jobs for a platform served only by a sibling node. Those explicitly foreign jobs do not belong to this node's inventory; unknown, contradictory, or missing local routes still fail closed. See [ADR 0059](docs/adr/0059-foreign-platform-jobs-do-not-poison-node-inventory.md). Shared-label configuration still requires canonical inventory and truthful capacities, and activation follows ADR 0015's observe/shadow/canary and rollback gates. Configuration validation alone does not prove job delivery.
