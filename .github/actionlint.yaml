@@ -14,3 +14,5 @@ self-hosted-runner:
     - trf-fleet-linux-amd64-4x8
     - trf-linux-amd64-2x4
     - trf-linux-amd64-4x8
+    - linux-go-2x4
+    - linux-go-4x8

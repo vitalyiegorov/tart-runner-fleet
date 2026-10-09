@@ -49,7 +49,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, trf-linux-amd64-2x4]
+    runs-on: [self-hosted, linux-go-2x4]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -72,7 +72,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, trf-linux-amd64-2x4]
+    runs-on: [self-hosted, linux-go-2x4]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -102,7 +102,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, trf-linux-amd64-4x8]
+    runs-on: [self-hosted, linux-go-4x8]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -134,7 +134,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, trf-linux-amd64-4x8]
+    runs-on: [self-hosted, linux-go-4x8]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -152,7 +152,7 @@ jobs:
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: [self-hosted, trf-linux-amd64-4x8]
+    runs-on: [self-hosted, linux-go-4x8]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
