@@ -64,6 +64,21 @@ exercise, not a historical problem to assume fixed.
 
 ## Evidence
 
+### Go CI routing, 2026-10-09
+
+The five Go CI jobs use the existing `linux-go-2x4` and `linux-go-4x8`
+aliases instead of AMD64-only labels. They execute the same checks and retain
+their deadlines. Go and lint caches remain disabled, so this change cannot
+restore binaries from the other architecture. Architecture-specific release
+and Android/KVM workflows retain their existing labels.
+
+The MacBook's ARM64 guest passed full `make ci` and a controller-managed
+ephemeral GitHub canary before this routing change. Production configuration
+activation is a separate guarded updater transaction on the released controller;
+this workflow change neither installs services nor changes controller authority.
+The first PR run exercises the new routing with the current toolchain. Existing
+queued AMD64 jobs keep their original assignment.
+
 Unit replay fails on the parent revision for both architectures. Simulation
 adds 24 seeds in each architecture direction beside the existing 48 OS cases,
 proving one local attribution and no foreign attribution. Pure predicate cases
