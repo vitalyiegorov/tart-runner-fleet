@@ -308,6 +308,25 @@ suites the nightly job exists to repeat cost 9.6s together at `-count=10` under
 the race detector, so a package that took 600s and failed was not one cost among
 several -- it was the whole report.
 
+#### Amendment 2026-10-09: race packages share a bounded runner
+
+Issue #360 records repeated main-CI failures at the unchanged ten-minute Go
+package deadline. The federation histories were still running; no data race or
+simulation invariant failure was reported. A Go 1.25.13 profile of the unchanged
+simulation package on four CPUs passed in 458.428 seconds and consumed 1708.31
+CPU seconds, with SQLite statement preparation accounting for about 44% of
+samples. The suite is CPU-bound, and running other test binaries beside it
+spends the same runner budget while its deadline keeps advancing.
+
+`make race` therefore uses `-p 1`: run independent package binaries sequentially,
+while retaining each package's existing parallel tests and Go runtime
+concurrency. Separate binaries do not share an address space, so their overlap
+cannot reveal a data race between packages. This changes test process scheduling,
+not the simulation world, controller policy, seed/tick counts, assertions,
+instrumentation, coverage threshold, or package/job deadlines. Do not disable
+pointer checks or add a statement cache merely to make this gate cheaper.
+Required CI must validate the change on the exact fix head before handoff.
+
 #### Amendment 2026-08-09: a held reservation is part of the feasibility question
 
 Issue #216. Property (a) reported a wedge on a tick that was correctly holding a
