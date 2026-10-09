@@ -54,7 +54,8 @@ unit coverage:
 	./scripts/check-coverage.sh $(COVERAGE_MIN)
 
 race:
-	$(GO) test -race -shuffle=on -count=1 ./...
+	# Give each test binary the runner budget; keep its internal concurrency.
+	$(GO) test -race -p 1 -shuffle=on -count=1 ./...
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath ./...
