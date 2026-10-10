@@ -890,6 +890,11 @@ grep -q "console=hvc0" /proc/cmdline
 sudo -n /sbin/shutdown --help >/dev/null
 systemd-run --scope --collect --quiet --unit=tart-runner-fleet-probe -- /bin/true
 
+# Step 4c: nothing may take the dpkg lock behind a job's back.
+for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer; do
+  test "$(systemctl is-enabled "$unit" 2>/dev/null)" = "masked"
+done
+
 # Everything a job needs, on the daemon PATH and nothing else.
 env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 sh -c '"'"'
