@@ -634,6 +634,32 @@ know fails every instance start. Verify after the reboot:
 # want: console=tty1 console=hvc0   (and no ttyAMA0)
 ```
 
+### 4c. Stop apt from upgrading the guest during a job
+
+Every clone boots from a sealed image and lives for one job, so the upstream
+cloud image's periodic apt work has nothing to keep current and only gets in
+the way. Left enabled, `unattended-upgrades` starts shortly after boot and holds
+the dpkg lock while the job runs. Any step that installs packages then fails
+with `Could not get lock /var/lib/dpkg/lock-frontend ... held by process N
+(unattended-upgr)`. Observed on knee-doctor E2E job 114293382905, 2026-10-10,
+where the `playwright install --with-deps` fallback lost the race.
+
+```sh
+"$TART" exec "$BUILD" sudo bash -c '
+set -euo pipefail
+systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service
+printf "APT::Periodic::Update-Package-Lists \"0\";\nAPT::Periodic::Unattended-Upgrade \"0\";\n" \
+  > /etc/apt/apt.conf.d/20auto-upgrades
+'
+```
+
+Image updates are a rebuild, not something a running guest does to itself.
+The containers on geekom do not run these timers, so this step only applies to
+Tart guests.
+
 ### 5. Install the bootstrap helper
 
 From the same release the node runs. The released asset name carries the
