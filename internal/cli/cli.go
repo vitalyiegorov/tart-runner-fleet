@@ -127,7 +127,7 @@ func defaultDependencies() dependencies {
 			return githubscaleset.NewAuditor(cfg)
 		},
 		openRecreate: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Recreater, error) {
-			return githubscaleset.NewProvisioner(cfg)
+			return githubscaleset.NewRecreater(cfg)
 		},
 		writeConfig: atomicWriteConfig,
 		command:     execCommand{},
