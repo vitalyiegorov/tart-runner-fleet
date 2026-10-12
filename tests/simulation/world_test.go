@@ -733,7 +733,12 @@ type world struct {
 	messageDelay    int
 	delayWindow     int
 	slowBootNext    int
-	longJobNext     int
+	// wedgeBootstrapNext latches eventWedgedBootstrap until a guest becomes
+	// reachable, and wedgedBootstrap is every guest it has wedged: each stays in
+	// Reachable for as long as provisioning keeps retrying it.
+	wedgeBootstrapNext bool
+	wedgedBootstrap    map[string]bool
+	longJobNext        int
 	// overrunJobNext arms the issue #223 shape: the next job to start holds its
 	// runner for whole profile budgets rather than for a long suite's worth of
 	// work, so nothing but the occupancy reclaim can end it.
@@ -896,6 +901,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
 		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
 		silentGuest: map[string]bool{}, guestDiedAt: map[string]int{}, saturatedGuest: map[string]bool{},
+		wedgedBootstrap: map[string]bool{},
 		powerMisreport:  map[string]int{},
 		powerUnreadable: map[string]bool{},
 		drainAborts:     map[string]int{}, known: map[string]finding{},
@@ -1129,6 +1135,13 @@ func (w *world) stepOperation(pending *simOperation) {
 		w.record(findingStoreError, fmt.Sprintf("read instance %s: %v", pending.instance, err))
 		return
 	}
+	// A provisioning operation whose instance a drain has taken over is finished:
+	// ProvisionExecutor completes without acting once the row is draining or
+	// beyond, and the drain operation owns every edge from there.
+	if pending.operation.Kind == lifecycle.OperationProvision && supersededProvisioning(instance.State) {
+		w.completeOperation(pending)
+		return
+	}
 	next, done := w.nextLifecycleState(instance)
 	if next != "" {
 		if !w.advance(instance, next) {
@@ -1138,11 +1151,24 @@ func (w *world) stepOperation(pending *simOperation) {
 	if !done {
 		return
 	}
+	w.completeOperation(pending)
+}
+
+func (w *world) completeOperation(pending *simOperation) {
 	if _, err := w.store.Complete(w.ctx, pending.operation.ID, simOwner, pending.operation.EffectKey, w.now); err != nil {
 		w.record(findingStoreError, fmt.Sprintf("complete %s: %v", pending.operation.ID, err))
 		return
 	}
 	delete(w.claimed, pending.operation.ID)
+}
+
+func supersededProvisioning(state operations.State) bool {
+	switch state {
+	case operations.StateDraining, operations.StateDeregistering, operations.StateStopping, operations.StateDeleted:
+		return true
+	default:
+		return false
+	}
 }
 
 // nextLifecycleState mirrors lifecycle.ProvisionExecutor and
@@ -1168,6 +1194,14 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 	case operations.StateBooting:
 		return operations.StateReachable, false
 	case operations.StateReachable:
+		// A wedged bootstrap fails every attempt and leaves the row where it is,
+		// exactly as ProvisionExecutor does when Bootstrap returns an error.
+		if w.wedgeBootstrapNext {
+			w.wedgedBootstrap[instance.ID], w.wedgeBootstrapNext = true, false
+		}
+		if w.wedgedBootstrap[instance.ID] {
+			return "", false
+		}
 		// An acquisition that returns nothing still generates a JIT runner: the VM
 		// registers and then waits for work GitHub will never send, which is
 		// precisely the ghost-demand runner that "registered online but never went
@@ -1497,6 +1531,13 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 		// runner-keyed question below would abort every one of these drains: GitHub
 		// calls a dead guest's runner busy for as long as its own grace timer runs,
 		// and that refusal is the premise rather than a refutation of it.
+		return false
+	case operations.DrainPhaseProvisionStalled:
+		// executor.go never aborts this phase: the instance never reached Running,
+		// so busy evidence fails the guard and retries rather than returning it
+		// there. Its runner cannot be busy here in any case, because the world
+		// acquires a job only at the reachable -> registering edge a stalled
+		// provisioning never crossed.
 		return false
 	case operations.DrainPhaseOccupancyBudget:
 		// The one phase with nothing to re-verify. Every other cause claims that no

@@ -274,6 +274,15 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		if instance.State == operations.StateAssigned {
 			assignedSince = instance.UpdatedAt
 		}
+		// A provisioning attempt that fails leaves the row in the state it failed
+		// in, so UpdatedAt marks how long provisioning has been stuck at that step.
+		// Planned is left out: its VM does not exist yet, and a planned instance may
+		// legitimately wait on another operation (ADR 0061).
+		provisioningSince := time.Time{}
+		switch instance.State {
+		case operations.StateCloning, operations.StateBooting, operations.StateReachable:
+			provisioningSince = instance.UpdatedAt
+		}
 		// A Running instance's dwell time is the age measured against the
 		// idle-runner deadline; JobInactive is the evidence that pairs with it —
 		// no active job on the durable demand. Both stay zero/false (fail-closed)
@@ -306,7 +315,8 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 			// failure made the reading unavailable. Nothing decides on it; it is the
 			// evidence issue #246 spent five reproduction attempts not having.
 			PowerUnreadable: unreadable,
-			AssignedSince:   assignedSince, RunningSince: runningSince, JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
+			AssignedSince:   assignedSince, RunningSince: runningSince, ProvisioningSince: provisioningSince,
+			JobInactive: jobInactive, OccupiedSince: instance.CreatedAt})
 	}
 	for name := range byName {
 		if strings.HasPrefix(name, "trf-") {

@@ -580,6 +580,18 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				if err := e.stopGuest(ctx, instance, operation); err != nil {
 					return err
 				}
+			case operations.DrainPhaseProvisionStalled:
+				// The provisioning deadline planned this reclaim from a VM that never
+				// became a runner, so there is no job to protect, and no Running state
+				// to abort back to. The one thing a fresh observation could still show
+				// is a runner the stalled provisioning started after all, executing a
+				// job. That fails the guard and retries until the job is over; it never
+				// aborts, because an abort would mark a VM that never registered as
+				// busy (ADR 0061).
+				busy, busyErr := e.Control.RunnerBusy(ctx, instance)
+				if busyErr != nil || busy {
+					return e.fail(ctx, instance, StageGuard)
+				}
 			case operations.DrainPhaseOccupancyBudget:
 				// The occupancy budget planned this reclaim from a fact no fresh
 				// evidence can disprove: the instance has held its profile's vector
@@ -642,7 +654,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// with its vector still held and the next tick would plan the same reclaim
 				// forever. For a dead guest the busy evidence is GitHub's, and GitHub is
 				// describing a job whose machine stopped executing minutes ago.
-				if !stopsItsGuestFirst(instance.DrainPhase) {
+				if abortsOnBusyRefusal(instance.DrainPhase) {
 					if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
 						return e.abort(ctx, instance)
 					}

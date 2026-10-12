@@ -345,3 +345,33 @@ func TestTheBackendsUnreadablePowerTravelsIntactThroughTheInventory(t *testing.T
 		t.Fatal("an instance whose power could not be read stopped charging the host")
 	}
 }
+
+// The provisioning deadline reads the last state change of a provisioning
+// instance whose VM already exists, and nothing else (ADR 0061). A failed
+// provisioning attempt does not change the row's state, so UpdatedAt is how long
+// provisioning has been stuck at that step.
+func TestInventoryCarriesTheProvisioningClockOnlyWhileAVMIsProvisioning(t *testing.T) {
+	now := time.Now().UTC()
+	for state, want := range map[operations.State]bool{
+		operations.StateCloning: true, operations.StateBooting: true, operations.StateReachable: true,
+		operations.StatePlanned: false, operations.StateRegistering: false, operations.StateRunning: false,
+	} {
+		stored := inventoryInstance(state)
+		stored.CreatedAt = now.Add(-7 * time.Hour)
+		stored.UpdatedAt = now.Add(-6 * time.Hour)
+		inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{stored}},
+			Executor: fakeTart{values: []executor.Instance{{Name: stored.ID, Power: domain.InstancePowerRunning}}}, Host: fakeHost{healthySnapshot(now)},
+			Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+		instances, _ := inv.Observe(context.Background())
+		if !instances.Usable() || len(instances.Value) != 1 {
+			t.Fatalf("%s: observation = %#v", state, instances)
+		}
+		got := instances.Value[0].ProvisioningSince
+		if want && !got.Equal(stored.UpdatedAt) {
+			t.Fatalf("%s: provisioning clock = %s, want the last state change %s", state, got, stored.UpdatedAt)
+		}
+		if !want && !got.IsZero() {
+			t.Fatalf("%s: provisioning clock = %s, want none", state, got)
+		}
+	}
+}

@@ -232,6 +232,14 @@ type Instance struct {
 	// cancelled). Zero means unknown, treated fail-closed as "never past the
 	// deadline".
 	RunningSince time.Time
+	// ProvisioningSince is when the instance most recently entered Cloning,
+	// Booting, or Reachable: a provisioning state its VM already exists in. A
+	// failed provisioning attempt retries without changing state, so this dwell
+	// is how long provisioning has been failing to get past one step. It bounds
+	// the provisioning deadline (ADR 0061). Zero means unknown or not
+	// provisioning, which the scheduler treats fail-closed as "never past the
+	// deadline".
+	ProvisioningSince time.Time
 	// JobInactive reports that the durable demand bound to a Running instance
 	// shows no active job — its status is not JobStarted (terminal/completed,
 	// pre-start, or the run was cancelled before work began). A healthy Running

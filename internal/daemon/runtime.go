@@ -1918,6 +1918,8 @@ func (r *failureReporter) reportRecovery(operation scheduler.Operation) {
 		cause = "guest stopped answering"
 	case operation.OccupancyExceeded:
 		cause = "occupancy budget exceeded"
+	case operation.ProvisionStalled:
+		cause = "provisioning stalled"
 	}
 	r.logger.Warn("instance recovery drain planned", "instance", operation.Instance,
 		"profile", string(operation.Profile), "cause", cause,

@@ -207,6 +207,12 @@ const (
 	// Unlike the occupancy budget its premise IS re-verifiable, and it is
 	// re-verified: a fresh probe that the guest answers aborts the drain (ADR 0040).
 	DrainPhaseGuestUnresponsive = 7
+	// DrainPhaseProvisionStalled reclaims an instance whose provisioning has
+	// failed to get past one step for longer than the provisioning deadline. It
+	// never became a runner, so there is no Running state to abort back to: busy
+	// evidence on its runner name fails the guard and retries instead, and the
+	// drain otherwise proceeds to a fresh clone for the same demand (ADR 0061).
+	DrainPhaseProvisionStalled = 8
 )
 
 type Lease struct {
