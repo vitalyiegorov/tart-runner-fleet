@@ -355,8 +355,10 @@ What it gives up. An invalid `unsafe.Pointer` conversion inside modernc's
 translated SQLite would no longer panic under `make race`. That is upstream's
 gate to hold, not ours.
 
-Measured on the same four pinned CPUs: 434s before, 198s after for
-`go test -race -count=1 ./tests/simulation`. That leaves about 2x headroom
+Measured on the same four pinned CPUs for `./tests/simulation`: 434s for
+`go test -race -count=1 ./tests/simulation`, and 198s for
+`go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 ./tests/simulation`,
+which is what `make race` runs. That leaves about 2x headroom
 against the 600s deadline on the slower ARM64 guests.
 
 This supersedes the 2026-10-09 instruction not to disable pointer checks, for
