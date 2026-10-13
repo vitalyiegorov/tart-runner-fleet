@@ -96,17 +96,78 @@ type recoveringScaleSetConfig struct {
 	limiter chan struct{}
 	policy  githubscaleset.SessionRecoveryPolicy
 	now     func() time.Time
+	// pending starts the binding without a session because the first open hit a
+	// transient network failure. The ingest loop opens it on a later poll.
+	pending bool
 }
 
 func newRecoveringScaleSetSource(c recoveringScaleSetConfig) (*recoveringScaleSetSource, error) {
-	if c.source == nil || c.open == nil || c.limiter == nil {
+	if (c.source == nil) != c.pending || c.open == nil || c.limiter == nil {
 		return nil, operations.ErrInvalid
 	}
 	if c.now == nil {
 		c.now = time.Now
 	}
 	return &recoveringScaleSetSource{source: c.source, open: c.open, limiter: c.limiter,
-		policy: c.policy, now: c.now}, nil
+		policy: c.policy, now: c.now, released: c.pending}, nil
+}
+
+// transientStartupFailure reports whether a session that could not be opened at
+// startup failed on the network rather than on anything the node got wrong.
+//
+// On 2026-10-13 the MacBook's controller exited 16 times in a row because one
+// of its 24 bindings timed out reaching the broker while the home uplink was
+// saturated, and launchd restarted it into the same timeout. A timeout, a
+// refused or reset connection, or a failed DNS lookup is the network's state,
+// not a reason to take the whole node out of the fleet; the binding starts
+// pending and its ingest loop opens it once the network answers. Everything
+// else -- a key GitHub rejects, a scale set that no longer exists, an invalid
+// configuration -- stays fatal, because retrying cannot fix it.
+func transientStartupFailure(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return true
+	}
+	var op *net.OpError
+	return errors.As(err, &op)
+}
+
+// openPending opens the session a binding started without. It shares the
+// recovery limiter so a node whose bindings all start pending cannot stampede
+// the broker the moment the network returns.
+func (s *recoveringScaleSetSource) openPending(ctx context.Context) error {
+	select {
+	case s.limiter <- struct{}{}:
+		defer func() { <-s.limiter }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.suspended || s.source != nil {
+		return nil
+	}
+	opened, err := s.open(ctx)
+	if err != nil {
+		return err
+	}
+	s.source = opened
+	s.released = false
+	s.failures = githubscaleset.SessionFailureState{}
+	return nil
+}
+
+func (s *recoveringScaleSetSource) pendingOpen() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.closed && !s.suspended && s.source == nil
 }
 
 func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
@@ -119,6 +180,14 @@ func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
 }
 
 func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(context.Context, githubscaleset.Demand) error) error {
+	if s.pendingOpen() {
+		if err := s.openPending(ctx); err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			return &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonSessionCreateFailed, Cause: err}
+		}
+	}
 	source, release, err := s.acquire()
 	if err != nil {
 		return err
@@ -706,10 +775,17 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						System:         "tart-runner-fleet", Version: opts.Version, Subsystem: "controller"})
 				}
 				initial, err := openSource(ctx)
+				deferred := false
 				if err != nil {
-					return err
+					if ctx.Err() != nil || !transientStartupFailure(err) {
+						return err
+					}
+					reporter.logger.Warn("scale-set session deferred", "scope", binding.Scope,
+						"profile", string(binding.Profile.ID), "scaleSet", settings.scaleSet.ID,
+						"reason", githubscaleset.ReasonSessionCreateFailed)
+					initial, deferred = nil, true
 				}
-				source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial,
+				source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial, pending: deferred,
 					open: openSource, limiter: recoveryLimiter, now: d.now,
 					policy: githubscaleset.SessionRecoveryPolicy{
 						MaxConsecutiveFailures: cfg.SessionRecovery.MaxConsecutiveFailures,
