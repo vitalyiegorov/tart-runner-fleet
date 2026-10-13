@@ -92,6 +92,52 @@ func TestAPendingBindingOpensItsSessionOnALaterPoll(t *testing.T) {
 	}
 }
 
+// A binding deferred on a timeout can later reach GitHub and be refused. That
+// refusal is permanent, so the binding stops opening sessions and every later
+// poll reports the same failure instead of asking the broker again each tick.
+func TestAPendingBindingStopsRetryingAPermanentRefusal(t *testing.T) {
+	var opens atomic.Int32
+	refused := errors.New(`request POST .../runnerscalesets/15/sessions failed(status="404 Not Found")`)
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{pending: true,
+		open: func(context.Context) (scaleSetSource, error) {
+			if opens.Add(1) == 1 {
+				return nil, brokerTimeout()
+			}
+			if opens.Load() == 2 {
+				return nil, refused
+			}
+			return &successfulSessionSource{}, nil
+		}, limiter: make(chan struct{}, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := func(context.Context, githubscaleset.Demand) error { return nil }
+	for poll := 1; poll <= 4; poll++ {
+		err := source.Handle(context.Background(), commit)
+		var failure *githubscaleset.SessionFailure
+		if !errors.As(err, &failure) || failure.Reason != githubscaleset.ReasonSessionCreateFailed {
+			t.Fatalf("poll %d = %v, want a session_create_failed ingest failure", poll, err)
+		}
+		if poll > 1 && !errors.Is(err, refused) {
+			t.Fatalf("poll %d = %v, want the permanent refusal", poll, err)
+		}
+	}
+	if opens.Load() != 2 {
+		t.Fatalf("opens = %d, want no attempt after the permanent refusal", opens.Load())
+	}
+	// Yielding and resuming the binding is an explicit retry, and a successful
+	// resume clears the refusal.
+	if err := source.Suspend(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Handle(context.Background(), commit); err != nil {
+		t.Fatalf("poll after resume = %v", err)
+	}
+}
+
 func TestAPendingBindingCanBeSuspendedAndClosedWithoutASession(t *testing.T) {
 	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{pending: true,
 		open: func(context.Context) (scaleSetSource, error) { return &successfulSessionSource{}, nil }, limiter: make(chan struct{}, 1)})

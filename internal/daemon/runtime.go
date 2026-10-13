@@ -87,7 +87,13 @@ type recoveringScaleSetSource struct {
 	// is how the mini logged session_release_failed 20-35 times an hour for
 	// days and never once recreated the session (issue #292).
 	releaseRefusals int
-	now             func() time.Time
+	// abandoned is the permanent failure that ended a pending binding's attempts
+	// to open its first session. The binding was deferred because the network
+	// could not answer; once GitHub does answer and refuses -- a rejected key, a
+	// deleted scale set -- retrying every poll cannot fix it, so every later poll
+	// reports this failure without calling the broker again.
+	abandoned error
+	now       func() time.Time
 }
 
 type recoveringScaleSetConfig struct {
@@ -156,12 +162,22 @@ func (s *recoveringScaleSetSource) openPending(ctx context.Context) error {
 	}
 	opened, err := s.open(ctx)
 	if err != nil {
-		return err
+		failure := &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonSessionCreateFailed, Cause: err}
+		if ctx.Err() == nil && !transientStartupFailure(err) {
+			s.abandoned = failure
+		}
+		return failure
 	}
 	s.source = opened
 	s.released = false
 	s.failures = githubscaleset.SessionFailureState{}
 	return nil
+}
+
+func (s *recoveringScaleSetSource) abandonment() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.abandoned
 }
 
 func (s *recoveringScaleSetSource) pendingOpen() bool {
@@ -180,12 +196,15 @@ func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
 }
 
 func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(context.Context, githubscaleset.Demand) error) error {
+	if err := s.abandonment(); err != nil {
+		return err
+	}
 	if s.pendingOpen() {
 		if err := s.openPending(ctx); err != nil {
 			if ctx.Err() != nil {
-				return err
+				return ctx.Err()
 			}
-			return &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonSessionCreateFailed, Cause: err}
+			return err
 		}
 	}
 	source, release, err := s.acquire()
@@ -377,6 +396,7 @@ func (s *recoveringScaleSetSource) Resume(ctx context.Context) error {
 	s.source = replacement
 	s.released = false
 	s.suspended = false
+	s.abandoned = nil
 	s.failures = githubscaleset.SessionFailureState{}
 	return nil
 }
