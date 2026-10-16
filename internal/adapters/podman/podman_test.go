@@ -306,7 +306,7 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 		{
 			name: "an ordinary profile gets no device", instance: "trf-small-abc",
 			kvm: []string{"trf-android-"},
-			want: "create --name trf-small-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
+			want: "create --name trf-small-abc --cpus 2 --memory 4096m --memory-swap 4096m --shm-size 1024m --restart no --init " +
 				vectorEnv +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"ghcr.io/example/runner:1 sleep infinity",
@@ -314,7 +314,7 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 		{
 			name: "the android profile gets /dev/kvm", instance: "trf-android-abc",
 			kvm: []string{"", "trf-android-"},
-			want: "create --name trf-android-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
+			want: "create --name trf-android-abc --cpus 2 --memory 4096m --memory-swap 4096m --shm-size 1024m --restart no --init " +
 				vectorEnv +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"--device /dev/kvm ghcr.io/example/runner:1 sleep infinity",
@@ -322,7 +322,7 @@ func TestCreateBuildsTheWholeContainerSpecificationInOneVector(t *testing.T) {
 		{
 			name: "a configured hold command replaces the default", instance: "trf-small-abc",
 			hold: []string{"/usr/bin/tail", "-f", "/dev/null"},
-			want: "create --name trf-small-abc --cpus 2 --memory 4096m --shm-size 1024m --restart no --init " +
+			want: "create --name trf-small-abc --cpus 2 --memory 4096m --memory-swap 4096m --shm-size 1024m --restart no --init " +
 				vectorEnv +
 				"--label trf.controller=node-b --label trf.resource=trf-small-1 --label trf.operation=op-7 " +
 				"ghcr.io/example/runner:1 /usr/bin/tail -f /dev/null",
