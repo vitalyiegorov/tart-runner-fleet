@@ -48,11 +48,18 @@ func ClassifyResponse(resp *http.Response, now time.Time, cause error) error {
 		return cause
 	}
 	kind := Unexpected
+	budget := ParseBudget(resp.Header)
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
 		kind = Authentication
 	case http.StatusForbidden:
+		// GitHub answers an exhausted primary limit with 403, not 429, and
+		// without Retry-After: the only proof is a zero remaining budget beside
+		// the window reset (issue #377). A 403 with budget left is a permission.
 		kind = Authorization
+		if budget.Observed && budget.Remaining == 0 {
+			kind = RateLimited
+		}
 	case http.StatusNotFound:
 		kind = NotFound
 	case http.StatusConflict:
@@ -69,7 +76,15 @@ func ClassifyResponse(resp *http.Response, now time.Time, cause error) error {
 	if cause == nil {
 		cause = errors.New(http.StatusText(resp.StatusCode))
 	}
-	return &APIError{Kind: kind, Status: resp.StatusCode, RequestID: resp.Header.Get("X-GitHub-Request-Id"), RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After"), now), Cause: cause}
+	retryAfter := ParseRetryAfter(resp.Header.Get("Retry-After"), now)
+	if retryAfter == 0 && kind == RateLimited {
+		// A limit without Retry-After still names its window: the reset is the
+		// horizon, and an elapsed reset carries no wait.
+		if reset, err := strconv.ParseInt(strings.TrimSpace(resp.Header.Get("X-RateLimit-Reset")), 10, 64); err == nil && reset > 0 {
+			retryAfter = max(time.Unix(reset, 0).Sub(now), 0)
+		}
+	}
+	return &APIError{Kind: kind, Status: resp.StatusCode, RequestID: resp.Header.Get("X-GitHub-Request-Id"), RetryAfter: retryAfter, Cause: cause}
 }
 
 func ParseRetryAfter(value string, now time.Time) time.Duration {

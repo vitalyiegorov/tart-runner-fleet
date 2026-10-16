@@ -1646,17 +1646,18 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}
 		now = r.now().UTC()
 	}
-	r.next = now.Add(r.interval)
 	observation := r.observer.Refresh(ctx, r.previous)
+	r.next = now.Add(r.pace(now, observation))
 	if observation.Err != nil {
+		reason := restObservationReason(observation)
 		if r.health != nil && r.observation != "" {
-			freshness, detail := telemetry.ObservationUnavailable, githubscaleset.ReasonQueueObservationFailed
+			freshness := telemetry.ObservationUnavailable
 			if observation.Freshness == githubscaleset.Stale {
-				freshness, detail = telemetry.ObservationStale, githubscaleset.ReasonQueueObservationStale
+				freshness = telemetry.ObservationStale
 			}
-			_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
+			_ = r.health.RecordObservationDetail(r.observation, freshness, reason)
 		}
-		return false, observation.Err
+		return false, &githubscaleset.SessionFailure{Reason: reason, Cause: observation.Err}
 	}
 	r.previous = observation.Snapshot
 	coordinator := r.coordinator
@@ -1691,6 +1692,48 @@ func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSe
 		}
 	}
 	return selectors
+}
+
+// restBudgetDeferralMax bounds how long one refresh may wait for a rate window
+// to reset. GitHub's window is an hour, so a longer horizon is a clock defect,
+// not a budget.
+const restBudgetDeferralMax = time.Hour
+
+// pace returns the delay before the next refresh. The ordinary interval holds
+// unless the installation budget is scarce or GitHub has already refused: then
+// the refresh waits for the window reset, so the two Mac nodes sharing one
+// installation stop spending it by ~:45 of every hour and losing the inventory
+// for the rest (issue #377). An elapsed reset, or a limit with no horizon,
+// defers nothing: the next poll is the only way to learn the new window.
+func (r *restQueueIngester) pace(now time.Time, observation githubscaleset.Observation) time.Duration {
+	deferral := time.Duration(0)
+	if observation.Budget.Scarce() {
+		deferral = observation.Budget.Reset.Sub(now)
+	}
+	var api *githubscaleset.APIError
+	if errors.As(observation.Err, &api) && api.Kind == githubscaleset.RateLimited {
+		deferral = max(deferral, api.RetryAfter)
+	}
+	return max(r.interval, min(deferral, restBudgetDeferralMax))
+}
+
+// restObservationReason reduces a failed REST refresh to the bounded vocabulary.
+// A rate limit and a server error already have names the session path uses;
+// anything else is the observation failing or ageing out, as before.
+func restObservationReason(observation githubscaleset.Observation) string {
+	var api *githubscaleset.APIError
+	if errors.As(observation.Err, &api) {
+		switch api.Kind {
+		case githubscaleset.RateLimited:
+			return githubscaleset.ReasonRateLimited
+		case githubscaleset.Server:
+			return githubscaleset.ReasonServerError
+		}
+	}
+	if observation.Freshness == githubscaleset.Stale {
+		return githubscaleset.ReasonQueueObservationStale
+	}
+	return githubscaleset.ReasonQueueObservationFailed
 }
 
 func bindingsByScope(bindings []app.Binding) map[string][]app.Binding {
