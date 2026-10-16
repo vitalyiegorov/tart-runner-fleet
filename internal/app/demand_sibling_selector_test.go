@@ -1,8 +1,9 @@
 package app
 
 import (
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"testing"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 )
 
 func TestForeignSelectorProofNeverNamesALocalOrUnknownRoute(t *testing.T) {
