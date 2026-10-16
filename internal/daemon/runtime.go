@@ -909,6 +909,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
 		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain,
 		membership: member}
+	if opts.Mode == reconcile.Authority {
+		cleanup := discharge.Service{Store: store, VM: d.newReaper(store, cfg), Authority: true, Now: d.now,
+			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+		ticker.recoverCleanup = func(ctx context.Context, letter operations.DeadLetter, instance domain.Instance) error {
+			return cleanup.RecoverStoppedCleanup(ctx, letter, instance, control)
+		}
+	}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -2176,6 +2183,7 @@ type engineTicker struct {
 	operationCounts   func(context.Context) (int, int, error)
 	operationFailures func(context.Context) ([]operations.OperationFailure, error)
 	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
+	recoverCleanup    func(context.Context, operations.DeadLetter, domain.Instance) error
 	// stalledOperations names what is not finishing: the operations still
 	// retrying and the instances still held in a cleanup state (ADR 0039).
 	stalledOperations func(context.Context, time.Time) ([]operations.StalledOperation, error)
@@ -2236,6 +2244,9 @@ func (e engineTicker) Tick(ctx context.Context) error {
 			failures, failureErr := e.operationFailureMetrics(ctx)
 			letters, letterErr := e.deadLetterMetrics(ctx, result.Instances)
 			stalled, stalledErr := e.stalledMetrics(ctx)
+			if countErr == nil && failureErr == nil && letterErr == nil && stalledErr == nil {
+				letterErr = e.recoverParkedCleanup(ctx, letters, result.Instances)
+			}
 			if countErr != nil || failureErr != nil || letterErr != nil || stalledErr != nil {
 				// Rule 4: an unreadable aggregate degrades the observation. It never
 				// publishes an empty failure set, which would read as a healed fleet, and
@@ -2615,3 +2626,26 @@ type wallClock struct{}
 func (wallClock) Now() time.Time { return time.Now().UTC() }
 
 var _ operations.Store = (*sqlite.Store)(nil)
+
+// Recovery runs on the existing tick, after all observations are coherent.
+// Metric readers remain read-only; only the authority wires this callback.
+func (e engineTicker) recoverParkedCleanup(ctx context.Context, letters []telemetry.DeadLetter, instances []domain.Instance) error {
+	if e.recoverCleanup == nil {
+		return nil
+	}
+	for _, letter := range letters {
+		if !letter.Parked {
+			continue
+		}
+		for _, instance := range instances {
+			if instance.ID != letter.ResourceID {
+				continue
+			}
+			durable := operations.DeadLetter{OperationID: letter.OperationID, ResourceID: letter.ResourceID, Kind: letter.Kind, Code: letter.Code, Attempts: letter.Attempts}
+			if err := e.recoverCleanup(ctx, durable, instance); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

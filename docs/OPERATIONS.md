@@ -1721,3 +1721,17 @@ legality, not agreement.
 3. Run `PRAGMA quick_check` through a normal `fleet` startup.
 4. Reconcile Tart inventory, GitHub runners/jobs, ownership, and outbox leases.
 5. Resume observe, then shadow. Never jump directly to authority.
+
+
+### Automatic recovery of a parked stopped cleanup (ADR0061)
+
+An authority controller automatically resumes a parked stop/delete cleanup on
+its ordinary tick when backend power and fresh runner/job confirmation prove
+inactivity. It queues a new durable cleanup attempt; it does not directly retire
+or delete the VM. Failed deletion remains retryable under the normal worker.
+Unknown/busy evidence or another progressing operation preserves the resource.
+Other dead-letter classes still require diagnosis and explicit operator action.
+No extra monitor, restart or cleanup script is needed. Public failure codes stay
+`stop`/`delete`; `automatic cleanup resumed` identifies the old operation and
+instance without logging its payload. Legacy stop rows restart conservatively
+rather than counting old GitHub/guard failures as stop attempts.
