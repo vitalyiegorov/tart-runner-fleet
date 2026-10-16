@@ -339,6 +339,7 @@ type Snapshot struct {
 	GuestConsole       *GuestConsoleMetric
 	Policy             *PolicyMetric
 	SessionYield       *SessionYieldMetric
+	Membership         *MembershipMetric
 	UpdateDrain        *UpdateDrainMetric
 	Reservation        *ReservationMetric
 	Envelope           EnvelopeMetric
@@ -416,6 +417,7 @@ type Health struct {
 	guestConsole       *GuestConsoleMetric
 	policy             *PolicyMetric
 	sessionYield       *SessionYieldMetric
+	membership         *MembershipMetric
 	updateDrain        *UpdateDrainMetric
 	reservation        *ReservationMetric
 	envelope           EnvelopeMetric
@@ -1176,6 +1178,7 @@ func (h *Health) Snapshot() Snapshot {
 		GuestConsole:             h.guestConsole,
 		Policy:                   h.policy,
 		SessionYield:             h.sessionYield,
+		Membership:               h.membership,
 		UpdateDrain:              h.updateDrain,
 		Reservation:              cloneReservation(h.reservation),
 		Envelope:                 h.envelope,

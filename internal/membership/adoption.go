@@ -2,12 +2,12 @@ package membership
 
 import "time"
 
-// This file is rung (c) of ADR 0061's ladder: what a sibling may do about a
+// This file is rung (c) of ADR 0063's ladder: what a sibling may do about a
 // scale set whose owner has gone. It is the executable statement of the rule,
 // and the deterministic simulation (tests/simulation/membership_test.go)
 // exercises it against a model of GitHub's session arbiter.
 //
-// It has NO production caller yet, deliberately. ADR 0061's spike could not
+// It has NO production caller yet, deliberately. ADR 0063's spike could not
 // settle from code or documentation that a sibling's new session is handed the
 // work already assigned to the set, nor how long GitHub keeps an unpolled
 // session alive. Until the live experiments the ADR lists have answered both,
@@ -65,7 +65,7 @@ type AdoptionPolicy struct {
 // that saw the set stranded, so at least three consecutive audits agree and a
 // single reading followed by an audit outage can never satisfy it. A sibling cannot read its
 // owner's configuration, so the owner's declared mode cannot shorten this; a
-// roaming owner shortens its own exposure instead, by yielding (ADR 0061 e).
+// roaming owner shortens its own exposure instead, by yielding (ADR 0063 e).
 func (p AdoptionPolicy) Grace() time.Duration { return freshCadences * p.Cadence }
 
 // Lease is the longest a sibling holds an adopted session before handing it

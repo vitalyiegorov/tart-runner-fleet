@@ -27,6 +27,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/membership"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scalesetaudit"
@@ -177,7 +178,7 @@ func (s *recoveringScaleSetSource) openPending(ctx context.Context) error {
 // deferrableOpenFailure is every reason a session could not be opened that a
 // later attempt can cure without anyone changing anything: the network's state
 // (transientStartupFailure), or a session another holder has not yet let go of
-// (ADR 0061 d). Everything else is the node's own fault and stays fatal.
+// (ADR 0063 d). Everything else is the node's own fault and stays fatal.
 func deferrableOpenFailure(err error) bool {
 	return transientStartupFailure(err) || githubscaleset.SessionHeld(err)
 }
@@ -772,6 +773,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		BlockedFor: cfg.SessionYield.BlockedFor, HealthyFor: cfg.SessionYield.HealthyFor})
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
+	// memberSources keys each binding's session by the scale set it polls, which
+	// is the key the scale-set audit's verdict arrives under (ADR 0063).
+	memberSources := make(map[membership.Key]yieldableSource, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if officialScaleSetSessions || canonicalRESTInventory {
@@ -834,6 +838,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					return err
 				}
 				closers = append(closers, source)
+				memberSources[membership.Key{Scope: binding.Scope, ID: int(binding.ScaleSetID)}] = source
 				ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
 					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey), reporter: reporter,
 					yield: yieldState})
@@ -895,9 +900,15 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	yield := newSessionYieldController(yieldState, closers, reporter)
+	member := newMembershipController(membershipMode(opts.Mode, cfg), cfg.GitHub.ParkedScaleSetAuditInterval(),
+		memberSources, reporter)
+	if yield != nil && member != nil {
+		yield.excluded = member.excludes
+	}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
-		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain}
+		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain,
+		membership: member}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1723,7 +1734,7 @@ func (b boundIngester) Ingest(ctx context.Context) error {
 }
 
 func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
-	if b.yield.Yielded() {
+	if b.yield.Yielded() || sourceSuspended(b.source) {
 		// Stale, not fresh: this node observed nothing. Stale, not unavailable:
 		// nothing failed. The detail names the cause so the freshness column is
 		// never the only thing an operator has to interpret.
@@ -1753,6 +1764,26 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 		b.reporter.reportBinding(b.binding, failure)
 	}
 	return changed, err
+}
+
+// membershipMode is the mode the membership ladder runs in on this process.
+// Only the authority audits, and the audit's verdict is the ladder's only
+// evidence, so every other mode runs none -- a watchdog that can never be
+// handed evidence is a green no-op, not a safety net.
+func membershipMode(mode reconcile.Mode, cfg config.Config) membership.Mode {
+	if mode != reconcile.Authority {
+		return membership.Off
+	}
+	return cfg.Membership
+}
+
+// sourceSuspended reports a binding whose session was released on purpose --
+// by ADR 0063's membership ladder, or in the instant between ADR 0047's
+// decision and its publication -- so it is reported as yielded rather than
+// polled into a failure this node caused itself.
+func sourceSuspended(source app.MessageSource) bool {
+	suspendable, ok := source.(interface{ Suspended() bool })
+	return ok && suspendable.Suspended()
 }
 
 // failureReporter turns app.Service's secret-safe failure callback into a
@@ -2152,6 +2183,8 @@ type engineTicker struct {
 	// reporter carries the occupancy warning. A nil reporter publishes the metric
 	// and says nothing, which is what an observe-mode harness wants.
 	reporter *failureReporter
+	// membership is ADR 0063's ladder, nil on a node that declared none.
+	membership *membershipController
 	// yield decides whether this node keeps competing for the jobs GitHub binds
 	// to its scale sets. A nil controller never withdraws, which is every mode
 	// that owns no sessions.
@@ -2264,6 +2297,12 @@ func (e engineTicker) applySessionYield(ctx context.Context, result app.TickResu
 	pressure := result.Host.Pressure
 	facts := sessionYieldFacts{At: result.At, AdmissionAllowed: pressure.AdmissionAllowed,
 		LiveInstances: live, BusyOperations: busy}
+	// The ladder decides before the yield controller reconciles, so an exclusion
+	// and the release it asks for land in the same tick.
+	if e.membership != nil {
+		summary := e.membership.Apply(ctx, e.health.Snapshot(), result.At, e.yield.state.Yielded())
+		e.health.SetMembership(e.membership.metric(summary))
+	}
 	yielded := e.yield.Apply(ctx, facts, pressure.AdmissionReason)
 	bindings, withdrawn := e.yield.Bindings()
 	e.health.SetSessionYield(telemetry.SessionYieldMetric{Yielded: yielded, Reason: pressure.AdmissionReason,

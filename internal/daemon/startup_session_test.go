@@ -231,7 +231,7 @@ func heldSession() error {
 			`failed(status="409 Conflict"): unexpected status code 409 Conflict`))
 }
 
-// ADR 0061 (d): a session another holder still has is a reason to wait, not to
+// ADR 0063 (d): a session another holder still has is a reason to wait, not to
 // stop. The holder is this node's own previous process whose session has not
 // expired yet, or a sibling that adopted the set while this node was away.
 func TestAPendingBindingKeepsRetryingASessionHeldElsewhere(t *testing.T) {

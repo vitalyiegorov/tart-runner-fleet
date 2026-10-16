@@ -17,7 +17,7 @@ import (
 // fakeActionsService answers the official client's whole session handshake --
 // registration token, admin connection, session create -- with sessionStatus
 // on the create, so the error under test is the one the pinned SDK really
-// produces rather than one this package imagines (ADR 0061 spike).
+// produces rather than one this package imagines (ADR 0063 spike).
 func fakeActionsService(t *testing.T, sessionStatus int) *httptest.Server {
 	t.Helper()
 	claims, err := json.Marshal(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})

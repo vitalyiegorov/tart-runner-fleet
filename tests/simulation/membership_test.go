@@ -10,12 +10,12 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// ADR 0061 -- an absent node's work is adopted, a failing node excludes itself
+// ADR 0063 -- an absent node's work is adopted, a failing node excludes itself
 // ---------------------------------------------------------------------------
 //
 // Every other world in this package is ONE node, because ADR 0034 made one node
 // one whole fleet and the properties checked there have no cross-node half.
-// ADR 0061 is the first rule whose subject is the space BETWEEN nodes -- whose
+// ADR 0063 is the first rule whose subject is the space BETWEEN nodes -- whose
 // session a scale set has, and who may run the work bound to it -- so this file
 // models exactly that and nothing else: GitHub's session arbiter, the jobs bound
 // to one owner's scale set, the owner, and the siblings that advertise the same
@@ -24,7 +24,7 @@ import (
 //
 // The world model's one assumption is stated as a parameter rather than
 // hidden: how long GitHub keeps a session alive after its listener stopped
-// polling (`expiry`). ADR 0061's spike could not settle it from code, so every
+// polling (`expiry`). ADR 0063's spike could not settle it from code, so every
 // scenario is swept across several values and the liveness bound is written in
 // terms of it.
 //
@@ -242,7 +242,7 @@ func (w *membershipWorld) ownerTick(t *testing.T, s membershipScenario, now time
 		case membership.Obtained:
 			o.holding = true
 		case membership.Held:
-			// ADR 0061 (d): a held session at startup or on rejoin is not fatal;
+			// ADR 0063 (d): a held session at startup or on rejoin is not fatal;
 			// the binding stays pending and is retried on the next poll.
 			if w.adoptionActive() {
 				w.ownerHeldWhileAdopted++

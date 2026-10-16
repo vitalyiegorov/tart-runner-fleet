@@ -25,7 +25,7 @@ const (
 	ReasonSessionCreateFailed = "session_create_failed"
 	// ReasonSessionHeld marks a session create GitHub refused because another
 	// session already holds the scale set: a previous process of this node
-	// whose session has not expired yet, or -- under ADR 0061 -- a sibling that
+	// whose session has not expired yet, or -- under ADR 0063 -- a sibling that
 	// adopted the set while this node was away. Either way the binding waits
 	// and retries; neither is a reason to stop the node.
 	ReasonSessionHeld = "session_held"
@@ -240,7 +240,7 @@ var heldSessionCreate = regexp.MustCompile(`request POST \S+/runnerscalesets/\d+
 
 // SessionHeld reports that GitHub refused to open a message session because
 // another session holds the scale set. ADR 0034 makes that exclusivity the only
-// cross-node arbiter, and ADR 0061 reads it as "the set's holder is alive":
+// cross-node arbiter, and ADR 0063 reads it as "the set's holder is alive":
 // the reference listener (actions-runner-controller's ghalistener) answers the
 // same 409 by retrying every 30 seconds rather than exiting, because a
 // session whose listener died is released by GitHub on its own.

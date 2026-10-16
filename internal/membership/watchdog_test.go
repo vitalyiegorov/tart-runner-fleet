@@ -201,6 +201,11 @@ func TestSummaryIsTheWorstStageAndListsOnlyBindingsNotServing(t *testing.T) {
 	if got.Bindings[0].Key != (Key{"a", 1}) || got.Bindings[3].Key != set19 {
 		t.Fatalf("rows must be ordered by scope then id: %+v", got.Bindings)
 	}
+	keys := []Key{set20, {Scope: "a", ID: 9}, set19}
+	SortKeys(keys)
+	if keys[0].Scope != "a" || keys[1] != set19 || keys[2] != set20 {
+		t.Fatalf("SortKeys = %v", keys)
+	}
 	if Summarize(map[Key]Binding{set19: {Stage: Healing}, set20: {Stage: Probation}}).State != Healing {
 		t.Fatal("healing outranks probation")
 	}

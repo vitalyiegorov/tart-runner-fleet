@@ -6,6 +6,10 @@ Accepted. The delivery-only queue-lookahead clauses are superseded by ADR 0013.
 The unconditional release-before-open clause is amended below: release failure
 no longer withholds recreation indefinitely.
 
+Amended by [ADR 0063](0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md): a session create GitHub refuses with `409`
+(`session_held`) defers the binding and is retried; it never ends the run and is
+never abandoned.
+
 ## Context
 
 Each configured scope/profile owns one official GitHub Actions Scale Set message

@@ -38,6 +38,12 @@ invariant is now expressible in configuration, checked across nodes wherever mor
 than one is in hand, and answerable by the image itself; the enforcement section
 below records what shipped, what did not, and against what.
 
+Amended 2026-10-16 by [ADR 0063](0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md): §9's "no lost-node reclaim" stays
+true of everything built. ADR 0063 designs -- and does not wire -- sibling
+adoption of an absent owner's set, arbitrated by the session exclusivity this
+record already names as the only cross-node arbiter. No node reads another
+node's state under it.
+
 ## Context
 
 The fleet runs on one Apple-silicon Mac mini (10 cores, 24 GiB). Two more

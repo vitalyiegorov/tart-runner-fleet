@@ -1,4 +1,4 @@
-// Package membership is the pure policy of ADR 0061: what a node owes the fleet
+// Package membership is the pure policy of ADR 0063: what a node owes the fleet
 // when a scale set it serves stops taking work, and -- in adoption.go -- what a
 // sibling may do about a set whose owner has gone.
 //
@@ -15,7 +15,7 @@ import (
 )
 
 // Mode is how a node declares its membership. The zero value is Off: a node
-// that declares nothing runs exactly the code it ran before ADR 0061.
+// that declares nothing runs exactly the code it ran before ADR 0063.
 type Mode string
 
 const (
@@ -115,7 +115,7 @@ const (
 // Policy is the whole ladder. Every bound is derived from the mode and from the
 // audit cadence the node already declares (github.parkedScaleSetAuditMinutes):
 // evidence only arrives once a cadence, so no bound can usefully be shorter,
-// and deriving them adds no knob (ADR 0061, the three questions).
+// and deriving them adds no knob (ADR 0063, the three questions).
 type Policy struct {
 	Mode    Mode
 	Cadence time.Duration
@@ -274,12 +274,19 @@ func Summarize(state map[Key]Binding) Summary {
 			summary.State = binding.Stage
 		}
 	}
-	sort.Slice(summary.Bindings, func(i, j int) bool {
-		a, b := summary.Bindings[i].Key, summary.Bindings[j].Key
-		if a.Scope != b.Scope {
-			return a.Scope < b.Scope
-		}
-		return a.ID < b.ID
-	})
+	sort.Slice(summary.Bindings, func(i, j int) bool { return summary.Bindings[i].Key.less(summary.Bindings[j].Key) })
 	return summary
+}
+
+// less orders keys by scope, then id: the order every published list uses.
+func (k Key) less(other Key) bool {
+	if k.Scope != other.Scope {
+		return k.Scope < other.Scope
+	}
+	return k.ID < other.ID
+}
+
+// SortKeys orders keys the way every published list is ordered.
+func SortKeys(keys []Key) {
+	sort.Slice(keys, func(i, j int) bool { return keys[i].less(keys[j]) })
 }
