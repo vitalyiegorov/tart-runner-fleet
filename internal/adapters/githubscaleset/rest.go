@@ -85,17 +85,26 @@ func (o *Observer) Refresh(ctx context.Context, previous *Snapshot) Observation 
 	return Observation{Freshness: Unavailable, Err: err, Budget: o.budget}
 }
 
-func (o *Observer) fetch(ctx context.Context) (*Snapshot, error) {
+func (o *Observer) fetch(ctx context.Context) (s *Snapshot, err error) {
+	// The budget belongs to this refresh's answers alone: a refresh GitHub never
+	// answered must not replay a window an earlier one reported.
+	o.budget = Budget{}
 	o.touched = make(map[string]struct{}, len(o.cache))
 	defer func() {
-		for key := range o.cache {
-			if _, kept := o.touched[key]; !kept {
-				delete(o.cache, key)
+		// Only a complete refresh proves a page left the inventory. One that
+		// failed part-way keeps the validators of every page it never reached,
+		// or the refresh that hit the exhausted limit would discard exactly the
+		// ETags that make the first refresh after the reset cheap.
+		if err == nil {
+			for key := range o.cache {
+				if _, kept := o.touched[key]; !kept {
+					delete(o.cache, key)
+				}
 			}
 		}
 		o.touched = nil
 	}()
-	s := &Snapshot{at: o.clock.Now(), runs: map[int64]WorkflowRun{}, jobs: map[int64]WorkflowJob{}, runners: map[int64]Runner{}}
+	s = &Snapshot{at: o.clock.Now(), runs: map[int64]WorkflowRun{}, jobs: map[int64]WorkflowJob{}, runners: map[int64]Runner{}}
 	for _, repo := range o.repos {
 		var repoRuns []WorkflowRun
 		for _, status := range activeRunStatuses {
@@ -222,9 +231,9 @@ func (o *Observer) pages(ctx context.Context, path string, target any, consume f
 		if err != nil {
 			return err
 		}
-		if budget := ParseBudget(resp.Header); budget.Observed {
-			o.budget = budget
-		}
+		// Each answer replaces the budget, so a headerless one leaves it
+		// unobserved instead of carrying an older window forward.
+		o.budget = ParseBudget(resp.Header)
 		page := cached
 		switch {
 		case revalidate && resp.StatusCode == http.StatusNotModified:

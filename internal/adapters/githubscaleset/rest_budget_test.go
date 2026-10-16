@@ -190,3 +190,68 @@ func TestObserverBudgetSurvivesErrorsAndStaysUnobservedWithoutHeaders(t *testing
 		}
 	}
 }
+
+// A refresh that fails part-way has not proved any page left the inventory, so
+// the pages it never reached keep their validators. Otherwise the refresh that
+// hits the exhausted limit throws away exactly the ETags that would make the
+// first refresh after the reset cheap.
+func TestObserverKeepsValidatorsWhenARefreshFailsPartWay(t *testing.T) {
+	now := time.Date(2026, 10, 16, 13, 0, 0, 0, time.UTC)
+	failing := ""
+	doer := doerFunc(func(r *http.Request) (*http.Response, error) {
+		key := r.URL.Path + "?" + r.URL.RawQuery
+		if key == failing {
+			return response(http.StatusBadGateway, "down", ""), nil
+		}
+		resp := response(http.StatusOK, `{"workflow_runs":[]}`, "")
+		resp.Header.Set("ETag", `"`+key+`"`)
+		return resp, nil
+	})
+	o, _ := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: doer,
+		Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "t", nil }), Clock: fixedClock(now)})
+	if obs := o.Refresh(context.Background(), nil); obs.Err != nil || len(o.cache) != len(activeRunStatuses) {
+		t.Fatalf("first refresh = %v cached=%d", obs.Err, len(o.cache))
+	}
+	failing = "/repos/o/r/actions/runs?status=" + activeRunStatuses[0] + "&per_page=100"
+	if obs := o.Refresh(context.Background(), nil); obs.Err == nil {
+		t.Fatal("expected the failing page to fail the refresh")
+	}
+	if len(o.cache) != len(activeRunStatuses) {
+		t.Fatalf("a failed refresh pruned validators: %d left of %d", len(o.cache), len(activeRunStatuses))
+	}
+}
+
+// The budget belongs to the latest answer, so an answer without the headers
+// and a refresh that got no answer both leave it unobserved rather than
+// replaying a window GitHub reported earlier.
+func TestObserverBudgetDoesNotOutliveTheResponseThatReportedIt(t *testing.T) {
+	now := time.Date(2026, 10, 16, 13, 0, 0, 0, time.UTC)
+	headers, down := true, false
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		if down {
+			return nil, errors.New("down")
+		}
+		resp := response(http.StatusOK, `{"workflow_runs":[]}`, "")
+		if headers {
+			resp.Header.Set("X-RateLimit-Limit", "5000")
+			resp.Header.Set("X-RateLimit-Remaining", "3")
+			resp.Header.Set("X-RateLimit-Reset", strconv.FormatInt(now.Add(time.Hour).Unix(), 10))
+		}
+		return resp, nil
+	})
+	o, _ := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{{Owner: "o", Name: "r"}}, HTTP: doer,
+		Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "t", nil }), Clock: fixedClock(now)})
+	if obs := o.Refresh(context.Background(), nil); !obs.Budget.Scarce() {
+		t.Fatalf("first refresh budget = %+v", obs.Budget)
+	}
+	headers = false
+	if obs := o.Refresh(context.Background(), nil); obs.Budget.Observed {
+		t.Fatalf("headerless answers replayed an old budget: %+v", obs.Budget)
+	}
+	headers, down = true, false
+	o.Refresh(context.Background(), nil)
+	down = true
+	if obs := o.Refresh(context.Background(), nil); obs.Err == nil || obs.Budget.Observed {
+		t.Fatalf("an unanswered refresh replayed an old budget: %+v err=%v", obs.Budget, obs.Err)
+	}
+}
