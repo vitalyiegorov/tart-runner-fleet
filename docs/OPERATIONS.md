@@ -176,6 +176,17 @@ existing official scale-set stream and delivery lookahead. With the field
 true, REST freshness becomes readiness-critical and configuration validation
 requires truthful capacity.
 
+The observer spends from the installation's primary rate budget (5,000 requests
+an hour for an App installed on a user account), and every node bound to the
+same installation spends from the same window. It revalidates every page with
+`If-None-Match`, so an unchanged page costs nothing, and it reads the
+`X-RateLimit-*` headers on every answer: when the remaining budget falls into
+the reserved tenth, or GitHub has already refused, the next refresh waits for
+the window reset instead of the poll interval (never longer than an hour). The
+inventory stays stale, never empty, while it waits, and the observation
+`detail` says `rate_limited`
+([ADR 0065](adr/0065-rest-inventory-paces-to-the-installation-budget.md)).
+
 Set every scale set's `maxCapacity` to its truthful executable maximum for the
 scope: the smaller of the profile/host capacity and the sum of the scope's
 repository `maxActive` limits. Under the default 8-CPU/16-GiB envelope and one
@@ -1338,10 +1349,10 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. A refusal counts on its own clock: after as many refusals as `maxConsecutiveFailures` (default 5) the session is discarded WITHOUT the release and a replacement opened, however many healthy polls came between. Before issue #292 a healthy poll reset the count, so a session GitHub would not delete was kept forever — the mini logged this 20–35 times an hour for days. |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
 | `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
-| `rate_limited` | GitHub answered with its primary or a secondary rate limit. | None if occasional. A count that climbs across hours means this node polls too aggressively — widen the poll interval before GitHub widens it for you. |
+| `rate_limited` | GitHub answered with its primary or a secondary rate limit. On a `github-rest-*` observation the inventory is already waiting for the window reset and keeps the last snapshot stale. | None if occasional. A count that climbs across hours means the nodes sharing this installation poll too aggressively — widen the poll interval before GitHub widens it for you, or give a busy scope its own installation. |
 | `server_error` | GitHub answered 5xx: the fault is GitHub's own, not this node's network or credentials. | Wait it out; escalate only if it persists across regions or outlives GitHub's status page. |
 | `demand_commit_conflict` | The durable store refused a broker message. This is not a network condition and redelivering the same message cannot clear it: the fleet holds state the message contradicts. | Read the `binding ingest failure` warning for the scope, profile, and scale set, then see [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md). A restarted message-id sequence resolves itself on the next colliding delivery; anything else is a genuine durable contradiction and needs the demand rows read. |
-| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out. | Check API reachability and rate limits. |
+| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out for a reason that is neither a rate limit nor a GitHub 5xx (those carry `rate_limited` and `server_error` on the same `github-rest-*` observation). | Check API reachability and the App's Actions permission. |
 | `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |
 
 The rate-limited `component loop failure` warning now carries the same
