@@ -866,7 +866,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
 					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
-					observation: "github-rest-" + scope, now: d.now})
+					auditInterval: cfg.GitHub.ParkedScaleSetAuditInterval(),
+					observation:   "github-rest-" + scope, now: d.now})
 			}
 		}
 	}
@@ -1609,15 +1610,16 @@ func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleS
 }
 
 type restQueueIngester struct {
-	coordinator app.DemandCoordinator
-	bindings    []app.Binding
-	observer    queueObserver
-	interval    time.Duration
-	health      *telemetry.Health
-	observation string
-	now         func() time.Time
-	previous    *githubscaleset.Snapshot
-	next        time.Time
+	auditInterval time.Duration
+	coordinator   app.DemandCoordinator
+	bindings      []app.Binding
+	observer      queueObserver
+	interval      time.Duration
+	health        *telemetry.Health
+	observation   string
+	now           func() time.Time
+	previous      *githubscaleset.Snapshot
+	next          time.Time
 }
 
 type queueObserver interface {
@@ -1657,7 +1659,9 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		return false, observation.Err
 	}
 	r.previous = observation.Snapshot
-	changed, err := r.coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	coordinator := r.coordinator
+	coordinator.ForeignSelectors = r.foreignSelectors(now)
+	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
 	if r.health != nil && r.observation != "" {
 		freshness, detail := telemetry.ObservationFresh, ""
 		if err != nil {
@@ -1666,6 +1670,27 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
 	return changed, err
+}
+
+// foreignSelectors reuses the completed audit's scope-qualified names. Neither
+// stale metadata nor a failed REST observation is permission to ignore a job.
+func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSetSelector {
+	if r.health == nil {
+		return nil
+	}
+	snapshot := r.health.Snapshot()
+	maxAge := 2 * max(r.auditInterval, r.interval)
+	fresh := func(at time.Time) bool { return !at.IsZero() && !at.After(now) && now.Sub(at) <= maxAge }
+	if !fresh(snapshot.ParkedScaleSetsAuditedAt) {
+		return nil
+	}
+	var selectors []app.ForeignScaleSetSelector
+	for _, row := range snapshot.ParkedScaleSets {
+		if fresh(row.ObservedAt) {
+			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name})
+		}
+	}
+	return selectors
 }
 
 func bindingsByScope(bindings []app.Binding) map[string][]app.Binding {
