@@ -176,6 +176,17 @@ existing official scale-set stream and delivery lookahead. With the field
 true, REST freshness becomes readiness-critical and configuration validation
 requires truthful capacity.
 
+The observer spends from the installation's primary rate budget (5,000 requests
+an hour for an App installed on a user account), and every node bound to the
+same installation spends from the same window. It revalidates every page with
+`If-None-Match`, so an unchanged page costs nothing, and it reads the
+`X-RateLimit-*` headers on every answer: when the remaining budget falls into
+the reserved tenth, or GitHub has already refused, the next refresh waits for
+the window reset instead of the poll interval (never longer than an hour). The
+inventory stays stale, never empty, while it waits, and the observation
+`detail` says `rate_limited`
+([ADR 0065](adr/0065-rest-inventory-paces-to-the-installation-budget.md)).
+
 Set every scale set's `maxCapacity` to its truthful executable maximum for the
 scope: the smaller of the profile/host capacity and the sum of the scope's
 repository `maxActive` limits. Under the default 8-CPU/16-GiB envelope and one
@@ -1339,10 +1350,10 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
 | `session_held` | GitHub refused the session with `409`: another session still holds the scale set. Usually this node's own previous process, whose session GitHub has not expired yet (after a crash, a restart, or a laptop waking). The binding waits and retries each poll; the node keeps running ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). | None if it clears within minutes. If it persists, another daemon is configured with this scale set: run `fleet config validate` over every node's configuration (ADR 0034 §2). |
 | `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
-| `rate_limited` | GitHub answered with its primary or a secondary rate limit. | None if occasional. A count that climbs across hours means this node polls too aggressively — widen the poll interval before GitHub widens it for you. |
+| `rate_limited` | GitHub answered with its primary or a secondary rate limit. On a `github-rest-*` observation the inventory is already waiting for the window reset and keeps the last snapshot stale. | None if occasional. A count that climbs across hours means the nodes sharing this installation poll too aggressively — widen the poll interval before GitHub widens it for you, or give a busy scope its own installation. |
 | `server_error` | GitHub answered 5xx: the fault is GitHub's own, not this node's network or credentials. | Wait it out; escalate only if it persists across regions or outlives GitHub's status page. |
 | `demand_commit_conflict` | The durable store refused a broker message. This is not a network condition and redelivering the same message cannot clear it: the fleet holds state the message contradicts. | Read the `binding ingest failure` warning for the scope, profile, and scale set, then see [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md). A restarted message-id sequence resolves itself on the next colliding delivery; anything else is a genuine durable contradiction and needs the demand rows read. |
-| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out. | Check API reachability and rate limits. |
+| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out for a reason that is neither a rate limit nor a GitHub 5xx (those carry `rate_limited` and `server_error` on the same `github-rest-*` observation). | Check API reachability and the App's Actions permission. |
 | `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |
 
 The rate-limited `component loop failure` warning now carries the same
@@ -1735,3 +1746,15 @@ No extra monitor, restart or cleanup script is needed. Public failure codes stay
 `stop`/`delete`; `automatic cleanup resumed` identifies the old operation and
 instance without logging its payload. Legacy stop rows restart conservatively
 rather than counting old GitHub/guard failures as stop attempts.
+
+### A queue observation fails on a sibling's explicit selector
+
+`queue_reconcile_failed` means REST data was obtained but could not safely be
+applied. It is different from a failed network refresh. If a queued job selects
+another node's exact scale-set name, compare that selector with fresh scope-
+qualified audit metadata before diagnosing the local runner as absent. Under
+ADR 0064, fresh proof of a foreign selector excludes only that job from local
+inventory. Missing or expired proof remains unavailable; unknown labels remain
+errors. Do not add a sibling's selector to this node or remove an intentional
+workflow selector to make readiness green. This classification neither moves
+existing assignments nor grants authority over a foreign scale set.

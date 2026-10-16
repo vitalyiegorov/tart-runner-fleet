@@ -868,3 +868,27 @@ expresses.
 
 Node C still needs a macOS image, and keeping every node's base image current is
 per-node operator work until measurement says otherwise.
+
+
+## Amendment 2026-10-16: a container cannot borrow host swap (issue #369)
+
+The Podman adapter set `--memory` without `--memory-swap`. On Omarchy, each
+8 GiB runner consequently received a 16 GiB combined RAM-plus-swap allowance.
+Live inspection confirmed three such runners while active swap-outs blocked
+admission. This establishes an isolation defect; it does not attribute every
+historical queued job or heartbeat failure to swap.
+
+Set the combined limit equal to the existing profile memory vector on every
+new container. This gives cgroup v2 `memory.swap.max=0`, without a new policy
+knob, scheduler pass, configuration field, or API change. Keep the host pressure
+admission guard intact. Existing containers keep their limits until normal job
+completion; deploying the fix does not change or stop them. A workload can now
+hit its own cgroup OOM limit rather than borrowing uncharged host swap.
+
+The command-vector regression fails without the flag. The real rootless Podman
+acceptance test reads the effective kernel limit and fails on the former
+2 GiB allowance of a 2 GiB test container, then passes only at zero. This is an
+executor-effect correction: deterministic scheduling still charges exactly the
+same memory vector, and no simulation oracle or world state is changed. Kernel
+resource enforcement is verified at the integration boundary rather than
+inferred from simulation. Observe/shadow authority limits remain unchanged.

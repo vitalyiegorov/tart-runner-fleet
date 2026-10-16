@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -109,6 +112,50 @@ type Observation struct {
 	Freshness Freshness
 	Snapshot  *Snapshot
 	Err       error
+	// Budget is the installation's primary rate budget as the latest GitHub
+	// response reported it, on success and on failure alike. It is unobserved
+	// when no response carried the headers; an unobserved budget is never an
+	// empty one.
+	Budget Budget
+}
+
+// Budget is the primary rate limit window of the installation a refresh spent
+// from. GitHub reports it on every response, so a refresh learns where the
+// shared window stands even when another node spent it.
+type Budget struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
+	Observed  bool
+}
+
+// budgetReserveDivisor keeps one tenth of the window for everything else that
+// spends from the same installation: session creation, JIT credentials, the
+// parked-set audit, and the sibling nodes. Below the reserve the REST inventory
+// waits for the reset rather than taking the last of it.
+const budgetReserveDivisor = 10
+
+// Scarce reports whether an observed budget has fallen into its reserve. An
+// unobserved budget is not scarce: nothing is known, and the caller keeps its
+// ordinary pace rather than inventing a limit.
+func (b Budget) Scarce() bool {
+	return b.Observed && b.Remaining <= b.Limit/budgetReserveDivisor
+}
+
+// ParseBudget reads GitHub's primary rate-limit headers. The budget is observed
+// only when both the remaining count and the reset instant parse; a limit
+// header is optional because the reserve degrades to zero without it.
+func ParseBudget(header http.Header) Budget {
+	remaining, err := strconv.Atoi(strings.TrimSpace(header.Get("X-RateLimit-Remaining")))
+	if err != nil || remaining < 0 {
+		return Budget{}
+	}
+	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-RateLimit-Reset")), 10, 64)
+	if err != nil || reset <= 0 {
+		return Budget{}
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(header.Get("X-RateLimit-Limit")))
+	return Budget{Limit: max(limit, 0), Remaining: remaining, Reset: time.Unix(reset, 0).UTC(), Observed: true}
 }
 
 type TokenSource interface {

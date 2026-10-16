@@ -464,6 +464,10 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 	args := []string{"create", "--name", spec.Name,
 		"--cpus", strconv.Itoa(spec.CPU),
 		"--memory", strconv.Itoa(spec.MemoryMB) + "m",
+		// Podman otherwise grants another full memory vector in host swap.
+		// Equal RAM and combined RAM+swap limits forbid that uncharged loan
+		// (issue #369); a runaway job must not stall every queue on the host.
+		"--memory-swap", strconv.Itoa(spec.MemoryMB) + "m",
 		// /dev/shm is memory, and it is memory the vector already pays for: a
 		// tmpfs page is charged to the container's own cgroup, so sizing it from
 		// the profile neither lends the job memory it was not granted nor takes

@@ -888,7 +888,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
 					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
-					observation: "github-rest-" + scope, now: d.now})
+					auditInterval: cfg.GitHub.ParkedScaleSetAuditInterval(),
+					observation:   "github-rest-" + scope, now: d.now})
 			}
 		}
 	}
@@ -1637,15 +1638,16 @@ func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleS
 }
 
 type restQueueIngester struct {
-	coordinator app.DemandCoordinator
-	bindings    []app.Binding
-	observer    queueObserver
-	interval    time.Duration
-	health      *telemetry.Health
-	observation string
-	now         func() time.Time
-	previous    *githubscaleset.Snapshot
-	next        time.Time
+	auditInterval time.Duration
+	coordinator   app.DemandCoordinator
+	bindings      []app.Binding
+	observer      queueObserver
+	interval      time.Duration
+	health        *telemetry.Health
+	observation   string
+	now           func() time.Time
+	previous      *githubscaleset.Snapshot
+	next          time.Time
 }
 
 type queueObserver interface {
@@ -1672,20 +1674,23 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}
 		now = r.now().UTC()
 	}
-	r.next = now.Add(r.interval)
 	observation := r.observer.Refresh(ctx, r.previous)
+	r.next = now.Add(r.pace(now, observation))
 	if observation.Err != nil {
+		reason := restObservationReason(observation)
 		if r.health != nil && r.observation != "" {
-			freshness, detail := telemetry.ObservationUnavailable, githubscaleset.ReasonQueueObservationFailed
+			freshness := telemetry.ObservationUnavailable
 			if observation.Freshness == githubscaleset.Stale {
-				freshness, detail = telemetry.ObservationStale, githubscaleset.ReasonQueueObservationStale
+				freshness = telemetry.ObservationStale
 			}
-			_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
+			_ = r.health.RecordObservationDetail(r.observation, freshness, reason)
 		}
-		return false, observation.Err
+		return false, &githubscaleset.SessionFailure{Reason: reason, Cause: observation.Err}
 	}
 	r.previous = observation.Snapshot
-	changed, err := r.coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	coordinator := r.coordinator
+	coordinator.ForeignSelectors = r.foreignSelectors(now)
+	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
 	if r.health != nil && r.observation != "" {
 		freshness, detail := telemetry.ObservationFresh, ""
 		if err != nil {
@@ -1694,6 +1699,69 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
 	return changed, err
+}
+
+// foreignSelectors reuses the completed audit's scope-qualified names. Neither
+// stale metadata nor a failed REST observation is permission to ignore a job.
+func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSetSelector {
+	if r.health == nil {
+		return nil
+	}
+	snapshot := r.health.Snapshot()
+	maxAge := 2 * max(r.auditInterval, r.interval)
+	fresh := func(at time.Time) bool { return !at.IsZero() && !at.After(now) && now.Sub(at) <= maxAge }
+	if !fresh(snapshot.ParkedScaleSetsAuditedAt) {
+		return nil
+	}
+	var selectors []app.ForeignScaleSetSelector
+	for _, row := range snapshot.ParkedScaleSets {
+		if fresh(row.ObservedAt) {
+			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name})
+		}
+	}
+	return selectors
+}
+
+// restBudgetDeferralMax bounds how long one refresh may wait for a rate window
+// to reset. GitHub's window is an hour, so a longer horizon is a clock defect,
+// not a budget.
+const restBudgetDeferralMax = time.Hour
+
+// pace returns the delay before the next refresh. The ordinary interval holds
+// unless the installation budget is scarce or GitHub has already refused: then
+// the refresh waits for the window reset, so the two Mac nodes sharing one
+// installation stop spending it by ~:45 of every hour and losing the inventory
+// for the rest (issue #377). An elapsed reset, or a limit with no horizon,
+// defers nothing: the next poll is the only way to learn the new window.
+func (r *restQueueIngester) pace(now time.Time, observation githubscaleset.Observation) time.Duration {
+	deferral := time.Duration(0)
+	if observation.Budget.Scarce() {
+		deferral = observation.Budget.Reset.Sub(now)
+	}
+	var api *githubscaleset.APIError
+	if errors.As(observation.Err, &api) && api.Kind == githubscaleset.RateLimited {
+		deferral = max(deferral, api.RetryAfter)
+	}
+	return max(r.interval, min(deferral, restBudgetDeferralMax))
+}
+
+// restObservationReason reduces a failed REST refresh to the bounded vocabulary.
+// A rate limit and a server error already have names the session path uses;
+// anything else is the observation failing or ageing out, as before.
+func restObservationReason(observation githubscaleset.Observation) string {
+	var api *githubscaleset.APIError
+	if errors.As(observation.Err, &api) {
+		switch api.Kind {
+		case githubscaleset.RateLimited:
+			return githubscaleset.ReasonRateLimited
+		case githubscaleset.Server:
+			return githubscaleset.ReasonServerError
+		}
+	}
+	if observation.Freshness == githubscaleset.Stale {
+		return githubscaleset.ReasonQueueObservationStale
+	}
+	return githubscaleset.ReasonQueueObservationFailed
 }
 
 func bindingsByScope(bindings []app.Binding) map[string][]app.Binding {

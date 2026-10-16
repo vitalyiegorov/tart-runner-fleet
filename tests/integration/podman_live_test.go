@@ -268,6 +268,19 @@ func TestPodmanSizesSharedMemoryFromTheVector(t *testing.T) {
 		t.Fatalf("/dev/shm mounted as %q, want a tmpfs with %s — a 2048 MiB profile gets a 512 MiB /dev/shm",
 			strings.TrimSpace(string(mounted)), want)
 	}
+
+	// Issue #369: the default swap allowance is another full memory vector,
+	// which lets one job stall every scope on the host. Read the kernel's
+	// effective limit rather than trusting the command-line spelling.
+	swap, err := exec.CommandContext(ctx, "podman", "exec", liveInstance,
+		"cat", "/sys/fs/cgroup/memory.swap.max").Output()
+	if err != nil {
+		t.Fatalf("read effective cgroup swap limit: %v", err)
+	}
+	if got := strings.TrimSpace(string(swap)); got != "0" {
+		t.Fatalf("memory.swap.max = %q, want 0: a job must not borrow host swap outside its memory vector", got)
+	}
+
 }
 
 // TestPodmanGrantsKvmOnlyToTheNamedProfile is the ADR 0034 device rule against a
