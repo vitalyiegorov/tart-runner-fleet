@@ -67,6 +67,10 @@ type Policy struct {
 	// binds jobs to, which decides whether a blocked node withholds a sibling's
 	// work (ADR 0047).
 	SessionYield PolicySessionYield `json:"sessionYield"`
+	// Membership is the node's declared membership mode (ADR 0063): empty runs
+	// no watchdog, `stationary` and `roaming` run the ladder their mode derives.
+	// It decides whether this node releases a wedged set's session on its own.
+	Membership string `json:"membership"`
 	// UpdateDrain is when this node refuses admission on purpose to reach a
 	// pending generation (ADR 0048) — a node admitting nothing for a reason no
 	// other node shares.
@@ -233,6 +237,7 @@ func ProjectPolicy(cfg Config) Policy {
 		SessionYield: PolicySessionYield{Enabled: cfg.SessionYield.Enabled,
 			BlockedForSeconds: int(cfg.SessionYield.BlockedFor.Seconds()),
 			HealthyForSeconds: int(cfg.SessionYield.HealthyFor.Seconds())},
+		Membership: string(cfg.Membership),
 		UpdateDrain: PolicyUpdateDrain{Enabled: cfg.UpdateDrain.Enabled,
 			PendingForSeconds: int(cfg.UpdateDrain.PendingFor.Seconds()),
 			MaxWaitSeconds:    int(cfg.UpdateDrain.MaxWait.Seconds()),

@@ -2,6 +2,7 @@ package githubscaleset
 
 import (
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -22,6 +23,12 @@ const (
 	// ReasonSessionCreateFailed marks a binding left without a usable session
 	// because the replacement could not be opened.
 	ReasonSessionCreateFailed = "session_create_failed"
+	// ReasonSessionHeld marks a session create GitHub refused because another
+	// session already holds the scale set: a previous process of this node
+	// whose session has not expired yet, or -- under ADR 0063 -- a sibling that
+	// adopted the set while this node was away. Either way the binding waits
+	// and retries; neither is a reason to stop the node.
+	ReasonSessionHeld = "session_held"
 	// ReasonRecreatedAfterFailures marks the bounded escalation: the failure
 	// could not be proven terminal, but the session exceeded its consecutive
 	// failure count or failure window and was discarded anyway.
@@ -116,7 +123,7 @@ func phaseFor(reason string) string {
 	switch reason {
 	case ReasonSessionReleaseFailed:
 		return PhaseRelease
-	case ReasonSessionCreateFailed:
+	case ReasonSessionCreateFailed, ReasonSessionHeld:
 		return PhaseCreate
 	case ReasonQueueObservationFailed, ReasonQueueObservationStale, ReasonQueueReconcileFailed:
 		return PhaseObserve
@@ -153,7 +160,7 @@ func DescribeIngestFailure(err error) IngestFailure {
 func ValidFailureReason(reason string) bool {
 	switch reason {
 	case ReasonSessionExpired, ReasonSessionReleaseFailed, ReasonSessionCreateFailed,
-		ReasonRecreatedAfterFailures, ReasonMessagePollFailed, ReasonRateLimited,
+		ReasonSessionHeld, ReasonRecreatedAfterFailures, ReasonMessagePollFailed, ReasonRateLimited,
 		ReasonServerError, ReasonQueueObservationFailed,
 		ReasonQueueObservationStale, ReasonQueueReconcileFailed, ReasonDemandCommitConflict:
 		return true
@@ -219,6 +226,25 @@ func SessionTerminal(err error) bool {
 		return false
 	}
 	return api.Kind == NotFound || api.Kind == Conflict || api.Kind == Authentication
+}
+
+// heldSessionCreate is how the pinned official client renders a session create
+// GitHub answered with 409. The client exposes no typed status -- every non-2xx
+// becomes a wrapped string built by its newRequestResponseError -- so the only
+// observation available is that rendering, anchored to the session endpoint so
+// a 409 from any other call in the handshake can never match.
+// sessionheld_test.go drives the real client against a fake actions service, so
+// an SDK upgrade that changes the rendering fails a test instead of silently
+// turning a held session back into a fatal startup error.
+var heldSessionCreate = regexp.MustCompile(`request POST \S+/runnerscalesets/\d+/sessions\S* failed\(status="409 `)
+
+// SessionHeld reports that GitHub refused to open a message session because
+// another session holds the scale set. ADR 0034 makes that exclusivity the only
+// cross-node arbiter. A conflict proves only that GitHub still holds a session,
+// not that its owner is alive: a departed owner may leave a lingering session.
+// The reference listener answers the same 409 by waiting rather than exiting.
+func SessionHeld(err error) bool {
+	return err != nil && heldSessionCreate.MatchString(err.Error())
 }
 
 // IngestFailureDetail reduces any ingest failure to one closed-vocabulary

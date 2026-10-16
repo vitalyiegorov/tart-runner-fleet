@@ -68,6 +68,15 @@ flowchart LR
   waits
   ([ADR 0057](docs/adr/0057-a-scope-that-holds-a-slot-yields-the-next-one.md)).
 
+- **A node that stops taking work repairs itself, then steps aside.** On a node
+  that declares `membership` (`stationary`, or `roaming` for a laptop), a scale
+  set GitHub has stopped delivering to has its session recycled a bounded number
+  of times. If that does not restore delivery, the node releases that one set's
+  session so GitHub binds new jobs to a sibling advertising the same labels,
+  and the set rejoins on probation later. Adopting an absent node's
+  already-bound jobs is designed but not built until GitHub's behaviour is
+  measured ([ADR 0063](docs/adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)).
+
 ## Quickstart
 
 Prerequisites: Apple-silicon macOS with Tart at `/opt/homebrew/bin/tart`; an

@@ -100,6 +100,14 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 		fmt.Fprintf(output, "\nSESSIONS WITHDRAWN\n%d of %d scale-set sessions released (%s); GitHub binds new jobs elsewhere\n",
 			yield.Withdrawn, yield.Bindings, reason)
 	}
+	// A set the membership ladder took out of service prints above the queues
+	// for the same reason a withdrawn node does (ADR 0063).
+	if member := status.Data.Membership; member != nil && len(member.Bindings) > 0 {
+		fmt.Fprintf(output, "\nMEMBERSHIP %s (%s)\n", strings.ToUpper(member.State), member.Mode)
+		for _, row := range member.Bindings {
+			fmt.Fprintf(output, "%s/%d  %s\n", row.Scope, row.ScaleSetID, row.Stage)
+		}
+	}
 	fmt.Fprintln(output, "\nQUEUES")
 	renderQueues(output, status.Data.Queues)
 	fmt.Fprintln(output, "\nINSTANCES")

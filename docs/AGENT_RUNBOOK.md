@@ -206,6 +206,31 @@ sibling node may be serving the set, and deleting it takes its assigned jobs
 with it (ADR 0054). The jobs on the recreated set are lost too and must be
 re-run.
 
+## A scale set this node excluded on purpose
+
+On a node that declares `membership` ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)), a wedged
+set is healed, then **excluded**: its session is released so GitHub sends new
+jobs to a sibling advertising the same labels. Read it from the versioned
+document, never from the queues, which look idle either way:
+
+```sh
+"$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.membership, .data.membershipCheck'
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json | jq '.checks[] | select(.name == "membership")'
+```
+
+`membership` absent means the node declared none, or the daemon predates it.
+Treat that as unknown, never as healthy. `state` is the worst stage of any
+bound set. `bindings[]` lists only the sets that are not serving. An excluded
+set rejoins by itself, so do not resume it by hand. If it keeps failing
+probation, follow the stranded-set procedure above (`fleet scale-sets
+recreate`).
+
+`session_held` on an observation means GitHub refused a session because
+another session still holds the set. That is usually this node's own previous
+process after a restart or a laptop waking, and the binding retries each poll.
+It is not a reason to restart anything. If it lasts more than a few minutes,
+check that no second daemon is configured with that scale set.
+
 ## Validate portable MacBook Linux overflow
 
 Issue #358 and [ADR 0060](adr/0060-portable-linux-overflow.md) start with an

@@ -15,6 +15,11 @@ does not anticipate the hub ADR still owed by
 answers a narrower question ADR 0034 left open: what a node owes the fleet when
 it owns a scale set it cannot currently serve.
 
+Amended 2026-10-16 by [ADR 0063](0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md): withdrawal may be one binding wide.
+A node whose set GitHub stopped delivering to, and whose bounded session heals
+did not restore delivery, releases that set's session and keeps the rest
+(opt-in, `membership`).
+
 ## Context
 
 GitHub binds a queued job to exactly one runner scale set at queue time, and

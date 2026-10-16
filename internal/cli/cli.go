@@ -969,6 +969,23 @@ func sessionYieldDetail(status adminapi.Status, check adminapi.Check) string {
 	return "holding its scale-set sessions"
 }
 
+// membershipDetail says where this node stands under ADR 0063 whichever way the
+// check reads, because a set the node excluded on purpose and a set nobody is
+// offering work to look identical from the queues.
+func membershipDetail(status adminapi.Status, check adminapi.Check) string {
+	if !check.OK {
+		return joinReasons(check)
+	}
+	member := status.Membership
+	if member == nil {
+		return "no membership declared, or not reported by this daemon"
+	}
+	if len(check.Reasons) == 0 {
+		return member.Mode + ": every bound scale set is serving"
+	}
+	return member.Mode + ", " + member.State + ": " + joinReasons(check)
+}
+
 func guestConsoleDetail(status adminapi.Status, check adminapi.Check) string {
 	if !check.OK {
 		return joinReasons(check)
@@ -1109,6 +1126,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	runners := status.Data.EffectiveRunnerVersionCheck()
 	console := status.Data.EffectiveGuestConsoleCheck()
 	yield := status.Data.EffectiveSessionYieldCheck()
+	member := status.Data.EffectiveMembershipCheck()
 	admission := status.Data.EffectiveAdmissionCheck()
 	ingest := status.Data.EffectiveIngestCheck()
 	parked := status.Data.EffectiveParkedScaleSetCheck()
@@ -1180,6 +1198,9 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// indistinguishable from a healthy idle one for the eleven hours of #292,
 		// so it says so here whichever way it reads.
 		{Name: "session yield", OK: yield.OK, Detail: sessionYieldDetail(status.Data, yield)},
+		// A scale set this node excluded is the same silence as a withdrawn node,
+		// one binding wide (ADR 0063), so it is said here whichever way it reads.
+		{Name: "membership", OK: member.OK, Detail: membershipDetail(status.Data, member)},
 		// A node draining toward its own update is healthy and admitting nothing.
 		// Said plainly here, because an empty queue on a healthy host is exactly
 		// what a fault looks like (#230).

@@ -1348,6 +1348,7 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `recreated_after_failures` | The failure could not be classified, so the bounded escalation discarded the session. | None, unless it repeats — then treat it as a broker or credential fault. |
 | `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. A refusal counts on its own clock: after as many refusals as `maxConsecutiveFailures` (default 5) the session is discarded WITHOUT the release and a replacement opened, however many healthy polls came between. Before issue #292 a healthy poll reset the count, so a session GitHub would not delete was kept forever — the mini logged this 20–35 times an hour for days. |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
+| `session_held` | GitHub refused the session with `409`: another session still holds the scale set. Usually this node's own previous process, whose session GitHub has not expired yet (after a crash, a restart, or a laptop waking). The binding waits and retries each poll; the node keeps running ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). | None if it clears within minutes. If it persists, another daemon is configured with this scale set: run `fleet config validate` over every node's configuration (ADR 0034 §2). |
 | `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
 | `rate_limited` | GitHub answered with its primary or a secondary rate limit. On a `github-rest-*` observation the inventory is already waiting for the window reset and keeps the last snapshot stale. | None if occasional. A count that climbs across hours means the nodes sharing this installation poll too aggressively — widen the poll interval before GitHub widens it for you, or give a busy scope its own installation. |
 | `server_error` | GitHub answered 5xx: the fault is GitHub's own, not this node's network or credentials. | Wait it out; escalate only if it persists across regions or outlives GitHub's status page. |
@@ -1564,6 +1565,46 @@ need a cancel and re-run. Withdrawal prevents a backlog; it does not drain one.
 and `sessionYieldDisabled: true` turns the behaviour off for a node that should
 hold its sessions regardless. All three are omitted from a rewritten file while
 they hold the defaults.
+
+### A scale set the membership ladder excluded
+
+Only on a node whose `fleet.json` declares `"membership": "stationary"` or
+`"membership": "roaming"` ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). A node that declares
+nothing runs no ladder and none of this applies.
+
+The ladder reads the authority's own scale-set audit. A set the audit judges
+**wedged** (the `strandedScaleSets` verdict of ADR 0056: GitHub holds work for
+it, no runner is registered, this node holds no instance, and its own queue for
+the set is empty) climbs one rung per audit:
+
+| Stage | What the node did | What you see |
+| --- | --- | --- |
+| `healing` | Closed and reopened that one set's session. Stationary nodes allow 2 attempts, roaming nodes 1. | `fleet doctor`'s `membership` row passes and names the attempt. |
+| `excluded` | Released that set's session, so GitHub binds new jobs to a sibling advertising the same labels. The node's other sets keep serving. | `MEMBERSHIP EXCLUDED` above the queues. The `membership` row FAILS. `fleet_membership_scale_sets{stage="excluded"}` is 1. The binding's observation reads `stale` / `session_yielded`. |
+| `probation` | Reopened the session once the exclusion elapsed. The next audit decides. | The `membership` row passes and says `probation`. |
+
+An exclusion lasts 4 audit cadences on a stationary node and 2 on a roaming
+one. Each consecutive exclusion doubles it, up to 16 cadences. With the
+default 15-minute audit that is 1 h (stationary) or 30 min (roaming), at most
+4 h. An exclusion ends on elapsed time alone, even without a fresh audit, and
+moves the set to `probation`. An audit outage never holds a set out, but stale
+or missing evidence freezes every audit-judged step of the ladder.
+
+Jobs GitHub bound to the set before it was excluded do not move (ADR 0047's
+measurement). The ladder stops new work from binding there; it does not drain
+what is already bound. Those jobs need a cancel and re-run, exactly as before.
+
+The remedy for a set that keeps failing probation is unchanged. Recreate it
+with `fleet scale-sets recreate` (ADR 0056) and restart the daemon. The ladder
+never deletes a GitHub object. A restarted daemon starts every set back at
+`serving`, and a set that is still wedged climbs the ladder again within a few
+audits.
+
+To opt in, add `"membership": "stationary"` (or `"roaming"` for a laptop) to
+the node's `fleet.json`. It requires `github.scopes` and a non-zero
+`github.parkedScaleSetAuditMinutes`, because the audit is the ladder's only
+evidence, and `fleet config validate` refuses it without them. It takes effect
+only in authority mode.
 
 ### A breached queue SLO while the host still has free capacity
 

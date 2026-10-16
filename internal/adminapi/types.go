@@ -94,6 +94,12 @@ type Status struct {
 	// none of it, which is why EffectiveSessionYieldCheck exists.
 	SessionYield      *SessionYield `json:"sessionYield,omitempty"`
 	SessionYieldCheck *Check        `json:"sessionYieldCheck,omitempty"`
+	// Membership is an additive fleet.v1 field (ADR 0063): the node's declared
+	// membership mode, the worst stage of any scale set it serves, and the sets
+	// that are not serving. Absent on a node that declared no membership and on
+	// a daemon that predates it, which is why EffectiveMembershipCheck exists.
+	Membership      *Membership `json:"membership,omitempty"`
+	MembershipCheck *Check      `json:"membershipCheck,omitempty"`
 	// AdmissionCheck is an additive fleet.v1 field: whether this node is taking
 	// work at all, and which guardrail refused it when it is not (issue #286).
 	// Absent from a daemon that predates it, which is why
@@ -401,6 +407,16 @@ func (s Status) EffectiveSessionYieldCheck() Check {
 	return *s.SessionYieldCheck
 }
 
+// EffectiveMembershipCheck reads the membership check an older daemon does not
+// publish. Absence is a pass: a controller that runs no watchdog has excluded
+// nothing.
+func (s Status) EffectiveMembershipCheck() Check {
+	if s.MembershipCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.MembershipCheck
+}
+
 // EffectiveUpdateDrainCheck reads the drain check an older daemon does not
 // publish. Absence is a pass: a controller that cannot drain has not.
 func (s Status) EffectiveUpdateDrainCheck() Check {
@@ -430,6 +446,26 @@ type SessionYield struct {
 	Since     time.Time `json:"since,omitzero"`
 	Bindings  int       `json:"bindings,omitempty"`
 	Withdrawn int       `json:"withdrawn,omitempty"`
+}
+
+// Membership is this node's place in the fleet under ADR 0063. Mode is
+// `stationary` or `roaming`; State is `serving`, `healing`, `probation` or
+// `excluded` -- the worst stage of any bound set; Bindings lists only the sets
+// that are not serving.
+type Membership struct {
+	Mode     string              `json:"mode"`
+	State    string              `json:"state"`
+	Bindings []MembershipBinding `json:"bindings"`
+}
+
+// MembershipBinding is one bound scale set that is not serving.
+type MembershipBinding struct {
+	Scope      string    `json:"scope"`
+	ScaleSetID int       `json:"scaleSetId"`
+	Stage      string    `json:"stage"`
+	Since      time.Time `json:"since,omitzero"`
+	Attempts   int       `json:"attempts,omitempty"`
+	Exclusions int       `json:"exclusions,omitempty"`
 }
 
 // UpdateDrain reports whether this node is draining toward a pending

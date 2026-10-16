@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/membership"
 )
 
 type Resources struct {
@@ -566,7 +567,11 @@ type Config struct {
 	Guards          Guards
 	SessionRecovery SessionRecovery
 	SessionYield    SessionYield
-	UpdateDrain     UpdateDrain
+	// Membership is how this node declares its place in the fleet (ADR 0063):
+	// absent runs no membership watchdog, which is the node this code was
+	// before; stationary and roaming run it with the ladder their mode derives.
+	Membership  membership.Mode
+	UpdateDrain UpdateDrain
 	// GuestLiveness bounds how long an instance whose guest has stopped answering
 	// may go on holding its vector (ADR 0040). An absent block is the shipped
 	// default bound, not an absent one.
@@ -650,6 +655,10 @@ type wireConfig struct {
 	SessionYieldDisabled          bool `json:"sessionYieldDisabled,omitempty"`
 	SessionYieldBlockedForSeconds int  `json:"sessionYieldBlockedForSeconds,omitempty"`
 	SessionYieldHealthyForSeconds int  `json:"sessionYieldHealthyForSeconds,omitempty"`
+	// Membership is omitted when unset so a node that declares nothing encodes
+	// exactly the file it encoded before ADR 0063, which an older strict
+	// release still decodes.
+	Membership string `json:"membership,omitempty"`
 	// UpdateDrain* express how this node reaches the quiescence its updater
 	// needs. Disabled is the explicit off switch: omitting every field ships the
 	// behaviour on, because a node that can never install its own fixes is the
@@ -697,7 +706,12 @@ func Decode(r io.Reader) (Config, error) {
 	if err := ensureEOF(dec); err != nil {
 		return Config{}, err
 	}
+	mode, err := membership.ParseMode(w.Membership)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
+		Membership:     mode,
 		PollInterval:   time.Duration(w.PollSeconds) * time.Second,
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		HostBudget:     hostBudget(w.HostBudget),
@@ -818,6 +832,7 @@ func Encode(w io.Writer, cfg Config) error {
 		GuestLivenessRefusals:            guestLiveness.refusals,
 		GuestLivenessWindowSeconds:       guestLiveness.windowSeconds,
 		GuestLivenessProbeTimeoutSeconds: guestLiveness.probeSeconds,
+		Membership:                       string(cfg.Membership),
 	}
 	// Only non-default recovery bounds are emitted; see wireConfig.
 	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
@@ -1204,6 +1219,9 @@ func (c Config) Validate() error {
 	if c.SessionYield.HealthyFor < minSessionYieldBound || c.SessionYield.HealthyFor > maxSessionYieldBound {
 		return errors.New("session yield healthy bound must be between 30 and 3600 seconds")
 	}
+	if err := c.validateMembership(); err != nil {
+		return err
+	}
 	for name, bound := range map[string]time.Duration{"pending": c.UpdateDrain.PendingFor,
 		"max wait": c.UpdateDrain.MaxWait, "cooldown": c.UpdateDrain.Cooldown} {
 		if bound < minUpdateDrainBound || bound > maxUpdateDrainBound {
@@ -1516,6 +1534,26 @@ const DefaultParkedScaleSetAuditInterval = 15 * time.Minute
 // ParkedScaleSetAuditInterval is the cadence this node audits parked scale sets
 // at. Zero means the operator turned the audit off; absence means they said
 // nothing, which is the default cadence and not silence.
+// validateMembership refuses a mode nobody defined and a watchdog with no
+// evidence: the ladder advances only on the scale-set audit's verdict, so a
+// node that disabled the audit would run a watchdog that can never act -- the
+// green no-op the three questions warn against.
+func (c Config) validateMembership() error {
+	if _, err := membership.ParseMode(string(c.Membership)); err != nil {
+		return err
+	}
+	if !c.Membership.Enabled() {
+		return nil
+	}
+	if c.GitHub.ParkedScaleSetAuditInterval() <= 0 {
+		return errors.New("membership requires the scale-set audit: github.parkedScaleSetAuditMinutes must be positive")
+	}
+	if len(c.GitHub.Scopes) == 0 {
+		return errors.New("membership requires scoped scale sets (github.scopes): the scale-set audit reads only scopes")
+	}
+	return nil
+}
+
 func (g GitHub) ParkedScaleSetAuditInterval() time.Duration {
 	if g.ParkedScaleSetAuditMinutes == nil {
 		return DefaultParkedScaleSetAuditInterval
