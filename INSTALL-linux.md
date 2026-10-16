@@ -148,6 +148,12 @@ the two stages of the bring-up.
 | `holdCommand` | Optional. What keeps a created container alive and idle until the JIT bootstrap runs inside it; the default is `sleep infinity`. |
 
 A container's resources are the profile's and are never configured twice here.
+The combined RAM-plus-swap limit equals the RAM limit (`--memory-swap` equals
+`--memory`), so cgroup v2 `memory.swap.max` is zero. Podman's default grants an
+extra full memory vector in host swap; that can stall the host and unrelated CI
+queues (issue #369). New runners receive this bound; existing runners are not
+modified or interrupted during deployment. A workload that cannot fit its
+profile can hit its cgroup OOM limit instead of borrowing host swap.
 `--cpus` and `--memory` come from the profile's vector, and so does `/dev/shm`:
 it is a quarter of that memory, floored at podman's own 64 MB default. Podman
 would otherwise mount 64 MB whatever the profile says, which is where a Chromium
