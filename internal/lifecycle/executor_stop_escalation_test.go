@@ -44,10 +44,12 @@ func TestDrainEscalatesAStopThatKeepsFailing(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			executor, state, vm, _ := drainFixture(operations.StateDeregistering)
 			vm.stopErr, vm.terminateErr, vm.destroyErr = errWedgedGuest, errWedgedGuest, errWedgedGuest
+			vm.running = true
 			operation := stopFailure()
 			operation.Attempts = test.attempts
+			operation.LastError = (stageError{stage: StageStop, stopAttempts: test.attempts}).Error()
 			err := executor.Execute(context.Background(), operation)
-			if err == nil || err.Error() != safeError(StageStop).Error() {
+			if err == nil || FailureCode(err.Error()) != string(StageStop) {
 				t.Fatalf("error = %v, want a bounded stop-stage failure", err)
 			}
 			if errors.Is(err, operations.ErrExhausted) {
@@ -81,6 +83,7 @@ func TestDrainStopLadderCompletesTheDrainOnceARungWorks(t *testing.T) {
 			vm.stopErr = errWedgedGuest
 			operation := stopFailure()
 			operation.Attempts = test.attempts
+			operation.LastError = (stageError{stage: StageStop, stopAttempts: test.attempts}).Error()
 			if err := executor.Execute(context.Background(), operation); err != nil {
 				t.Fatal(err)
 			}
@@ -102,16 +105,18 @@ func TestDrainStopLadderCompletesTheDrainOnceARungWorks(t *testing.T) {
 func TestDrainStopLadderExhaustionIsTerminal(t *testing.T) {
 	executor, state, vm, _ := drainFixture(operations.StateDeregistering)
 	vm.stopErr, vm.terminateErr, vm.destroyErr = errWedgedGuest, errWedgedGuest, errWedgedGuest
+	vm.running = true
 	operation := stopFailure()
 	operation.Attempts = GracefulStopAttempts + ForcedStopAttempts + DestructiveStopAttempts
+	operation.LastError = (stageError{stage: StageStop, stopAttempts: operation.Attempts}).Error()
 	err := executor.Execute(context.Background(), operation)
 	if !errors.Is(err, operations.ErrExhausted) {
 		t.Fatalf("error = %v, want an exhausted ladder the worker parks", err)
 	}
-	if err.Error() != safeError(StageStop).Error() {
+	if FailureCode(err.Error()) != string(StageStop) {
 		t.Fatalf("persisted text = %q, want the same closed code an ordinary stop failure persists", err.Error())
 	}
-	if len(*vm.calls) != 0 {
+	if !reflect.DeepEqual(*vm.calls, []string{"power:trf-small-1"}) {
 		t.Fatalf("calls = %v, want no further attempt on a guest that has refused every rung", *vm.calls)
 	}
 	if state.instance.State != operations.StateDeregistering {
@@ -149,6 +154,7 @@ func TestDrainNeverEscalatesAGuestWhoseJobIsStillRunning(t *testing.T) {
 	control.busy = true
 	operation := stopFailure()
 	operation.Attempts = GracefulStopAttempts + ForcedStopAttempts + DestructiveStopAttempts
+	operation.LastError = (stageError{stage: StageStop, stopAttempts: operation.Attempts}).Error()
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +178,7 @@ func TestOccupancyBudgetReclaimClimbsTheSameLadder(t *testing.T) {
 	vm.stopErr = errWedgedGuest
 	operation := stopFailure()
 	operation.Attempts = GracefulStopAttempts
+	operation.LastError = (stageError{stage: StageStop, stopAttempts: operation.Attempts}).Error()
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
 	}
@@ -193,5 +200,39 @@ func TestStopEscalationVocabularyIsClosed(t *testing.T) {
 	}
 	if got := StopForce(99).String(); got != "exhausted" {
 		t.Fatalf("unknown rung rendered %q", got)
+	}
+}
+
+// Replay of the MacBook shape: failures before the stop do not buy escalation.
+func TestStopFailuresDoNotInheritEarlierGuardAttempts(t *testing.T) {
+	executor, _, vm, _ := drainFixture(operations.StateDeregistering)
+	vm.stopErr = errWedgedGuest
+	operation := stopFailure()
+	operation.Attempts, operation.LastError = 198, safeError(StageGuard).Error()
+	first := executor.Execute(context.Background(), operation)
+	if first == nil {
+		t.Fatal("expected the first stop to fail")
+	}
+	operation.Attempts++
+	operation.LastError = first.Error()
+	second := executor.Execute(context.Background(), operation)
+	if errors.Is(second, operations.ErrExhausted) {
+		t.Fatal("one stop failure exhausted the entire ladder")
+	}
+	if got := *vm.calls; !reflect.DeepEqual(got, []string{"stop:trf-small-1", "stop:trf-small-1"}) {
+		t.Fatalf("one stop failure after 198 guard failures called %v", got)
+	}
+}
+
+func TestAnExhaustedStopAcknowledgesAGuestThatIsNowOff(t *testing.T) {
+	executor, state, _, _ := drainFixture(operations.StateDeregistering)
+	operation := stopFailure()
+	operation.Attempts = 200
+	operation.LastError = (stageError{stage: StageStop, stopAttempts: 9}).Error()
+	if err := executor.Execute(context.Background(), operation); err != nil {
+		t.Fatalf("stopped guest still parked: %v", err)
+	}
+	if state.instance.State != operations.StateDeleted {
+		t.Fatalf("state=%s", state.instance.State)
 	}
 }
