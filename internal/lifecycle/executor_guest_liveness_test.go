@@ -138,6 +138,7 @@ func TestADeadGuestReclaimClimbsTheStopLadder(t *testing.T) {
 	vm.stopErr = errWedgedGuest
 	operation := stopFailure()
 	operation.Attempts = GracefulStopAttempts
+	operation.LastError = (stageError{stage: StageStop, stopAttempts: operation.Attempts}).Error()
 	if err := executor.Execute(context.Background(), operation); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +158,7 @@ func TestADeadGuestThatAlsoRefusesToStopFailsAtTheStopStep(t *testing.T) {
 	executor, state, vm, _ := guestDrainFixture(domain.GuestLivenessRefused)
 	vm.stopErr, vm.terminateErr, vm.destroyErr = errWedgedGuest, errWedgedGuest, errWedgedGuest
 	err := executor.Execute(context.Background(), stopFailure())
-	if err == nil || err.Error() != safeError(StageStop).Error() {
+	if err == nil || FailureCode(err.Error()) != string(StageStop) {
 		t.Fatalf("error = %v, want a bounded stop-stage failure", err)
 	}
 	if state.instance.State != operations.StateDraining {
