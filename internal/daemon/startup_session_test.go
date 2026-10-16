@@ -220,3 +220,73 @@ func TestRunDefersABindingTheNetworkCouldNotReach(t *testing.T) {
 		t.Fatalf("expected the failing binding to have been attempted; calls=%d", calls.Load())
 	}
 }
+
+// heldSession is the shape the official client returns when GitHub refuses a
+// session create because another session holds the set (sessionheld_test.go in
+// the adapter pins it against the real client).
+func heldSession() error {
+	return fmt.Errorf("create official message session: %w", errors.New(
+		`failed to create message session: failed to do the session request: request POST `+
+			`https://broker.example/tenant/_apis/runtime/runnerscalesets/19/sessions?api-version=6.0-preview `+
+			`failed(status="409 Conflict"): unexpected status code 409 Conflict`))
+}
+
+// ADR 0061 (d): a session another holder still has is a reason to wait, not to
+// stop. The holder is this node's own previous process whose session has not
+// expired yet, or a sibling that adopted the set while this node was away.
+func TestAPendingBindingKeepsRetryingASessionHeldElsewhere(t *testing.T) {
+	var opens atomic.Int32
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{pending: true,
+		open: func(context.Context) (scaleSetSource, error) {
+			if opens.Add(1) <= 2 {
+				return nil, heldSession()
+			}
+			return &successfulSessionSource{}, nil
+		}, limiter: make(chan struct{}, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := func(context.Context, githubscaleset.Demand) error { return nil }
+	for poll := 1; poll <= 2; poll++ {
+		err := source.Handle(context.Background(), commit)
+		var failure *githubscaleset.SessionFailure
+		if !errors.As(err, &failure) || failure.Reason != githubscaleset.ReasonSessionHeld {
+			t.Fatalf("poll %d = %v, want a session_held ingest failure", poll, err)
+		}
+	}
+	if err := source.Handle(context.Background(), commit); err != nil || opens.Load() != 3 {
+		t.Fatalf("a held session must be retried until it is released; err=%v opens=%d", err, opens.Load())
+	}
+}
+
+func TestRunDefersABindingWhoseSessionIsHeld(t *testing.T) {
+	d := testDependencies(t)
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	d.inventory = func(_ runtimeStore, _ config.Config, _ app.RecoveryObserver, _ *updateDrainController) app.Inventory {
+		return notifyingInventory{ready: ready, once: &readyOnce}
+	}
+	var calls atomic.Int32
+	d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+		if calls.Add(1) == 1 {
+			return nil, heldSession()
+		}
+		return &fakeSource{}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runWithDependencies(ctx, options{Mode: reconcile.Authority, ConfigPath: writeConfig(t, true),
+			DatabasePath: filepath.Join(t.TempDir(), "fleet.db"), HealthAddress: "127.0.0.1:0"}, d)
+	}()
+	select {
+	case <-ready:
+		cancel()
+		<-done
+	case err := <-done:
+		t.Fatalf("a held session ended the run: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runtime did not start")
+	}
+}

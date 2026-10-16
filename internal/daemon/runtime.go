@@ -162,8 +162,8 @@ func (s *recoveringScaleSetSource) openPending(ctx context.Context) error {
 	}
 	opened, err := s.open(ctx)
 	if err != nil {
-		failure := &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonSessionCreateFailed, Cause: err}
-		if ctx.Err() == nil && !transientStartupFailure(err) {
+		failure := &githubscaleset.SessionFailure{Reason: openFailureReason(err), Cause: err}
+		if ctx.Err() == nil && !deferrableOpenFailure(err) {
 			s.abandoned = failure
 		}
 		return failure
@@ -172,6 +172,23 @@ func (s *recoveringScaleSetSource) openPending(ctx context.Context) error {
 	s.released = false
 	s.failures = githubscaleset.SessionFailureState{}
 	return nil
+}
+
+// deferrableOpenFailure is every reason a session could not be opened that a
+// later attempt can cure without anyone changing anything: the network's state
+// (transientStartupFailure), or a session another holder has not yet let go of
+// (ADR 0061 d). Everything else is the node's own fault and stays fatal.
+func deferrableOpenFailure(err error) bool {
+	return transientStartupFailure(err) || githubscaleset.SessionHeld(err)
+}
+
+// openFailureReason names a failed open in the closed vocabulary. A held set is
+// its own reason because its remedy is the opposite of a broken one: wait.
+func openFailureReason(err error) string {
+	if githubscaleset.SessionHeld(err) {
+		return githubscaleset.ReasonSessionHeld
+	}
+	return githubscaleset.ReasonSessionCreateFailed
 }
 
 func (s *recoveringScaleSetSource) abandonment() error {
@@ -797,12 +814,12 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				initial, err := openSource(ctx)
 				deferred := false
 				if err != nil {
-					if ctx.Err() != nil || !transientStartupFailure(err) {
+					if ctx.Err() != nil || !deferrableOpenFailure(err) {
 						return err
 					}
 					reporter.logger.Warn("scale-set session deferred", "scope", binding.Scope,
 						"profile", string(binding.Profile.ID), "scaleSet", settings.scaleSet.ID,
-						"reason", githubscaleset.ReasonSessionCreateFailed)
+						"reason", openFailureReason(err))
 					initial, deferred = nil, true
 				}
 				source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial, pending: deferred,
