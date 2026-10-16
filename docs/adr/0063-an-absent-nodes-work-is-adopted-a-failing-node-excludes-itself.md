@@ -234,10 +234,11 @@ daemon.
   least three audits agree and one reading followed by an outage never
   qualifies); and its own admission would admit now. Every term is a fact the
   sibling holds. The claim about the owner is left to the arbiter.
-- **`Arbitrate`.** `409`: the owner is alive, possibly wedged and possibly
-  behind its own capacity. Do nothing. Obtained: no other session holds the
-  set, so serve its work within the sibling's own admission, under a lease of 4
-  cadences. Anything else (timeout, 5xx, refused credential) proves nothing and
+- **`Arbitrate`.** `409`: GitHub still holds a session, possibly left by a
+  departed owner. It proves no host liveness. Do nothing. Obtained: the model
+  assumes exclusive session ownership; E3 must verify this before production
+  adoption. Serve work only within the sibling's own admission, under a lease
+  of 4 cadences. Anything else (timeout, 5xx, refused credential) proves nothing and
   adopts nothing.
 - **`Release`.** Hand the session back when nothing of the set's is left to
   run, and in any case when the lease ends, so a returning owner is locked out
@@ -323,6 +324,8 @@ session-yield controller as a forced withdrawal.
 
    Two invariants hold on every tick: at most one present node believes it
    holds a set's session, and that node is the one GitHub granted it to; and no
-   job starts twice. The world model's one assumption is the expiry parameter.
+   job starts twice. The world model assumes exclusive session arbitration and recoverable assigned
+   work, in addition to the expiry parameter. E1–E4 must validate those premises;
+   exercising the model is not evidence that GitHub implements them.
    If E2 measures a value outside the swept range, that is a world-model gap to
    close before rung (c) is wired.

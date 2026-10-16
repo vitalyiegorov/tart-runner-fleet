@@ -21,8 +21,8 @@ import "time"
 type Arbiter string
 
 const (
-	// Held is a 409: another session holds the set, so its owner is alive --
-	// possibly wedged, possibly behind its own capacity, but present.
+	// Held is a 409: GitHub still holds another session. Its owner may be
+	// present or gone; this is not a host-liveness observation.
 	Held Arbiter = "held"
 	// Obtained is a session GitHub granted: no other session holds the set.
 	Obtained Arbiter = "obtained"
@@ -95,8 +95,8 @@ type Adoption struct {
 }
 
 // Arbitrate turns the arbiter's answer into what the sibling holds. Only
-// Obtained adopts; Held proves the owner is alive and Unanswered proves
-// nothing, and neither leaves the sibling holding anything.
+// Obtained adopts in this model; Held means a session remains held and
+// Unanswered proves nothing. Neither leaves the sibling holding anything.
 func (p AdoptionPolicy) Arbitrate(key Key, answer Arbiter, now time.Time) (Adoption, bool) {
 	if answer != Obtained {
 		return Adoption{}, false

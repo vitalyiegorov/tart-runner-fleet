@@ -274,7 +274,7 @@ func Summarize(state map[Key]Binding) Summary {
 			summary.State = binding.Stage
 		}
 	}
-	sort.Slice(summary.Bindings, func(i, j int) bool { return summary.Bindings[i].Key.less(summary.Bindings[j].Key) })
+	sort.Slice(summary.Bindings, func(i, j int) bool { return summary.Bindings[i].less(summary.Bindings[j].Key) })
 	return summary
 }
 

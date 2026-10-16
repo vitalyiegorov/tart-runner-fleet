@@ -240,10 +240,9 @@ var heldSessionCreate = regexp.MustCompile(`request POST \S+/runnerscalesets/\d+
 
 // SessionHeld reports that GitHub refused to open a message session because
 // another session holds the scale set. ADR 0034 makes that exclusivity the only
-// cross-node arbiter, and ADR 0063 reads it as "the set's holder is alive":
-// the reference listener (actions-runner-controller's ghalistener) answers the
-// same 409 by retrying every 30 seconds rather than exiting, because a
-// session whose listener died is released by GitHub on its own.
+// cross-node arbiter. A conflict proves only that GitHub still holds a session,
+// not that its owner is alive: a departed owner may leave a lingering session.
+// The reference listener answers the same 409 by waiting rather than exiting.
 func SessionHeld(err error) bool {
 	return err != nil && heldSessionCreate.MatchString(err.Error())
 }
