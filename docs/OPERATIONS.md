@@ -1695,3 +1695,15 @@ No extra monitor, restart or cleanup script is needed. Public failure codes stay
 `stop`/`delete`; `automatic cleanup resumed` identifies the old operation and
 instance without logging its payload. Legacy stop rows restart conservatively
 rather than counting old GitHub/guard failures as stop attempts.
+
+### A queue observation fails on a sibling's explicit selector
+
+`queue_reconcile_failed` means REST data was obtained but could not safely be
+applied. It is different from a failed network refresh. If a queued job selects
+another node's exact scale-set name, compare that selector with fresh scope-
+qualified audit metadata before diagnosing the local runner as absent. Under
+ADR 0064, fresh proof of a foreign selector excludes only that job from local
+inventory. Missing or expired proof remains unavailable; unknown labels remain
+errors. Do not add a sibling's selector to this node or remove an intentional
+workflow selector to make readiness green. This classification neither moves
+existing assignments nor grants authority over a foreign scale set.

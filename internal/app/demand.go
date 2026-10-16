@@ -134,6 +134,14 @@ func (b Binding) matchesRESTLabels(labels []string) bool {
 	return true
 }
 
+// ForeignScaleSetSelector is fresh audit proof of a named set this node does
+// not serve. It can exclude a job from local inventory, never admit or move it.
+type ForeignScaleSetSelector struct {
+	Scope string
+	ID    int64
+	Name  string
+}
+
 type DemandCoordinator struct {
 	Store            DemandStore
 	Projector        DemandProjector
@@ -141,6 +149,7 @@ type DemandCoordinator struct {
 	StatisticsMaxAge time.Duration
 	GhostAbsence     time.Duration
 	StrictJobRouting bool
+	ForeignSelectors []ForeignScaleSetSelector
 	// Priority classifies a demand into the tier configuration declared for it
 	// (issue #224). The zero policy leaves every demand in the default tier,
 	// which is what keeps a fleet that declares no tier on pure aged FIFO.
@@ -385,7 +394,7 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 			return false, err
 		}
 		if len(matched) == 0 {
-			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedCapability(bindings, job) {
+			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedCapability(bindings, job) && !c.jobSelectsForeignSet(bindings, job) {
 				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
 			}
 			continue
@@ -420,6 +429,32 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 	}
 	expired, err := c.expireGhostDemand(ctx, bindings, snapshot.ObservedAt())
 	return changed || expired, err
+}
+
+// jobSelectsForeignSet requires an explicit selector for a freshly audited set
+// outside every local binding in this scope. Unknown labels alone prove nothing.
+func (c DemandCoordinator) jobSelectsForeignSet(bindings []Binding, job githubscaleset.WorkflowJob) bool {
+	for _, peer := range c.ForeignSelectors {
+		if peer.ID <= 0 || peer.Scope == "" || peer.Name == "" || !containsFold(job.Labels, peer.Name) {
+			continue
+		}
+		accepted, local := false, false
+		for _, binding := range bindings {
+			if !strings.EqualFold(binding.Scope, peer.Scope) {
+				continue
+			}
+			if binding.ScaleSetID == peer.ID || containsFold(binding.ScaleSetLabels, peer.Name) {
+				local = true
+			}
+			if binding.accepts(job.Repository.Owner + "/" + job.Repository.Name) {
+				accepted = true
+			}
+		}
+		if accepted && !local {
+			return true
+		}
+	}
+	return false
 }
 
 var foreignJobRoutePattern = regexp.MustCompile(`(?i)^trf-(linux|macos)-(arm64|amd64)-[1-9][0-9]*x[1-9][0-9]*$`)
