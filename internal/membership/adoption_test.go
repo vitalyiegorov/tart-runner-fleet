@@ -45,7 +45,7 @@ func TestOnlyAnObtainedSessionAdopts(t *testing.T) {
 	p := AdoptionPolicy{Cadence: cadence}
 	for _, answer := range []Arbiter{Held, Unanswered} {
 		if _, ok := p.Arbitrate(set19, answer, t0); ok {
-			t.Fatalf("%s must not adopt: a 409 proves the owner alive and an error proves nothing", answer)
+			t.Fatalf("%s must not adopt: a 409 means GitHub still holds another session and an error proves nothing", answer)
 		}
 	}
 	adoption, ok := p.Arbitrate(set19, Obtained, t0)
