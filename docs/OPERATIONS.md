@@ -1586,8 +1586,9 @@ the set is empty) climbs one rung per audit:
 An exclusion lasts 4 audit cadences on a stationary node and 2 on a roaming
 one. Each consecutive exclusion doubles it, up to 16 cadences. With the
 default 15-minute audit that is 1 h (stationary) or 30 min (roaming), at most
-4 h. An exclusion ends on time alone. An audit outage never holds a set out,
-and never advances the ladder either: stale or missing evidence freezes it.
+4 h. An exclusion ends on elapsed time alone, even without a fresh audit, and
+moves the set to `probation`. An audit outage never holds a set out, but stale
+or missing evidence freezes every audit-judged step of the ladder.
 
 Jobs GitHub bound to the set before it was excluded do not move (ADR 0047's
 measurement). The ladder stops new work from binding there; it does not drain
