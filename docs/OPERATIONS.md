@@ -360,6 +360,7 @@ Four things are kept, and nothing else:
 | Kept | Why |
 | --- | --- |
 | The running generation | Deleting it unlinks the live process's own binary. |
+| Every loaded or on-disk fleet service reference | A cached supervisor definition may outlive its file or the committed generation; keep its immutable executable path (ADR 0071). |
 | The `current` symlink target | Between the commit's symlink swap and the service restart these differ, and that window is when a prune would strand the boot path. |
 | The newest version present | It is the pending candidate the next adoption takes (`fleet doctor` reports it as a pending update). |
 | The **2** newest generations *older* than running | Rollback headroom. Counted among older versions only — rolling back to a version the node has never run is not a rollback. |
@@ -369,6 +370,13 @@ that are not the newest: the updater resolves `releases/latest` on every run, so
 an intermediate download is superseded before anything can adopt it. Names that
 are not versions — the updater's own `.generation-*` staging directories — are
 never touched.
+
+A failed or incomplete service-reference observation defers collection with
+`release pruning deferred: service references unavailable`. It never authorizes
+deletion or blocks the update transaction. References are read from both loaded
+services and boot definitions; an old loaded path is protected even when its file
+is gone. This prevents pruning from stranding relaunch, but does not repair an
+already-missing release or certify service/manifest parity (ADR 0071, #352).
 
 The line to look for is `pruned N superseded release(s): …`. Collection is
 best-effort and never fails the update: reclaiming disk is an errand performed
