@@ -233,6 +233,7 @@ func TestTheReclaimedPhasesDeriveInactivityFromRunnerAbsence(t *testing.T) {
 		operations.DrainPhaseLingeringRunner:   true,
 		operations.DrainPhaseOccupancyBudget:   true,
 		operations.DrainPhaseGuestUnresponsive: true,
+		operations.DrainPhaseProvisionStalled:  true,
 		operations.DrainPhaseInactiveRecovery:  false,
 		1 /* the ordinary event drain */ :      false,
 	} {

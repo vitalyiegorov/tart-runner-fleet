@@ -11,6 +11,16 @@ func stopsItsGuestFirst(phase int) bool {
 	return phase == operations.DrainPhaseOccupancyBudget || phase == operations.DrainPhaseGuestUnresponsive
 }
 
+// abortsOnBusyRefusal names the drain phases that return their instance to
+// Running when GitHub refuses deregistration and fresh evidence shows the
+// runner busy. The two reclaims that stop the guest first act on busy evidence
+// rather than being refuted by it, and a stalled provisioning never reached
+// Running, so aborting there would invent a busy runner (ADR 0067); it fails
+// the deregister step and retries instead.
+func abortsOnBusyRefusal(phase int) bool {
+	return !stopsItsGuestFirst(phase) && phase != operations.DrainPhaseProvisionStalled
+}
+
 // derivesInactivityFromRunnerAbsence names the drain phases whose deletion
 // confirmation reads runner absence rather than waiting for a job-completion
 // event. Each of them ends, or has already lost, a job that will never publish
@@ -20,7 +30,7 @@ func derivesInactivityFromRunnerAbsence(phase int) bool {
 	switch phase {
 	case operations.DrainPhaseStoppedRecovery, operations.DrainPhaseStalledAssignment,
 		operations.DrainPhaseLingeringRunner, operations.DrainPhaseOccupancyBudget,
-		operations.DrainPhaseGuestUnresponsive:
+		operations.DrainPhaseGuestUnresponsive, operations.DrainPhaseProvisionStalled:
 		return true
 	default:
 		return false
