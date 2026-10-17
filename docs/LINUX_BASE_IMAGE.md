@@ -647,15 +647,29 @@ where the `playwright install --with-deps` fallback lost the race.
 ```sh
 "$TART" exec "$BUILD" sudo bash -c '
 set -euo pipefail
-systemctl stop unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
-  apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-systemctl mask unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+systemctl mask --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
   apt-daily.service apt-daily-upgrade.service
+for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service; do
+  load_state=$(systemctl show --property=LoadState --value "$unit")
+  active_state=$(systemctl show --property=ActiveState --value "$unit")
+  test "$load_state" = "masked"
+  test "$active_state" = "inactive"
+done
 printf "APT::Periodic::Update-Package-Lists \"0\";\nAPT::Periodic::Unattended-Upgrade \"0\";\n" \
   > /etc/apt/apt.conf.d/20auto-upgrades
 '
 ```
 
+Masking alone does not stop an active updater. `--now` stops it, and any
+failure aborts the build before further package installation. Both checks must
+pass for every unit; unavailable or unexpected state fails verification.
+`systemctl show` reads properties without the legitimate nonzero status that
+`is-active` returns for an inactive unit.
+
+[ADR 0068](adr/0068-ephemeral-linux-guests-use-immutable-package-updates.md)
+records this policy and its canonical incident, [issue
+#148](https://github.com/vitalyiegorov/tart-runner-fleet/issues/148).
 Image updates are a rebuild, not something a running guest does to itself.
 The containers on geekom do not run these timers, so this step only applies to
 Tart guests.
@@ -890,9 +904,13 @@ grep -q "console=hvc0" /proc/cmdline
 sudo -n /sbin/shutdown --help >/dev/null
 systemd-run --scope --collect --quiet --unit=tart-runner-fleet-probe -- /bin/true
 
-# Step 4c: nothing may take the dpkg lock behind a job's back.
-for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer; do
-  test "$(systemctl is-enabled "$unit" 2>/dev/null)" = "masked"
+# Step 4c: background apt units must be masked and inactive.
+for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service; do
+  load_state=$(systemctl show --property=LoadState --value "$unit")
+  active_state=$(systemctl show --property=ActiveState --value "$unit")
+  test "$load_state" = "masked"
+  test "$active_state" = "inactive"
 done
 
 # Everything a job needs, on the daemon PATH and nothing else.
