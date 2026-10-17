@@ -36,7 +36,7 @@ const DefaultRetainedReleases = 2
 // be adopted by anything; they are downloads that were already superseded when
 // the next hour's timer fired.
 //
-// Four things are kept, and each is a way this could take a node down:
+// Five things are kept, and each is a way this could take a node down:
 //
 //   - `running` is the generation executing this code. Deleting it unlinks the
 //     binary of the live process and every helper it re-execs.
@@ -47,6 +47,8 @@ const DefaultRetainedReleases = 2
 //   - The newest version present, which is what `PendingCandidate` reports and
 //     what the next adoption will take. Deleting it would make a node fight its
 //     own update.
+//   - Every generation referenced by a fresh supervisor snapshot or an on-disk
+//     fleet boot definition, even when those references lag the current link.
 //   - The `retain` newest generations OLDER than running. That is rollback
 //     headroom, and it is deliberately measured among older versions only:
 //     rolling back to a version the node has never run is not a rollback.
@@ -54,7 +56,7 @@ const DefaultRetainedReleases = 2
 // A name that is not a parseable version is never prunable. The releases
 // directory carries the updater's own `.generation-*` staging directories, and a
 // concurrent download's staging directory is not this function's to remove.
-func PrunableReleases(names []string, running, current string, retain int) []string {
+func PrunableReleases(names []string, running, current string, retain int, referenced ...string) []string {
 	if running == "" {
 		return nil
 	}
@@ -88,6 +90,9 @@ func PrunableReleases(names []string, running, current string, retain int) []str
 	}
 	sortVersionsNewestFirst(older)
 	kept := map[string]bool{running: true, newest: true}
+	for _, name := range referenced {
+		kept[name] = true
+	}
 	if current != "" {
 		kept[current] = true
 	}
@@ -139,7 +144,7 @@ func sortVersionsNewestFirst(names []string) {
 // problem into an update failure. What it must never do is delete the wrong
 // thing, and that judgement lives in PrunableReleases where it is testable
 // without a filesystem.
-func PruneReleases(rootDir, running string, retain int) []string {
+func PruneReleases(rootDir, running string, retain int, referenced ...string) []string {
 	if rootDir == "" || running == "" {
 		return nil
 	}
@@ -149,7 +154,7 @@ func PruneReleases(rootDir, running string, retain int) []string {
 		return nil
 	}
 	removed := make([]string, 0, len(names))
-	for _, name := range PrunableReleases(names, running, currentGenerationName(rootDir), retain) {
+	for _, name := range PrunableReleases(names, running, currentGenerationName(rootDir), retain, referenced...) {
 		if os.RemoveAll(filepath.Join(releases, name)) == nil {
 			removed = append(removed, name)
 		}
