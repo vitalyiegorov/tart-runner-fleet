@@ -20,6 +20,11 @@ detection half of issue #164 for the federation topology
 beside [ADR 0026](0026-queued-demand-expires-on-proven-absence.md), which handles
 the opposite direction: demand the fleet believes in that GitHub no longer has.
 
+Amended 2026-10-16 by [ADR 0063](0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md): "the verdict is the hub's" stands for
+everything built. ADR 0063 designs one exception, not yet wired: a parked
+reading may become a sibling's *premise* for asking GitHub's session arbiter,
+whose `409` or grant is the verdict (ADR 0042).
+
 ## Context
 
 GitHub routes a queued job to exactly **one** matching runner scale set. It marks

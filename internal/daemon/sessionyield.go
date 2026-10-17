@@ -159,6 +159,10 @@ type sessionYieldController struct {
 	// stderr learns the node withdrew and why rather than inferring it from an
 	// empty queue.
 	report func(action sessionYieldAction, reason string, failures int)
+	// excluded names the single bindings ADR 0063's membership ladder holds
+	// released while the node as a whole keeps serving. Nil on a node that
+	// declared no membership.
+	excluded func(yieldableSource) bool
 }
 
 // Apply folds one tick's facts into the policy and reconciles the sessions with
@@ -172,10 +176,14 @@ func (c *sessionYieldController) Apply(ctx context.Context, facts sessionYieldFa
 		return false
 	}
 	action := c.state.Observe(facts)
-	want := c.state.Yielded()
+	yielded := c.state.Yielded()
 	failures := 0
 	for _, source := range c.sources {
-		if source == nil || source.Suspended() == want {
+		if source == nil {
+			continue
+		}
+		want := yielded || (c.excluded != nil && c.excluded(source))
+		if source.Suspended() == want {
 			continue
 		}
 		var err error
@@ -191,7 +199,7 @@ func (c *sessionYieldController) Apply(ctx context.Context, facts sessionYieldFa
 	if action != sessionYieldNone && c.report != nil {
 		c.report(action, reason, failures)
 	}
-	return want
+	return yielded
 }
 
 // Bindings reports how many scale-set sessions this node owns and how many are

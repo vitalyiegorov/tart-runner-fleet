@@ -74,6 +74,6 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Disjoint seed range under the race detector
-        run: go test -race -count=1 -timeout 15m ./tests/simulation -run TestSimFuzz -seed-base=900001 -seeds=15 -sim-ticks=200
+        run: go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 15m ./tests/simulation -run TestSimFuzz -seed-base=900001 -seeds=15 -sim-ticks=200
       - name: Pinned incidents and findings repeated
-        run: go test -race -shuffle=on -count=5 -timeout 10m ./tests/simulation -run 'TestFinding|TestGhost|TestDoubleAdmission|TestStranded|TestSimIsDeterministic'
+        run: go test -race -gcflags=modernc.org/...=-d=checkptr=0 -shuffle=on -count=5 -timeout 10m ./tests/simulation -run 'TestFinding|TestGhost|TestDoubleAdmission|TestStranded|TestSimIsDeterministic'

@@ -42,7 +42,7 @@ func TestIngestFailureVocabularyIsDocumented(t *testing.T) {
 	}
 	emitted := []string{
 		githubscaleset.ReasonSessionExpired, githubscaleset.ReasonSessionReleaseFailed,
-		githubscaleset.ReasonSessionCreateFailed, githubscaleset.ReasonRecreatedAfterFailures,
+		githubscaleset.ReasonSessionCreateFailed, githubscaleset.ReasonSessionHeld, githubscaleset.ReasonRecreatedAfterFailures,
 		githubscaleset.ReasonMessagePollFailed, githubscaleset.ReasonRateLimited,
 		githubscaleset.ReasonServerError, githubscaleset.ReasonQueueObservationFailed,
 		githubscaleset.ReasonQueueObservationStale, githubscaleset.ReasonQueueReconcileFailed,

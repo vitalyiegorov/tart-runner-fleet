@@ -102,16 +102,23 @@ func StopEscalation(stopAttempts int) StopForce {
 }
 
 // StopAttempts reports how many attempts a durable drain operation has spent
-// failing at the stop step, from the two durable facts the operation row keeps:
-// its attempt count and the closed code of its last failure.
+// failing at the stop step, from a bounded stage-local counter in LastError.
+// The total operation attempt count includes unrelated GitHub/guard failures.
 //
 // The last-failure gate is what keeps the ladder honest. A drain that has spent
 // forty attempts being refused by GitHub at the deregister step has not yet
 // asked its guest to stop even once, and must not open at a forceful rung on the
 // strength of failures that happened somewhere else.
 func StopAttempts(operation operations.Operation) int {
-	if FailureCode(operation.LastError) != string(StageStop) {
-		return 0
+	for n := 1; n <= GracefulStopAttempts+ForcedStopAttempts+DestructiveStopAttempts; n++ {
+		if operation.LastError == (stageError{stage: StageStop, stopAttempts: n}).Error() {
+			return n
+		}
 	}
-	return operation.Attempts
+	// Legacy rows have no stage-local counter. One known stop failure is all
+	// their text proves; unrelated lifetime attempts must never buy escalation.
+	if FailureCode(operation.LastError) == string(StageStop) && operation.Attempts > 0 {
+		return 1
+	}
+	return 0
 }

@@ -367,6 +367,21 @@ scheduler persists the handoff, drains only idle foreign instances, and makes
 same-tick replacement spawns depend on those drains. An active macOS cohort
 continues to block new Linux admission until its instances become idle.
 
+## Membership (opt-in)
+
+`"membership": "stationary"` or `"membership": "roaming"` in `fleet.json` turns
+on the membership ladder
+([ADR 0063](docs/adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)).
+Omit it and the node behaves exactly as before. With it, a set the authority's
+scale-set audit judges wedged goes through `healing` (its session recycled),
+then `excluded` (its session released, so GitHub binds new jobs to a sibling),
+then `probation`. Every bound is derived from
+`github.parkedScaleSetAuditMinutes`. `roaming` is for a node that comes and
+goes, such as a laptop, and climbs a shorter ladder. The key requires
+`github.scopes` and a non-zero audit cadence, and takes effect only in
+authority mode. `fleet status` and `fleet doctor` report it as `membership`;
+see `docs/OPERATIONS.md`.
+
 ## Scheduling principles
 
 1. Fresh observations are mandatory; unavailable data fails closed.

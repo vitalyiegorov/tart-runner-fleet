@@ -264,6 +264,8 @@ type Adapter struct {
 	// emulator profile and to no other, so this is a list of names and never a
 	// boolean.
 	KVMInstancePrefixes []string
+	// EmulatorSlotsDir is mounted only into profiles granted KVM.
+	EmulatorSlotsDir string
 	// VectorViewDir is where the narrowed `/proc/cpuinfo` and `/proc/stat` a
 	// container is shown are materialised (issue #291). Empty disables the
 	// narrowing entirely, which is the behaviour every node had before it and is
@@ -464,6 +466,10 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 	args := []string{"create", "--name", spec.Name,
 		"--cpus", strconv.Itoa(spec.CPU),
 		"--memory", strconv.Itoa(spec.MemoryMB) + "m",
+		// Podman otherwise grants another full memory vector in host swap.
+		// Equal RAM and combined RAM+swap limits forbid that uncharged loan
+		// (issue #369); a runaway job must not stall every queue on the host.
+		"--memory-swap", strconv.Itoa(spec.MemoryMB) + "m",
 		// /dev/shm is memory, and it is memory the vector already pays for: a
 		// tmpfs page is charged to the container's own cgroup, so sizing it from
 		// the profile neither lends the job memory it was not granted nor takes
@@ -488,6 +494,9 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 		// hardware acceleration, and it gets a device grant rather than a
 		// privileged container.
 		args = append(args, "--device", "/dev/kvm")
+		if a.EmulatorSlotsDir != "" {
+			args = append(args, "--mount", "type=bind,src="+a.EmulatorSlotsDir+",dst=/var/lib/mobile-ci/emulator-slots")
+		}
 	}
 	args = append(args, spec.Image)
 	return append(args, a.holdCommand()...)

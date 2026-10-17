@@ -27,6 +27,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/membership"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scalesetaudit"
@@ -87,7 +88,13 @@ type recoveringScaleSetSource struct {
 	// is how the mini logged session_release_failed 20-35 times an hour for
 	// days and never once recreated the session (issue #292).
 	releaseRefusals int
-	now             func() time.Time
+	// abandoned is the permanent failure that ended a pending binding's attempts
+	// to open its first session. The binding was deferred because the network
+	// could not answer; once GitHub does answer and refuses -- a rejected key, a
+	// deleted scale set -- retrying every poll cannot fix it, so every later poll
+	// reports this failure without calling the broker again.
+	abandoned error
+	now       func() time.Time
 }
 
 type recoveringScaleSetConfig struct {
@@ -96,17 +103,105 @@ type recoveringScaleSetConfig struct {
 	limiter chan struct{}
 	policy  githubscaleset.SessionRecoveryPolicy
 	now     func() time.Time
+	// pending starts the binding without a session because the first open hit a
+	// transient network failure. The ingest loop opens it on a later poll.
+	pending bool
 }
 
 func newRecoveringScaleSetSource(c recoveringScaleSetConfig) (*recoveringScaleSetSource, error) {
-	if c.source == nil || c.open == nil || c.limiter == nil {
+	if (c.source == nil) != c.pending || c.open == nil || c.limiter == nil {
 		return nil, operations.ErrInvalid
 	}
 	if c.now == nil {
 		c.now = time.Now
 	}
 	return &recoveringScaleSetSource{source: c.source, open: c.open, limiter: c.limiter,
-		policy: c.policy, now: c.now}, nil
+		policy: c.policy, now: c.now, released: c.pending}, nil
+}
+
+// transientStartupFailure reports whether a session that could not be opened at
+// startup failed on the network rather than on anything the node got wrong.
+//
+// On 2026-10-13 the MacBook's controller exited 16 times in a row because one
+// of its 24 bindings timed out reaching the broker while the home uplink was
+// saturated, and launchd restarted it into the same timeout. A timeout, a
+// refused or reset connection, or a failed DNS lookup is the network's state,
+// not a reason to take the whole node out of the fleet; the binding starts
+// pending and its ingest loop opens it once the network answers. Everything
+// else -- a key GitHub rejects, a scale set that no longer exists, an invalid
+// configuration -- stays fatal, because retrying cannot fix it.
+func transientStartupFailure(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return true
+	}
+	var op *net.OpError
+	return errors.As(err, &op)
+}
+
+// openPending opens the session a binding started without. It shares the
+// recovery limiter so a node whose bindings all start pending cannot stampede
+// the broker the moment the network returns.
+func (s *recoveringScaleSetSource) openPending(ctx context.Context) error {
+	select {
+	case s.limiter <- struct{}{}:
+		defer func() { <-s.limiter }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.suspended || s.source != nil {
+		return nil
+	}
+	opened, err := s.open(ctx)
+	if err != nil {
+		failure := &githubscaleset.SessionFailure{Reason: openFailureReason(err), Cause: err}
+		if ctx.Err() == nil && !deferrableOpenFailure(err) {
+			s.abandoned = failure
+		}
+		return failure
+	}
+	s.source = opened
+	s.released = false
+	s.failures = githubscaleset.SessionFailureState{}
+	return nil
+}
+
+// deferrableOpenFailure is every reason a session could not be opened that a
+// later attempt can cure without anyone changing anything: the network's state
+// (transientStartupFailure), or a session another holder has not yet let go of
+// (ADR 0063 d). Everything else is the node's own fault and stays fatal.
+func deferrableOpenFailure(err error) bool {
+	return transientStartupFailure(err) || githubscaleset.SessionHeld(err)
+}
+
+// openFailureReason names a failed open in the closed vocabulary. A held set is
+// its own reason because its remedy is the opposite of a broken one: wait.
+func openFailureReason(err error) string {
+	if githubscaleset.SessionHeld(err) {
+		return githubscaleset.ReasonSessionHeld
+	}
+	return githubscaleset.ReasonSessionCreateFailed
+}
+
+func (s *recoveringScaleSetSource) abandonment() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.abandoned
+}
+
+func (s *recoveringScaleSetSource) pendingOpen() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.closed && !s.suspended && s.source == nil
 }
 
 func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
@@ -119,6 +214,17 @@ func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
 }
 
 func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(context.Context, githubscaleset.Demand) error) error {
+	if err := s.abandonment(); err != nil {
+		return err
+	}
+	if s.pendingOpen() {
+		if err := s.openPending(ctx); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+	}
 	source, release, err := s.acquire()
 	if err != nil {
 		return err
@@ -308,6 +414,7 @@ func (s *recoveringScaleSetSource) Resume(ctx context.Context) error {
 	s.source = replacement
 	s.released = false
 	s.suspended = false
+	s.abandoned = nil
 	s.failures = githubscaleset.SessionFailureState{}
 	return nil
 }
@@ -666,6 +773,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		BlockedFor: cfg.SessionYield.BlockedFor, HealthyFor: cfg.SessionYield.HealthyFor})
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
+	// memberSources keys each binding's session by the scale set it polls, which
+	// is the key the scale-set audit's verdict arrives under (ADR 0063).
+	memberSources := make(map[membership.Key]yieldableSource, len(bindings))
 	recoveryLimiter := make(chan struct{}, scaleSetCloseConcurrency)
 	controls := make(map[lifecycle.SourceKey]lifecycle.SourceBinding)
 	if officialScaleSetSessions || canonicalRESTInventory {
@@ -706,10 +816,17 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						System:         "tart-runner-fleet", Version: opts.Version, Subsystem: "controller"})
 				}
 				initial, err := openSource(ctx)
+				deferred := false
 				if err != nil {
-					return err
+					if ctx.Err() != nil || !deferrableOpenFailure(err) {
+						return err
+					}
+					reporter.logger.Warn("scale-set session deferred", "scope", binding.Scope,
+						"profile", string(binding.Profile.ID), "scaleSet", settings.scaleSet.ID,
+						"reason", openFailureReason(err))
+					initial, deferred = nil, true
 				}
-				source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial,
+				source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: initial, pending: deferred,
 					open: openSource, limiter: recoveryLimiter, now: d.now,
 					policy: githubscaleset.SessionRecoveryPolicy{
 						MaxConsecutiveFailures: cfg.SessionRecovery.MaxConsecutiveFailures,
@@ -721,6 +838,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					return err
 				}
 				closers = append(closers, source)
+				memberSources[membership.Key{Scope: binding.Scope, ID: int(binding.ScaleSetID)}] = source
 				ingesters = append(ingesters, boundIngester{coordinator: coordinator, binding: binding, source: source,
 					health: health, observation: fmt.Sprintf("github-%d", binding.StoreKey), reporter: reporter,
 					yield: yieldState})
@@ -770,7 +888,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
 					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
-					observation: "github-rest-" + scope, now: d.now})
+					auditInterval: cfg.GitHub.ParkedScaleSetAuditInterval(),
+					observation:   "github-rest-" + scope, now: d.now})
 			}
 		}
 	}
@@ -782,9 +901,22 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	yield := newSessionYieldController(yieldState, closers, reporter)
+	member := newMembershipController(membershipMode(opts.Mode, cfg), cfg.GitHub.ParkedScaleSetAuditInterval(),
+		memberSources, reporter)
+	if yield != nil && member != nil {
+		yield.excluded = member.excludes
+	}
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
-		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain}
+		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain,
+		membership: member}
+	if opts.Mode == reconcile.Authority {
+		cleanup := discharge.Service{Store: store, VM: d.newReaper(store, cfg), Authority: true, Now: d.now,
+			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+		ticker.recoverCleanup = func(ctx context.Context, letter operations.DeadLetter, instance domain.Instance) error {
+			return cleanup.RecoverStoppedCleanup(ctx, letter, instance, control)
+		}
+	}
 	var worker app.WorkRunner
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
@@ -1506,15 +1638,16 @@ func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleS
 }
 
 type restQueueIngester struct {
-	coordinator app.DemandCoordinator
-	bindings    []app.Binding
-	observer    queueObserver
-	interval    time.Duration
-	health      *telemetry.Health
-	observation string
-	now         func() time.Time
-	previous    *githubscaleset.Snapshot
-	next        time.Time
+	auditInterval time.Duration
+	coordinator   app.DemandCoordinator
+	bindings      []app.Binding
+	observer      queueObserver
+	interval      time.Duration
+	health        *telemetry.Health
+	observation   string
+	now           func() time.Time
+	previous      *githubscaleset.Snapshot
+	next          time.Time
 }
 
 type queueObserver interface {
@@ -1541,20 +1674,23 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}
 		now = r.now().UTC()
 	}
-	r.next = now.Add(r.interval)
 	observation := r.observer.Refresh(ctx, r.previous)
+	r.next = now.Add(r.pace(now, observation))
 	if observation.Err != nil {
+		reason := restObservationReason(observation)
 		if r.health != nil && r.observation != "" {
-			freshness, detail := telemetry.ObservationUnavailable, githubscaleset.ReasonQueueObservationFailed
+			freshness := telemetry.ObservationUnavailable
 			if observation.Freshness == githubscaleset.Stale {
-				freshness, detail = telemetry.ObservationStale, githubscaleset.ReasonQueueObservationStale
+				freshness = telemetry.ObservationStale
 			}
-			_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
+			_ = r.health.RecordObservationDetail(r.observation, freshness, reason)
 		}
-		return false, observation.Err
+		return false, &githubscaleset.SessionFailure{Reason: reason, Cause: observation.Err}
 	}
 	r.previous = observation.Snapshot
-	changed, err := r.coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	coordinator := r.coordinator
+	coordinator.ForeignSelectors = r.foreignSelectors(now)
+	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
 	if r.health != nil && r.observation != "" {
 		freshness, detail := telemetry.ObservationFresh, ""
 		if err != nil {
@@ -1563,6 +1699,69 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
 	return changed, err
+}
+
+// foreignSelectors reuses the completed audit's scope-qualified names. Neither
+// stale metadata nor a failed REST observation is permission to ignore a job.
+func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSetSelector {
+	if r.health == nil {
+		return nil
+	}
+	snapshot := r.health.Snapshot()
+	maxAge := 2 * max(r.auditInterval, r.interval)
+	fresh := func(at time.Time) bool { return !at.IsZero() && !at.After(now) && now.Sub(at) <= maxAge }
+	if !fresh(snapshot.ParkedScaleSetsAuditedAt) {
+		return nil
+	}
+	var selectors []app.ForeignScaleSetSelector
+	for _, row := range snapshot.ParkedScaleSets {
+		if fresh(row.ObservedAt) {
+			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name})
+		}
+	}
+	return selectors
+}
+
+// restBudgetDeferralMax bounds how long one refresh may wait for a rate window
+// to reset. GitHub's window is an hour, so a longer horizon is a clock defect,
+// not a budget.
+const restBudgetDeferralMax = time.Hour
+
+// pace returns the delay before the next refresh. The ordinary interval holds
+// unless the installation budget is scarce or GitHub has already refused: then
+// the refresh waits for the window reset, so the two Mac nodes sharing one
+// installation stop spending it by ~:45 of every hour and losing the inventory
+// for the rest (issue #377). An elapsed reset, or a limit with no horizon,
+// defers nothing: the next poll is the only way to learn the new window.
+func (r *restQueueIngester) pace(now time.Time, observation githubscaleset.Observation) time.Duration {
+	deferral := time.Duration(0)
+	if observation.Budget.Scarce() {
+		deferral = observation.Budget.Reset.Sub(now)
+	}
+	var api *githubscaleset.APIError
+	if errors.As(observation.Err, &api) && api.Kind == githubscaleset.RateLimited {
+		deferral = max(deferral, api.RetryAfter)
+	}
+	return max(r.interval, min(deferral, restBudgetDeferralMax))
+}
+
+// restObservationReason reduces a failed REST refresh to the bounded vocabulary.
+// A rate limit and a server error already have names the session path uses;
+// anything else is the observation failing or ageing out, as before.
+func restObservationReason(observation githubscaleset.Observation) string {
+	var api *githubscaleset.APIError
+	if errors.As(observation.Err, &api) {
+		switch api.Kind {
+		case githubscaleset.RateLimited:
+			return githubscaleset.ReasonRateLimited
+		case githubscaleset.Server:
+			return githubscaleset.ReasonServerError
+		}
+	}
+	if observation.Freshness == githubscaleset.Stale {
+		return githubscaleset.ReasonQueueObservationStale
+	}
+	return githubscaleset.ReasonQueueObservationFailed
 }
 
 func bindingsByScope(bindings []app.Binding) map[string][]app.Binding {
@@ -1610,7 +1809,7 @@ func (b boundIngester) Ingest(ctx context.Context) error {
 }
 
 func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
-	if b.yield.Yielded() {
+	if b.yield.Yielded() || sourceSuspended(b.source) {
 		// Stale, not fresh: this node observed nothing. Stale, not unavailable:
 		// nothing failed. The detail names the cause so the freshness column is
 		// never the only thing an operator has to interpret.
@@ -1640,6 +1839,26 @@ func (b boundIngester) IngestChanged(ctx context.Context) (bool, error) {
 		b.reporter.reportBinding(b.binding, failure)
 	}
 	return changed, err
+}
+
+// membershipMode is the mode the membership ladder runs in on this process.
+// Only the authority audits, and the audit's verdict is the ladder's only
+// evidence, so every other mode runs none -- a watchdog that can never be
+// handed evidence is a green no-op, not a safety net.
+func membershipMode(mode reconcile.Mode, cfg config.Config) membership.Mode {
+	if mode != reconcile.Authority {
+		return membership.Off
+	}
+	return cfg.Membership
+}
+
+// sourceSuspended reports a binding whose session was released on purpose --
+// by ADR 0063's membership ladder, or in the instant between ADR 0047's
+// decision and its publication -- so it is reported as yielded rather than
+// polled into a failure this node caused itself.
+func sourceSuspended(source app.MessageSource) bool {
+	suspendable, ok := source.(interface{ Suspended() bool })
+	return ok && suspendable.Suspended()
 }
 
 // failureReporter turns app.Service's secret-safe failure callback into a
@@ -2032,6 +2251,7 @@ type engineTicker struct {
 	operationCounts   func(context.Context) (int, int, error)
 	operationFailures func(context.Context) ([]operations.OperationFailure, error)
 	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
+	recoverCleanup    func(context.Context, operations.DeadLetter, domain.Instance) error
 	// stalledOperations names what is not finishing: the operations still
 	// retrying and the instances still held in a cleanup state (ADR 0039).
 	stalledOperations func(context.Context, time.Time) ([]operations.StalledOperation, error)
@@ -2039,6 +2259,8 @@ type engineTicker struct {
 	// reporter carries the occupancy warning. A nil reporter publishes the metric
 	// and says nothing, which is what an observe-mode harness wants.
 	reporter *failureReporter
+	// membership is ADR 0063's ladder, nil on a node that declared none.
+	membership *membershipController
 	// yield decides whether this node keeps competing for the jobs GitHub binds
 	// to its scale sets. A nil controller never withdraws, which is every mode
 	// that owns no sessions.
@@ -2090,6 +2312,9 @@ func (e engineTicker) Tick(ctx context.Context) error {
 			failures, failureErr := e.operationFailureMetrics(ctx)
 			letters, letterErr := e.deadLetterMetrics(ctx, result.Instances)
 			stalled, stalledErr := e.stalledMetrics(ctx)
+			if countErr == nil && failureErr == nil && letterErr == nil && stalledErr == nil {
+				letterErr = e.recoverParkedCleanup(ctx, letters, result.Instances)
+			}
 			if countErr != nil || failureErr != nil || letterErr != nil || stalledErr != nil {
 				// Rule 4: an unreadable aggregate degrades the observation. It never
 				// publishes an empty failure set, which would read as a healed fleet, and
@@ -2151,6 +2376,12 @@ func (e engineTicker) applySessionYield(ctx context.Context, result app.TickResu
 	pressure := result.Host.Pressure
 	facts := sessionYieldFacts{At: result.At, AdmissionAllowed: pressure.AdmissionAllowed,
 		LiveInstances: live, BusyOperations: busy}
+	// The ladder decides before the yield controller reconciles, so an exclusion
+	// and the release it asks for land in the same tick.
+	if e.membership != nil {
+		summary := e.membership.Apply(ctx, e.health.Snapshot(), result.At, e.yield.state.Yielded())
+		e.health.SetMembership(e.membership.metric(summary))
+	}
 	yielded := e.yield.Apply(ctx, facts, pressure.AdmissionReason)
 	bindings, withdrawn := e.yield.Bindings()
 	e.health.SetSessionYield(telemetry.SessionYieldMetric{Yielded: yielded, Reason: pressure.AdmissionReason,
@@ -2463,3 +2694,26 @@ type wallClock struct{}
 func (wallClock) Now() time.Time { return time.Now().UTC() }
 
 var _ operations.Store = (*sqlite.Store)(nil)
+
+// Recovery runs on the existing tick, after all observations are coherent.
+// Metric readers remain read-only; only the authority wires this callback.
+func (e engineTicker) recoverParkedCleanup(ctx context.Context, letters []telemetry.DeadLetter, instances []domain.Instance) error {
+	if e.recoverCleanup == nil {
+		return nil
+	}
+	for _, letter := range letters {
+		if !letter.Parked {
+			continue
+		}
+		for _, instance := range instances {
+			if instance.ID != letter.ResourceID {
+				continue
+			}
+			durable := operations.DeadLetter{OperationID: letter.OperationID, ResourceID: letter.ResourceID, Kind: letter.Kind, Code: letter.Code, Attempts: letter.Attempts}
+			if err := e.recoverCleanup(ctx, durable, instance); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
