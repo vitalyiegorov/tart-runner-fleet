@@ -1772,3 +1772,15 @@ inventory. Missing or expired proof remains unavailable; unknown labels remain
 errors. Do not add a sibling's selector to this node or remove an intentional
 workflow selector to make readiness green. This classification neither moves
 existing assignments nor grants authority over a foreign scale set.
+
+
+### A provisioning VM is missing from inventory
+
+A successful backend enumeration that cannot find a Cloning, Booting or Reachable
+VM reports that instance as absent, retaining its state-entry age and resource
+charge. The existing provisioning deadline then requests its guarded recovery
+([ADR 0067](adr/0067-a-provisioning-instance-may-not-retry-forever.md), issues #159/#380). A failed enumeration remains unavailable; missing
+registered or running VMs still block inventory. Never delete state rows or
+fabricate a replacement VM. An older incumbent that cannot expose the row to
+recovery also cannot pass the updater's healthy-generation gate; preserve the
+failure evidence and use a separately validated operational recovery path.
