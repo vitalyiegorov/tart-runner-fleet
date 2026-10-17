@@ -245,8 +245,8 @@ Two configuration rules follow, and both are checked rather than documented:
   no `scaleSets` entry is not exposed, receives no jobs, and is not checked —
   which is how a budgeted node keeps the mandatory `macosBurst.builder` in its
   file while serving `maestro` alone.
-- **A budget must fit the machine.** `fleet config validate` decodes a file and
-  never probes a host, so this one is checked at the host probe: a budget above
+- **A budget must fit the machine.** `fleet config validate` does not probe host
+  CPU or memory, so this one is checked at the host probe: a budget above
   the physical cores, or above physical memory less `minAvailableMemoryMb`,
   reports the host observation unavailable with a reason naming both figures.
   `fleet status`, `fleet doctor`, and `fleet observations` all show it. A

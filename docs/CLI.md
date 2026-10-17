@@ -32,8 +32,16 @@ The old `validate-config PATH` spelling remains a compatibility alias.
 
 ### Validating more than one node at once
 
-`config validate` accepts several paths. Each is decoded and validated exactly as
-a single path is — same checks, same messages, same exit codes — and then two
+A single path validates executable configuration for the local host. On macOS,
+when macOS guests and `macosBurst.sharedDirectoryPath` are configured, the path
+must exist and be a directory accessible to lookup by the validating user. Run
+this command on the owning Mac as the daemon user. The daemon repeats this check
+before opening state in every mode, including observe. Lookup failures name the
+field and path and exit `1`; the validator never creates or repairs directories.
+Linux and disabled macOS configurations do not inspect macOS share paths.
+
+`config validate` accepts several paths for cross-node shape validation. Each is
+decoded and checked without inspecting remote host paths, and then two
 rules that are knowable only when every node is in hand are applied across the
 set ([ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md)):
 

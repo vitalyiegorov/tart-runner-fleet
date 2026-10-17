@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ type apiClient interface {
 }
 
 type dependencies struct {
+	validateLocalHost        func(config.Config) error
 	newClient                func(string, time.Duration) (apiClient, error)
 	openConfig               func(string) (io.ReadCloser, error)
 	loadPrivateKey           func(context.Context, string, string, string) (*githubscaleset.PrivateKeySecret, error)
@@ -103,6 +105,7 @@ func privateKeyLoader(load secretLoader) func(context.Context, string, string, s
 func defaultDependencies() dependencies {
 	appKey := credentials.GitHubAppKey{}
 	return dependencies{
+		validateLocalHost: func(cfg config.Config) error { return app.ValidateLocalHost(cfg, runtime.GOOS, os.Stat) },
 		newClient: func(endpoint string, timeout time.Duration) (apiClient, error) {
 			return adminapi.NewClient(endpoint, timeout)
 		},
@@ -168,13 +171,13 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 		fmt.Fprintln(stdout, adminapi.APIVersion)
 		return exitSuccess
 	case "config":
-		return runConfig(args[1:], stdout, stderr)
+		return runConfig(args[1:], stdout, stderr, deps)
 	case "scale-sets":
 		return runScaleSets(ctx, args[1:], stdout, stderr, deps)
 	case "update":
 		return runUpdate(ctx, args[1:], stdout, stderr, deps)
 	case "validate-config":
-		return runConfig(append([]string{"validate"}, args[1:]...), stdout, stderr)
+		return runConfig(append([]string{"validate"}, args[1:]...), stdout, stderr, deps)
 	case "operations":
 		// `operations` stays the read-only view; only the explicit `discharge`
 		// subcommand mutates, so the guarded path can never be reached by a typo in
@@ -1254,11 +1257,11 @@ func runVersion(args []string, stdout, stderr io.Writer, version string) int {
 	return exitSuccess
 }
 
-// runConfig dispatches the offline configuration surface. `validate` judges a
+// runConfig dispatches the configuration surface. `validate` judges a
 // file against the rules of this release; `policy` reports what a file — or the
 // status document a node published from one — actually decides with, which is a
 // different question and the one nothing could answer before ADR 0053.
-func runConfig(args []string, stdout, stderr io.Writer) int {
+func runConfig(args []string, stdout, stderr io.Writer, deps dependencies) int {
 	if len(args) > 0 && args[0] == "policy" {
 		return runConfigPolicy(args[1:], stdout, stderr)
 	}
@@ -1286,12 +1289,18 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		if code != exitSuccess {
 			return code
 		}
+		if len(paths) == 1 {
+			if err := deps.validateLocalHost(cfg); err != nil {
+				fmt.Fprintf(stderr, "invalid local host: %v\n", err)
+				return exitFailure
+			}
+		}
 		nodes = append(nodes, config.NodeConfig{Node: filepath.Base(path), Config: cfg})
 	}
 	// More than one path is the only place the fleet exists as a single artifact,
 	// so it is the only place ADR 0034's cross-node rules can be asserted: label
 	// capability parity, and one owner per (scope, scale-set name). One path is
-	// unchanged, because one node cannot disagree with itself.
+	// checked locally above, because one node cannot disagree with itself.
 	if len(nodes) > 1 {
 		if err := config.CheckFleet(nodes).Err(); err != nil {
 			fmt.Fprintf(stderr, "invalid fleet:\n%v\n", err)
