@@ -87,6 +87,19 @@ func NewProvisioner(c GitHubAppAdminConfig) (Provisioner, error) {
 	return Provisioner{Client: client}, nil
 }
 
+// NewRecreater builds the provisioner `fleet scale-sets recreate` holds. It
+// tolerates drift because replacing the object is the only repair for label
+// drift: GitHub accepts an in-place label update and keeps the old labels, so a
+// set that gained an alias can only advertise it as a new object.
+func NewRecreater(c GitHubAppAdminConfig) (Provisioner, error) {
+	provisioner, err := NewProvisioner(c)
+	if err != nil {
+		return Provisioner{}, err
+	}
+	provisioner.ReconcileDrift = true
+	return provisioner, nil
+}
+
 func (p Provisioner) Ensure(ctx context.Context, spec ScaleSetSpec) (scaleset.RunnerScaleSet, error) {
 	inspection, err := p.inspect(ctx, spec)
 	if err != nil {
@@ -105,8 +118,12 @@ func (p Provisioner) Ensure(ctx context.Context, spec ScaleSetSpec) (scaleset.Ru
 		if err != nil {
 			return scaleset.RunnerScaleSet{}, fmt.Errorf("reconcile runner scale set: %w", err)
 		}
-		if updated == nil || updated.ID != inspection.current.ID || !exactScaleSet(*updated, inspection.desired) {
+		if updated == nil || updated.ID != inspection.current.ID {
 			return scaleset.RunnerScaleSet{}, operations.ErrUncertain
+		}
+		if !exactScaleSet(*updated, inspection.desired) {
+			return scaleset.RunnerScaleSet{}, fmt.Errorf("GitHub kept runner scale set %q unchanged; labels "+
+				"are fixed at creation, so `fleet scale-sets recreate` it: %w", spec.Name, operations.ErrUncertain)
 		}
 		return *updated, nil
 	}
