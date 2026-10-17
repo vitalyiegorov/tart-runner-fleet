@@ -80,7 +80,10 @@ func (c *fakeUpdateCommand) Run(_ context.Context, name string, args ...string) 
 		return []byte(`{"data":{"controllerVersion":"v2","controllerMode":"authority","ready":{"ok":false},"healthy":{"ok":true}}}`), nil
 	}
 	if strings.Contains(call, "launchctl print") {
-		return []byte(c.launchPrint), nil
+		if c.launchPrint != "" {
+			return []byte(c.launchPrint), nil
+		}
+		return []byte("program = /test/releases/v2/fleet"), nil
 	}
 	return nil, nil
 }
@@ -819,7 +822,8 @@ func TestAtomicWriteConfigFailsClosedAtEveryDurabilityStep(t *testing.T) {
 // whether to adopt it, and that node never reached quiescence — so the
 // collection has to happen on the download path, not only after a successful
 // adoption.
-func TestApplyLatestCollectsSupersededReleases(t *testing.T) {
+func pruneUpdateFixture(t *testing.T) (string, []string, dependencies) {
+	t.Helper()
 	root := t.TempDir()
 	state := filepath.Join(root, "state")
 	agents := filepath.Join(root, "LaunchAgents")
@@ -857,8 +861,12 @@ func TestApplyLatestCollectsSupersededReleases(t *testing.T) {
 	if code := executeWith(context.Background(), adopt, &stdout, &stderr, deps); code != exitSuccess {
 		t.Fatalf("adopt code=%d stderr=%q", code, stderr.String())
 	}
-	stdout.Reset()
-	stderr.Reset()
+	return root, common, deps
+}
+
+func TestApplyLatestCollectsSupersededReleases(t *testing.T) {
+	root, common, deps := pruneUpdateFixture(t)
+	var stdout, stderr bytes.Buffer
 	args := append(append([]string{"update", "apply-latest"}, common...), "--confirm", "automatic-release-update")
 	if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
 		t.Fatalf("apply-latest code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
@@ -955,5 +963,31 @@ func TestGuardedAdoptionEnrollsALinuxNodeThroughItsSystemdTimer(t *testing.T) {
 	}
 	if strings.Contains(joined, "launchctl") {
 		t.Fatalf("a systemd node was driven with launchctl:\n%s", joined)
+	}
+}
+
+// Issue #352: the installed manifest and current link advance while launchd
+// still caches an older executable outside normal rollback headroom.
+func TestPruningPreservesTheLoadedStaleGeneration(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		t.Run(fmt.Sprint(unavailable), func(t *testing.T) {
+			root, common, deps := pruneUpdateFixture(t)
+			command := deps.command.(*fakeUpdateCommand)
+			command.launchPrint = "program = " + filepath.Join(root, "releases", "v0.0.1", "fleet")
+			if unavailable {
+				command.launchPrint = "program = "
+			}
+			var stdout, stderr bytes.Buffer
+			args := append(append([]string{"update", "apply-latest"}, common...), "--confirm", "automatic-release-update")
+			if code := executeWith(context.Background(), args, &stdout, &stderr, deps); code != exitSuccess {
+				t.Fatalf("apply failed: %d %s", code, stderr.String())
+			}
+			if _, err := os.Stat(filepath.Join(root, "releases", "v0.0.1")); err != nil {
+				t.Fatalf("issue #352: relaunch binary pruned: %v", err)
+			}
+			if unavailable && !strings.Contains(stdout.String(), "release pruning deferred") {
+				t.Fatalf("missing defer diagnostic: %s", stdout.String())
+			}
+		})
 	}
 }

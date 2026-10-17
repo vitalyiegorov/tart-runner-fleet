@@ -378,7 +378,12 @@ func pruneReleases(ctx context.Context, host autoupdate.ManagedHost, root string
 	if err != nil {
 		return
 	}
-	if removed := autoupdate.PruneReleases(root, current.Version, autoupdate.DefaultRetainedReleases); len(removed) > 0 {
+	referenced, err := host.ReferencedReleases(ctx)
+	if err != nil {
+		fmt.Fprintln(stdout, "release pruning deferred: service references unavailable")
+		return
+	}
+	if removed := autoupdate.PruneReleases(root, current.Version, autoupdate.DefaultRetainedReleases, referenced...); len(removed) > 0 {
 		fmt.Fprintf(stdout, "pruned %d superseded release(s): %s\n", len(removed), strings.Join(removed, " "))
 	}
 }
