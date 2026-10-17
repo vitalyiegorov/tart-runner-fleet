@@ -440,6 +440,10 @@ func (s *recoveringScaleSetSource) Close(ctx context.Context) error {
 }
 
 type dependencies struct {
+	// validateLocalHost checks local executable configuration in every mode,
+	// before durable state or backend side effects.
+	validateLocalHost func(config.Config) error
+
 	// executes mirrors platform.executes: whether this node's backend can bring
 	// an instance into existence at all. It is a question asked of the decoded
 	// configuration, because on Linux the answer is a configured backend rather
@@ -524,9 +528,10 @@ func defaultDependencies() dependencies { return newDependencies(runtime.GOOS) }
 func newDependencies(goos string) dependencies {
 	node := platformFor(goos)
 	return dependencies{
-		executes:   node.executes,
-		preflight:  node.preflight,
-		linuxImage: node.linuxImage,
+		validateLocalHost: func(cfg config.Config) error { return app.ValidateLocalHost(cfg, goos, os.Stat) },
+		executes:          node.executes,
+		preflight:         node.preflight,
+		linuxImage:        node.linuxImage,
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
@@ -626,6 +631,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// rather than decoded, because it is a fact about this process's invocation
 	// and not about the document.
 	cfg.StateDir = filepath.Dir(opts.ConfigPath)
+	if err := d.validateLocalHost(cfg); err != nil {
+		return fmt.Errorf("local host preflight: %w", err)
+	}
 	if opts.Mode != reconcile.Observe {
 		// A node with no execution technology may observe and nothing else. Shadow,
 		// canary and authority all exist to act on a machine this build cannot act
