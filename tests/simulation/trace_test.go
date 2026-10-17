@@ -65,6 +65,18 @@ const (
 	eventHostProbeStale  eventKind = "host_probe_stale"
 	eventTartUnavailable eventKind = "tart_unavailable"
 	eventSlowBoot        eventKind = "slow_boot"
+	// eventWedgedBootstrap is the 2026-10-11 Mac Studio incident (ADR 0067): the
+	// next guest to become reachable never gets past bootstrap. Its VM booted and
+	// answers on the network, but `tart exec` into it hangs, so every bootstrap
+	// attempt fails and the provisioning operation retries it forever against
+	// the same VM. It never decays: nothing about that guest gets better because
+	// time passed, and only a fresh clone can succeed.
+	//
+	// It is a trace-only fault, deliberately absent from faultThisTick: adding a
+	// kind to the generator's draw reshuffles every generated trace, and with it
+	// every regression pinned to a seed.
+	eventWedgedBootstrap eventKind = "wedged_bootstrap"
+	eventMissingBootVM   eventKind = "missing_boot_vm"
 	// eventLongJob makes the next workflow job to start run for longer than a
 	// recovery deadline, which is what a real test suite does.
 	eventLongJob eventKind = "long_job"
@@ -312,6 +324,10 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.tartUnavailable = event.Count
 	case eventSlowBoot:
 		w.slowBootNext = event.Count
+	case eventMissingBootVM:
+		w.missingBootNext = true
+	case eventWedgedBootstrap:
+		w.wedgeBootstrapNext = true
 	case eventLongJob:
 		// Scaled to deadlines: Count of 6 is roughly one assignment deadline, so
 		// the generator reaches jobs that outlive one and jobs that do not.

@@ -863,7 +863,7 @@ func (w *world) stoppedPowerReclaims() []string {
 				continue
 			}
 			if operation.ConfirmedInactive || operation.StalledAssignment || operation.LingeringRunner ||
-				operation.GuestUnresponsive || operation.OccupancyExceeded {
+				operation.GuestUnresponsive || operation.OccupancyExceeded || operation.ProvisionStalled {
 				continue
 			}
 			reclaimed = append(reclaimed, operation.Instance)

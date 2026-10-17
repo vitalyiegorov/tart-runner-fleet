@@ -283,6 +283,9 @@ func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
 		{flag: func(o *scheduler.Operation) { o.StalledAssignment = true }, state: operations.StateAssigned, phase: operations.DrainPhaseStalledAssignment},
 		{flag: func(o *scheduler.Operation) { o.LingeringRunner = true }, state: operations.StateRunning, phase: operations.DrainPhaseLingeringRunner},
 		{flag: func(o *scheduler.Operation) { o.OccupancyExceeded = true }, state: operations.StateRunning, phase: operations.DrainPhaseOccupancyBudget},
+		{flag: func(o *scheduler.Operation) { o.ProvisionStalled = true }, state: operations.StateCloning, phase: operations.DrainPhaseProvisionStalled},
+		{flag: func(o *scheduler.Operation) { o.ProvisionStalled = true }, state: operations.StateBooting, phase: operations.DrainPhaseProvisionStalled},
+		{flag: func(o *scheduler.Operation) { o.ProvisionStalled = true }, state: operations.StateReachable, phase: operations.DrainPhaseProvisionStalled},
 	} {
 		store.applied = nil
 		instance.State = deadline.state
@@ -294,6 +297,18 @@ func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
 		}
 		if intent := store.applied[0].Instances[0]; intent.ExpectedState != deadline.state || intent.Instance.DrainPhase != deadline.phase {
 			t.Fatalf("deadline recovery intent = %#v, want phase %d", intent, deadline.phase)
+		}
+	}
+	// A stalled provisioning is only ever a provisioning instance's cause: a
+	// runner that got as far as Running is judged by the other causes, and a
+	// Registering instance may not drain at all (ADR 0067).
+	for _, state := range []operations.State{operations.StateRunning, operations.StateRegistering, operations.StatePlanned} {
+		store.applied = nil
+		instance.State = state
+		store.instances[instance.ID] = instance
+		op := scheduler.Operation{ID: "recover", Kind: scheduler.OperationDrain, Instance: instance.ID, Recovery: true, ProvisionStalled: true}
+		if _, err := controller.Commit(context.Background(), readyPlan(op), "", controllerNow); err == nil {
+			t.Fatalf("a stalled-provisioning drain was accepted for a %s instance", state)
 		}
 	}
 	store.applied = nil
