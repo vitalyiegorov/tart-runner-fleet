@@ -139,6 +139,7 @@ type ManagedHost interface {
 	Host
 	Adopt(context.Context, Generation) error
 	FinishUpdaterHandoff(context.Context, Generation) error
+	ReferencedReleases(context.Context) ([]string, error)
 }
 
 // NewHost builds the release transaction for the supervisor this node names.
