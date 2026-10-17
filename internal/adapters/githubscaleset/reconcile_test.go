@@ -3,6 +3,7 @@ package githubscaleset
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/actions/scaleset"
@@ -139,8 +140,37 @@ func TestEnsureRefusesAnUnverifiedRepair(t *testing.T) {
 	provisioner.ReconcileDrift = true
 	admin.returnDrifted = true
 
-	if _, err := provisioner.Ensure(context.Background(), spec); !errors.Is(err, operations.ErrUncertain) {
+	_, err := provisioner.Ensure(context.Background(), spec)
+	if !errors.Is(err, operations.ErrUncertain) {
 		t.Fatalf("Ensure() = %v, want ErrUncertain when the repaired object still differs", err)
+	}
+	// GitHub ignores in-place label updates, so the refusal names the remedy.
+	if !strings.Contains(err.Error(), "fleet scale-sets recreate") {
+		t.Fatalf("Ensure() = %v, want the error to name recreate", err)
+	}
+}
+
+// TestRecreaterReplacesADriftedSet is the path `scale-sets recreate` takes for a
+// set that gained an alias: inspection plans the drift instead of refusing it,
+// the old object is deleted by id, and the replacement carries every label.
+func TestRecreaterReplacesADriftedSet(t *testing.T) {
+	admin, provisioner, spec := driftedProvisioner(t)
+	provisioner.ReconcileDrift = true
+
+	plan, err := provisioner.Inspect(context.Background(), spec)
+	if err != nil || plan.Action != ScaleSetUpdate || plan.ID != 1 {
+		t.Fatalf("Inspect() = %+v, %v, want the drifted set planned by id", plan, err)
+	}
+	if err := provisioner.Delete(context.Background(), plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	admin.existing = nil
+	created, err := provisioner.Ensure(context.Background(), spec)
+	if err != nil || created.ID != 41 {
+		t.Fatalf("Ensure() = %+v, %v, want a new object", created, err)
+	}
+	if admin.updateCalls != 0 || len(admin.created.Labels) != 4 {
+		t.Fatalf("replacement must be created with every label, not updated: %d updates, %v", admin.updateCalls, admin.created.Labels)
 	}
 }
 
