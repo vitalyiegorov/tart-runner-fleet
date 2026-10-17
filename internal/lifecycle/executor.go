@@ -596,7 +596,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// is a runner the stalled provisioning started after all, executing a
 				// job. That fails the guard and retries until the job is over; it never
 				// aborts, because an abort would mark a VM that never registered as
-				// busy (ADR 0061).
+				// busy (ADR 0067).
 				busy, busyErr := e.Control.RunnerBusy(ctx, instance)
 				if busyErr != nil || busy {
 					return e.fail(ctx, instance, StageGuard)

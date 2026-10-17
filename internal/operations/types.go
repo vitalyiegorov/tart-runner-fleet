@@ -211,7 +211,7 @@ const (
 	// failed to get past one step for longer than the provisioning deadline. It
 	// never became a runner, so there is no Running state to abort back to: busy
 	// evidence on its runner name fails the guard and retries instead, and the
-	// drain otherwise proceeds to a fresh clone for the same demand (ADR 0061).
+	// drain otherwise proceeds to a fresh clone for the same demand (ADR 0067).
 	DrainPhaseProvisionStalled = 8
 )
 

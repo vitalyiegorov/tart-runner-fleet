@@ -236,7 +236,7 @@ type Instance struct {
 	// Booting, or Reachable: a provisioning state its VM already exists in. A
 	// failed provisioning attempt retries without changing state, so this dwell
 	// is how long provisioning has been failing to get past one step. It bounds
-	// the provisioning deadline (ADR 0061). Zero means unknown or not
+	// the provisioning deadline (ADR 0067). Zero means unknown or not
 	// provisioning, which the scheduler treats fail-closed as "never past the
 	// deadline".
 	ProvisioningSince time.Time

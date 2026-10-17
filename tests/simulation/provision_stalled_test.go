@@ -7,7 +7,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Incident 2026-10-11 -- ADR 0061, a provisioning that retried forever
+// Incident 2026-10-11 -- ADR 0067, a provisioning that retried forever
 // ---------------------------------------------------------------------------
 //
 // On the Mac Studio a macOS guest booted and answered on the network, but `tart
@@ -69,5 +69,36 @@ func TestAWedgedBootstrapIsReprovisionedOnAFreshClone(t *testing.T) {
 	}
 	if final := w.observations[len(w.observations)-1]; final.Queued != 0 {
 		t.Fatalf("the queue never drained: %d still queued", final.Queued)
+	}
+}
+
+// Issue #380: backend enumeration succeeds but a booting guest has disappeared.
+// This uses the real inventory seam, not an invented scheduler-only snapshot.
+func TestAMissingBootVMIsReclaimedWithoutHidingTheHost(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	trace := wedgedBootstrapTrace(cfg)
+	trace.Seed = 20261017
+	trace.Events[0].Kind = eventMissingBootVM
+	w := newWorld(t, cfg, trace)
+	defer w.close()
+	findings := w.run()
+	if len(w.missingBoot) != 1 {
+		t.Fatalf("missing boot fault never fired: %v", w.missingBoot)
+	}
+	reclaimed := w.provisionStalledReclaims()
+	if len(reclaimed) != 1 || !w.missingBoot[reclaimed[0]] {
+		t.Fatalf("missing guest never reclaimed: %v; findings: %v", reclaimed, findings)
+	}
+	if len(findings) > 0 {
+		t.Fatalf("missing boot replay: %v", findings)
+	}
+	for id, job := range w.jobs {
+		if job.status != jobDone {
+			t.Fatalf("job %d never completed: %s", id, job.status)
+		}
+	}
+	if live := w.liveInstanceCount(); live != 0 {
+		t.Fatalf("fleet never settled: %d", live)
 	}
 }

@@ -15,7 +15,7 @@ func stopsItsGuestFirst(phase int) bool {
 // Running when GitHub refuses deregistration and fresh evidence shows the
 // runner busy. The two reclaims that stop the guest first act on busy evidence
 // rather than being refuted by it, and a stalled provisioning never reached
-// Running, so aborting there would invent a busy runner (ADR 0061); it fails
+// Running, so aborting there would invent a busy runner (ADR 0067); it fails
 // the deregister step and retries instead.
 func abortsOnBusyRefusal(phase int) bool {
 	return !stopsItsGuestFirst(phase) && phase != operations.DrainPhaseProvisionStalled

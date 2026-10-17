@@ -738,6 +738,8 @@ type world struct {
 	// Reachable for as long as provisioning keeps retrying it.
 	wedgeBootstrapNext bool
 	wedgedBootstrap    map[string]bool
+	missingBootNext    bool
+	missingBoot        map[string]bool
 	longJobNext        int
 	// overrunJobNext arms the issue #223 shape: the next job to start holds its
 	// runner for whole profile budgets rather than for a long suite's worth of
@@ -902,6 +904,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
 		silentGuest: map[string]bool{}, guestDiedAt: map[string]int{}, saturatedGuest: map[string]bool{},
 		wedgedBootstrap: map[string]bool{},
+		missingBoot:     map[string]bool{},
 		powerMisreport:  map[string]int{},
 		powerUnreadable: map[string]bool{},
 		drainAborts:     map[string]int{}, known: map[string]finding{},
@@ -1192,6 +1195,13 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 	case operations.StateCloning:
 		return operations.StateBooting, false
 	case operations.StateBooting:
+		if w.missingBootNext {
+			delete(w.vms, instance.ID)
+			w.missingBoot[instance.ID], w.missingBootNext = true, false
+		}
+		if w.missingBoot[instance.ID] {
+			return "", false
+		}
 		return operations.StateReachable, false
 	case operations.StateReachable:
 		// A wedged bootstrap fails every attempt and leaves the row where it is,

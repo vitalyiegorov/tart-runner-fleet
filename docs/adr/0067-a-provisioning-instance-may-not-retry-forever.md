@@ -1,4 +1,4 @@
-# ADR 0061: A provisioning instance may not retry forever
+# ADR 0067: A provisioning instance may not retry forever
 
 ## Status
 
@@ -125,3 +125,41 @@ operation went on stepping the instance's lifecycle, and so performed the
 drain's edges itself, as a second drain. It now completes the way production
 does (`supersededProvisioning`), and leaves the drain to the drain operation.
 The provisioning-stalled reclaim depends on exactly that hand-over.
+
+
+## Amendment 2026-10-17: missing provisioning guests (#159/#380)
+
+On 2026-10-17 Mac Studio could not rejoin: its durable instance was Booting,
+its clone operation repeatedly failed at readiness, and successful Tart
+inventory contained no corresponding VM (#380, recurrence of #159).
+Inventory made every profile unavailable before this ADR's provisioning deadline
+could see the row. Retrying readiness cannot recreate an absent guest.
+
+Keep a successful enumeration miss per-instance for Cloning, Booting and
+Reachable, the exact states already covered by bounded provisioning recovery.
+Report power `absent`, preserve the durable state-entry clock, and continue
+charging the vector until the existing guarded drain takes over. Planned remains
+unknown because its VM has not yet been created. Registration and later live
+states still make inventory unavailable on absence. Failed backend observation
+always remains unavailable.
+
+This adds no recovery cause, phase, retry knob, or operator bypass. this ADR's
+existing deadline and fresh runner-busy, deregistration, ownership, and deletion
+confirmation guards remain responsible for effects. A missing VM is evidence,
+not independent permission to kill or deregister anything.
+
+## Evidence and limits
+
+The regression unit test and deterministic `missing_boot_vm` simulation fail
+before the inventory change: the missing Booting row hides the recovery and
+no reclaim occurs. After it, exactly that guest is reclaimed, both jobs run,
+and the fleet settles. The fault removes the VM after entering Booting and
+keeps readiness failing, matching production. This is a fleet defect; the
+harness previously lacked the triggering fault. Existing failed-enumeration
+and registered/live absence tests stay fail-closed. The new trace-only fault
+does not change the random generator's draw or weaken its oracles.
+
+No persistent schema or fleet.v1 field/enum changes. Observe and shadow gain
+truthful per-instance evidence but retain their mutation limits. Production
+rejoin and updating an already unhealthy incumbent require separate operational
+evidence; local tests do not prove deployment or authorize database surgery.

@@ -119,14 +119,13 @@ func TestAbsentOwnedVMDuringCleanupIsPerInstanceNotHostWide(t *testing.T) {
 }
 
 // The narrowing is bounded by the controller invariant that produces it: a row
-// leaves Planned only after Clone succeeded, so every other live state means the
-// VM was removed out of band with no cleanup operation reconciling it and no
-// non-destructive reclamation available. That stays host-wide fail-closed, and so
-// does a Tart probe that failed rather than proved absence.
+// has reached registration, so its missing VM may still have a runner receiving
+// jobs. Those states remain host-wide fail-closed; the bounded provisioning
+// recovery is restricted to earlier states. A failed Tart probe also remains
+// unavailable instead of being treated as proven absence.
 func TestAbsentOwnedVMOutsideCleanupStaysHostWideUnavailable(t *testing.T) {
 	now := time.Now().UTC()
-	for _, state := range []operations.State{operations.StateCloning, operations.StateBooting, operations.StateReachable,
-		operations.StateRegistering, operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning, operations.StateFailed} {
+	for _, state := range []operations.State{operations.StateRegistering, operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning, operations.StateFailed} {
 		t.Run(string(state), func(t *testing.T) {
 			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(state)}},
 				Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
@@ -347,7 +346,8 @@ func TestTheBackendsUnreadablePowerTravelsIntactThroughTheInventory(t *testing.T
 }
 
 // The provisioning deadline reads the last state change of a provisioning
-// instance whose VM already exists, and nothing else (ADR 0061). A failed
+// instance whose VM has already been created, including one now missing from
+// successful enumeration (ADR 0067). A failed
 // provisioning attempt does not change the row's state, so UpdatedAt is how long
 // provisioning has been stuck at that step.
 func TestInventoryCarriesTheProvisioningClockOnlyWhileAVMIsProvisioning(t *testing.T) {
@@ -372,6 +372,37 @@ func TestInventoryCarriesTheProvisioningClockOnlyWhileAVMIsProvisioning(t *testi
 		}
 		if !want && !got.IsZero() {
 			t.Fatalf("%s: provisioning clock = %s, want none", state, got)
+		}
+	}
+}
+
+// Issue #380: an absent provisioning guest must reach the existing bounded,
+// freshly guarded provision-stalled recovery instead of wedging every profile.
+func TestAbsentProvisioningVMRemainsVisibleToDeadlineRecovery(t *testing.T) {
+	now := time.Now().UTC()
+	for _, state := range []operations.State{operations.StateCloning, operations.StateBooting, operations.StateReachable} {
+		t.Run(string(state), func(t *testing.T) {
+			instance := inventoryInstance(state)
+			instance.UpdatedAt = now.Add(-time.Hour)
+			inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{instance}}, Executor: fakeTart{}, Host: fakeHost{healthySnapshot(now)}, Capacity: domain.Resources{CPU: 8, MemoryMB: 16384, Slots: 4}}
+			got, _ := inv.Observe(context.Background())
+			if !got.Usable() || len(got.Value) != 1 {
+				t.Fatalf("missing provisioning VM hid recovery: %#v", got)
+			}
+			if i := got.Value[0]; i.Power != domain.InstancePowerAbsent || !i.ProvisioningSince.Equal(instance.UpdatedAt) || !i.ConsumesHostResources() {
+				t.Fatalf("missing provisioning evidence = %#v", i)
+			}
+		})
+	}
+}
+
+func TestUnavailableBackendNeverProvesProvisioningAbsence(t *testing.T) {
+	now := time.Now().UTC()
+	for _, state := range []operations.State{operations.StateCloning, operations.StateBooting, operations.StateReachable} {
+		inv := ProductionInventory{Store: fakeInstances{values: []operations.Instance{inventoryInstance(state)}}, Executor: fakeTart{err: errors.New("unavailable")}, Host: fakeHost{healthySnapshot(now)}}
+		got, _ := inv.Observe(context.Background())
+		if got.State != domain.ObservationUnavailable || got.Reason != "Tart inventory unavailable" {
+			t.Fatalf("unavailable %s backend became absence: %#v", state, got)
 		}
 	}
 }

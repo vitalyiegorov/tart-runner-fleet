@@ -252,9 +252,9 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		switch {
 		case exists:
 			power, unreadable = vm.Power, vm.Unreadable
-		case instance.State.TearingDown():
+		case instance.State != operations.StatePlanned:
 			// The Tart read above SUCCEEDED, so this VM is proven gone rather than
-			// unread, and during cleanup that is an expected intermediate fact — see
+			// unread. Cleanup and bounded provisioning recovery can reconcile it — see
 			// absenceIsReconcilable. A Planned instance keeps Unknown power: its VM has
 			// not been cloned yet, so nothing was ever observed about it.
 			power = domain.InstancePowerAbsent
@@ -277,7 +277,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		// A provisioning attempt that fails leaves the row in the state it failed
 		// in, so UpdatedAt marks how long provisioning has been stuck at that step.
 		// Planned is left out: its VM does not exist yet, and a planned instance may
-		// legitimately wait on another operation (ADR 0061).
+		// legitimately wait on another operation (ADR 0067).
 		provisioningSince := time.Time{}
 		switch instance.State {
 		case operations.StateCloning, operations.StateBooting, operations.StateReachable:
@@ -358,31 +358,18 @@ func (p ProductionInventory) probeGuests(ctx context.Context, instances []domain
 	return instances
 }
 
-// absenceIsReconcilable reports whether a live durable row whose owned VM a
-// successful `tart list` did not enumerate can be carried as a per-instance fact
-// instead of collapsing the whole host's instance observation.
-//
-// Planned precedes the clone, so its VM legitimately does not exist yet. The
-// cleanup states are the other half, for two reasons that hold together:
-//
-//   - Absence there is EXPECTED, not anomalous. DrainExecutor deletes the VM and
-//     only then advances the row to deleted, and a tick reads the durable rows and
-//     Tart at two different instants, so any interleaving of the two legitimately
-//     observes a live cleanup row with no VM. Blocking host-wide made a benign,
-//     self-clearing race stop planning for every profile on the machine.
-//   - Something is already reconciling it, and absence cannot stop it: the drain's
-//     Stop and Delete both treat an absent VM as success, so the row reaches
-//     deleted and the observation heals with no operator action.
-//
-// Every other live state stays host-wide fail-closed. A row leaves Planned only
-// after Clone succeeded, so absence there is an out-of-band removal with no
-// cleanup operation reconciling it, and reclaiming it would mean deregistering a
-// runner GitHub may still be handing a job to — new destructive authority derived
-// from an enumeration miss, which this change deliberately does not take. It
-// keeps a loud, correct block that an operator resolves with
-// `fleet operations discharge`.
+// absenceIsReconcilable keeps a successful enumeration miss per-instance when
+// an existing lifecycle path can reconcile it. Planned precedes clone; teardown
+// is absent-idempotent. Cloning, Booting and Reachable have ADR 0067's bounded
+// provision-stalled drain, with fresh runner/job guards at execution time.
+// Registered/live states still fail closed: absence alone authorizes no drain.
 func absenceIsReconcilable(state operations.State) bool {
-	return state == operations.StatePlanned || state.TearingDown()
+	switch state {
+	case operations.StatePlanned, operations.StateCloning, operations.StateBooting, operations.StateReachable:
+		return true
+	default:
+		return state.TearingDown()
+	}
 }
 
 func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {

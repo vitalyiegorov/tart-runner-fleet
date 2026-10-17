@@ -151,7 +151,7 @@ type Operation struct {
 	// ProvisionStalled marks the reclaim of an instance whose provisioning has
 	// failed to get past one step for longer than the provisioning deadline: a
 	// VM that exists but never became a runner, so no job, completion event, or
-	// other recovery will ever release it (ADR 0061).
+	// other recovery will ever release it (ADR 0067).
 	ProvisionStalled bool `json:"provisionStalled,omitempty"`
 }
 

@@ -301,7 +301,7 @@ func TestControllerMarksStoppedAssignmentRecoveryProof(t *testing.T) {
 	}
 	// A stalled provisioning is only ever a provisioning instance's cause: a
 	// runner that got as far as Running is judged by the other causes, and a
-	// Registering instance may not drain at all (ADR 0061).
+	// Registering instance may not drain at all (ADR 0067).
 	for _, state := range []operations.State{operations.StateRunning, operations.StateRegistering, operations.StatePlanned} {
 		store.applied = nil
 		instance.State = state

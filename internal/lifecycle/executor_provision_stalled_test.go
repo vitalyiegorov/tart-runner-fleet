@@ -8,7 +8,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
-// This file is the 2026-10-11 Mac Studio incident at the drain edge (ADR 0061):
+// This file is the 2026-10-11 Mac Studio incident at the drain edge (ADR 0067):
 // a guest whose bootstrap could never succeed is reclaimed so its demand can be
 // provisioned on a fresh clone. The instance never became a runner, so the one
 // way this drain could be wrong is to treat it as one: aborting it to Running
