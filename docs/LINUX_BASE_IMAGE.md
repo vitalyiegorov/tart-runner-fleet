@@ -634,6 +634,46 @@ know fails every instance start. Verify after the reboot:
 # want: console=tty1 console=hvc0   (and no ttyAMA0)
 ```
 
+### 4c. Stop apt from upgrading the guest during a job
+
+Every clone boots from a sealed image and lives for one job, so the upstream
+cloud image's periodic apt work has nothing to keep current and only gets in
+the way. Left enabled, `unattended-upgrades` starts shortly after boot and holds
+the dpkg lock while the job runs. Any step that installs packages then fails
+with `Could not get lock /var/lib/dpkg/lock-frontend ... held by process N
+(unattended-upgr)`. Observed on knee-doctor E2E job 114293382905, 2026-10-10,
+where the `playwright install --with-deps` fallback lost the race.
+
+```sh
+"$TART" exec "$BUILD" sudo bash -c '
+set -euo pipefail
+systemctl mask --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service
+for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service; do
+  load_state=$(systemctl show --property=LoadState --value "$unit")
+  active_state=$(systemctl show --property=ActiveState --value "$unit")
+  test "$load_state" = "masked"
+  test "$active_state" = "inactive"
+done
+printf "APT::Periodic::Update-Package-Lists \"0\";\nAPT::Periodic::Unattended-Upgrade \"0\";\n" \
+  > /etc/apt/apt.conf.d/20auto-upgrades
+'
+```
+
+Masking alone does not stop an active updater. `--now` stops it, and any
+failure aborts the build before further package installation. Both checks must
+pass for every unit; unavailable or unexpected state fails verification.
+`systemctl show` reads properties without the legitimate nonzero status that
+`is-active` returns for an inactive unit.
+
+[ADR 0068](adr/0068-ephemeral-linux-guests-use-immutable-package-updates.md)
+records this policy and its canonical incident, [issue
+#148](https://github.com/vitalyiegorov/tart-runner-fleet/issues/148).
+Image updates are a rebuild, not something a running guest does to itself.
+The containers on geekom do not run these timers, so this step only applies to
+Tart guests.
+
 ### 5. Install the bootstrap helper
 
 From the same release the node runs. The released asset name carries the
@@ -863,6 +903,15 @@ grep -q "console=hvc0" /proc/cmdline
 ! grep -q "console=ttyAMA0" /proc/cmdline
 sudo -n /sbin/shutdown --help >/dev/null
 systemd-run --scope --collect --quiet --unit=tart-runner-fleet-probe -- /bin/true
+
+# Step 4c: background apt units must be masked and inactive.
+for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
+  apt-daily.service apt-daily-upgrade.service; do
+  load_state=$(systemctl show --property=LoadState --value "$unit")
+  active_state=$(systemctl show --property=ActiveState --value "$unit")
+  test "$load_state" = "masked"
+  test "$active_state" = "inactive"
+done
 
 # Everything a job needs, on the daemon PATH and nothing else.
 env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
