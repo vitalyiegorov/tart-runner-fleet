@@ -197,6 +197,9 @@ type Executor struct {
 	// profile and to no other, so this is a list an operator writes down rather
 	// than a fleet-wide switch.
 	KVMProfiles []string
+	// EmulatorSlotsDir is a dedicated local directory of shared slot-* locks.
+	// Only KVM profiles receive its writable bind mount. Empty disables it.
+	EmulatorSlotsDir string
 	// HoldCommand keeps a created container alive and idle so the JIT bootstrap
 	// can be executed inside it. Empty means the adapter's default.
 	HoldCommand []string
@@ -594,11 +597,12 @@ type Config struct {
 }
 
 type wireExecutor struct {
-	Backend     ExecutorBackend `json:"backend"`
-	Image       string          `json:"image,omitempty"`
-	Binary      string          `json:"binary,omitempty"`
-	KVMProfiles []string        `json:"kvmProfiles,omitempty"`
-	HoldCommand []string        `json:"holdCommand,omitempty"`
+	Backend          ExecutorBackend `json:"backend"`
+	Image            string          `json:"image,omitempty"`
+	Binary           string          `json:"binary,omitempty"`
+	KVMProfiles      []string        `json:"kvmProfiles,omitempty"`
+	EmulatorSlotsDir string          `json:"emulatorSlotsDir,omitempty"`
+	HoldCommand      []string        `json:"holdCommand,omitempty"`
 }
 
 type wireConfig struct {
@@ -869,7 +873,8 @@ func Encode(w io.Writer, cfg Config) error {
 	if cfg.Executor.Backend != ExecutorNone {
 		wire.Executor = &wireExecutor{Backend: cfg.Executor.Backend, Image: cfg.Executor.Image,
 			Binary: cfg.Executor.Binary, KVMProfiles: append([]string(nil), cfg.Executor.KVMProfiles...),
-			HoldCommand: append([]string(nil), cfg.Executor.HoldCommand...)}
+			EmulatorSlotsDir: cfg.Executor.EmulatorSlotsDir,
+			HoldCommand:      append([]string(nil), cfg.Executor.HoldCommand...)}
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
@@ -1098,7 +1103,7 @@ func decodeExecutor(w *wireExecutor) Executor {
 	if w == nil {
 		return Executor{}
 	}
-	return Executor{Backend: w.Backend, Image: w.Image, Binary: w.Binary,
+	return Executor{Backend: w.Backend, Image: w.Image, Binary: w.Binary, EmulatorSlotsDir: w.EmulatorSlotsDir,
 		KVMProfiles: append([]string(nil), w.KVMProfiles...),
 		HoldCommand: append([]string(nil), w.HoldCommand...)}
 }
@@ -1419,7 +1424,7 @@ func (c Config) budgetedProfiles() []Profile {
 func (c Config) validateExecutor() error {
 	if c.Executor.Backend == ExecutorNone {
 		if c.Executor.Image != "" || c.Executor.Binary != "" ||
-			len(c.Executor.KVMProfiles) > 0 || len(c.Executor.HoldCommand) > 0 {
+			len(c.Executor.KVMProfiles) > 0 || len(c.Executor.HoldCommand) > 0 || c.Executor.EmulatorSlotsDir != "" {
 			return errors.New("executor settings require an executor backend")
 		}
 		return nil
@@ -1429,6 +1434,14 @@ func (c Config) validateExecutor() error {
 	}
 	if err := domain.ValidateImageReference(c.Executor.Image); err != nil {
 		return fmt.Errorf("executor image: %w", err)
+	}
+	if dir := c.Executor.EmulatorSlotsDir; dir != "" {
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" || strings.ContainsAny(dir, ",\r\n\x00") {
+			return errors.New("executor emulatorSlotsDir must be a clean absolute dedicated directory without commas or control characters")
+		}
+		if len(c.Executor.KVMProfiles) == 0 {
+			return errors.New("executor emulatorSlotsDir requires at least one KVM profile")
+		}
 	}
 	declared := make(map[string]struct{}, len(c.Linux.Profiles))
 	for _, profile := range c.Linux.Profiles {

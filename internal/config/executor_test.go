@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -140,5 +141,49 @@ func TestAnUnknownExecutorKeyIsRefused(t *testing.T) {
 	tampered := strings.Replace(encoded.String(), `"kvmProfiles"`, `"kvmProfile"`, 1)
 	if _, err := Decode(strings.NewReader(tampered)); err == nil {
 		t.Fatal("a misspelled executor key was accepted")
+	}
+}
+
+func TestEmulatorSlotsRoundTripAndValidation(t *testing.T) {
+	cfg := podmanNode()
+	cfg.Executor.EmulatorSlotsDir = "/srv/mobile-ci/emulator-slots"
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil || decoded.Executor.EmulatorSlotsDir != cfg.Executor.EmulatorSlotsDir {
+		t.Fatalf("slot directory did not round trip: %#v, %v", decoded.Executor, err)
+	}
+	for _, path := range []string{"relative/slots", "/", "/srv/../slots", "/srv/slots,ro", "/srv/slots\n", "/srv/slots\x00"} {
+		cfg.Executor.EmulatorSlotsDir = path
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("accepted unsafe emulator slot directory %q", path)
+		}
+	}
+	cfg.Executor.EmulatorSlotsDir = "/srv/mobile-ci/emulator-slots"
+	cfg.Executor.KVMProfiles = nil
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a slot directory without a KVM profile was silently unused")
+	}
+	cfg.Executor = Executor{EmulatorSlotsDir: "/srv/mobile-ci/emulator-slots"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a slot mount without an executor was accepted")
+	}
+}
+
+func TestEmulatorSlotsPolicyPublishesCapabilityWithoutHostPath(t *testing.T) {
+	cfg := podmanNode()
+	cfg.Executor.EmulatorSlotsDir = "/private/operator/emulator-slots"
+	policy := ProjectPolicy(cfg)
+	if !policy.EmulatorSlotsEnabled {
+		t.Fatal("policy hides the enabled emulator slot cap")
+	}
+	var encoded bytes.Buffer
+	if err := json.NewEncoder(&encoded).Encode(policy); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encoded.String(), cfg.Executor.EmulatorSlotsDir) {
+		t.Fatal("policy published a host path")
 	}
 }

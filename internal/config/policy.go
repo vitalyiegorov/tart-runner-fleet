@@ -101,6 +101,8 @@ type Policy struct {
 	// sorted. A profile missing here runs an Android emulator without
 	// acceleration, which is the same silent per-node divergence as #304's.
 	KVMProfiles []string `json:"kvmProfiles"`
+	// EmulatorSlotsEnabled reports the shared cap without publishing a host path.
+	EmulatorSlotsEnabled bool `json:"emulatorSlotsEnabled,omitempty"`
 	// BaseImageCapabilities is what each of the node's two guest images declares
 	// it provides, sorted. ADR 0034's cross-node parity rule is decided on
 	// exactly this against the labels above.
@@ -242,13 +244,14 @@ func ProjectPolicy(cfg Config) Policy {
 			PendingForSeconds: int(cfg.UpdateDrain.PendingFor.Seconds()),
 			MaxWaitSeconds:    int(cfg.UpdateDrain.MaxWait.Seconds()),
 			CooldownSeconds:   int(cfg.UpdateDrain.Cooldown.Seconds())},
-		Targets:          projectTargets(cfg.Targets),
-		Profiles:         projectProfiles(cfg.Linux.Profiles),
-		AdvertisedLabels: advertisedLabels(cfg),
-		GuestArch:        cfg.GuestArchOrDefault(),
-		ExecutorBackend:  string(cfg.Executor.Backend),
-		ExecutorImage:    cfg.Executor.Image,
-		KVMProfiles:      sortedCopy(cfg.Executor.KVMProfiles),
+		Targets:              projectTargets(cfg.Targets),
+		Profiles:             projectProfiles(cfg.Linux.Profiles),
+		AdvertisedLabels:     advertisedLabels(cfg),
+		GuestArch:            cfg.GuestArchOrDefault(),
+		ExecutorBackend:      string(cfg.Executor.Backend),
+		ExecutorImage:        cfg.Executor.Image,
+		KVMProfiles:          sortedCopy(cfg.Executor.KVMProfiles),
+		EmulatorSlotsEnabled: cfg.Executor.EmulatorSlotsDir != "",
 		BaseImageCapabilities: PolicyCapabilities{Linux: sortedCopy(cfg.Linux.BaseImageCapabilities),
 			MacOS: sortedCopy(cfg.MacOS.BaseImageCapabilities)},
 		CanonicalJobInventory: cfg.GitHub.CanonicalJobInventory,

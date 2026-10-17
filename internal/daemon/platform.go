@@ -213,6 +213,7 @@ func newPodmanAdapter(store runtimeStore, cfg config.Config, control lifecycle.D
 		Ownership: store, Confirmation: control,
 		Image: cfg.Executor.Image, HoldCommand: cfg.Executor.HoldCommand,
 		KVMInstancePrefixes: kvmInstancePrefixes(cfg),
+		EmulatorSlotsDir:    cfg.Executor.EmulatorSlotsDir,
 		VectorViewDir:       vectorViewDir(cfg),
 		CommandTimeout:      cfg.Timeouts.Tart, StopTimeout: containerStopGrace,
 		ConfirmationMaxAge: deletionConfirmationMaxAge}
