@@ -121,6 +121,7 @@ func TestSystemdMissingMaskedAndUnavailableReferences(t *testing.T) {
 		{name: "masked", body: "LoadState=masked\nExecStart=\n"},
 		{name: "empty", wantErr: true},
 		{name: "missing ExecStart", body: "LoadState=loaded\n", wantErr: true},
+		{name: "empty loaded ExecStart", body: "LoadState=loaded\nExecStart=\n", wantErr: true},
 		{name: "loading", body: "LoadState=loading\nExecStart=x", wantErr: true},
 		{name: "error", err: errors.New("unavailable"), wantErr: true},
 	} {

@@ -135,7 +135,7 @@ func (h *SystemdHost) ReferencedReleases(ctx context.Context) ([]string, error) 
 		if namesProperty(string(body), "LoadState", "not-found") {
 			continue
 		}
-		if (!namesProperty(string(body), "LoadState", "loaded") && !namesProperty(string(body), "LoadState", "masked")) || !strings.Contains(string(body), "ExecStart=") {
+		if (!namesProperty(string(body), "LoadState", "loaded") && !namesProperty(string(body), "LoadState", "masked")) || !strings.Contains(string(body), "ExecStart=") || (namesProperty(string(body), "LoadState", "loaded") && namesProperty(string(body), "ExecStart", "")) {
 			return nil, ErrServiceReferences
 		}
 		bodies = append(bodies, string(body))
