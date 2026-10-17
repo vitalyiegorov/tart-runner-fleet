@@ -1119,6 +1119,19 @@ fleet queues --output json
 fleet doctor --output json | jq '.checks[] | select(.name == "ingest delivery")'
 ```
 
+The same explicit remedy applies when a configured label or alias is missing
+and `scale-sets provision --reconcile-drift --apply` reports that GitHub retained
+the old labels. Run `fleet scale-sets recreate` (issue #135). In-place
+updates can be accepted without changing labels. Recreation tolerates that
+drift during inspection and creates the replacement with all configured
+labels. Ordinary provisioning still rejects drift by default. Use the exact
+confirmation token and a reason describing the label repair, and select
+`--scope` when the name is ambiguous. Guard ordering is unchanged: a failed
+inspection prevents deletion, only the observed configured old id is deleted,
+the replacement is verified, then its id is written atomically. A retry after
+an interrupted create or write adopts the replacement without deleting it.
+This is an operator action; the daemon does not recreate sets automatically.
+
 The jobs already assigned to the deleted set are lost with it and must be
 re-run. Do not use this command on a PARKED set: that set is very likely a
 sibling's, and the parked row is evidence, not a verdict (ADR 0054).

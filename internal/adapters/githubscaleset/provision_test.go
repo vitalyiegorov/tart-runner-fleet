@@ -191,8 +191,15 @@ func TestNewProvisionerValidatesAndBuildsOfficialBoundary(t *testing.T) {
 	t.Cleanup(secret.Destroy)
 	provisioner, err := NewProvisioner(GitHubAppAdminConfig{PrivateKey: secret, GitHubConfigURL: "https://github.com/o/r", ClientID: "client", InstallationID: 1,
 		System: "fleet", Version: "v1", CommitSHA: "abc", Subsystem: "provisioner"})
-	if err != nil || provisioner.Client == nil {
+	if err != nil || provisioner.Client == nil || provisioner.ReconcileDrift {
 		t.Fatalf("NewProvisioner() = %#v, %v", provisioner, err)
+	}
+	recreater, err := NewRecreater(GitHubAppAdminConfig{PrivateKey: secret, GitHubConfigURL: "https://github.com/o/r", ClientID: "client", InstallationID: 1})
+	if err != nil || recreater.Client == nil || !recreater.ReconcileDrift {
+		t.Fatalf("NewRecreater() = %#v, %v, want a drift-tolerant provisioner", recreater, err)
+	}
+	if _, err := NewRecreater(GitHubAppAdminConfig{}); !errors.Is(err, operations.ErrInvalid) {
+		t.Fatalf("NewRecreater() must refuse an empty credential: %v", err)
 	}
 }
 
