@@ -1121,7 +1121,7 @@ fleet doctor --output json | jq '.checks[] | select(.name == "ingest delivery")'
 
 The same explicit remedy applies when a configured label or alias is missing
 and `scale-sets provision --reconcile-drift --apply` reports that GitHub retained
-the old labels and names `fleet scale-sets recreate` (issue #135). In-place
+the old labels. Run `fleet scale-sets recreate` (issue #135). In-place
 updates can be accepted without changing labels. Recreation tolerates that
 drift during inspection and creates the replacement with all configured
 labels. Ordinary provisioning still rejects drift by default. Use the exact
