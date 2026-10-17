@@ -327,6 +327,46 @@ instrumentation, coverage threshold, or package/job deadlines. Do not disable
 pointer checks or add a statement cache merely to make this gate cheaper.
 Required CI must validate the change on the exact fix head before handoff.
 
+#### Amendment 2026-10-11: checkptr is scoped off the translated SQLite
+
+`-p 1` was not enough. The simulation package kept running 340-545s on
+four-CPU omarchy runners and timed out at 600s on four-CPU ARM64 guests (PR
+#364, 2026-10-10, and two main runs on 2026-10-08), with no data race and no
+property failure. A second profile (Go 1.26.9, four pinned CPUs, 434s, 1472
+CPU-seconds) says why. About 30% of all samples are `runtime.checkptr*`, and
+another quarter are the race detector's own hooks, both landing inside
+`modernc.org/sqlite/lib`, which is SQLite machine-translated from C. One
+federated seed of 200 ticks executes about 55 SQL statements per tick and takes
+1.2s without instrumentation and about 43 CPU-seconds with it. The suite is not
+large; every statement is about forty times dearer.
+
+`-race` implies `-d=checkptr` for every package it builds. checkptr asserts
+that Go code converting `unsafe.Pointer` follows the rules of the Go memory
+model. Applied to translated C, which emulates a C heap with pointer arithmetic
+by construction, it checks nothing this repository wrote. `make race` and the
+nightly race jobs therefore pass `-gcflags=modernc.org/...=-d=checkptr=0`.
+
+What this keeps. The race detector instruments every package, modernc
+included. checkptr still instruments every package of this module and every
+other dependency. Seeds, ticks, assertions, coverage, and the package and job
+deadlines are unchanged.
+
+What it gives up. An invalid `unsafe.Pointer` conversion inside modernc's
+translated SQLite would no longer panic under `make race`. That is upstream's
+gate to hold, not ours.
+
+Measured on the same four pinned CPUs for `./tests/simulation`: 434s for
+`go test -race -count=1 ./tests/simulation`, and 198s for
+`go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 ./tests/simulation`,
+which is what `make race` runs. That leaves about 2x headroom
+against the 600s deadline on the slower ARM64 guests.
+
+This supersedes the 2026-10-09 instruction not to disable pointer checks, for
+modernc.org packages only, by the owner's decision on 2026-10-11. A statement
+cache is still not the answer. modernc.org/sqlite re-prepares on every
+execution even through `*sql.Stmt`, and making the one hot reconciliation
+set-based measured a 6% saving.
+
 #### Amendment 2026-08-09: a held reservation is part of the feasibility question
 
 Issue #216. Property (a) reported a wedge on a tick that was correctly holding a

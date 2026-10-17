@@ -2,6 +2,11 @@ GO ?= go
 GOLANGCI_LINT ?= golangci-lint
 TOOL ?= ./scripts/run-tool.sh
 COVERAGE_MIN ?= 99.0
+# -race turns on checkptr for every package. modernc.org/sqlite is SQLite
+# machine-translated to Go, so checkptr there costs ~40x per statement while
+# checking no code of ours; the race detector itself stays on everywhere
+# (ADR 0031, amendment 2026-10-11).
+RACE_FLAGS ?= -race -gcflags=modernc.org/...=-d=checkptr=0
 CPD_THRESHOLD ?= 100
 
 export GOTOOLCHAIN ?= local
@@ -55,7 +60,7 @@ unit coverage:
 
 race:
 	# Give each test binary the runner budget; keep its internal concurrency.
-	$(GO) test -race -p 1 -shuffle=on -count=1 ./...
+	$(GO) test $(RACE_FLAGS) -p 1 -shuffle=on -count=1 ./...
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath ./...

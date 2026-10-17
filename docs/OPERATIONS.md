@@ -176,6 +176,17 @@ existing official scale-set stream and delivery lookahead. With the field
 true, REST freshness becomes readiness-critical and configuration validation
 requires truthful capacity.
 
+The observer spends from the installation's primary rate budget (5,000 requests
+an hour for an App installed on a user account), and every node bound to the
+same installation spends from the same window. It revalidates every page with
+`If-None-Match`, so an unchanged page costs nothing, and it reads the
+`X-RateLimit-*` headers on every answer: when the remaining budget falls into
+the reserved tenth, or GitHub has already refused, the next refresh waits for
+the window reset instead of the poll interval (never longer than an hour). The
+inventory stays stale, never empty, while it waits, and the observation
+`detail` says `rate_limited`
+([ADR 0065](adr/0065-rest-inventory-paces-to-the-installation-budget.md)).
+
 Set every scale set's `maxCapacity` to its truthful executable maximum for the
 scope: the smaller of the profile/host capacity and the sum of the scope's
 repository `maxActive` limits. Under the default 8-CPU/16-GiB envelope and one
@@ -1337,11 +1348,12 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `recreated_after_failures` | The failure could not be classified, so the bounded escalation discarded the session. | None, unless it repeats — then treat it as a broker or credential fault. |
 | `session_release_failed` | The dead session could not be released yet; recreation is withheld until the bound. | Wait out `githubSessionFailureWindowSeconds`. A refusal counts on its own clock: after as many refusals as `maxConsecutiveFailures` (default 5) the session is discarded WITHOUT the release and a replacement opened, however many healthy polls came between. Before issue #292 a healthy poll reset the count, so a session GitHub would not delete was kept forever — the mini logged this 20–35 times an hour for days. |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
+| `session_held` | GitHub refused the session with `409`: another session still holds the scale set. Usually this node's own previous process, whose session GitHub has not expired yet (after a crash, a restart, or a laptop waking). The binding waits and retries each poll; the node keeps running ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). | None if it clears within minutes. If it persists, another daemon is configured with this scale set: run `fleet config validate` over every node's configuration (ADR 0034 §2). |
 | `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
-| `rate_limited` | GitHub answered with its primary or a secondary rate limit. | None if occasional. A count that climbs across hours means this node polls too aggressively — widen the poll interval before GitHub widens it for you. |
+| `rate_limited` | GitHub answered with its primary or a secondary rate limit. On a `github-rest-*` observation the inventory is already waiting for the window reset and keeps the last snapshot stale. | None if occasional. A count that climbs across hours means the nodes sharing this installation poll too aggressively — widen the poll interval before GitHub widens it for you, or give a busy scope its own installation. |
 | `server_error` | GitHub answered 5xx: the fault is GitHub's own, not this node's network or credentials. | Wait it out; escalate only if it persists across regions or outlives GitHub's status page. |
 | `demand_commit_conflict` | The durable store refused a broker message. This is not a network condition and redelivering the same message cannot clear it: the fleet holds state the message contradicts. | Read the `binding ingest failure` warning for the scope, profile, and scale set, then see [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md). A restarted message-id sequence resolves itself on the next colliding delivery; anything else is a genuine durable contradiction and needs the demand rows read. |
-| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out. | Check API reachability and rate limits. |
+| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out for a reason that is neither a rate limit nor a GitHub 5xx (those carry `rate_limited` and `server_error` on the same `github-rest-*` observation). | Check API reachability and the App's Actions permission. |
 | `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |
 
 The rate-limited `component loop failure` warning now carries the same
@@ -1554,6 +1566,46 @@ and `sessionYieldDisabled: true` turns the behaviour off for a node that should
 hold its sessions regardless. All three are omitted from a rewritten file while
 they hold the defaults.
 
+### A scale set the membership ladder excluded
+
+Only on a node whose `fleet.json` declares `"membership": "stationary"` or
+`"membership": "roaming"` ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). A node that declares
+nothing runs no ladder and none of this applies.
+
+The ladder reads the authority's own scale-set audit. A set the audit judges
+**wedged** (the `strandedScaleSets` verdict of ADR 0056: GitHub holds work for
+it, no runner is registered, this node holds no instance, and its own queue for
+the set is empty) climbs one rung per audit:
+
+| Stage | What the node did | What you see |
+| --- | --- | --- |
+| `healing` | Closed and reopened that one set's session. Stationary nodes allow 2 attempts, roaming nodes 1. | `fleet doctor`'s `membership` row passes and names the attempt. |
+| `excluded` | Released that set's session, so GitHub binds new jobs to a sibling advertising the same labels. The node's other sets keep serving. | `MEMBERSHIP EXCLUDED` above the queues. The `membership` row FAILS. `fleet_membership_scale_sets{stage="excluded"}` is 1. The binding's observation reads `stale` / `session_yielded`. |
+| `probation` | Reopened the session once the exclusion elapsed. The next audit decides. | The `membership` row passes and says `probation`. |
+
+An exclusion lasts 4 audit cadences on a stationary node and 2 on a roaming
+one. Each consecutive exclusion doubles it, up to 16 cadences. With the
+default 15-minute audit that is 1 h (stationary) or 30 min (roaming), at most
+4 h. An exclusion ends on elapsed time alone, even without a fresh audit, and
+moves the set to `probation`. An audit outage never holds a set out, but stale
+or missing evidence freezes every audit-judged step of the ladder.
+
+Jobs GitHub bound to the set before it was excluded do not move (ADR 0047's
+measurement). The ladder stops new work from binding there; it does not drain
+what is already bound. Those jobs need a cancel and re-run, exactly as before.
+
+The remedy for a set that keeps failing probation is unchanged. Recreate it
+with `fleet scale-sets recreate` (ADR 0056) and restart the daemon. The ladder
+never deletes a GitHub object. A restarted daemon starts every set back at
+`serving`, and a set that is still wedged climbs the ladder again within a few
+audits.
+
+To opt in, add `"membership": "stationary"` (or `"roaming"` for a laptop) to
+the node's `fleet.json`. It requires `github.scopes` and a non-zero
+`github.parkedScaleSetAuditMinutes`, because the audit is the ladder's only
+evidence, and `fleet config validate` refuses it without them. It takes effect
+only in authority mode.
+
 ### A breached queue SLO while the host still has free capacity
 
 `queue_slo_breached` with `admissionAllowed: true` and idle cores is normally
@@ -1681,3 +1733,29 @@ legality, not agreement.
 3. Run `PRAGMA quick_check` through a normal `fleet` startup.
 4. Reconcile Tart inventory, GitHub runners/jobs, ownership, and outbox leases.
 5. Resume observe, then shadow. Never jump directly to authority.
+
+
+### Automatic recovery of a parked stopped cleanup (ADR0061)
+
+An authority controller automatically resumes a parked stop/delete cleanup on
+its ordinary tick when backend power and fresh runner/job confirmation prove
+inactivity. It queues a new durable cleanup attempt; it does not directly retire
+or delete the VM. Failed deletion remains retryable under the normal worker.
+Unknown/busy evidence or another progressing operation preserves the resource.
+Other dead-letter classes still require diagnosis and explicit operator action.
+No extra monitor, restart or cleanup script is needed. Public failure codes stay
+`stop`/`delete`; `automatic cleanup resumed` identifies the old operation and
+instance without logging its payload. Legacy stop rows restart conservatively
+rather than counting old GitHub/guard failures as stop attempts.
+
+### A queue observation fails on a sibling's explicit selector
+
+`queue_reconcile_failed` means REST data was obtained but could not safely be
+applied. It is different from a failed network refresh. If a queued job selects
+another node's exact scale-set name, compare that selector with fresh scope-
+qualified audit metadata before diagnosing the local runner as absent. Under
+ADR 0064, fresh proof of a foreign selector excludes only that job from local
+inventory. Missing or expired proof remains unavailable; unknown labels remain
+errors. Do not add a sibling's selector to this node or remove an intentional
+workflow selector to make readiness green. This classification neither moves
+existing assignments nor grants authority over a foreign scale set.

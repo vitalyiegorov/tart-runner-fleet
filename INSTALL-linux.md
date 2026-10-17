@@ -145,9 +145,37 @@ the two stages of the bring-up.
 | `image` | The OCI reference every runner container is created from. It takes the place of `linux.baseVm`, which means nothing on this node. A node that declares Linux profiles must still name a `baseVm` even when a container backend supersedes it; only a node with no Linux profiles at all may omit it (ADR 0058). Pin the image by digest in production. |
 | `binary` | Optional. Empty resolves `podman` through `PATH`, which is what a distribution package installs. |
 | `kvmProfiles` | The profile IDs whose containers get `--device /dev/kvm`. Per ADR 0034 this is the Android emulator profile and nothing else; a profile named here that the node does not declare is a refused configuration. |
+| `emulatorSlotsDir` | Optional dedicated absolute host directory, mounted writable at `/var/lib/mobile-ci/emulator-slots` only for `kvmProfiles`. Requires at least one KVM profile; leave unset to disable. See provisioning below. |
 | `holdCommand` | Optional. What keeps a created container alive and idle until the JIT bootstrap runs inside it; the default is `sleep infinity`. |
 
+For a host-wide Android emulator cap, provision a dedicated directory before
+setting `emulatorSlotsDir`. Keep the directory owned by the operator and readable
+by the image's runner user. Precreate a fixed number of `slot-*` files writable
+by that user; with the standard rootless image's UID/GID 1000, for example:
+
+```sh
+slots_dir="$HOME/.local/share/mobile-ci/emulator-slots"
+install -d -m 755 "$slots_dir"
+touch "$slots_dir/slot-1" "$slots_dir/slot-2"
+podman unshare chown 1000:1000 "$slots_dir/slot-1" "$slots_dir/slot-2"
+```
+
+Use that full absolute path as `emulatorSlotsDir`, and set mobile-ci's
+`emulator-slots-dir` input to `/var/lib/mobile-ci/emulator-slots` (the file
+count is the limit). Verify the image's actual UID/GID first.
+All KVM runners on one host must share this directory; never remove or replace
+lockfiles while runners exist. An absent directory fails container creation.
+Run the required Podman smoke test with the production image before enabling
+this setting. An older fleet binary rejects the new key: remove it before
+rolling back. See [ADR 0066](docs/adr/0066-kvm-runners-share-host-emulator-slot-locks.md).
+
 A container's resources are the profile's and are never configured twice here.
+The combined RAM-plus-swap limit equals the RAM limit (`--memory-swap` equals
+`--memory`), so cgroup v2 `memory.swap.max` is zero. Podman's default grants an
+extra full memory vector in host swap; that can stall the host and unrelated CI
+queues (issue #369). New runners receive this bound; existing runners are not
+modified or interrupted during deployment. A workload that cannot fit its
+profile can hit its cgroup OOM limit instead of borrowing host swap.
 `--cpus` and `--memory` come from the profile's vector, and so does `/dev/shm`:
 it is a quarter of that memory, floored at podman's own 64 MB default. Podman
 would otherwise mount 64 MB whatever the profile says, which is where a Chromium

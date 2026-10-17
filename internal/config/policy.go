@@ -67,6 +67,10 @@ type Policy struct {
 	// binds jobs to, which decides whether a blocked node withholds a sibling's
 	// work (ADR 0047).
 	SessionYield PolicySessionYield `json:"sessionYield"`
+	// Membership is the node's declared membership mode (ADR 0063): empty runs
+	// no watchdog, `stationary` and `roaming` run the ladder their mode derives.
+	// It decides whether this node releases a wedged set's session on its own.
+	Membership string `json:"membership"`
 	// UpdateDrain is when this node refuses admission on purpose to reach a
 	// pending generation (ADR 0048) — a node admitting nothing for a reason no
 	// other node shares.
@@ -97,6 +101,8 @@ type Policy struct {
 	// sorted. A profile missing here runs an Android emulator without
 	// acceleration, which is the same silent per-node divergence as #304's.
 	KVMProfiles []string `json:"kvmProfiles"`
+	// EmulatorSlotsEnabled reports the shared cap without publishing a host path.
+	EmulatorSlotsEnabled bool `json:"emulatorSlotsEnabled,omitempty"`
 	// BaseImageCapabilities is what each of the node's two guest images declares
 	// it provides, sorted. ADR 0034's cross-node parity rule is decided on
 	// exactly this against the labels above.
@@ -233,17 +239,19 @@ func ProjectPolicy(cfg Config) Policy {
 		SessionYield: PolicySessionYield{Enabled: cfg.SessionYield.Enabled,
 			BlockedForSeconds: int(cfg.SessionYield.BlockedFor.Seconds()),
 			HealthyForSeconds: int(cfg.SessionYield.HealthyFor.Seconds())},
+		Membership: string(cfg.Membership),
 		UpdateDrain: PolicyUpdateDrain{Enabled: cfg.UpdateDrain.Enabled,
 			PendingForSeconds: int(cfg.UpdateDrain.PendingFor.Seconds()),
 			MaxWaitSeconds:    int(cfg.UpdateDrain.MaxWait.Seconds()),
 			CooldownSeconds:   int(cfg.UpdateDrain.Cooldown.Seconds())},
-		Targets:          projectTargets(cfg.Targets),
-		Profiles:         projectProfiles(cfg.Linux.Profiles),
-		AdvertisedLabels: advertisedLabels(cfg),
-		GuestArch:        cfg.GuestArchOrDefault(),
-		ExecutorBackend:  string(cfg.Executor.Backend),
-		ExecutorImage:    cfg.Executor.Image,
-		KVMProfiles:      sortedCopy(cfg.Executor.KVMProfiles),
+		Targets:              projectTargets(cfg.Targets),
+		Profiles:             projectProfiles(cfg.Linux.Profiles),
+		AdvertisedLabels:     advertisedLabels(cfg),
+		GuestArch:            cfg.GuestArchOrDefault(),
+		ExecutorBackend:      string(cfg.Executor.Backend),
+		ExecutorImage:        cfg.Executor.Image,
+		KVMProfiles:          sortedCopy(cfg.Executor.KVMProfiles),
+		EmulatorSlotsEnabled: cfg.Executor.EmulatorSlotsDir != "",
 		BaseImageCapabilities: PolicyCapabilities{Linux: sortedCopy(cfg.Linux.BaseImageCapabilities),
 			MacOS: sortedCopy(cfg.MacOS.BaseImageCapabilities)},
 		CanonicalJobInventory: cfg.GitHub.CanonicalJobInventory,
