@@ -1395,3 +1395,35 @@ func TestAnUnsetVectorStatesNothing(t *testing.T) {
 		}
 	}
 }
+
+func TestEmulatorSlotsMountOnlyIntoKVMContainers(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dir      string
+		instance string
+		want     bool
+	}{
+		{"KVM profile shares slots", "/srv/mobile ci/slots", "trf-android-abc", true},
+		{"ordinary profile gets no mount", "/srv/mobile ci/slots", "trf-small-abc", false},
+		{"unset directory changes nothing", "", "trf-android-abc", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := Adapter{EmulatorSlotsDir: tc.dir, KVMInstancePrefixes: []string{"trf-android-"}}
+			args := a.createArgs(spec(tc.instance))
+			mounts := []string{}
+			for i, arg := range args {
+				if arg == "--mount" && i+1 < len(args) {
+					mounts = append(mounts, args[i+1])
+				}
+			}
+			if tc.want {
+				want := "type=bind,src=" + tc.dir + ",dst=/var/lib/mobile-ci/emulator-slots"
+				if len(mounts) != 1 || mounts[0] != want {
+					t.Fatalf("mount argument vector = %q, want one %q", mounts, want)
+				}
+			} else if len(mounts) != 0 {
+				t.Fatalf("unexpected slot mounts: %q", mounts)
+			}
+		})
+	}
+}

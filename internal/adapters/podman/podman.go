@@ -264,6 +264,8 @@ type Adapter struct {
 	// emulator profile and to no other, so this is a list of names and never a
 	// boolean.
 	KVMInstancePrefixes []string
+	// EmulatorSlotsDir is mounted only into profiles granted KVM.
+	EmulatorSlotsDir string
 	// VectorViewDir is where the narrowed `/proc/cpuinfo` and `/proc/stat` a
 	// container is shown are materialised (issue #291). Empty disables the
 	// narrowing entirely, which is the behaviour every node had before it and is
@@ -492,6 +494,9 @@ func (a *Adapter) createArgs(spec executor.InstanceSpec) []string {
 		// hardware acceleration, and it gets a device grant rather than a
 		// privileged container.
 		args = append(args, "--device", "/dev/kvm")
+		if a.EmulatorSlotsDir != "" {
+			args = append(args, "--mount", "type=bind,src="+a.EmulatorSlotsDir+",dst=/var/lib/mobile-ci/emulator-slots")
+		}
 	}
 	args = append(args, spec.Image)
 	return append(args, a.holdCommand()...)

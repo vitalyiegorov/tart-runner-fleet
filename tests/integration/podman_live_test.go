@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"go/build"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -495,4 +496,77 @@ func buildBootstrapHelper(t *testing.T) string {
 		t.Fatalf("build the guest bootstrap helper: %v: %s", err, output)
 	}
 	return binary
+}
+
+// TestPodmanSharesEmulatorSlotsAcrossKVMContainers proves the locks have the
+// same inode across disposable runners, including release on process exit.
+func TestPodmanSharesEmulatorSlotsAcrossKVMContainers(t *testing.T) {
+	adapter := liveAdapter(t)
+	if os.Getenv(liveKVMEnv) == "" {
+		t.Skip("KVM grant unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	slots := t.TempDir()
+	if err := os.Chmod(slots, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slot := filepath.Join(slots, "slot-1")
+	if err := os.WriteFile(slot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, uid, gid := liveGuestIdentity(ctx, t, liveImage())
+	if output, err := exec.CommandContext(ctx, "podman", "unshare", "chown", uid+":"+gid, slot).CombinedOutput(); err != nil {
+		t.Fatalf("slot ownership: %v: %s", err, output)
+	}
+	adapter.EmulatorSlotsDir = slots
+	names := []string{"trf-livekvm-slota-0000000000000000", "trf-livekvm-slotb-0000000000000000"}
+	removeLeftovers(t, names...)
+	t.Cleanup(func() { removeLeftovers(t, names...) })
+	for _, name := range names {
+		ownership := liveOwnership(name)
+		if err := adapter.Create(ctx, executor.InstanceSpec{Name: name, Image: liveImage(), CPU: 1, MemoryMB: 512, Ownership: ownership}); err != nil {
+			t.Fatal(err)
+		}
+		if err := adapter.Start(ctx, name, ownership); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holder := exec.CommandContext(ctx, "podman", "exec", "-i", names[0], "sh", "-c", "exec 9>/var/lib/mobile-ci/emulator-slots/slot-1; flock -n 9 || exit 71; echo locked; read release")
+	input, err := holder.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := holder.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = input.Close(); _ = holder.Wait() })
+	var marker [7]byte
+	if _, err := io.ReadFull(output, marker[:]); err != nil || string(marker[:]) != "locked\n" {
+		t.Fatalf("first container did not acquire lock: %q, %v", marker, err)
+	}
+	contender := func() error {
+		return exec.CommandContext(ctx, "podman", "exec", names[1], "sh", "-c", "exec 9>/var/lib/mobile-ci/emulator-slots/slot-1; flock -n 9").Run()
+	}
+	if err := contender(); err == nil {
+		t.Fatal("second runner acquired an occupied host slot")
+	} else {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			t.Fatalf("expected lock contention, got %v", err)
+		}
+	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Wait(); err == nil {
+		t.Fatal("closed input should end the holder read")
+	}
+	if err := contender(); err != nil {
+		t.Fatalf("slot was not released after holder exit: %v", err)
+	}
 }

@@ -296,3 +296,12 @@ func TestTheVectorViewLivesInTheNodesStateDirectory(t *testing.T) {
 		t.Fatalf("vectorViewDir = %q", got)
 	}
 }
+
+func TestContainerBackendWiresSharedEmulatorSlots(t *testing.T) {
+	cfg := containerNodeConfig()
+	cfg.Executor.EmulatorSlotsDir = "/srv/mobile-ci/slots"
+	adapter := newPodmanAdapter(nil, cfg, nil)
+	if adapter.EmulatorSlotsDir != cfg.Executor.EmulatorSlotsDir {
+		t.Fatalf("shared slots wiring = %q", adapter.EmulatorSlotsDir)
+	}
+}
