@@ -61,6 +61,8 @@ func TestEveryRecoveryCauseNamesItself(t *testing.T) {
 			mutate: func(o *scheduler.Operation) { o.GuestUnresponsive = true }},
 		{name: "occupancy budget", cause: "occupancy budget exceeded",
 			mutate: func(o *scheduler.Operation) { o.OccupancyExceeded = true }},
+		{name: "provisioning stalled", cause: "provisioning stalled",
+			mutate: func(o *scheduler.Operation) { o.ProvisionStalled = true }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reporter, logged := silenceReporter()

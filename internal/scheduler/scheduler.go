@@ -148,6 +148,11 @@ type Operation struct {
 	// is part of the content address, so a guest-death reclaim and a budget reap
 	// of one instance are distinct attempts (ADR 0028).
 	GuestUnresponsive bool `json:"guestUnresponsive,omitempty"`
+	// ProvisionStalled marks the reclaim of an instance whose provisioning has
+	// failed to get past one step for longer than the provisioning deadline: a
+	// VM that exists but never became a runner, so no job, completion event, or
+	// other recovery will ever release it (ADR 0067).
+	ProvisionStalled bool `json:"provisionStalled,omitempty"`
 }
 
 type PlanStatus string
@@ -476,6 +481,15 @@ func hasConsumingPlatform(instances []domain.Instance, platform domain.Platform)
 func assignmentRecoveries(now time.Time, config Config, instances []domain.Instance) []Operation {
 	var recoveries []Operation
 	for _, instance := range sortedInstances(instances) {
+		if provisionStalled(now, config.AssignedTimeout, instance) {
+			// It never became a runner, so it holds no job and has nothing the
+			// other causes could judge; it is its own cause and the only one.
+			operation := Operation{Kind: OperationDrain, Instance: instance.ID, Profile: instance.Profile, Route: instance.Route,
+				Demand: instance.Demand, Recovery: true, ProvisionStalled: true}
+			operation.ID = stableID("op", operation)
+			recoveries = append(recoveries, operation)
+			continue
+		}
 		if instance.State != domain.InstanceAssigned && instance.State != domain.InstanceRunning {
 			continue
 		}
@@ -537,6 +551,31 @@ func stalledAssignment(now time.Time, assignedTimeout time.Duration, instance do
 	return instance.State == domain.InstanceAssigned && instance.Power == domain.InstancePowerRunning &&
 		!instance.RecoveryReady && assignedTimeout > 0 && !instance.AssignedSince.IsZero() &&
 		now.Sub(instance.AssignedSince) >= assignedTimeout
+}
+
+// provisionStalled reports whether an instance whose VM already exists has
+// spent longer than the provisioning deadline in one provisioning step.
+//
+// It exists for 2026-10-11: on the Mac Studio, `tart exec` into a booted guest
+// began hanging at bootstrap, and the provisioning operation retried that step
+// against the same VM 395 times over seven hours. Every other recovery is
+// scoped to Assigned or Running, so nothing could release the instance, and the
+// macOS handoff reserved behind it stalled the node's whole macOS queue.
+//
+// Retrying the step on the same guest cannot succeed when the guest itself is
+// the fault; a fresh clone can. It is narrow and fail-closed: Cloning, Booting,
+// and Reachable only, a configured deadline, and a known entry time. Planned
+// is left out because its VM does not exist yet and it may legitimately wait on
+// another operation; Registering is left out because the instance FSM does not
+// let it drain. The deadline is the assignment deadline: an instance that has
+// not got past one provisioning step in that long would have missed it anyway.
+func provisionStalled(now time.Time, deadline time.Duration, instance domain.Instance) bool {
+	switch instance.State {
+	case domain.InstanceCloning, domain.InstanceBooting, domain.InstanceReachable:
+	default:
+		return false
+	}
+	return deadline > 0 && !instance.ProvisioningSince.IsZero() && now.Sub(instance.ProvisioningSince) >= deadline
 }
 
 // lingeringRunner reports whether a Running instance has exceeded the
