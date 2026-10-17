@@ -31,7 +31,7 @@ jobs:
       # Repetition is how a flake surfaces in a suite with real timers,
       # goroutines, and I/O.
       - name: Repeated replay, integration, contract, and chaos suites
-        run: go test -race -shuffle=on -count=10 -timeout 20m ./tests/chaos ./tests/contract ./tests/integration ./tests/replay
+        run: go test -race -gcflags=modernc.org/...=-d=checkptr=0 -shuffle=on -count=10 -timeout 20m ./tests/chaos ./tests/contract ./tests/integration ./tests/replay
       # The simulation harness is deliberately run ONCE, and that is not a raised
       # budget. ADR 0031 makes a run a pure function of (trace, config): virtual
       # clock, single writer, every source of nondeterminism drawn from the seed.
@@ -44,6 +44,6 @@ jobs:
       # job's report with it (issue #208). Volume lives in
       # nightly-simulation.yml, which explores 500 seeds at 320 ticks.
       - name: Deterministic fleet simulation under the race detector
-        run: go test -race -shuffle=on -count=1 -timeout 15m ./tests/simulation
+        run: go test -race -gcflags=modernc.org/...=-d=checkptr=0 -shuffle=on -count=1 -timeout 15m ./tests/simulation
       - name: Bounded deterministic scheduler fuzzing
         run: go test -fuzz=FuzzPlanTickDeterministicAndSafe -fuzztime=3m -timeout 10m ./internal/scheduler

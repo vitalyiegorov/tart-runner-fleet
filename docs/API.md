@@ -361,6 +361,26 @@ healthy node. Its absence therefore means *no finding or no detector*, never
 *audited and clean* — that is what `parkedScaleSetsAuditedAt` beside it is for.
 The remedy is `fleet scale-sets recreate`; see `docs/OPERATIONS.md`.
 
+`membership` and `membershipCheck` are additive fields
+([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). Both are present only on an authority node whose
+configuration declares `membership`; `membershipCheck` is published as passing
+everywhere else. `mode` is `stationary` or `roaming`. `state` is the worst
+stage of any bound set: `serving`, `probation`, `healing` or `excluded`.
+`bindings[]` lists only the sets that are not serving. The check fails only for
+an excluded set, and its reasons carry one sentence per non-serving set.
+
+```json
+"membership": {"mode": "roaming", "state": "excluded", "bindings": [
+  {"scope": "knee", "scaleSetId": 19, "stage": "excluded", "since": "2026-10-16T08:30:00Z",
+   "exclusions": 1}]},
+"membershipCheck": {"ok": false, "reasons": ["knee scale set 19 is excluded since 2026-10-16T08:30:00Z (exclusion 1): ..."]}
+```
+
+`attempts` and `exclusions` are omitted when zero. An absent `membership` means
+no membership is declared or the daemon predates it, never "every set
+serving". The metric `fleet_membership_scale_sets{stage}` carries the count of
+sets in each non-serving stage, and is exported only where `membership` is.
+
 `admissionCheck` says whether this node is taking work at all, and when it is not,
 which guardrail refused it and by how much:
 

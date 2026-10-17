@@ -252,6 +252,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	yield := sessionYieldResult(snapshot.SessionYield)
 	drain := updateDrainResult(snapshot.UpdateDrain)
 	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
+	member := membershipResult(snapshot.Membership)
+	membershipCheck := adminapi.Check{OK: member.OK, Reasons: nonNilStrings(member.Reasons)}
 	admission := admissionResult(snapshot)
 	ingest := ingestResult(snapshot)
 	ingestCheck := adminapi.Check{OK: ingest.OK, Reasons: nonNilStrings(ingest.Reasons)}
@@ -279,6 +281,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
 			Policy:       policyRow(snapshot),
 			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,
+			Membership: membershipRow(snapshot), MembershipCheck: &membershipCheck,
 			UpdateDrain: updateDrainRow(snapshot), UpdateDrainCheck: &updateDrainCheck,
 			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
@@ -791,6 +794,13 @@ func renderMetrics(snapshot Snapshot) string {
 	}
 	if snapshot.UpdateDrain != nil {
 		fmt.Fprintf(&output, "fleet_update_drain_active %d\n", boolGauge(snapshot.UpdateDrain.Draining))
+	}
+	if snapshot.Membership != nil {
+		writeHelpType("fleet_membership_scale_sets", "Bound scale sets in each non-serving membership stage (ADR 0063).", "gauge")
+		counts := membershipGauges(snapshot.Membership)
+		for _, stage := range membershipStages {
+			fmt.Fprintf(&output, "fleet_membership_scale_sets{stage=%q} %d\n", stage, counts[stage])
+		}
 	}
 
 	writeHelpType("fleet_observation_fresh", "Whether a bounded critical observation is fresh.", "gauge")

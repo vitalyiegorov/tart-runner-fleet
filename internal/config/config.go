@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/membership"
 )
 
 type Resources struct {
@@ -196,6 +197,9 @@ type Executor struct {
 	// profile and to no other, so this is a list an operator writes down rather
 	// than a fleet-wide switch.
 	KVMProfiles []string
+	// EmulatorSlotsDir is a dedicated local directory of shared slot-* locks.
+	// Only KVM profiles receive its writable bind mount. Empty disables it.
+	EmulatorSlotsDir string
 	// HoldCommand keeps a created container alive and idle so the JIT bootstrap
 	// can be executed inside it. Empty means the adapter's default.
 	HoldCommand []string
@@ -566,7 +570,11 @@ type Config struct {
 	Guards          Guards
 	SessionRecovery SessionRecovery
 	SessionYield    SessionYield
-	UpdateDrain     UpdateDrain
+	// Membership is how this node declares its place in the fleet (ADR 0063):
+	// absent runs no membership watchdog, which is the node this code was
+	// before; stationary and roaming run it with the ladder their mode derives.
+	Membership  membership.Mode
+	UpdateDrain UpdateDrain
 	// GuestLiveness bounds how long an instance whose guest has stopped answering
 	// may go on holding its vector (ADR 0040). An absent block is the shipped
 	// default bound, not an absent one.
@@ -589,11 +597,12 @@ type Config struct {
 }
 
 type wireExecutor struct {
-	Backend     ExecutorBackend `json:"backend"`
-	Image       string          `json:"image,omitempty"`
-	Binary      string          `json:"binary,omitempty"`
-	KVMProfiles []string        `json:"kvmProfiles,omitempty"`
-	HoldCommand []string        `json:"holdCommand,omitempty"`
+	Backend          ExecutorBackend `json:"backend"`
+	Image            string          `json:"image,omitempty"`
+	Binary           string          `json:"binary,omitempty"`
+	KVMProfiles      []string        `json:"kvmProfiles,omitempty"`
+	EmulatorSlotsDir string          `json:"emulatorSlotsDir,omitempty"`
+	HoldCommand      []string        `json:"holdCommand,omitempty"`
 }
 
 type wireConfig struct {
@@ -650,6 +659,10 @@ type wireConfig struct {
 	SessionYieldDisabled          bool `json:"sessionYieldDisabled,omitempty"`
 	SessionYieldBlockedForSeconds int  `json:"sessionYieldBlockedForSeconds,omitempty"`
 	SessionYieldHealthyForSeconds int  `json:"sessionYieldHealthyForSeconds,omitempty"`
+	// Membership is omitted when unset so a node that declares nothing encodes
+	// exactly the file it encoded before ADR 0063, which an older strict
+	// release still decodes.
+	Membership string `json:"membership,omitempty"`
 	// UpdateDrain* express how this node reaches the quiescence its updater
 	// needs. Disabled is the explicit off switch: omitting every field ships the
 	// behaviour on, because a node that can never install its own fixes is the
@@ -697,7 +710,12 @@ func Decode(r io.Reader) (Config, error) {
 	if err := ensureEOF(dec); err != nil {
 		return Config{}, err
 	}
+	mode, err := membership.ParseMode(w.Membership)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
+		Membership:     mode,
 		PollInterval:   time.Duration(w.PollSeconds) * time.Second,
 		ReservationAge: time.Duration(w.LinuxReservationAgeSecs) * time.Second,
 		HostBudget:     hostBudget(w.HostBudget),
@@ -818,6 +836,7 @@ func Encode(w io.Writer, cfg Config) error {
 		GuestLivenessRefusals:            guestLiveness.refusals,
 		GuestLivenessWindowSeconds:       guestLiveness.windowSeconds,
 		GuestLivenessProbeTimeoutSeconds: guestLiveness.probeSeconds,
+		Membership:                       string(cfg.Membership),
 	}
 	// Only non-default recovery bounds are emitted; see wireConfig.
 	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
@@ -854,7 +873,8 @@ func Encode(w io.Writer, cfg Config) error {
 	if cfg.Executor.Backend != ExecutorNone {
 		wire.Executor = &wireExecutor{Backend: cfg.Executor.Backend, Image: cfg.Executor.Image,
 			Binary: cfg.Executor.Binary, KVMProfiles: append([]string(nil), cfg.Executor.KVMProfiles...),
-			HoldCommand: append([]string(nil), cfg.Executor.HoldCommand...)}
+			EmulatorSlotsDir: cfg.Executor.EmulatorSlotsDir,
+			HoldCommand:      append([]string(nil), cfg.Executor.HoldCommand...)}
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
@@ -1083,7 +1103,7 @@ func decodeExecutor(w *wireExecutor) Executor {
 	if w == nil {
 		return Executor{}
 	}
-	return Executor{Backend: w.Backend, Image: w.Image, Binary: w.Binary,
+	return Executor{Backend: w.Backend, Image: w.Image, Binary: w.Binary, EmulatorSlotsDir: w.EmulatorSlotsDir,
 		KVMProfiles: append([]string(nil), w.KVMProfiles...),
 		HoldCommand: append([]string(nil), w.HoldCommand...)}
 }
@@ -1203,6 +1223,9 @@ func (c Config) Validate() error {
 	}
 	if c.SessionYield.HealthyFor < minSessionYieldBound || c.SessionYield.HealthyFor > maxSessionYieldBound {
 		return errors.New("session yield healthy bound must be between 30 and 3600 seconds")
+	}
+	if err := c.validateMembership(); err != nil {
+		return err
 	}
 	for name, bound := range map[string]time.Duration{"pending": c.UpdateDrain.PendingFor,
 		"max wait": c.UpdateDrain.MaxWait, "cooldown": c.UpdateDrain.Cooldown} {
@@ -1401,7 +1424,7 @@ func (c Config) budgetedProfiles() []Profile {
 func (c Config) validateExecutor() error {
 	if c.Executor.Backend == ExecutorNone {
 		if c.Executor.Image != "" || c.Executor.Binary != "" ||
-			len(c.Executor.KVMProfiles) > 0 || len(c.Executor.HoldCommand) > 0 {
+			len(c.Executor.KVMProfiles) > 0 || len(c.Executor.HoldCommand) > 0 || c.Executor.EmulatorSlotsDir != "" {
 			return errors.New("executor settings require an executor backend")
 		}
 		return nil
@@ -1411,6 +1434,14 @@ func (c Config) validateExecutor() error {
 	}
 	if err := domain.ValidateImageReference(c.Executor.Image); err != nil {
 		return fmt.Errorf("executor image: %w", err)
+	}
+	if dir := c.Executor.EmulatorSlotsDir; dir != "" {
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" || strings.ContainsAny(dir, ",\r\n\x00") {
+			return errors.New("executor emulatorSlotsDir must be a clean absolute dedicated directory without commas or control characters")
+		}
+		if len(c.Executor.KVMProfiles) == 0 {
+			return errors.New("executor emulatorSlotsDir requires at least one KVM profile")
+		}
 	}
 	declared := make(map[string]struct{}, len(c.Linux.Profiles))
 	for _, profile := range c.Linux.Profiles {
@@ -1516,6 +1547,26 @@ const DefaultParkedScaleSetAuditInterval = 15 * time.Minute
 // ParkedScaleSetAuditInterval is the cadence this node audits parked scale sets
 // at. Zero means the operator turned the audit off; absence means they said
 // nothing, which is the default cadence and not silence.
+// validateMembership refuses a mode nobody defined and a watchdog with no
+// evidence: the ladder advances only on the scale-set audit's verdict, so a
+// node that disabled the audit would run a watchdog that can never act -- the
+// green no-op the three questions warn against.
+func (c Config) validateMembership() error {
+	if _, err := membership.ParseMode(string(c.Membership)); err != nil {
+		return err
+	}
+	if !c.Membership.Enabled() {
+		return nil
+	}
+	if c.GitHub.ParkedScaleSetAuditInterval() <= 0 {
+		return errors.New("membership requires the scale-set audit: github.parkedScaleSetAuditMinutes must be positive")
+	}
+	if len(c.GitHub.Scopes) == 0 {
+		return errors.New("membership requires scoped scale sets (github.scopes): the scale-set audit reads only scopes")
+	}
+	return nil
+}
+
 func (g GitHub) ParkedScaleSetAuditInterval() time.Duration {
 	if g.ParkedScaleSetAuditMinutes == nil {
 		return DefaultParkedScaleSetAuditInterval

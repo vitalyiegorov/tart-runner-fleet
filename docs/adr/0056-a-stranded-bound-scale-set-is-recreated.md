@@ -8,6 +8,10 @@ the amendment under Decision). Closes issue #336. Stands beside
 sets this node does NOT serve, and whose 2026-09-21 amendment deliberately made
 the parked reading evidence rather than a verdict.
 
+Amended 2026-10-16 by [ADR 0063](0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md): on a node that declares `membership`,
+the Wedged verdict drives an automatic session heal and then a session release
+for that set. Automatic recreation stays refused, exactly as decided below.
+
 ## Context
 
 Three times on 2026-09-21, on two different nodes, a runner scale set the node

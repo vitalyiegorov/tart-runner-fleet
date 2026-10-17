@@ -92,7 +92,7 @@ func TestOccupancyBudgetDrainFailsClosedWhenTheGuestCannotBeStopped(t *testing.T
 
 			err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
 
-			if err == nil || err.Error() != "runner lifecycle failed at stop" {
+			if err == nil || FailureCode(err.Error()) != string(StageStop) {
 				t.Fatalf("an unstoppable guest must surface as a stop-stage retry, got %v", err)
 			}
 			if state.instance.State != operations.StateDraining {

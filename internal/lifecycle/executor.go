@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,16 +52,19 @@ const (
 // optional reason is a closed-vocabulary runner-administration code, never
 // upstream text: a durable operation row and the operator API both render it.
 type stageError struct {
-	stage  Stage
-	reason string
+	stage        Stage
+	reason       string
+	stopAttempts int
 	// exhausted marks a failure no further attempt can change. It travels as a Go
-	// error and never as text: the persisted message stays byte-identical to the
-	// ordinary failure at the same stage, so FailureCode and every operator
-	// surface keep reading exactly one closed code.
+	// error, while FailureCode keeps the public closed vocabulary unchanged.
+	// The bounded stop-attempt metadata is internal durable progress only.
 	exhausted bool
 }
 
 func (e stageError) Error() string {
+	if e.stage == StageStop && e.stopAttempts > 0 {
+		return "runner lifecycle failed at stop (attempt " + strconv.Itoa(e.stopAttempts) + ")"
+	}
 	if e.reason == "" {
 		return "runner lifecycle failed at " + string(e.stage)
 	}
@@ -98,6 +102,11 @@ var failureStages = [...]Stage{StageClone, StageStart, StageReady, StageAcquire,
 // code, either "<stage>" or "<stage>:<reason>". It is total by exact match, so
 // nothing an executor did not author can reach an operator surface.
 func FailureCode(persisted string) string {
+	for n := 1; n <= GracefulStopAttempts+ForcedStopAttempts+DestructiveStopAttempts; n++ {
+		if persisted == (stageError{stage: StageStop, stopAttempts: n}).Error() {
+			return string(StageStop)
+		}
+	}
 	for _, stage := range failureStages {
 		if persisted == (stageError{stage: stage}).Error() {
 			return string(stage)
@@ -732,10 +741,14 @@ func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instan
 		// superstition, and an operation that retries forever is one an operator
 		// cannot discharge, so the drain reports a failure the worker must park
 		// rather than repeat.
-		return exhaustedError(StageStop)
+		power, err := e.VM.Power(ctx, instance.ID)
+		if err != nil || !power.ProvenIdle() {
+			return exhaustedError(StageStop)
+		}
+		return nil
 	}
 	if stopErr != nil {
-		return e.fail(ctx, instance, StageStop)
+		return stageError{stage: StageStop, stopAttempts: StopAttempts(operation) + 1}
 	}
 	return nil
 }
