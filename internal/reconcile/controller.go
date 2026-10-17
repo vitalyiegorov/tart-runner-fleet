@@ -158,6 +158,11 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 					drainPhase = operations.DrainPhaseOccupancyBudget
 				}
 				validState = instance.State == operations.StateAssigned || instance.State == operations.StateRunning
+				if operation.ProvisionStalled {
+					drainPhase = operations.DrainPhaseProvisionStalled
+					validState = instance.State == operations.StateCloning || instance.State == operations.StateBooting ||
+						instance.State == operations.StateReachable
+				}
 			}
 			if !validState {
 				return operations.Plan{}, fmt.Errorf("drain %s in state %s: %w", instance.ID, instance.State, operations.ErrConflict)
