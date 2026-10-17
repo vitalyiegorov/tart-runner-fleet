@@ -370,9 +370,8 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer, dep
 }
 
 // pruneReleases reclaims the disk superseded generations hold, and says what it
-// took. It reports nothing on failure: this is an errand performed on the way to
-// updating, and failing an update because a stale directory is busy would turn a
-// disk-space problem into an availability one.
+// took. Unknown service references defer collection visibly; removal remains
+// best-effort. Housekeeping never changes the release transaction result.
 func pruneReleases(ctx context.Context, host autoupdate.ManagedHost, root string, stdout io.Writer) {
 	current, err := host.Current(ctx)
 	if err != nil {
