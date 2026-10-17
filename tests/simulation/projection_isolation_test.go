@@ -72,6 +72,13 @@ func TestIssue134ProjectionFailureDoesNotBlockNeighbors(t *testing.T) {
 			if err != nil || changed || source.acks != 1 {
 				t.Fatalf("recovered replay: changed=%v error=%v acks=%d", changed, err, source.acks)
 			}
+			recovered, stateErr := w.store.Instance(ctx, bad.RunnerName)
+			if stateErr != nil {
+				t.Fatal(stateErr)
+			}
+			if recovered.State != operations.StateRunning {
+				t.Fatalf("recovered runner state=%s want=%s", recovered.State, operations.StateRunning)
+			}
 			pending, err := w.store.Claim(ctx, "projection-proof", 10, w.now, simTick)
 			if err != nil || len(pending) != 1 || pending[0].ResourceID != "trf-projection-complete" {
 				t.Fatalf("idempotent drain count=%d error=%v", len(pending), err)
