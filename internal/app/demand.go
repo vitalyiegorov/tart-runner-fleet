@@ -790,11 +790,15 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 			projector, _ = c.Store.(DemandProjector)
 		}
 		if projector != nil {
+			var projectionErr error
 			for _, event := range events {
 				if err := projector.ProjectDemandEvent(ctx, binding.durableKey(), event); err != nil {
-					return err
+					projectionErr = errors.Join(projectionErr, err)
 				}
 			}
+			// Every event is already durable. Attempt independent neighbors, but
+			// retain the nack so redelivery retries every failed projection.
+			return projectionErr
 		}
 		return nil
 	})

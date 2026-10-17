@@ -43,6 +43,9 @@ func TestIssue134ProjectionFailureDoesNotBlockNeighbors(t *testing.T) {
 			events := append([]githubscaleset.JobEvent(nil), good[:badIndex]...)
 			events = append(events, bad)
 			events = append(events, good[badIndex:]...)
+			// A queued neighbor is durable even on the old short-circuit path;
+			// assert that separately from lifecycle progress to avoid claiming loss.
+			events = append(events, event(74, githubscaleset.JobAvailable))
 			source := &projectionReplay{message: githubscaleset.Demand{MessageID: 1, Events: events}}
 			for attempt := range 2 {
 				changed, err := w.demand.IngestOnceResult(ctx, binding, source)

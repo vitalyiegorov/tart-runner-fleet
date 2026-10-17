@@ -584,6 +584,42 @@ func TestDemandProjectionFailurePreventsAcknowledgement(t *testing.T) {
 	}
 }
 
+type demandProjectorFunc func(context.Context, int64, operations.DemandEvent) error
+
+func (f demandProjectorFunc) ProjectDemandEvent(ctx context.Context, key int64, event operations.DemandEvent) error {
+	return f(ctx, key, event)
+}
+
+func TestDemandProjectionAttemptsEveryEventAndPreservesEveryError(t *testing.T) {
+	first, last := errors.New("first projection"), errors.New("last projection")
+	store := &fakeDemandStore{applied: true}
+	source := &fakeMessages{demand: githubscaleset.Demand{MessageID: 3, Events: []githubscaleset.JobEvent{
+		{Kind: githubscaleset.JobAssigned, RunnerRequestID: 1},
+		{Kind: githubscaleset.JobStarted, RunnerRequestID: 2},
+		{Kind: githubscaleset.JobCompleted, RunnerRequestID: 3},
+	}}}
+	var attempted []int64
+	projector := demandProjectorFunc(func(_ context.Context, key int64, event operations.DemandEvent) error {
+		if key != 99 || len(store.batches) != 3 {
+			t.Fatal("projection must follow the committed batch under its durable binding key")
+		}
+		attempted = append(attempted, event.RunnerRequestID)
+		switch event.RunnerRequestID {
+		case 1:
+			return first
+		case 3:
+			return last
+		default:
+			return nil
+		}
+	})
+	binding := Binding{StoreKey: 99, ScaleSetID: 1, Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	changed, err := (DemandCoordinator{Store: store, Projector: projector}).IngestOnceResult(context.Background(), binding, source)
+	if !changed || source.committed || !errors.Is(err, first) || !errors.Is(err, last) || !reflect.DeepEqual(attempted, []int64{1, 2, 3}) {
+		t.Fatalf("changed=%v acknowledged=%v error=%v attempted=%v", changed, source.committed, err, attempted)
+	}
+}
+
 func TestQueuedDemandsMarksStaleStatisticsWithSentinel(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	record := operations.DemandRecord{Status: operations.DemandJobAvailable, RunnerRequestID: 1,
