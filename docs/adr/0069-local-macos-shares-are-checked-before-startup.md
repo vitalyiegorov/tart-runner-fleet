@@ -48,10 +48,8 @@ runtime filesystem changes and global share isolation remain separate concerns.
 The daemon incident replay fails before the fix in observe, shadow, canary, and
 authority: each opens durable state despite the absent path. Direct tests cover
 the lookup outcomes and platform/enablement conditions; CLI tests cover the alias
-and remote fleet exemption. Seeded simulation startup now supplies absent, file,
-directory, permission-denied, and unavailable filesystem evidence before running
-the macOS fleet world, closing its assumption that startup always succeeds.
-This incident is a fleet defect, not a property/oracle or world-model defect.
+and remote fleet exemption. The check runs before the daemon loop the simulation
+drives, so no simulation fault is added. This is a fleet defect.
 
 There is no schema, migration, JSON API, scheduler, or authority-policy change.
 A misconfigured Mac now refuses startup, including observation, with an actionable
