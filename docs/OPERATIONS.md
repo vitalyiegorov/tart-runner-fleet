@@ -1774,7 +1774,6 @@ errors. Do not add a sibling's selector to this node or remove an intentional
 workflow selector to make readiness green. This classification neither moves
 existing assignments nor grants authority over a foreign scale set.
 
-
 ### A provisioning VM is missing from inventory
 
 A successful backend enumeration that cannot find a Cloning, Booting or Reachable

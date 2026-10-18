@@ -160,8 +160,7 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 				validState = instance.State == operations.StateAssigned || instance.State == operations.StateRunning
 				if operation.ProvisionStalled {
 					drainPhase = operations.DrainPhaseProvisionStalled
-					validState = instance.State == operations.StateCloning || instance.State == operations.StateBooting ||
-						instance.State == operations.StateReachable
+					validState = instance.State.Provisioning()
 				}
 			}
 			if !validState {

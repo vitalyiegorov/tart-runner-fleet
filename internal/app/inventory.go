@@ -279,8 +279,7 @@ func (p ProductionInventory) Observe(ctx context.Context) (domain.Observation[[]
 		// Planned is left out: its VM does not exist yet, and a planned instance may
 		// legitimately wait on another operation (ADR 0067).
 		provisioningSince := time.Time{}
-		switch instance.State {
-		case operations.StateCloning, operations.StateBooting, operations.StateReachable:
+		if instance.State.Provisioning() {
 			provisioningSince = instance.UpdatedAt
 		}
 		// A Running instance's dwell time is the age measured against the
@@ -364,12 +363,7 @@ func (p ProductionInventory) probeGuests(ctx context.Context, instances []domain
 // provision-stalled drain, with fresh runner/job guards at execution time.
 // Registered/live states still fail closed: absence alone authorizes no drain.
 func absenceIsReconcilable(state operations.State) bool {
-	switch state {
-	case operations.StatePlanned, operations.StateCloning, operations.StateBooting, operations.StateReachable:
-		return true
-	default:
-		return state.TearingDown()
-	}
+	return state == operations.StatePlanned || state.Provisioning() || state.TearingDown()
 }
 
 func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {

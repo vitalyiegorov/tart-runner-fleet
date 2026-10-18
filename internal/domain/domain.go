@@ -407,6 +407,12 @@ func (s InstanceState) TearingDown() bool {
 	}
 }
 
+// Provisioning reports whether the instance is past its clone but not yet
+// registering: the states the provisioning deadline (ADR 0067) bounds.
+func (s InstanceState) Provisioning() bool {
+	return s == InstanceCloning || s == InstanceBooting || s == InstanceReachable
+}
+
 // ConsumesHostResources distinguishes durable cleanup state from physical
 // CPU/RAM occupancy. A tearing-down instance whose guest has stopped remains
 // live until GitHub deregistration and Tart deletion complete, but cannot
