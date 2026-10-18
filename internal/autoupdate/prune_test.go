@@ -84,6 +84,18 @@ func TestTheCurrentSymlinkTargetIsKeptWhenItDiffersFromRunning(t *testing.T) {
 	}
 }
 
+// Issue #352: launchd still caches an executable outside rollback headroom
+// after the manifest and current link advanced; pruning it strands relaunch.
+func TestAServiceReferencedGenerationIsKept(t *testing.T) {
+	names := []string{"v0.1.575", "v0.1.608", "v0.1.609", "v0.1.610", "v0.1.612", "v0.1.613"}
+
+	prunable := PrunableReleases(names, "v0.1.612", "v0.1.612", 2, "v0.1.575")
+
+	if !reflect.DeepEqual(prunable, []string{"v0.1.608"}) {
+		t.Fatalf("only the unreferenced superseded release may go: %v", prunable)
+	}
+}
+
 // Rollback headroom is counted over generations OLDER than running. Rolling
 // back to a version the node has never run is not a rollback.
 func TestRollbackHeadroomIsCountedAmongOlderGenerationsOnly(t *testing.T) {

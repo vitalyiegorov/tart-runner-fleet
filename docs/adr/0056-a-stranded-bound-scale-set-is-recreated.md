@@ -179,33 +179,13 @@ failed.
 
 ### Amendment 2026-10-17: explicit recreation tolerates label drift
 
-Issue #135 and PR #364 expose a second reason to use the same guarded remedy:
-GitHub can accept an in-place label update while retaining the old labels. A
-set that gained a configured alias then fails both verified reconciliation and
-the strict inspection that formerly preceded recreation. This is a fleet
-defect: the explicit repair refused the state it needed to replace.
-
-Only the explicit `scale-sets recreate` path uses `NewRecreater`, which enables
-the existing `ReconcileDrift` mechanism for inspection. Ordinary provisioning
-still rejects drift by default; opt-in in-place reconciliation still verifies
-its result and names recreation when GitHub retains drift. No new policy axis
-or automatic recreation is introduced.
-
-Guard ordering stays unchanged: exact confirmation and a reason, validated
-configuration and unambiguous scope/name, fresh inspection, deletion only when
-the observed id equals the configured old id, verified replacement with a new
-id, then atomic configuration persistence. An unavailable inspection stops
-before deletion. Retries after deletion or creation reuse the same resumable
-path and never delete an already-created replacement. Jobs assigned to the old
-id can be lost; operator authorization remains required.
-
-The deterministic administration world in
-`tests/simulation/recreate_label_drift_test.go` runs the real constructor,
-adapter and `provision.Recreate` across unavailable inspection, refused delete,
-failed create and interrupted configuration persistence. It checks the new id,
-every desired label, default drift refusal and effect ordering. This extends
-the simulation's formerly missing administration boundary without changing
-the scheduler world or authority limits.
+GitHub can accept an in-place label update while keeping the old labels (issue
+#135, PR #364), so a set that gained a configured alias fails both verified
+reconciliation and the strict inspection that preceded recreation. Only
+`scale-sets recreate` now builds its provisioner with `NewRecreater`, which
+enables the existing `ReconcileDrift` for inspection; ordinary provisioning
+still refuses drift, and an unverified in-place repair names recreation as the
+remedy. The guard ordering above is unchanged.
 
 ## Consequences
 

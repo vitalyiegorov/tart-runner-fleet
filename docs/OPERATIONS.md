@@ -1119,18 +1119,11 @@ fleet queues --output json
 fleet doctor --output json | jq '.checks[] | select(.name == "ingest delivery")'
 ```
 
-The same explicit remedy applies when a configured label or alias is missing
-and `scale-sets provision --reconcile-drift --apply` reports that GitHub retained
-the old labels. Run `fleet scale-sets recreate` (issue #135). In-place
-updates can be accepted without changing labels. Recreation tolerates that
-drift during inspection and creates the replacement with all configured
-labels. Ordinary provisioning still rejects drift by default. Use the exact
-confirmation token and a reason describing the label repair, and select
-`--scope` when the name is ambiguous. Guard ordering is unchanged: a failed
-inspection prevents deletion, only the observed configured old id is deleted,
-the replacement is verified, then its id is written atomically. A retry after
-an interrupted create or write adopts the replacement without deleting it.
-This is an operator action; the daemon does not recreate sets automatically.
+The same remedy applies when `scale-sets provision --reconcile-drift --apply`
+reports that GitHub kept the old labels (issue #135): in-place updates cannot
+change labels, so run `fleet scale-sets recreate`, which tolerates the drift and
+creates the replacement with every configured label. Ordinary provisioning
+still rejects drift, and the daemon never recreates a set on its own.
 
 The jobs already assigned to the deleted set are lost with it and must be
 re-run. Do not use this command on a PARKED set: that set is very likely a
@@ -1780,7 +1773,6 @@ inventory. Missing or expired proof remains unavailable; unknown labels remain
 errors. Do not add a sibling's selector to this node or remove an intentional
 workflow selector to make readiness green. This classification neither moves
 existing assignments nor grants authority over a foreign scale set.
-
 
 ### A provisioning VM is missing from inventory
 

@@ -36,16 +36,12 @@ watchdog, state, timeout setting or automatic service reload is added.
 ## Evidence and remaining scope
 
 The operator-command regression recreates the independent cached/committed
-identities and fails red before the fix: the cached old release is deleted.
-The deterministic release-state simulation exercises the real pure pruning
-predicate through a commit/collection/exit/relaunch interleaving, including cached
-shadow definitions without files. Host tests cover both supervisors, unreadable
-and canceled observations, explicit absence and preservation of on-disk roots.
-The scheduler world is not the owner of updater/supervisor state; this replay
-extends simulation at that boundary rather than inventing a VM-world fault.
+identities and fails red before the fix: the cached old release is deleted. A
+pure `PrunableReleases` test pins the referenced generation; host tests cover
+both supervisors, unreadable and canceled observations, explicit absence and
+preservation of on-disk roots. Updater/supervisor state is outside the
+scheduler world, so no simulation fault is added.
 
-This prevents collection from amplifying reference drift into executable loss;
-it does not claim to repair an already-missing binary, establish runtime parity,
-alert on absent nodes, or prove production rollout. Those operational and
-observability obligations remain tracked by #352. Existing transaction reload and
-rollback rules remain; no authority/canary promotion, API or schema migration.
+This does not repair an already-missing binary, establish runtime parity, alert
+on absent nodes, or prove production rollout; those remain tracked by #352. No
+authority/canary promotion, API or schema migration.

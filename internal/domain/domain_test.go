@@ -293,3 +293,13 @@ func TestOccupancyIsMeasuredOnlyWhenTheVectorIsProvablyHeld(t *testing.T) {
 		}
 	}
 }
+
+func TestProvisioningIsExactlyThePostCloneSetupStates(t *testing.T) {
+	for _, state := range []InstanceState{InstancePlanned, InstanceCloning, InstanceBooting, InstanceReachable,
+		InstanceRegistering, InstanceRunning, InstanceDraining, InstanceFailed} {
+		want := state == InstanceCloning || state == InstanceBooting || state == InstanceReachable
+		if state.Provisioning() != want {
+			t.Fatalf("%s.Provisioning() = %v", state, !want)
+		}
+	}
+}

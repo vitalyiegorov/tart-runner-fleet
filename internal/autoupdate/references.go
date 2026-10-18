@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -78,14 +79,10 @@ func (h *LocalHost) ReferencedReleases(ctx context.Context) ([]string, error) {
 		if ctx.Err() != nil {
 			return nil, ErrServiceReferences
 		}
-		if readErr != nil {
-			var status interface{ ExitCode() int }
-			if errors.As(readErr, &status) && status.ExitCode() == 113 {
-				continue
-			} // launchctl's explicit service-not-found result.
-			return nil, ErrServiceReferences
+		if exitedWith(readErr, 113) { // launchctl's explicit service-not-found result.
+			continue
 		}
-		if !hasLoadedProgram(string(body)) {
+		if readErr != nil || !hasLoadedProgram(string(body)) {
 			return nil, ErrServiceReferences
 		}
 		bodies = append(bodies, string(body))
@@ -116,29 +113,33 @@ func (h *SystemdHost) ReferencedReleases(ctx context.Context) ([]string, error) 
 		units = append(units, systemdUnitName(mode))
 	}
 	units = append(units, systemdUpdaterUnit)
-	seen := map[string]bool{}
-	for _, unit := range units {
-		if seen[unit] {
-			continue
-		}
-		seen[unit] = true
+	slices.Sort(units)
+	for _, unit := range slices.Compact(units) {
 		body, readErr := h.command.Run(ctx, "systemctl", "--user", "show", unit, "--property=LoadState", "--property=ExecStart")
 		if ctx.Err() != nil {
 			return nil, ErrServiceReferences
 		}
-		if readErr != nil {
-			var status interface{ ExitCode() int }
-			if !errors.As(readErr, &status) || status.ExitCode() != 1 || !namesProperty(string(body), "LoadState", "not-found") {
-				return nil, ErrServiceReferences
-			}
-		}
-		if namesProperty(string(body), "LoadState", "not-found") {
-			continue
-		}
-		if (!namesProperty(string(body), "LoadState", "loaded") && !namesProperty(string(body), "LoadState", "masked")) || !strings.Contains(string(body), "ExecStart=") || (namesProperty(string(body), "LoadState", "loaded") && namesProperty(string(body), "ExecStart", "")) {
+		text := string(body)
+		notFound := namesProperty(text, "LoadState", "not-found")
+		if readErr != nil && (!notFound || !exitedWith(readErr, 1)) {
 			return nil, ErrServiceReferences
 		}
-		bodies = append(bodies, string(body))
+		if notFound {
+			continue
+		}
+		// A masked unit may report an empty ExecStart; a loaded one must name its program.
+		switch {
+		case !strings.Contains(text, "ExecStart="),
+			namesProperty(text, "LoadState", "loaded") && namesProperty(text, "ExecStart", ""),
+			!namesProperty(text, "LoadState", "loaded") && !namesProperty(text, "LoadState", "masked"):
+			return nil, ErrServiceReferences
+		}
+		bodies = append(bodies, text)
 	}
 	return referencedVersions(bodies), nil
+}
+
+func exitedWith(err error, code int) bool {
+	var status interface{ ExitCode() int }
+	return errors.As(err, &status) && status.ExitCode() == code
 }

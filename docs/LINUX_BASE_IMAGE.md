@@ -661,11 +661,9 @@ printf "APT::Periodic::Update-Package-Lists \"0\";\nAPT::Periodic::Unattended-Up
 '
 ```
 
-Masking alone does not stop an active updater. `--now` stops it, and any
-failure aborts the build before further package installation. Both checks must
-pass for every unit; unavailable or unexpected state fails verification.
-`systemctl show` reads properties without the legitimate nonzero status that
-`is-active` returns for an inactive unit.
+Masking alone does not stop an active updater, so `--now` stops it; any
+failure, or a unit not both masked and inactive, aborts the build. `systemctl
+show` is used because `is-active` exits nonzero for an inactive unit.
 
 [ADR 0068](adr/0068-ephemeral-linux-guests-use-immutable-package-updates.md)
 records this policy and its canonical incident, [issue
