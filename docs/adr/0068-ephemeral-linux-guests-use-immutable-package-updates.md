@@ -33,9 +33,6 @@ rollback, consistent with ADR 0010. Jobs may still install required packages;
 this policy removes the image's background updater as a competing lock holder.
 It does not claim that every possible dpkg lock holder is absent.
 
-This is documentation only: no controller behavior, API, schema, host service,
-or production image changes. The deterministic fleet simulation does not model
-guest systemd or apt; shell syntax checks and repository gates validate the
-document change, while masked/inactive checks on a rebooted candidate and fresh
-clones remain operator rollout evidence. No production verification or
-observe/shadow/authority promotion follows from documentation CI.
+Documentation only: no controller, API, schema or host-service change. The
+fleet simulation does not model guest systemd or apt; the masked/inactive checks
+on a rebooted candidate are the rollout evidence.
