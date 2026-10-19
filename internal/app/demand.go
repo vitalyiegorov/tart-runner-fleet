@@ -459,10 +459,19 @@ func (c DemandCoordinator) jobSelectsForeignSet(bindings []Binding, job githubsc
 
 var foreignJobRoutePattern = regexp.MustCompile(`(?i)^trf-(linux|macos)-(arm64|amd64)-[1-9][0-9]*x[1-9][0-9]*$`)
 
+// platformJobRoutePattern recognizes the arch-free platform aliases of ADR 0060
+// (`linux-portable-2x4`, `linux-go-4x8`). They name a platform but no
+// architecture, so they prove a job foreign only to a node that serves no
+// binding of that platform for the repository.
+var platformJobRoutePattern = regexp.MustCompile(`(?i)^(linux|macos)-[a-z][a-z0-9]*-[1-9][0-9]*x[1-9][0-9]*$`)
+
 // Repository snapshots include sibling nodes' work. Only an explicit canonical
 // route to an OS/architecture absent from this repository's bindings proves
 // work is foreign; unknown shapes on a served capability still fail closed.
 func jobRequiresUnservedCapability(bindings []Binding, job githubscaleset.WorkflowJob) bool {
+	if platform, ok := soleRouteLabel(job, platformJobRoutePattern); ok {
+		return jobRequiresUnservedPlatform(bindings, job, platform[1])
+	}
 	var route []string
 	for _, label := range job.Labels {
 		if match := foreignJobRoutePattern.FindStringSubmatch(label); match != nil {
@@ -939,4 +948,39 @@ func event(name string) domain.Event {
 	default:
 		return domain.EventPush
 	}
+}
+
+// soleRouteLabel returns the match of the job's only routing label when every
+// other label is `self-hosted`, which is the shape a platform alias route has.
+func soleRouteLabel(job githubscaleset.WorkflowJob, pattern *regexp.Regexp) ([]string, bool) {
+	var route []string
+	for _, label := range job.Labels {
+		if strings.EqualFold(label, "self-hosted") {
+			continue
+		}
+		match := pattern.FindStringSubmatch(label)
+		if match == nil || route != nil {
+			return nil, false
+		}
+		route = match
+	}
+	return route, route != nil
+}
+
+// jobRequiresUnservedPlatform proves a platform-alias job foreign when this
+// node accepts the repository but holds no binding of that platform for it. A
+// node that serves the platform at all stays uncertain: the alias may be one of
+// its own that this snapshot simply failed to match.
+func jobRequiresUnservedPlatform(bindings []Binding, job githubscaleset.WorkflowJob, platform string) bool {
+	accepted := false
+	for _, binding := range bindings {
+		if !binding.accepts(job.Repository.Owner + "/" + job.Repository.Name) {
+			continue
+		}
+		accepted = true
+		if strings.EqualFold(string(binding.Profile.Platform), platform) {
+			return false
+		}
+	}
+	return accepted
 }
