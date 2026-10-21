@@ -146,7 +146,7 @@ because ADR 0034's first decision is that no node is aware of another.
 Truthful capacity is truthful for one scope. A node shares one envelope across
 all of its scopes, and GitHub adds up what their sets advertise, so a small
 node kept accepting work it could not start (issue #388).
-[ADR 0072](0072-scale-sets-advertise-the-residual-envelope.md) keeps the
+[ADR 0073](0073-scale-sets-advertise-the-residual-envelope.md) keeps the
 configured `maxCapacity` as the validated ceiling. On every poll, each set
 advertises `min(maxCapacity, held + fit)`, and falls back to the configured
 value whenever the residual is unknown.

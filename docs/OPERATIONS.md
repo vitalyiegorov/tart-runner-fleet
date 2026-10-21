@@ -206,7 +206,7 @@ admits against. On a small node with many scopes, this keeps GitHub from
 placing work the node cannot start while siblings are idle (issue #388). A set
 never advertises less than it holds. If the scheduler's view is missing, not
 ready, or older than two minutes, the set advertises the configured value
-([ADR 0072](adr/0072-scale-sets-advertise-the-residual-envelope.md)). A node
+([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md)). A node
 whose scale sets receive no new work while a guest is running is therefore
 expected behaviour, not a session fault. Check the status `envelope` first.
 

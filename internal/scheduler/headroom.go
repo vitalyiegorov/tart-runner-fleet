@@ -4,7 +4,7 @@ import "github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 
 // Headroom reports how many more instances of one profile the node's current
 // residual admission envelope can start, once every demand already waiting on
-// this node has been charged its own vector (issue #388, ADR 0072).
+// this node has been charged its own vector (issue #388, ADR 0073).
 //
 // It is the answer a scale set needs before it tells GitHub how much capacity
 // it has. A node has one envelope -- slots, CPU, memory, the host budget, and the

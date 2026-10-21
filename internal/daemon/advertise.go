@@ -9,7 +9,7 @@ import (
 
 // residualAdvertiser carries the scheduler's latest view of the node's residual
 // envelope to every scale-set session, so each long poll advertises only what
-// that set holds plus what the node can still start (issue #388, ADR 0072).
+// that set holds plus what the node can still start (issue #388, ADR 0073).
 //
 // It is one value for the whole node, written by the ticker and read by every
 // binding's poll, for the same reason the session-yield state is: the envelope
@@ -20,7 +20,7 @@ import (
 // advertise it, so a node can be offered that residual once per set, and only
 // until the poll that carried the stale figure ends: the first placement is
 // charged on the next tick and every later poll advertises net of it. That
-// bound is deliberate and ADR 0072 says why: dividing the residual between sets
+// bound is deliberate and ADR 0073 says why: dividing the residual between sets
 // would leave a single-node scope waiting on an idle machine, and serialising it
 // through a lease would let a set with no work hold the residual hostage for
 // its whole poll.

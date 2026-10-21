@@ -58,7 +58,7 @@ type TickResult struct {
 	// queue that shrinks without a visible cause is its own small mystery.
 	ExpiredOverdue int64
 	// Headroom is, per scale set, what it holds and how many more of its own
-	// vector the node's residual envelope can start (issue #388, ADR 0072). It
+	// vector the node's residual envelope can start (issue #388, ADR 0073). It
 	// is nil when the envelope could not be computed, and a binding absent from
 	// it advertises its configured capacity: unknown is never zero.
 	Headroom []ScaleSetHeadroom

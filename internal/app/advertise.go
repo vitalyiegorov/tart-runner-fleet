@@ -9,7 +9,7 @@ import (
 )
 
 // ScaleSetHeadroom is one scale set's share of the node's residual envelope
-// (issue #388, ADR 0072): what the set already holds, and how many more of its
+// (issue #388, ADR 0073): what the set already holds, and how many more of its
 // own vector the node could start right now.
 type ScaleSetHeadroom struct {
 	StoreKey int64

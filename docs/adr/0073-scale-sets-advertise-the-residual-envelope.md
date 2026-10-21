@@ -1,4 +1,4 @@
-# ADR 0072: Scale sets advertise the residual envelope
+# ADR 0073: Scale sets advertise the residual envelope
 
 ## Status
 
