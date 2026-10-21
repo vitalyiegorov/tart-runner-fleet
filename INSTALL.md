@@ -11,7 +11,10 @@ bring-up sequence: [`INSTALL-linux.md`](INSTALL-linux.md).
 ## 1. Prerequisites
 
 - Apple Silicon macOS with [Tart](https://tart.run/) available at
-  `/opt/homebrew/bin/tart`;
+  `/opt/homebrew/bin/tart`; a node that runs macOS guests must be on host macOS
+  26 or earlier, because macOS 27 zero-fills its guests' page cache mid-job
+  ([ADR 0072](docs/adr/0072-macos-guests-run-only-on-validated-host-macos.md));
+  a macOS 27 host serves Linux guests only;
 - an authenticated GitHub CLI (`gh auth status`) for release downloads;
 - a GitHub App installed on every repository or organization the fleet serves;
 - one GitHub Actions runner scale set per profile variant each scope exposes;

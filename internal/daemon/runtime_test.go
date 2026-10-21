@@ -493,6 +493,11 @@ func writeMultiScopeConfig(t *testing.T) string {
 func testDependencies(t *testing.T) dependencies {
 	t.Helper()
 	d := newDependencies("darwin")
+	// The harness is a darwin node on whatever machine runs the tests, so it
+	// states a validated host macOS rather than reading the test runner's own.
+	d.validateLocalHost = func(cfg config.Config) error {
+		return app.ValidateLocalHost(cfg, "darwin", os.Stat, func() (string, error) { return "26.5", nil })
+	}
 	d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
 		return runtimeInventory{}
 	}

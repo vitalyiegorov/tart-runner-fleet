@@ -38,7 +38,13 @@ must exist and be a directory accessible to lookup by the validating user. Run
 this command on the owning Mac as the daemon user. The daemon repeats this check
 before opening state in every mode, including observe. Lookup failures name the
 field and path and exit `1`; the validator never creates or repairs directories.
-Linux and disabled macOS configurations do not inspect macOS share paths.
+With macOS guests enabled, the host's own macOS major must also be one this
+fleet has validated to keep guest memory intact (below 27; [ADR
+0072](adr/0072-macos-guests-run-only-on-validated-host-macos.md)). An unvalidated
+or unreadable host version exits `1` and names `macosBurst.enabled`; the repair
+is `"macosBurst": {"enabled": false}` on that node, which keeps its Linux guests.
+Linux and disabled macOS configurations inspect neither share paths nor the host
+version.
 
 `config validate` accepts several paths for cross-node shape validation. Each is
 decoded and checked without inspecting remote host paths, and then two

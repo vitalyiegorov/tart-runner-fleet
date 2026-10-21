@@ -528,10 +528,12 @@ func defaultDependencies() dependencies { return newDependencies(runtime.GOOS) }
 func newDependencies(goos string) dependencies {
 	node := platformFor(goos)
 	return dependencies{
-		validateLocalHost: func(cfg config.Config) error { return app.ValidateLocalHost(cfg, goos, os.Stat) },
-		executes:          node.executes,
-		preflight:         node.preflight,
-		linuxImage:        node.linuxImage,
+		validateLocalHost: func(cfg config.Config) error {
+			return app.ValidateLocalHost(cfg, goos, os.Stat, app.HostProductVersion)
+		},
+		executes:   node.executes,
+		preflight:  node.preflight,
+		linuxImage: node.linuxImage,
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
