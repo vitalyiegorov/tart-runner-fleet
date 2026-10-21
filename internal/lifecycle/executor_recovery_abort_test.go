@@ -38,43 +38,51 @@ func drainExecutor(state *memoryState, vm fakeVM, control *fakeDrainControl) Dra
 // retrying the kill order until a lookup flake lets it through is forbidden.
 func TestRecoveryDrainAbortsWhenPremiseIsDisproven(t *testing.T) {
 	for _, test := range []struct {
-		name      string
-		phase     int
-		vm        fakeVM
-		control   fakeDrainControl
-		wantCalls []string
+		name         string
+		phase        int
+		vm           fakeVM
+		control      fakeDrainControl
+		wantCalls    []string
+		wantEvidence AbortEvidence
 	}{
 		{name: "stopped recovery with VM actually running and flaky registration lookup",
 			phase:     operations.DrainPhaseStoppedRecovery,
 			vm:        fakeVM{running: true},
 			control:   fakeDrainControl{safe: true, registered: false},
-			wantCalls: []string{"power:trf-small-1"}},
+			wantCalls: []string{"power:trf-small-1"}, wantEvidence: AbortEvidenceVMRunning},
 		{name: "inactive recovery with runner still registered",
 			phase:     operations.DrainPhaseInactiveRecovery,
 			vm:        fakeVM{running: true},
 			control:   fakeDrainControl{safe: true, registered: true},
-			wantCalls: []string{"registered:trf-small-1"}},
-		{name: "stalled assignment whose job has since started",
+			wantCalls: []string{"registered:trf-small-1"}, wantEvidence: AbortEvidenceRunnerRegistered},
+		{name: "stalled assignment whose runner has since started a job",
 			phase:     operations.DrainPhaseStalledAssignment,
 			vm:        fakeVM{running: true},
-			control:   fakeDrainControl{safe: true, registered: true, jobStarted: true},
-			wantCalls: []string{"started:trf-small-1"}},
-		{name: "lingering runner whose job is active again",
+			control:   fakeDrainControl{safe: true, registered: true, busy: true},
+			wantCalls: []string{}, wantEvidence: AbortEvidenceRunnerBusy},
+		{name: "lingering runner whose runner is executing a job again",
 			phase:     operations.DrainPhaseLingeringRunner,
 			vm:        fakeVM{running: true},
-			control:   fakeDrainControl{safe: true, registered: true, jobActive: true},
-			wantCalls: []string{"active:trf-small-1"}},
+			control:   fakeDrainControl{safe: true, registered: true, busy: true},
+			wantCalls: []string{}, wantEvidence: AbortEvidenceRunnerBusy},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := []string{}
 			test.vm.calls, test.control.calls = &calls, &calls
 			state := &memoryState{instance: recoveryInstance(test.phase)}
 			executor := drainExecutor(state, test.vm, &test.control)
+			var reported []DrainAbort
+			executor.OnAbort = func(abort DrainAbort) { reported = append(reported, abort) }
+			planned := state.instance
 
 			err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
 
 			if err != nil {
 				t.Fatalf("abort must acknowledge the operation as a no-op, got %v", err)
+			}
+			want := []DrainAbort{{Instance: planned, Phase: DrainPhaseName(test.phase), Evidence: test.wantEvidence}}
+			if !reflect.DeepEqual(reported, want) {
+				t.Fatalf("abort report = %#v, want %#v", reported, want)
 			}
 			if state.instance.State != operations.StateRunning {
 				t.Fatalf("instance must roll back to running, got %s", state.instance.State)
@@ -111,17 +119,17 @@ func TestRecoveryDrainReclaimsWhenPremiseHolds(t *testing.T) {
 			name:  "stalled assignment reclaims zombie when no job started",
 			phase: operations.DrainPhaseStalledAssignment, running: true,
 			control: func(calls *[]string, c []operations.DeletionConfirmation) *fakeDrainControl {
-				return &fakeDrainControl{calls: calls, jobStarted: false, registered: false, confirmations: c}
+				return &fakeDrainControl{calls: calls, busy: false, registered: false, confirmations: c}
 			},
-			want: []string{"started:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
+			want: []string{"deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
 		},
 		{
 			name:  "lingering runner reclaims idle VM when no active job",
 			phase: operations.DrainPhaseLingeringRunner, running: true,
 			control: func(calls *[]string, c []operations.DeletionConfirmation) *fakeDrainControl {
-				return &fakeDrainControl{calls: calls, jobActive: false, registered: false, confirmations: c}
+				return &fakeDrainControl{calls: calls, busy: false, registered: false, confirmations: c}
 			},
-			want: []string{"active:trf-small-1", "deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
+			want: []string{"deregister:trf-small-1", "confirm:trf-small-1", "stop:trf-small-1", "confirm:trf-small-1", "delete:trf-small-1"},
 		},
 	}
 	for _, test := range tests {
@@ -189,10 +197,10 @@ func TestRecoveryDrainRetriesWhenPremiseCannotBeVerified(t *testing.T) {
 			control: fakeDrainControl{safe: true, registeredErr: context.DeadlineExceeded}},
 		{name: "inactive premise holds but demand guard refuses", phase: operations.DrainPhaseInactiveRecovery,
 			control: fakeDrainControl{safe: false, registered: false}},
-		{name: "stalled assignment job-started probe error", phase: operations.DrainPhaseStalledAssignment,
-			control: fakeDrainControl{jobStartedErr: context.DeadlineExceeded}},
-		{name: "lingering runner job-active probe error", phase: operations.DrainPhaseLingeringRunner,
-			control: fakeDrainControl{jobActiveErr: context.DeadlineExceeded}},
+		{name: "stalled assignment runner-busy probe error", phase: operations.DrainPhaseStalledAssignment,
+			control: fakeDrainControl{busyErr: context.DeadlineExceeded}},
+		{name: "lingering runner runner-busy probe error", phase: operations.DrainPhaseLingeringRunner,
+			control: fakeDrainControl{busyErr: context.DeadlineExceeded}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := []string{}
@@ -223,6 +231,7 @@ func TestRecoveryDrainAbortSurfacesPersistenceFailure(t *testing.T) {
 	state := &memoryState{instance: recoveryInstance(operations.DrainPhaseStoppedRecovery), advanceErr: operations.ErrConflict}
 	control := &fakeDrainControl{calls: &calls}
 	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, control)
+	executor.OnAbort = func(abort DrainAbort) { t.Fatalf("an abort that did not persist was reported: %#v", abort) }
 
 	err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
 

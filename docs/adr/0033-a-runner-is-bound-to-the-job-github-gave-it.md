@@ -9,6 +9,11 @@ Generalizes the crossed-assignment rule of
 semantics [ADR 0026](0026-queued-demand-expires-on-proven-absence.md) established
 for demand that is queued but not being served.
 
+Amended by [ADR 0074](0074-drain-guards-re-verify-the-runner-not-the-spawning-demand.md):
+the stalled-assignment and lingering-runner drains re-check at execution time
+with the runner-keyed `RunnerBusy`, not the spawning demand. Before, a second
+instance bound to the same demand could abort its own reclaim forever.
+
 ## Context
 
 The fleet spawns a VM *for a demand*. Every later question about that VM is

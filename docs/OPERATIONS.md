@@ -949,6 +949,40 @@ the fleet less safe. If retractions are frequent on a node, the backend's
 enumeration is unreliable there and that is the thing to investigate; the fleet
 is already declining to act on it.
 
+### A recovery drain that aborted
+
+A recovery drain re-checks its premise at the moment it acts. If fresh evidence
+disproves the premise, the drain aborts and the instance goes back to `running`.
+Every abort is logged once, with the phase that planned the drain and the
+evidence that stopped it (ADR 0074, issue #398):
+
+```sh
+grep 'instance drain aborted by fresh evidence' fleet-authority.stderr.log
+```
+
+| `evidence=` | phase | meaning |
+|---|---|---|
+| `vm_running` | `stopped_recovery` | the VM reads powered on |
+| `runner_registered` | `inactive_recovery` | the runner is still registered on GitHub |
+| `runner_busy` | `stalled_assignment`, `lingering_runner`, `event` | a job is executing on **this instance's runner** |
+| `guest_answered` | `guest_unresponsive` | the guest answered a fresh liveness probe |
+| `deregister_refused_runner_busy` | any phase that may abort | GitHub refused deregistration and fresh evidence shows the runner busy |
+
+The stalled-assignment and lingering-runner drains check **what the runner is
+doing**, not the demand the VM was spawned for. They abort only when a job is
+executing on this instance's own runner, from whichever demand GitHub brokered
+it. An idle duplicate is reclaimed at its own deadline even if its demand ran
+on a sibling VM. Before ADR 0074, such a duplicate aborted on its sibling's job
+every time and held its vector until the occupancy budget. If the runner
+evidence cannot be read, the drain fails at `drain_guard` and retries. It
+neither deregisters nor aborts.
+
+Each line is one withdrawn decision, so the log is never rate limited. If the
+same instance repeats a plan and abort pair, the planning evidence and the
+runner evidence disagree for that instance. Compare
+`fleet instances --output json` with the instance's demand rows before you
+change anything. Never deregister such a runner by hand.
+
 ### A vector that has not come back yet
 
 An instance in `draining` or `deregistering` **still charges the admission

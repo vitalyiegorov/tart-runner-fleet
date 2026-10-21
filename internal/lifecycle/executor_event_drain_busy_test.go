@@ -144,24 +144,21 @@ func TestDrainRefusedByBusyRunnerAbortsInsteadOfRetrying(t *testing.T) {
 		wantState operations.State
 		wantErr   string
 	}{
-		{name: "event drain refused while a brokered job runs", phase: 1,
+		{name: "event drain refused while a brokered job runs", phase: operations.DrainPhaseEvent,
 			control:   fakeDrainControl{safe: true, deregisterErr: errors.New("busy"), busy: true},
 			wantState: operations.StateRunning},
-		{name: "stalled assignment refused while a brokered job runs", phase: operations.DrainPhaseStalledAssignment,
-			control:   fakeDrainControl{jobStarted: false, deregisterErr: errors.New("busy"), busy: true},
+		{name: "inactive recovery refused while a brokered job runs", phase: operations.DrainPhaseInactiveRecovery,
+			control:   fakeDrainControl{safe: true, registered: false, deregisterErr: errors.New("busy"), busy: true},
 			wantState: operations.StateRunning},
-		{name: "lingering runner refused while a brokered job runs", phase: operations.DrainPhaseLingeringRunner,
-			control:   fakeDrainControl{jobActive: false, deregisterErr: errors.New("busy"), busy: true},
-			wantState: operations.StateRunning},
-		{name: "transient refusal with an idle runner keeps retrying", phase: 1,
+		{name: "transient refusal with an idle runner keeps retrying", phase: operations.DrainPhaseEvent,
 			control:   fakeDrainControl{safe: true, deregisterErr: errors.New("gateway timeout")},
 			wantState: operations.StateDraining, wantErr: "runner lifecycle failed at deregister (deregister_failed)"},
-		// A recovery phase reaches the deregister without the event drain's
-		// runner-scoped pre-check, so it is the case that exercises an unreadable
-		// busy observation at refusal time: it must stay a retryable deregister
-		// failure rather than being guessed either way.
-		{name: "refusal whose busy evidence is unreadable keeps retrying", phase: operations.DrainPhaseStalledAssignment,
-			control:   fakeDrainControl{jobStarted: false, deregisterErr: errors.New("gateway timeout"), busyErr: context.DeadlineExceeded},
+		// An inactive recovery reaches the deregister without a runner-scoped
+		// pre-check (its premise is the runner's absence), so it is the case that
+		// exercises an unreadable busy observation at refusal time: it must stay a
+		// retryable deregister failure rather than being guessed either way.
+		{name: "refusal whose busy evidence is unreadable keeps retrying", phase: operations.DrainPhaseInactiveRecovery,
+			control:   fakeDrainControl{safe: true, registered: false, deregisterErr: errors.New("gateway timeout"), busyErr: context.DeadlineExceeded},
 			wantState: operations.StateDraining, wantErr: "runner lifecycle failed at deregister (deregister_failed)"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

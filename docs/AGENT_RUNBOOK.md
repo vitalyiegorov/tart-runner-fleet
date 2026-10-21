@@ -126,6 +126,19 @@ grep -E 'recovery drain planned|power premise retracted|power state unreadable' 
   the trigger has survived three investigations and this is the evidence that
   ends it.
 
+A fourth line covers every other withdrawn decision:
+
+```sh
+grep 'instance drain aborted by fresh evidence' "$STATE/fleet-authority.stderr.log"
+```
+
+- **`instance drain aborted by fresh evidence`** names the `phase` that planned
+  the drain and the `evidence` that stopped it. `evidence=runner_busy` means a
+  job is executing on this instance's own runner. It is never the spawning
+  demand running on a sibling VM, because drain guards check the runner
+  (ADR 0074). If one instance keeps repeating a plan and abort pair, report it.
+  Never deregister the runner by hand.
+
 None of the three authorizes cleanup by hand.
 
 ## Understand the updater

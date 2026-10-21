@@ -12,7 +12,7 @@ import (
 // RunnerBusy is deliberately keyed by the runner, not by the demand the VM was
 // spawned for: GitHub's scale-set brokering may hand a runner a different
 // matching job, and it records the runner it chose on THAT job's demand row.
-// JobStarted/JobActive read the spawned-for demand only, which is why a
+// JobActive reads the spawned-for demand only, which is why a
 // completed spawned-for demand said "idle" while the runner was mid-flight on a
 // brokered job in the 2026-07-25 incident.
 func TestControlRouterRunnerBusyReadsRunnerScopedEvidence(t *testing.T) {

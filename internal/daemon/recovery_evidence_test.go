@@ -7,8 +7,40 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
 )
+
+// TestEveryDrainAbortNamesItsPhaseAndEvidence is the secondary gap of issue
+// #398: an idle duplicate's stalled-assignment drain aborted on the sibling's
+// job and nothing after the plan line said so. Each abort now names the
+// instance, the phase that planned the drain, and the evidence that disproved
+// it — and nothing else: no payload, no JIT configuration.
+func TestEveryDrainAbortNamesItsPhaseAndEvidence(t *testing.T) {
+	instance := operations.Instance{ID: "trf-macos-4x7-67fea656017b5f67", Repo: "owner/pony", Profile: "macos-4x7",
+		Demand:     domain.DemandKey{Repo: "owner/pony", RunID: 17, Attempt: 2, JobID: 41},
+		DrainPhase: operations.DrainPhaseStalledAssignment}
+	reporter, logged := silenceReporter()
+
+	for range 2 {
+		reporter.reportDrainAbort(lifecycle.DrainAbort{Instance: instance,
+			Phase: lifecycle.DrainPhaseName(instance.DrainPhase), Evidence: lifecycle.AbortEvidenceRunnerBusy})
+	}
+
+	for _, fragment := range []string{"instance drain aborted by fresh evidence",
+		"instance=trf-macos-4x7-67fea656017b5f67", "profile=macos-4x7", "repo=owner/pony",
+		"phase=stalled_assignment", "evidence=runner_busy", "runId=17", "jobId=41"} {
+		if !strings.Contains(logged.String(), fragment) {
+			t.Fatalf("abort log missing %q: %q", fragment, logged.String())
+		}
+	}
+	// Each abort is a distinct destructive decision the fleet withdrew; a repeat is
+	// itself the signal (a premise that keeps being planned and disproved).
+	if lines := strings.Count(logged.String(), "instance drain aborted"); lines != 2 {
+		t.Fatalf("two aborts produced %d lines", lines)
+	}
+}
 
 // glitched is the instance of issue #246: Running, executing a job, and reported
 // by the backend as powered off. PowerRetracted is the durable trace of its own

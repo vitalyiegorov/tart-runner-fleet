@@ -415,10 +415,6 @@ type fakeDrainControl struct {
 	guardErr      error
 	registered    bool
 	registeredErr error
-	jobStarted    bool
-	jobStartedErr error
-	jobActive     bool
-	jobActiveErr  error
 	busy          bool
 	busyErr       error
 	busyCalls     int
@@ -439,16 +435,6 @@ func (d *fakeDrainControl) RunnerBusy(_ context.Context, _ operations.Instance) 
 func (d *fakeDrainControl) RunnerRegistered(_ context.Context, instance operations.Instance) (bool, error) {
 	*d.calls = append(*d.calls, "registered:"+instance.ID)
 	return d.registered, d.registeredErr
-}
-
-func (d *fakeDrainControl) JobStarted(_ context.Context, instance operations.Instance) (bool, error) {
-	*d.calls = append(*d.calls, "started:"+instance.ID)
-	return d.jobStarted, d.jobStartedErr
-}
-
-func (d *fakeDrainControl) JobActive(_ context.Context, instance operations.Instance) (bool, error) {
-	*d.calls = append(*d.calls, "active:"+instance.ID)
-	return d.jobActive, d.jobActiveErr
 }
 
 func (d *fakeDrainControl) SafeToDeregister(_ context.Context, instance operations.Instance) (bool, error) {

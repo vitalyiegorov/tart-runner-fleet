@@ -171,18 +171,22 @@ type Transition struct {
 }
 
 const (
+	// DrainPhaseEvent is the drain the demand projection issues when the demand
+	// the VM was spawned for reaches JobCompleted.
+	DrainPhaseEvent            = 1
 	DrainPhaseStoppedRecovery  = 2
 	DrainPhaseInactiveRecovery = 3
 	// DrainPhaseStalledAssignment recovers an instance stuck in Assigned past
 	// the assignment deadline with no evidence a job ever started. Its
-	// execution-time premise is re-verified against fresh demand state (no
-	// started job bound to the runner) exactly like the other recovery phases.
+	// execution-time premise is re-verified against runner-keyed evidence — no
+	// job executing on THIS runner, whichever demand GitHub brokered to it — never
+	// against the demand the VM was spawned for (ADR 0074).
 	DrainPhaseStalledAssignment = 4
 	// DrainPhaseLingeringRunner recovers an instance stuck in Running past the
 	// idle-runner deadline whose bound demand carries no active job (terminal or
 	// cancelled before work began). Its execution-time premise is re-verified
-	// against fresh demand state — a job actively started disproves it — exactly
-	// like the other recovery phases; job inactivity is derived from runner
+	// against runner-keyed evidence — a job executing on this runner disproves it
+	// (ADR 0074); job inactivity is derived from runner
 	// absence after deregistration, so reclaim never blocks on a completion
 	// event that will never arrive.
 	DrainPhaseLingeringRunner = 5
