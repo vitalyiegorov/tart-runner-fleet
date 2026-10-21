@@ -472,6 +472,9 @@ func jobRequiresUnservedCapability(bindings []Binding, job githubscaleset.Workfl
 	if platform, ok := soleRouteLabel(job, platformJobRoutePattern); ok {
 		return jobRequiresUnservedPlatform(bindings, job, platform[1])
 	}
+	if platform, ok := standardOSLabel(job); ok && jobRequiresUnservedPlatform(bindings, job, string(platform)) {
+		return true
+	}
 	var route []string
 	for _, label := range job.Labels {
 		if match := foreignJobRoutePattern.FindStringSubmatch(label); match != nil {
@@ -965,6 +968,38 @@ func soleRouteLabel(job githubscaleset.WorkflowJob, pattern *regexp.Regexp) ([]s
 		route = match
 	}
 	return route, route != nil
+}
+
+// standardOSLabel returns the platform a job names through GitHub's standard
+// OS label (`macOS`, `Linux`, case-insensitive) when no label points at the
+// other platform. Both OS labels, or an OS label beside a `<os>-…` or
+// `trf-<os>-…` label of the other platform, are contradictory and prove nothing.
+func standardOSLabel(job githubscaleset.WorkflowJob) (domain.Platform, bool) {
+	var named domain.Platform
+	for _, label := range job.Labels {
+		for _, platform := range []domain.Platform{domain.PlatformLinux, domain.PlatformMacOS} {
+			if strings.EqualFold(label, string(platform)) {
+				if named != "" && named != platform {
+					return "", false
+				}
+				named = platform
+			}
+		}
+	}
+	other := domain.PlatformLinux
+	switch named {
+	case "":
+		return "", false
+	case domain.PlatformLinux:
+		other = domain.PlatformMacOS
+	}
+	for _, label := range job.Labels {
+		lower := strings.ToLower(label)
+		if strings.HasPrefix(lower, string(other)+"-") || strings.HasPrefix(lower, "trf-"+string(other)+"-") {
+			return "", false
+		}
+	}
+	return named, true
 }
 
 // jobRequiresUnservedPlatform proves a platform-alias job foreign when this

@@ -21,3 +21,7 @@ No knob, process command, backend dependency, database migration, or `fleet.v1` 
 ## Evidence
 
 A failing unit replay reproduces the MacBook mixed-platform snapshot. Unit cases retain unknown/contradictory routing errors. Deterministic simulation captures repository-wide foreign jobs beside local broker jobs on macOS-only and Linux-only nodes across 24 seeds each, and verifies one local attribution and no foreign attribution.
+
+## Amendment: GitHub standard OS labels (issue #392)
+
+Legacy macOS work is often routed with GitHub's standard OS label and a non-sized alias (`self-hosted, macOS, ARM64, macos-maestro`), which matches neither the canonical route nor an ADR 0060 platform alias. A Linux-only canonical node therefore failed the whole repository snapshot. A job that carries exactly one standard OS label (`macOS` or `Linux`, case-insensitive) is now proven foreign when the node accepts the repository and holds no binding of that platform for it; other labels such as an architecture or an alias do not weaken that proof because no local binding can serve the platform at all. A node with any binding of that platform stays uncertain, as do jobs naming both OS labels, jobs whose `<os>-…` or `trf-<os>-…` labels name the other platform, and unaccepted repositories. The canonical-route and platform-alias proofs are unchanged.
