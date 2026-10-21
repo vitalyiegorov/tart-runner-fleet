@@ -171,7 +171,15 @@ recipe:
   such a job would fail on missing tooling until a separate image update adds
   it. Building that image is future work, not covered by this document.
 - **A Go toolchain.** It was never in the image; see the `-go` note above.
-- **`ccache`.** This recipe's image compiles nothing.
+- ~~`ccache`. This recipe's image compiles nothing.~~ **Superseded
+  2026-10-21.** `rnw-community/mobile-ci` v4's `ios-maestro.yml` runs its
+  iOS **Build** jobs on the same `macos-maestro` label as its shards when a
+  caller passes no `build-runner-labels`, so this image now compiles. Without
+  `ccache` in the image, `setup-ccache-ios` falls back to `brew install ccache`
+  inside every build guest: measured on mac-studio guest
+  `trf-macos-4x7-a70572d82ba4bd36` (rnw-community job 118955234384), a Homebrew
+  auto-update plus seven formulae, 34.8 s per build, and a live dependency on
+  Homebrew's CDN in every job. The provisioning step below installs it.
 - **Creating a second `iPhone 17 Pro` simulator, strictly speaking.** A
   `maestro` guest is 4 vCPU regardless of which node's budget admits it, and
   each guest boots exactly one device. Measured on `26.4.1`: the Cirrus image already ships one
@@ -277,6 +285,12 @@ sudo ln -sfn "$node_prefix/bin/node" /usr/local/bin/node
 sudo ln -sfn "$node_prefix/bin/npx"  /usr/local/bin/npx
 node --version
 
+# --- ccache, so iOS Build jobs on this label do not brew-install it ---------
+# /opt/homebrew/bin is on the daemon runner PATH; setup-ccache-ios takes the
+# compiler shims from "$(brew --prefix ccache)/libexec".
+brew list --versions ccache >/dev/null 2>&1 || brew install ccache
+ccache --version
+
 # --- A JVM for the Maestro CLI ------------------------------------------------
 # Settled by measurement, not inferred: ~/.maestro/lib holds 195 jars and no
 # bundled JRE, and the maestro launcher is a Gradle start script that fails
@@ -315,9 +329,17 @@ rm -rf "$HOME/actions-runner"
 mkdir -p "$HOME/actions-runner"
 curl --retry 3 --retry-all-errors -fsSL -o /tmp/runner.tar.gz \
   "https://github.com/actions/runner/releases/download/v$version/actions-runner-osx-arm64-$version.tar.gz"
+# The release notes carry the SHA-256 of every asset between BEGIN/END SHA markers.
+want=$(curl -fsSL "https://api.github.com/repos/actions/runner/releases/tags/v$version" |
+  python3 -c "import sys,json,re;print(re.search(r\"<!-- BEGIN SHA osx-arm64 -->([0-9a-f]{64})<!-- END SHA osx-arm64 -->\",json.load(sys.stdin)[\"body\"]).group(1))")
+test "$(shasum -a 256 /tmp/runner.tar.gz | cut -d" " -f1)" = "$want"
 tar xzf /tmp/runner.tar.gz -C "$HOME/actions-runner"
 rm /tmp/runner.tar.gz
 test -x "$HOME/actions-runner/run.sh"
+# The runner starts every JavaScript action with its own bundled Node; prove it
+# is arm64 and executes in this guest before sealing.
+test "$(lipo -archs "$HOME/actions-runner/externals/node24/bin/node")" = arm64
+"$HOME/actions-runner/externals/node24/bin/node" --version
 # A sealed base carries a pristine payload only. Registration state and job
 # workspaces must stay unique to each ephemeral clone.
 test ! -e "$HOME/actions-runner/.runner"
@@ -774,6 +796,8 @@ test -x /usr/local/libexec/tart-runner-fleet-bootstrap
 test -r /usr/local/share/tart-runner-fleet/image-capabilities.json
 python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
 command -v node && node --version
+"$HOME/actions-runner/externals/node24/bin/node" --version
+command -v ccache && ccache --version
 command -v python3
 java -version
 "$HOME/.maestro/bin/maestro" --version
