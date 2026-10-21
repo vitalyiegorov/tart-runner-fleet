@@ -14,8 +14,8 @@ import (
 type ScaleSetHeadroom struct {
 	StoreKey int64
 	// Held is the work this set already owns: its live instances and its queued,
-	// not-yet-launched demand, or GitHub's own count of what it has offered and
-	// assigned the set when fresh statistics say more. It is deliberately the
+	// not-yet-launched demand, or GitHub's own assigned count for the set when
+	// fresh statistics say more. It is deliberately the
 	// larger of the two -- an over-count advertises more, which is today's
 	// behaviour, while an under-count could advertise below what GitHub has
 	// already given the set.
@@ -81,7 +81,10 @@ func (c DemandCoordinator) scaleSetHeadroom(ctx context.Context, bindings []Bind
 }
 
 // brokerHeld is GitHub's own count of the work it has placed on this set and
-// not finished: offered, acquired, and assigned (which includes running). It is
+// not finished: TotalAssignedJobs, which includes running jobs and is the
+// figure the protocol scales by. The other counters are not documented as
+// disjoint from it -- one job can be reported both acquired and assigned -- so
+// summing them would count one held job twice and over-advertise. It is
 // zero when the statistics are absent or stale, because then the set's durable
 // demand and live instances are the better record of what it holds; an
 // unreadable store is an error, not a zero.
@@ -102,5 +105,5 @@ func (c DemandCoordinator) brokerHeld(ctx context.Context, binding Binding) (int
 		now.Sub(statistics.ObservedAt) > c.statisticsMaxAge() {
 		return 0, nil
 	}
-	return statistics.Available + statistics.Acquired + statistics.Assigned, nil
+	return statistics.Assigned, nil
 }

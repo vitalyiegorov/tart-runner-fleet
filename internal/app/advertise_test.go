@@ -64,9 +64,19 @@ func TestScaleSetHeadroomFloorsAtTheLargerHeldCountAndOmitsTheUnknown(t *testing
 		Available: 1, Acquired: 1, Assigned: 3, Running: 1}}
 	coordinator := DemandCoordinator{Store: store, Now: func() time.Time { return now }}
 	rows := coordinator.scaleSetHeadroom(ctx, []Binding{binding}, in, map[int64]int{7: 1})
-	if len(rows) != 1 || rows[0].Held != 5 || rows[0].Fit != 2 {
-		t.Fatalf("fresh statistics outrank a smaller local count: %+v", rows)
+	if len(rows) != 1 || rows[0].Held != 3 || rows[0].Fit != 2 {
+		t.Fatalf("fresh assigned statistics outrank a smaller local count: %+v", rows)
 	}
+	// GitHub documents no disjointness between its counters: one job may be
+	// reported as both acquired and assigned. TotalAssignedJobs is the scaling
+	// truth, so that job is held once, not twice.
+	store.statistics = operations.DemandStatistics{MessageID: 4, ObservedAt: now, Acquired: 1, Assigned: 1}
+	rows = coordinator.scaleSetHeadroom(ctx, []Binding{binding}, in, nil)
+	if len(rows) != 1 || rows[0].Held != 1 {
+		t.Fatalf("a job reported acquired and assigned must be held once: %+v", rows)
+	}
+	store.statistics = operations.DemandStatistics{MessageID: 3, ObservedAt: now,
+		Available: 1, Acquired: 1, Assigned: 3, Running: 1}
 	store.statistics.ObservedAt = now.Add(-time.Hour)
 	rows = coordinator.scaleSetHeadroom(ctx, []Binding{binding}, in, map[int64]int{7: 1})
 	if len(rows) != 1 || rows[0].Held != 2 {

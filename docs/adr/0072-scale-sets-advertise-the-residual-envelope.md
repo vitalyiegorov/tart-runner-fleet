@@ -30,8 +30,11 @@ On each poll, a scale set advertises
 - **held** is what the set already owns. It is the larger of two counts:
   - the set's own record: live instances of its profile and repositories, plus
     queued demand that no instance runs yet;
-  - GitHub's fresh statistics for the set: available + acquired + assigned
-    (assigned includes running).
+  - GitHub's fresh statistics for the set: `totalAssignedJobs`, which
+    includes running jobs. This is the count the protocol scales by. The
+    other counters (available, acquired) are not documented as disjoint from
+    it, and one job can appear in both acquired and assigned, so adding them
+    would count one held job twice.
 
   Taking the larger value is the conservative choice. Counting too much only
   advertises more, which is the old behaviour. Counting too little could

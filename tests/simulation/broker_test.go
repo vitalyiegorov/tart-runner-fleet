@@ -512,15 +512,16 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 	if w.arrivalsStopped {
 		return nil
 	}
-	binding := w.bindingFor(profile, repo)
+	binding, room := w.bindingFor(profile, repo)
 	if binding < 0 {
 		return nil
 	}
-	if w.cfg.BrokerHonorsAdvertisedCapacity && w.outstandingJobs(binding) >= w.advertisedCapacity(binding) {
-		// GitHub places a job only on a set with advertised room. With none here
-		// it waits for -- or goes to -- a sibling node this world does not model,
-		// which is precisely the outcome issue #388 wants for work this node's
-		// residual cannot start.
+	if w.cfg.BrokerHonorsAdvertisedCapacity && room <= 0 {
+		// GitHub places a job only on a set with advertised room, and bindingFor
+		// already chose the eligible set with the most. With none here it waits
+		// for -- or goes to -- a sibling node this world does not model, which is
+		// precisely the outcome issue #388 wants for work this node's residual
+		// cannot start.
 		w.toSibling++
 		return nil
 	}
@@ -542,18 +543,28 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 // world) pair still names one exact history. A set restricted to named
 // repositories only ever receives their jobs, as a repository-scoped scale set
 // does.
-func (w *world) bindingFor(profile domain.ProfileID, repo string) int {
-	chosen, room := -1, 0
+//
+// Room is what the set last advertised less what it holds. A world whose
+// broker honours advertised capacity reads the advertisement from the fleet's
+// last tick (issue #388), so a set advertising nothing never wins over an
+// overlapping set that still has room; any other world keeps the profile's
+// MaxActive as the advertisement, exactly as before.
+func (w *world) bindingFor(profile domain.ProfileID, repo string) (chosen, room int) {
+	chosen = -1
 	for index, binding := range w.cfg.Bindings {
 		if binding.Profile.ID != profile || (len(binding.Targets) > 0 && !slices.Contains(binding.Targets, repo)) {
 			continue
 		}
-		free := w.cfg.Scheduler.Profiles[profile].MaxActive - w.outstandingJobs(index)
+		advertised := w.cfg.Scheduler.Profiles[profile].MaxActive
+		if w.cfg.BrokerHonorsAdvertisedCapacity {
+			advertised = w.advertisedCapacity(index)
+		}
+		free := advertised - w.outstandingJobs(index)
 		if chosen < 0 || free > room {
 			chosen, room = index, free
 		}
 	}
-	return chosen
+	return chosen, room
 }
 
 // outstandingJobs is what one scale set is already holding: everything GitHub

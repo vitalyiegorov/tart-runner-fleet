@@ -102,3 +102,29 @@ func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 		t.Fatalf("once the maestro exited the node must advertise and run a 4x8 again: %+v", later)
 	}
 }
+
+// TestIssue388BrokerPlacesOnTheOverlappingSetThatAdvertisesRoom: when two sets
+// serve the same job, GitHub places it on one that advertised room. A set
+// advertising nothing must not divert the job to a sibling while its peer on
+// this node still has room.
+func TestIssue388BrokerPlacesOnTheOverlappingSetThatAdvertisesRoom(t *testing.T) {
+	t.Parallel()
+	cfg := macbookWorld()
+	large := cfg.Scheduler.Profiles["large"]
+	labels := []string{"self-hosted", string(large.Route)}
+	cfg.Bindings = []app.Binding{
+		{StoreKey: 1, ScaleSetID: 1, Scope: "sim/shared", Profile: large, ScaleSetLabels: labels, SharedLabels: true},
+		{StoreKey: 2, ScaleSetID: 2, Scope: "sim/shared", Profile: large, ScaleSetLabels: labels, SharedLabels: true},
+	}
+	world := newWorld(t, cfg, simTrace{Seed: 388, Ticks: 1, Config: cfg.Name})
+	defer world.close()
+	world.lastTick = app.TickResult{Headroom: []app.ScaleSetHeadroom{
+		{StoreKey: 1, Held: 0, Fit: 0}, {StoreKey: 2, Held: 0, Fit: 1}}}
+	job := world.arrive("b/repo", "large", "push")
+	if job == nil || job.binding != 1 || world.toSibling != 0 {
+		t.Fatalf("job placed on %+v with %d diverted; want the set that advertised room", job, world.toSibling)
+	}
+	if second := world.arrive("b/repo", "large", "push"); second != nil || world.toSibling != 1 {
+		t.Fatalf("with no set advertising room the job goes to a sibling: %+v, %d diverted", second, world.toSibling)
+	}
+}
