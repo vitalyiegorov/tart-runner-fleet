@@ -105,7 +105,9 @@ func privateKeyLoader(load secretLoader) func(context.Context, string, string, s
 func defaultDependencies() dependencies {
 	appKey := credentials.GitHubAppKey{}
 	return dependencies{
-		validateLocalHost: func(cfg config.Config) error { return app.ValidateLocalHost(cfg, runtime.GOOS, os.Stat) },
+		validateLocalHost: func(cfg config.Config) error {
+			return app.ValidateLocalHost(cfg, runtime.GOOS, os.Stat, app.HostProductVersion)
+		},
 		newClient: func(endpoint string, timeout time.Duration) (apiClient, error) {
 			return adminapi.NewClient(endpoint, timeout)
 		},
