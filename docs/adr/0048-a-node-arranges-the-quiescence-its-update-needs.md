@@ -94,6 +94,15 @@ one it is running. The updater materialises and verifies a candidate there
 running means precisely "an update is waiting on me". No coordination with the
 updater process is required, and no new API.
 
+The installation root is the one holding the running executable
+(`<root>/releases/<generation>/fleet`), because that is where the updater
+writes. Only outside a release layout does it fall back to the configuration
+path's `<root>/state/` parent. *Amendment 2026-10-21:* the root used to come
+from the configuration path alone, so a node started from a candidate or
+experiment file kept outside `<root>/state` never saw its waiting candidate,
+never drained, and its updater refused "fleet is not quiescent" indefinitely
+(the Mini stayed on v0.1.695 while v0.1.701 sat in `releases/`).
+
 Every unreadable input — an unreadable directory, an unparseable version, no
 configuration path — reports nothing pending. A node must never refuse
 admission on the strength of a fact it could not establish.

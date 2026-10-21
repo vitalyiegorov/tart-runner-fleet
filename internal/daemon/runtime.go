@@ -755,7 +755,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// waiting on finish, which is how quiescence becomes reachable at all.
 	updateDrain := newUpdateDrainController(autoupdate.DrainPolicy{Enabled: cfg.UpdateDrain.Enabled,
 		PendingFor: cfg.UpdateDrain.PendingFor, MaxWait: cfg.UpdateDrain.MaxWait,
-		Cooldown: cfg.UpdateDrain.Cooldown}, installationRoot(opts.ConfigPath), opts.Version,
+		Cooldown: cfg.UpdateDrain.Cooldown}, installationRoot(opts.ExecutablePath, opts.ConfigPath), opts.Version,
 		autoupdate.ReleaseDirNames, reporter)
 	reporter.counter = health
 	// What runner version each base image carries is a fact about the
