@@ -975,7 +975,10 @@ it. An idle duplicate is reclaimed at its own deadline even if its demand ran
 on a sibling VM. Before ADR 0074, such a duplicate aborted on its sibling's job
 every time and held its vector until the occupancy budget. If the runner
 evidence cannot be read, the drain fails at `drain_guard` and retries. It
-neither deregisters nor aborts.
+neither deregisters nor aborts. The same happens when the instance's own demand
+shows a job started with **no runner name** recorded: nothing proves the job is
+not on this runner. Such a drain retries at `drain_guard` until the demand
+completes or names a runner.
 
 Each line is one withdrawn decision, so the log is never rate limited. If the
 same instance repeats a plan and abort pair, the planning evidence and the

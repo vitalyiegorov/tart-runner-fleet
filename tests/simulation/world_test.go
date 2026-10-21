@@ -1312,6 +1312,11 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 			w.drainAborts[instance.ID]++
 			return operations.StateRunning, true
 		}
+		if w.ownStartUnattributed(instance) {
+			// executor.go's stalled/lingering guard: an unnamed start of the
+			// instance's own demand is uncertain, so the guard fails and retries.
+			return "", false
+		}
 		if w.runnerExecuting(instance.ID) {
 			// GitHub refuses to deregister a runner that is EXECUTING a job, and the
 			// fleet's own durable evidence did not corroborate that refusal, so the
@@ -1566,6 +1571,18 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 	// evidence implies GitHub would refuse anyway, so one query answers both.
 	busy, err := w.store.RunnerActiveJob(w.ctx, scaleSet, instance.ID)
 	return err == nil && busy
+}
+
+// ownStartUnattributed mirrors ControlRouter.StartUnattributed for the two
+// phases that consult it, on the same durable row. This world's broker always
+// names the runner on a start, so it holds only if the store disagrees with the
+// broker, but the mirror stays edge for edge with executor.go (ADR 0074).
+func (w *world) ownStartUnattributed(instance operations.Instance) bool {
+	if instance.DrainPhase != operations.DrainPhaseStalledAssignment && instance.DrainPhase != operations.DrainPhaseLingeringRunner {
+		return false
+	}
+	record, err := w.store.DemandRecord(w.ctx, w.storeKeyFor(instance), instance.Demand.JobID)
+	return err != nil || (record.Status == operations.DemandJobStarted && record.RunnerName == "")
 }
 
 // storeKeyFor resolves the durable scale-set key an instance's demand lives

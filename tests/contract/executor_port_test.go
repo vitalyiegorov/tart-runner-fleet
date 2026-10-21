@@ -635,3 +635,6 @@ func (portControl) RunnerRegistered(context.Context, operations.Instance) (bool,
 	return false, nil
 }
 func (portControl) RunnerBusy(context.Context, operations.Instance) (bool, error) { return false, nil }
+func (portControl) StartUnattributed(context.Context, operations.Instance) (bool, error) {
+	return false, nil
+}

@@ -192,6 +192,12 @@ type DrainControl interface {
 	// spawned for demand X may be executing a different matching job Y, and
 	// "demand X completed" then says nothing about whether the runner is idle.
 	RunnerBusy(context.Context, operations.Instance) (bool, error)
+	// StartUnattributed reports whether the demand the VM was spawned for is
+	// executing (exactly JobStarted) with no runner name recorded. RunnerBusy
+	// keys on the runner name, so such a start is invisible to it, yet nothing
+	// proves it is not on this runner. Recovery guards treat it as unreadable
+	// evidence (ADR 0074).
+	StartUnattributed(context.Context, operations.Instance) (bool, error)
 }
 
 // ProvisionExecutor is a restartable state machine. One durable outbox
@@ -543,6 +549,17 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// fails the guard and retries (ADR 0074).
 				if proceed, result := e.verifyRunnerIdle(ctx, instance); !proceed {
 					return result
+				}
+				// Runner-keyed evidence cannot see a start GitHub did not attribute
+				// to a runner. When that start is of this instance's OWN demand it
+				// may well be on this runner, which the demand-keyed guard used to
+				// abort on, so it is uncertain: retry, neither deregister nor abort.
+				// An unnamed start of another demand is not consulted — it would
+				// block every reclaim in the scale set — and GitHub's busy refusal
+				// stays the backstop there.
+				unattributed, unattributedErr := e.Control.StartUnattributed(ctx, instance)
+				if unattributedErr != nil || unattributed {
+					return e.fail(ctx, instance, StageGuard)
 				}
 			case operations.DrainPhaseGuestUnresponsive:
 				// The scheduler planned this reclaim from an unbroken run of refused

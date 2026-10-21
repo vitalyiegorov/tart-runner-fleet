@@ -149,6 +149,63 @@ func TestRecoveryDrainAbortsWhenThisRunnerIsExecutingAJob(t *testing.T) {
 	}
 }
 
+// TestRecoveryDrainWillNotTrustAnUnattributedStartOfItsOwnDemand is the CodeRabbit
+// finding on PR #399. DemandEvent.Valid accepts a JobStarted with no runner
+// name, and RunnerActiveJob keys on the runner name, so a start of the spawning
+// demand that GitHub did not attribute reads as "this runner is idle". The old
+// demand-keyed guard would have aborted on it. Nothing proves the start is NOT on
+// this runner, so the guard must fail closed and retry: no deregistration, no
+// abort.
+//
+// It is deliberately narrow. Only the instance's OWN demand, only while it is
+// executing (a completed demand is no live work), and only when unnamed: a start
+// named for the sibling is the #398 duplicate and must still be reclaimed, and an
+// unnamed start of some other demand would block every reclaim in the scale set
+// indefinitely. GitHub's busy refusal remains the backstop for that case.
+func TestRecoveryDrainWillNotTrustAnUnattributedStartOfItsOwnDemand(t *testing.T) {
+	for _, phase := range []int{operations.DrainPhaseStalledAssignment, operations.DrainPhaseLingeringRunner} {
+		for _, test := range []struct {
+			name      string
+			demand    demandRows
+			wantGuard bool
+		}{
+			{name: "own demand started without a runner name", wantGuard: true,
+				demand: demandRows{scaleSet: 9, rows: map[int64]operations.DemandRecord{
+					41: {ScaleSetID: 9, RunnerRequestID: 41, Status: operations.DemandJobStarted}}}},
+			{name: "own demand unreadable", wantGuard: true,
+				demand: demandRows{scaleSet: 9, rows: map[int64]operations.DemandRecord{}}},
+			{name: "own demand completed without a runner name",
+				demand: demandRows{scaleSet: 9, rows: map[int64]operations.DemandRecord{
+					41: {ScaleSetID: 9, RunnerRequestID: 41, Status: operations.DemandJobCompleted}}}},
+			{name: "another demand started without a runner name",
+				demand: demandRows{scaleSet: 9, rows: map[int64]operations.DemandRecord{
+					41: {ScaleSetID: 9, RunnerRequestID: 41, Status: operations.DemandJobAssigned},
+					42: {ScaleSetID: 9, RunnerRequestID: 42, Status: operations.DemandJobStarted}}}},
+		} {
+			t.Run(fmt.Sprintf("phase %d, %s", phase, test.name), func(t *testing.T) {
+				state, source, executor := duplicateDrain(phase, test.demand)
+				executor.OnAbort = func(abort DrainAbort) { t.Fatalf("an unattributed start was reported as an abort: %#v", abort) }
+
+				err := executor.Execute(context.Background(), operations.Operation{Kind: OperationDrain, ResourceID: state.instance.ID})
+
+				if !test.wantGuard {
+					if err != nil || source.deregister != 1 || state.instance.State != operations.StateDeleted {
+						t.Fatalf("err=%v deregistrations=%d state=%s, want the idle runner reclaimed", err, source.deregister, state.instance.State)
+					}
+					return
+				}
+				var staged stageError
+				if !errors.As(err, &staged) || staged.stage != StageGuard {
+					t.Fatalf("err=%v deregistrations=%d state=%s, want a guard-stage retry", err, source.deregister, state.instance.State)
+				}
+				if source.deregister != 0 || state.instance.State != operations.StateDraining {
+					t.Fatalf("deregistrations=%d state=%s, want 0 and still draining", source.deregister, state.instance.State)
+				}
+			})
+		}
+	}
+}
+
 // Unreadable runner evidence is not permission to deregister and not evidence to
 // abort on: the guard fails closed and the drain retries.
 func TestRecoveryDrainFailsClosedWhenRunnerEvidenceIsUnreadable(t *testing.T) {

@@ -423,6 +423,13 @@ type fakeDrainControl struct {
 	confirmErr    error
 }
 
+// StartUnattributed is not recorded in calls, for RunnerBusy's reason below;
+// the fake reports a fully attributed demand, and the real ControlRouter's
+// answers are exercised in executor_duplicate_drain_test.go.
+func (d *fakeDrainControl) StartUnattributed(context.Context, operations.Instance) (bool, error) {
+	return false, nil
+}
+
 // RunnerBusy is deliberately not recorded in calls: it is a runner-scoped
 // premise probe that every drain phase may run, and the existing call-sequence
 // assertions pin the phase-specific evidence order. Its invocation is asserted

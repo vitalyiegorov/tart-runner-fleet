@@ -57,9 +57,24 @@ invisible.
    - no job on this runner lets the drain proceed. GitHub re-queues any job that
      was assigned but had not started.
 
-   No drain guard reads the spawning demand. `DrainControl.JobStarted` and
-   `DrainControl.JobActive` are removed, and so is `ControlRouter.JobStarted`,
-   which nothing else used.
+   `DrainControl.JobStarted` and `DrainControl.JobActive` are removed, and so is
+   `ControlRouter.JobStarted`, which nothing else used.
+
+   One narrow exception reads the spawning demand, and it can only make the
+   guard more cautious. `RunnerBusy` matches on the runner name, and
+   `DemandEvent.Valid` accepts a `JobStarted` without one. A start GitHub did
+   not attribute is invisible to `RunnerBusy`, but nothing proves it is not on
+   this runner, and the old demand-keyed guard would have aborted on it. So,
+   after `verifyRunnerIdle` passes, the stalled-assignment and lingering-runner
+   guards ask `DrainControl.StartUnattributed`. If the instance's **own**
+   spawning demand is exactly `JobStarted` with an empty runner name, or cannot
+   be read, the guard fails (`drain_guard`) and retries; it neither deregisters
+   nor aborts. The exception is deliberately limited:
+   - it does not apply to a completed demand, which has no live work;
+   - it does not apply to a start named for a sibling, which is the #398
+     duplicate and is still reclaimed;
+   - it does not apply to an unnamed start of some **other** demand, because
+     that would block every reclaim in the scale set indefinitely.
 
 2. **Planning is unchanged.** The inventory still derives the lingering-runner
    candidate from `ControlRouter.JobActive`, which reads the spawning demand. A
@@ -96,12 +111,16 @@ invisible.
 
 ## Open risk
 
-`RunnerBusy` depends on GitHub recording the runner's name on the `JobStarted`
-it sends. A start with no runner name would read as idle, and the drain would
-reach the deregistration call. GitHub refuses to remove a busy runner, so the
-drain keeps retrying the deregister stage under ADR 0007's cleanup retries and
-never ends the job. The event drain already carries this exposure. GitHub's protocol always names the runner on a start, so no
-new rule is added for a case we have not observed.
+Runner-keyed evidence depends on GitHub recording the runner's name on the
+`JobStarted` it sends. Decision 1 closes this gap for the instance's own
+spawning demand (CodeRabbit finding on PR #399). One case stays open: an
+unnamed start of a **different** demand, brokered to this runner. It would read
+as idle, and the drain would reach the deregistration call. GitHub refuses to
+remove a busy runner, and the busy-refusal abort is the backstop. Without
+corroborating busy evidence, the drain keeps retrying the deregister stage
+under ADR 0007's cleanup retries and never ends the job. The event drain already
+carries the same exposure. GitHub's protocol names the runner on every start we
+have observed.
 
 The simulator cannot yet create two instances bound to one demand. The fleet's
 own planner never does that, and the mechanism behind the 2026-10-21 duplicate

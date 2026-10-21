@@ -120,15 +120,26 @@ func (r ControlRouter) RunnerRegistered(ctx context.Context, instance operations
 // itself through RunnerBusy, because the spawning demand may be executing on a
 // sibling runner while this one is idle (issue #398, ADR 0074).
 func (r ControlRouter) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
+	record, err := r.spawningDemand(ctx, instance)
+	return err == nil && record.Status == operations.DemandJobStarted, err
+}
+
+// StartUnattributed reports whether the spawning demand is executing (exactly
+// JobStarted) with no runner name recorded: a start RunnerBusy cannot see and
+// cannot rule out as this runner's. A start named for any runner, or a demand
+// that is not executing, is not unattributed. An unreadable demand is an error,
+// which the guard treats as uncertain (ADR 0074).
+func (r ControlRouter) StartUnattributed(ctx context.Context, instance operations.Instance) (bool, error) {
+	record, err := r.spawningDemand(ctx, instance)
+	return err == nil && record.Status == operations.DemandJobStarted && record.RunnerName == "", err
+}
+
+func (r ControlRouter) spawningDemand(ctx context.Context, instance operations.Instance) (operations.DemandRecord, error) {
 	binding, err := r.binding(instance)
 	if err != nil {
-		return false, err
+		return operations.DemandRecord{}, err
 	}
-	record, err := r.demand(ctx, binding, instance)
-	if err != nil {
-		return false, err
-	}
-	return record.Status == operations.DemandJobStarted, nil
+	return r.demand(ctx, binding, instance)
 }
 
 // RunnerBusy reports whether fresh durable demand evidence shows a workflow job
