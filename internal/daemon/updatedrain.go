@@ -100,7 +100,8 @@ func installationRoot(executable, configPath string) string {
 	if executable != "" {
 		generation := filepath.Dir(executable)
 		releases := filepath.Dir(generation)
-		if filepath.Base(releases) == "releases" && filepath.Base(generation) != "releases" {
+		if filepath.Base(executable) == "fleet" &&
+			filepath.Base(releases) == "releases" && filepath.Base(generation) != "releases" {
 			return filepath.Dir(releases)
 		}
 	}

@@ -144,6 +144,8 @@ func TestInstallationRootFollowsTheRunningReleaseWhenTheConfigLivesElsewhere(t *
 		{"/opt/trf/releases/v1/fleet", "/opt/trf/state/fleet.json", "/opt/trf"},
 		// Outside a release layout (a developer build) the configuration decides.
 		{"/home/u/go/bin/fleet", "/opt/trf/state/fleet.json", "/opt/trf"},
+		// Only the release binary itself names the layout.
+		{"/opt/a/releases/v1/fleet-debug", "/opt/b/state/fleet.json", "/opt/b"},
 	} {
 		if got := installationRoot(tc.executable, tc.config); got != tc.want {
 			t.Fatalf("installationRoot(%q, %q) = %q, want %q", tc.executable, tc.config, got, tc.want)
@@ -235,10 +237,10 @@ func TestExecutablePathResolvesOrReportsNothing(t *testing.T) {
 	if got := executablePath(); got != resolvedTarget {
 		t.Fatalf("executablePath() = %q, want the resolved release binary %q", got, resolvedTarget)
 	}
-	missing := filepath.Join(dir, "gone")
+	missing := filepath.Join(dir, "releases", "v2", "fleet")
 	osExecutable = func() (string, error) { return missing, nil }
-	if got := executablePath(); got != missing {
-		t.Fatalf("executablePath() = %q, want the unresolvable path itself", got)
+	if got := executablePath(); got != "" {
+		t.Fatalf("executablePath() = %q, want empty for a release path that no longer resolves", got)
 	}
 	osExecutable = func() (string, error) { return "", errors.New("unsupported") }
 	if got := executablePath(); got != "" {

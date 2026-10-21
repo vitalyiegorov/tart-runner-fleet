@@ -18,8 +18,8 @@ var (
 )
 
 // executablePath resolves the running binary through symlinks (the `current`
-// link included). An unresolvable path is reported as empty rather than as an
-// error: the update drain then falls back to the configuration path.
+// link included). An unknown or unresolvable path is reported as empty rather
+// than as an error: the update drain then falls back to the configuration path.
 func executablePath() string {
 	path, err := osExecutable()
 	if err != nil {
@@ -28,7 +28,9 @@ func executablePath() string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
 	}
-	return path
+	// os.Executable does not promise the path still names the running binary;
+	// one that cannot be resolved must not choose another installation's root.
+	return ""
 }
 
 type options struct {
