@@ -5,12 +5,31 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 )
 
-var run = runDaemon
+var (
+	run          = runDaemon
+	osExecutable = os.Executable
+)
+
+// executablePath resolves the running binary through symlinks (the `current`
+// link included). An unresolvable path is reported as empty rather than as an
+// error: the update drain then falls back to the configuration path.
+func executablePath() string {
+	path, err := osExecutable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
+}
 
 type options struct {
 	ConfigPath    string
@@ -23,6 +42,10 @@ type options struct {
 	// Version is the single build identity, injected by the fleet entry point
 	// and reported to GitHub and telemetry. It is never a package-local default.
 	Version string
+	// ExecutablePath is the resolved path of the running binary. The update
+	// drain reads the release root from it (see installationRoot); empty when
+	// the platform cannot say, which falls back to the configuration path.
+	ExecutablePath string
 }
 
 // Execute runs the daemon command surface. The caller owns process exit and
@@ -53,7 +76,8 @@ func execute(ctx context.Context, args []string, _ io.Writer, stderr io.Writer, 
 		return 2
 	}
 	opts := options{ConfigPath: *configPath, DatabasePath: *databasePath, HealthAddress: *healthAddress, AdminSocket: *adminSocket,
-		Mode: reconcile.Mode(*mode), CanaryScope: *canaryScope, CanaryProfile: *canaryProfile, Version: version}
+		Mode: reconcile.Mode(*mode), CanaryScope: *canaryScope, CanaryProfile: *canaryProfile, Version: version,
+		ExecutablePath: executablePath()}
 	if opts.Mode == reconcile.Canary && (opts.CanaryScope == "" || opts.CanaryProfile == "") {
 		fmt.Fprintln(stderr, "canary requires both --canary-scope and --canary-profile")
 		return 2

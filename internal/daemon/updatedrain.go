@@ -86,11 +86,24 @@ func (c *updateDrainController) Metric() telemetry.UpdateDrainMetric {
 		PendingSince: c.pendingSince, Since: c.state.Since()}
 }
 
-// installationRoot derives the release root from the configuration path the
-// daemon was started with, rather than from the ambient user's default layout:
-// a daemon told to run from an explicit path must read the releases beside that
-// path, not some other installation's.
-func installationRoot(configPath string) string {
+// installationRoot derives the release root this daemon's updater writes to.
+//
+// The running executable decides when it lives in a release layout
+// (<root>/releases/<generation>/fleet): that is exactly where the updater
+// materialises the next generation, wherever the configuration is kept. A node
+// started from a candidate or experiment file outside <root>/state would
+// otherwise read a directory with no releases/, never see the waiting
+// candidate, never drain, and leave the updater's quiescence gate refusing
+// forever. Outside a release layout the configuration path decides, so two
+// installations on one machine still never read each other's candidates.
+func installationRoot(executable, configPath string) string {
+	if executable != "" {
+		generation := filepath.Dir(executable)
+		releases := filepath.Dir(generation)
+		if filepath.Base(releases) == "releases" && filepath.Base(generation) != "releases" {
+			return filepath.Dir(releases)
+		}
+	}
 	if configPath == "" {
 		return ""
 	}
