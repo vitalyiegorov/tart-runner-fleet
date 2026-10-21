@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -510,8 +512,16 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 	if w.arrivalsStopped {
 		return nil
 	}
-	binding := w.bindingFor(profile)
+	binding := w.bindingFor(profile, repo)
 	if binding < 0 {
+		return nil
+	}
+	if w.cfg.BrokerHonorsAdvertisedCapacity && w.outstandingJobs(binding) >= w.advertisedCapacity(binding) {
+		// GitHub places a job only on a set with advertised room. With none here
+		// it waits for -- or goes to -- a sibling node this world does not model,
+		// which is precisely the outcome issue #388 wants for work this node's
+		// residual cannot start.
+		w.toSibling++
 		return nil
 	}
 	owner, name := splitRepo(repo)
@@ -529,11 +539,13 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 // sets in one scope has the answer the #144 spike measured: the job goes to the
 // set with the most room, so each set fills to the capacity it last advertised
 // and the remainder stays queued. Ties break on the lower index so a (seed,
-// world) pair still names one exact history.
-func (w *world) bindingFor(profile domain.ProfileID) int {
+// world) pair still names one exact history. A set restricted to named
+// repositories only ever receives their jobs, as a repository-scoped scale set
+// does.
+func (w *world) bindingFor(profile domain.ProfileID, repo string) int {
 	chosen, room := -1, 0
 	for index, binding := range w.cfg.Bindings {
-		if binding.Profile.ID != profile {
+		if binding.Profile.ID != profile || (len(binding.Targets) > 0 && !slices.Contains(binding.Targets, repo)) {
 			continue
 		}
 		free := w.cfg.Scheduler.Profiles[profile].MaxActive - w.outstandingJobs(index)
@@ -568,4 +580,19 @@ func splitRepo(repo string) (owner, name string) {
 		}
 	}
 	return repo, repo
+}
+
+// advertisedCapacity is what one scale set sends GitHub on its long poll, read
+// through the production composition (issue #388) from the last tick the
+// fleet completed. The configured value is the world's truthful per-set
+// capacity: the node's slot count, which no set can exceed.
+func (w *world) advertisedCapacity(binding int) int {
+	configured := w.cfg.Scheduler.LinuxCapacity.Slots
+	key := w.cfg.Bindings[binding].StoreKey
+	for _, headroom := range w.lastTick.Headroom {
+		if headroom.StoreKey == key {
+			return app.AdvertisedCapacity(configured, headroom, w.lastTickErr == nil)
+		}
+	}
+	return app.AdvertisedCapacity(configured, app.ScaleSetHeadroom{}, false)
 }

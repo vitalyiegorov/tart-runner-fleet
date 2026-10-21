@@ -17,6 +17,7 @@ type fakeScaleSet struct {
 	messages                  []*scaleset.RunnerScaleSetMessage
 	getErr, deleteErr, jitErr error
 	gets                      []int
+	capacities                []int
 	deleted                   []int
 	jitSetting                *scaleset.RunnerScaleSetJitRunnerSetting
 	jitID                     int
@@ -58,6 +59,7 @@ func (f *fakeScaleSet) Close(ctx context.Context) error {
 func (f *fakeScaleSet) GetMessage(ctx context.Context, last, capacity int) (*scaleset.RunnerScaleSetMessage, error) {
 	_, f.deadlineSeen = ctx.Deadline()
 	f.gets = append(f.gets, last)
+	f.capacities = append(f.capacities, capacity)
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -578,5 +580,36 @@ func TestSnapshotCopiesAndTokenFunc(t *testing.T) {
 	(*JITSecret)(nil).Destroy()
 	if !strings.Contains((&APIError{Kind: Server, Status: 500}).Error(), "server") || (*APIError)(nil).Error() != "<nil>" || (*APIError)(nil).Unwrap() != nil {
 		t.Fatal()
+	}
+}
+
+// TestScaleSetAdvertisesTheProvidedCapacityButNeverMoreThanConfigured is the
+// adapter half of issue #388: each long poll asks the provider afresh, and the
+// answer can only lower the configured truthful capacity.
+func TestScaleSetAdvertisesTheProvidedCapacityButNeverMoreThanConfigured(t *testing.T) {
+	answers := []int{0, 1, 9, -3}
+	next := 0
+	f := &fakeScaleSet{}
+	s, err := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 9, MaxCapacity: 2,
+		Capacity:    func() int { answer := answers[next]; next++; return answer },
+		PollTimeout: time.Second, RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range answers {
+		if _, err := s.Next(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if want := []int{0, 1, 2, 0}; fmt.Sprint(f.capacities) != fmt.Sprint(want) {
+		t.Fatalf("advertised %v, want %v", f.capacities, want)
+	}
+	static, err := NewScaleSet(ScaleSetConfig{Messages: f, JIT: f, ScaleSetID: 9, MaxCapacity: 2,
+		PollTimeout: time.Second, RequestTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := static.Next(context.Background()); err != nil || f.capacities[len(f.capacities)-1] != 2 {
+		t.Fatalf("without a provider the configured capacity is advertised: %v %v", f.capacities, err)
 	}
 }

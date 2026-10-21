@@ -38,11 +38,16 @@ type officialRunners interface {
 }
 
 type ScaleSetConfig struct {
-	Messages       officialMessages
-	JIT            officialJIT
-	Runners        officialRunners
-	ScaleSetID     int
-	MaxCapacity    int
+	Messages    officialMessages
+	JIT         officialJIT
+	Runners     officialRunners
+	ScaleSetID  int
+	MaxCapacity int
+	// Capacity, when set, is asked on every long poll for the capacity to
+	// advertise (issue #388). It can only lower MaxCapacity: a larger answer is
+	// clamped to it and a negative one to zero, so the configured truthful
+	// capacity stays the ceiling whatever the caller computes.
+	Capacity       func() int
 	PollTimeout    time.Duration
 	RequestTimeout time.Duration
 	InitialCursor  int
@@ -53,6 +58,7 @@ type ScaleSet struct {
 	jit                         officialJIT
 	runners                     officialRunners
 	id, capacity                int
+	advertise                   func() int
 	pollTimeout, requestTimeout time.Duration
 	mu                          sync.Mutex
 	cursor                      int
@@ -69,7 +75,7 @@ func NewScaleSet(c ScaleSetConfig) (*ScaleSet, error) {
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 15 * time.Second
 	}
-	return &ScaleSet{messages: c.Messages, jit: c.JIT, runners: c.Runners, id: c.ScaleSetID, capacity: c.MaxCapacity, pollTimeout: c.PollTimeout, requestTimeout: c.RequestTimeout, cursor: c.InitialCursor}, nil
+	return &ScaleSet{messages: c.Messages, jit: c.JIT, runners: c.Runners, id: c.ScaleSetID, capacity: c.MaxCapacity, advertise: c.Capacity, pollTimeout: c.PollTimeout, requestTimeout: c.RequestTimeout, cursor: c.InitialCursor}, nil
 }
 
 func (s *ScaleSet) LastMessageID() int { s.mu.Lock(); defer s.mu.Unlock(); return s.cursor }
@@ -86,7 +92,7 @@ func (s *ScaleSet) Next(ctx context.Context) (*PendingMessage, error) {
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, s.pollTimeout)
 	defer cancel()
-	m, err := s.messages.GetMessage(ctx, cursor, s.capacity)
+	m, err := s.messages.GetMessage(ctx, cursor, s.advertisedCapacity())
 	if err != nil {
 		return nil, fmt.Errorf("long-poll scale-set messages: %w", err)
 	}
@@ -121,6 +127,14 @@ func (s *ScaleSet) Next(ctx context.Context) (*PendingMessage, error) {
 		return nil
 	}
 	return p, nil
+}
+
+// advertisedCapacity is the X-ScaleSetMaxCapacity of the next long poll.
+func (s *ScaleSet) advertisedCapacity() int {
+	if s.advertise == nil {
+		return s.capacity
+	}
+	return min(s.capacity, max(0, s.advertise()))
 }
 
 // Handle makes the required ordering explicit: durable work is committed

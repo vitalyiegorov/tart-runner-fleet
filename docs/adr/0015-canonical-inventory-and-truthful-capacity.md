@@ -140,3 +140,13 @@ The declaration is per scale set (`sharedLabels`) and requires
 splits a shared queue by advertised capacity, so two nodes both inflating that
 number for lookahead would have it split by fiction. It cannot be inferred,
 because ADR 0034's first decision is that no node is aware of another.
+
+## Amendment: the advertised capacity is the residual, bounded by the truth
+
+Truthful capacity is truthful for one scope. A node shares one envelope across
+all of its scopes, and GitHub adds up what their sets advertise, so a small
+node kept accepting work it could not start (issue #388).
+[ADR 0072](0072-scale-sets-advertise-the-residual-envelope.md) keeps the
+configured `maxCapacity` as the validated ceiling. On every poll, each set
+advertises `min(maxCapacity, held + fit)`, and falls back to the configured
+value whenever the residual is unknown.
