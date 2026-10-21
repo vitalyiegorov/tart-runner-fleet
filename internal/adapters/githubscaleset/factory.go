@@ -40,13 +40,16 @@ func (*PrivateKeySecret) MarshalBinary() ([]byte, error) {
 }
 
 type GitHubAppScaleSetConfig struct {
-	GitHubConfigURL                       string
-	ClientID                              string
-	InstallationID                        int64
-	PrivateKey                            *PrivateKeySecret
-	ScaleSetID                            int
-	Owner                                 string
-	MaxCapacity                           int
+	GitHubConfigURL string
+	ClientID        string
+	InstallationID  int64
+	PrivateKey      *PrivateKeySecret
+	ScaleSetID      int
+	Owner           string
+	MaxCapacity     int
+	// Capacity is ScaleSetConfig.Capacity: the per-poll advertisement, which
+	// can only lower MaxCapacity.
+	Capacity                              func() int
 	InitialCursor                         int
 	PollTimeout                           time.Duration
 	RequestTimeout                        time.Duration
@@ -86,7 +89,7 @@ func NewGitHubAppScaleSet(ctx context.Context, c GitHubAppScaleSetConfig) (*Scal
 		return nil, err
 	}
 	runners, _ := jit.(officialRunners)
-	s, err := NewScaleSet(ScaleSetConfig{Messages: messages, JIT: jit, Runners: runners, ScaleSetID: c.ScaleSetID, MaxCapacity: c.MaxCapacity, InitialCursor: c.InitialCursor, PollTimeout: c.PollTimeout, RequestTimeout: c.RequestTimeout})
+	s, err := NewScaleSet(ScaleSetConfig{Messages: messages, JIT: jit, Runners: runners, ScaleSetID: c.ScaleSetID, MaxCapacity: c.MaxCapacity, Capacity: c.Capacity, InitialCursor: c.InitialCursor, PollTimeout: c.PollTimeout, RequestTimeout: c.RequestTimeout})
 	if err != nil {
 		if closer, ok := messages.(interface{ Close(context.Context) error }); ok {
 			_ = closer.Close(ctx)

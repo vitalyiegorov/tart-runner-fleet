@@ -783,6 +783,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		BlockedFor: cfg.SessionYield.BlockedFor, HealthyFor: cfg.SessionYield.HealthyFor})
 	ingesters := make([]app.Ingester, 0, len(bindings))
 	closers := make([]scaleSetSource, 0, len(bindings))
+	// Only truthful capacity is lowered to the residual (issue #388). Without
+	// canonical inventory the configured capacity is deliberately inflated for
+	// queue lookahead (ADR 0009), and that mechanism needs it advertised as is.
+	var advertiser *residualAdvertiser
+	if canonicalRESTInventory {
+		advertiser = newResidualAdvertiser(d.now, max(residualAdvertisementMaxAge, 3*cfg.PollInterval))
+	}
 	// memberSources keys each binding's session by the scale set it polls, which
 	// is the key the scale-set audit's verdict arrives under (ADR 0063).
 	memberSources := make(map[membership.Key]yieldableSource, len(bindings))
@@ -814,6 +821,10 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				if err != nil {
 					return err
 				}
+				var capacity func() int
+				if advertiser != nil {
+					capacity = advertiser.provider(binding.StoreKey, settings.scaleSet.MaxCapacity)
+				}
 				openSource := func(openCtx context.Context) (scaleSetSource, error) {
 					cursor, cursorErr := d.cursor(openCtx, store, settings.cursorKey)
 					if cursorErr != nil {
@@ -821,7 +832,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					}
 					return d.newScaleSet(openCtx, githubscaleset.GitHubAppScaleSetConfig{GitHubConfigURL: settings.configURL,
 						ClientID: settings.clientID, InstallationID: settings.installationID, PrivateKey: privateKey,
-						ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, InitialCursor: int(cursor),
+						ScaleSetID: settings.scaleSet.ID, Owner: settings.owner, MaxCapacity: settings.scaleSet.MaxCapacity, Capacity: capacity, InitialCursor: int(cursor),
 						RequestTimeout: cfg.Timeouts.GitHub,
 						System:         "tart-runner-fleet", Version: opts.Version, Subsystem: "controller"})
 				}
@@ -919,7 +930,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
 		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain,
-		membership: member}
+		membership: member, advertiser: advertiser}
 	if opts.Mode == reconcile.Authority {
 		cleanup := discharge.Service{Store: store, VM: d.newReaper(store, cfg), Authority: true, Now: d.now,
 			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
@@ -2280,7 +2291,17 @@ type engineTicker struct {
 	// drain decides whether this node refuses admission to reach the quiescence
 	// its own pending update needs (ADR 0011 amendment, issue #230).
 	drain *updateDrainController
+	// advertiser hands each tick's residual envelope to the scale-set sessions
+	// (issue #388). Nil when capacity is not truthful, which advertises the
+	// configured value unchanged.
+	advertiser *residualAdvertiser
 }
+
+// residualAdvertisementMaxAge is how old the scheduler's view of the residual
+// may be before scale sets stop trusting it and advertise their configured
+// capacity again. It matches the statistics freshness bound the demand path
+// already uses.
+const residualAdvertisementMaxAge = 2 * time.Minute
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
 // carries. An unclassified error yields no detail rather than free-form text, so
@@ -2297,6 +2318,7 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	result, err := e.engine.Tick(ctx)
 	success := err == nil && result.Plan.Status == "ready"
 	e.health.RecordTick(success)
+	e.advertiser.observe(result, err == nil && success)
 	freshness := telemetry.ObservationFresh
 	// A blocked plan explains itself through the plan reason. An error has no
 	// plan at all -- every failing return yields a zero TickResult -- so the

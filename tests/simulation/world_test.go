@@ -144,6 +144,11 @@ type worldConfig struct {
 	// message-id sequence, as it did for scale set 8077185082566234948 on
 	// 2026-08-01T18:32Z. Zero means the sequence is never restarted.
 	SequenceResetAt int
+	// BrokerHonorsAdvertisedCapacity makes GitHub place a job on a scale set
+	// only while the set holds less than it advertised on its last poll, with
+	// the advertisement read from the fleet's own last tick (issue #388). Off,
+	// the broker places every job regardless, which is every world before it.
+	BrokerHonorsAdvertisedCapacity bool
 }
 
 // simOccupancyBudget is the per-profile ceiling on how long ONE instance may
@@ -795,6 +800,13 @@ type world struct {
 	// arrivalsStopped marks the tick after which no new job may be created, which
 	// is what makes property (f) meaningful.
 	arrivalsStopped bool
+	// lastTick is the fleet's most recent tick, which is what its scale sets
+	// advertise from until the next one completes.
+	lastTick    app.TickResult
+	lastTickErr error
+	// toSibling counts jobs GitHub placed elsewhere because this node's sets
+	// advertised no room for them (issue #388).
+	toSibling int
 
 	observations []tickObservation
 	findings     []finding
@@ -1056,6 +1068,7 @@ func (w *world) reconcile() tickObservation {
 	// built from rather than against the state it just created.
 	instances, host := w.engine.Inventory.Observe(w.ctx)
 	result, err := w.engine.Tick(w.ctx)
+	w.lastTick, w.lastTickErr = result, err
 	queued := 0
 	for _, summary := range result.Queues {
 		queued += summary.Count
