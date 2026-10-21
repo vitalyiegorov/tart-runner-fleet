@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -119,9 +121,51 @@ func TestInstallationRootIsDerivedFromTheConfigurationPath(t *testing.T) {
 		"/home/u/.local/share/tart-runner-fleet/state/fleet.json": "/home/u/.local/share/tart-runner-fleet",
 		"": "",
 	} {
-		if got := installationRoot(path); got != want {
+		if got := installationRoot("", path); got != want {
 			t.Fatalf("installationRoot(%q) = %q, want %q", path, got, want)
 		}
+	}
+}
+
+// A node may run a configuration kept outside <root>/state (an operator
+// candidate file, an experiment beside the installation). The release root is
+// then the one holding the running executable, because that is where the
+// updater materialises the next generation. Deriving it from such a config path
+// read a directory with no releases/, so the drain never saw the waiting
+// candidate and the quiescence gate refused the update forever.
+func TestInstallationRootFollowsTheRunningReleaseWhenTheConfigLivesElsewhere(t *testing.T) {
+	for _, tc := range []struct{ executable, config, want string }{
+		{"/Users/u/Library/Application Support/tart-runner-fleet/releases/v0.1.695+main.a/fleet",
+			"/Users/u/.local/state/fleet-disk-monitor/issue358/candidate.private.json",
+			"/Users/u/Library/Application Support/tart-runner-fleet"},
+		{"/Users/u/Library/Application Support/tart-runner-fleet/releases/v0.1.701+main.b/fleet",
+			"/Users/u/Library/Application Support/tart-runner-fleet/experiment.json",
+			"/Users/u/Library/Application Support/tart-runner-fleet"},
+		{"/opt/trf/releases/v1/fleet", "/opt/trf/state/fleet.json", "/opt/trf"},
+		// Outside a release layout (a developer build) the configuration decides.
+		{"/home/u/go/bin/fleet", "/opt/trf/state/fleet.json", "/opt/trf"},
+		// Only the release binary itself names the layout.
+		{"/opt/a/releases/v1/fleet-debug", "/opt/b/state/fleet.json", "/opt/b"},
+	} {
+		if got := installationRoot(tc.executable, tc.config); got != tc.want {
+			t.Fatalf("installationRoot(%q, %q) = %q, want %q", tc.executable, tc.config, got, tc.want)
+		}
+	}
+}
+
+func TestPendingCandidateIsSeenFromTheExecutableRootWithAForeignConfig(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"v0.1.695+main.a", "v0.1.701+main.b"} {
+		if err := os.MkdirAll(filepath.Join(root, "releases", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := filepath.Join(t.TempDir(), "monitor", "candidate.private.json")
+	executable := filepath.Join(root, "releases", "v0.1.695+main.a", "fleet")
+	pending, candidate := autoupdate.PendingCandidate(installationRoot(executable, config), "v0.1.695+main.a",
+		autoupdate.ReleaseDirNames)
+	if !pending || candidate != "v0.1.701+main.b" {
+		t.Fatalf("pending=%v candidate=%q, want the waiting v0.1.701 generation", pending, candidate)
 	}
 }
 
@@ -166,5 +210,40 @@ func TestUpdateDrainReportingToleratesAnAbsentLoggerAndCandidate(t *testing.T) {
 	reporter.reportUpdateDrain("stop", "", 0)
 	if line := logged.String(); !strings.Contains(line, "unknown") {
 		t.Fatalf("a nameless candidate logged as %q", line)
+	}
+}
+
+func TestExecutablePathResolvesOrReportsNothing(t *testing.T) {
+	original := osExecutable
+	t.Cleanup(func() { osExecutable = original })
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "releases", "v1", "fleet")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "current")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	osExecutable = func() (string, error) { return link, nil }
+	if got := executablePath(); got != resolvedTarget {
+		t.Fatalf("executablePath() = %q, want the resolved release binary %q", got, resolvedTarget)
+	}
+	missing := filepath.Join(dir, "releases", "v2", "fleet")
+	osExecutable = func() (string, error) { return missing, nil }
+	if got := executablePath(); got != "" {
+		t.Fatalf("executablePath() = %q, want empty for a release path that no longer resolves", got)
+	}
+	osExecutable = func() (string, error) { return "", errors.New("unsupported") }
+	if got := executablePath(); got != "" {
+		t.Fatalf("executablePath() = %q, want empty when the platform cannot say", got)
 	}
 }

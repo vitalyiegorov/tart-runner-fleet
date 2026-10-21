@@ -1527,6 +1527,12 @@ not a fault: a generation newer than the running one has been sitting under
 live ones can finish and the updater's quiescence gate can pass
 ([ADR 0048](adr/0048-a-node-arranges-the-quiescence-its-update-needs.md)).
 
+`releases/` here is the one beside the running executable, not beside the
+configuration file. A node may run a configuration kept anywhere; a doctor row
+reading `running the newest generation on disk` while the updater log repeats
+`fleet is not quiescent` and a newer directory sits under `releases/` was the
+signature of a release before that rule (ADR 0048, amendment 2026-10-21).
+
 Nothing running is interrupted — that guarantee is ADR 0011's and is untouched.
 The queue growing during a drain is the expected cost, not evidence against it.
 
