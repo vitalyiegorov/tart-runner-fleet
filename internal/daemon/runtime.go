@@ -950,7 +950,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
-					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now},
+					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
+					OnAbort: reporter.reportDrainAbort},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -2164,6 +2165,28 @@ func (r *failureReporter) reportRecovery(operation scheduler.Operation) {
 	r.logger.Warn("instance recovery drain planned", "instance", operation.Instance,
 		"profile", string(operation.Profile), "cause", cause,
 		"repo", operation.Demand.Repo, "runId", operation.Demand.RunID, "jobId", operation.Demand.JobID)
+}
+
+// reportDrainAbort names a drain the executor withdrew because fresh evidence at
+// the moment of acting disproved the premise it was planned on: the instance,
+// the phase that planned it, and the closed-vocabulary evidence that stopped it.
+//
+// It exists for issue #398. An idle duplicate's stalled-assignment drain aborted
+// on its sibling's job and the instance held 4 CPU / 7 GiB for two hours with
+// nothing after the plan line to say why. reportRetractedPremise covers only the
+// stopped recovery, from the durable trace it leaves on the row; every other
+// abort left no trace at all.
+//
+// It is never rate limited, for reportRecovery's reason: each line is one
+// destructive decision withdrawn, and a plan/abort pair that repeats is exactly
+// the pattern an operator needs to see. The instance row carries no secret; only
+// identity, profile, repository and demand key are written.
+func (r *failureReporter) reportDrainAbort(abort lifecycle.DrainAbort) {
+	r.logger.Warn("instance drain aborted by fresh evidence", "instance", abort.Instance.ID,
+		"profile", string(abort.Instance.Profile), "repo", abort.Instance.Repo,
+		"phase", abort.Phase, "evidence", string(abort.Evidence),
+		"runId", abort.Instance.Demand.RunID, "jobId", abort.Instance.Demand.JobID,
+		"outcome", "the instance returned to running; nothing was deregistered")
 }
 
 // reportRetractedPremise says out loud that the fleet has contradicted itself

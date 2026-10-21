@@ -415,16 +415,19 @@ type fakeDrainControl struct {
 	guardErr      error
 	registered    bool
 	registeredErr error
-	jobStarted    bool
-	jobStartedErr error
-	jobActive     bool
-	jobActiveErr  error
 	busy          bool
 	busyErr       error
 	busyCalls     int
 	deregisterErr error
 	confirmations []operations.DeletionConfirmation
 	confirmErr    error
+}
+
+// StartUnattributed is not recorded in calls, for RunnerBusy's reason below;
+// the fake reports a fully attributed demand, and the real ControlRouter's
+// answers are exercised in executor_duplicate_drain_test.go.
+func (d *fakeDrainControl) StartUnattributed(context.Context, operations.Instance) (bool, error) {
+	return false, nil
 }
 
 // RunnerBusy is deliberately not recorded in calls: it is a runner-scoped
@@ -439,16 +442,6 @@ func (d *fakeDrainControl) RunnerBusy(_ context.Context, _ operations.Instance) 
 func (d *fakeDrainControl) RunnerRegistered(_ context.Context, instance operations.Instance) (bool, error) {
 	*d.calls = append(*d.calls, "registered:"+instance.ID)
 	return d.registered, d.registeredErr
-}
-
-func (d *fakeDrainControl) JobStarted(_ context.Context, instance operations.Instance) (bool, error) {
-	*d.calls = append(*d.calls, "started:"+instance.ID)
-	return d.jobStarted, d.jobStartedErr
-}
-
-func (d *fakeDrainControl) JobActive(_ context.Context, instance operations.Instance) (bool, error) {
-	*d.calls = append(*d.calls, "active:"+instance.ID)
-	return d.jobActive, d.jobActiveErr
 }
 
 func (d *fakeDrainControl) SafeToDeregister(_ context.Context, instance operations.Instance) (bool, error) {

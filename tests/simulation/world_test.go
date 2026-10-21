@@ -531,13 +531,13 @@ func (r simRecovery) ConfirmDeletion(_ context.Context, name string) (operations
 		ObservedAt: r.world.now}, nil
 }
 
-// JobActive is the evidence a lingering-runner reclaim is derived from, and it
-// reads the DURABLE demand record — the same row, through the same status test,
-// that drainAbortsNow re-reads when the drain acts.
+// JobActive is the evidence a lingering-runner reclaim is PLANNED from, and it
+// reads the DURABLE demand record exactly as `lifecycle.ControlRouter.JobActive`
+// does. (The drain no longer re-reads this row when it acts: since issue #398 it
+// re-verifies the runner itself, as drainAbortsNow mirrors — ADR 0074.)
 //
 // Production has one object for both: `lifecycle.ControlRouter` is wired as the
-// inventory's RecoveryObserver and as the executor's Control, and both questions
-// come out of `demandStatus`. Answering the planner from the simulator's own job
+// inventory's RecoveryObserver and as the executor's Control. Answering the planner from the simulator's own job
 // truth instead gave the two halves different sources, and a delayed broker
 // message made them disagree PERSISTENTLY: the world knew a job had finished
 // while the durable record still said JobStarted, so the fleet planned a
@@ -1312,6 +1312,11 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 			w.drainAborts[instance.ID]++
 			return operations.StateRunning, true
 		}
+		if w.ownStartUnattributed(instance) {
+			// executor.go's stalled/lingering guard: an unnamed start of the
+			// instance's own demand is uncertain, so the guard fails and retries.
+			return "", false
+		}
 		if w.runnerExecuting(instance.ID) {
 			// GitHub refuses to deregister a runner that is EXECUTING a job, and the
 			// fleet's own durable evidence did not corroborate that refusal, so the
@@ -1502,23 +1507,22 @@ func (w *world) armLatchedGuestFaults() {
 //
 // There are two gates, in the executor's own order.
 //
-// First the drain phase re-verifies its own planning premise, on the key that
-// premise was derived from:
-//
-//   - A stalled assignment aborts when the BOUND demand shows a job that started
-//     (ControlRouter.JobStarted).
-//   - A lingering runner aborts when the BOUND demand shows a job executing right
-//     now (ControlRouter.JobActive).
-//   - Every other drain -- the event drain the demand projection issues -- aborts
-//     on RUNNER-keyed evidence (ControlRouter.RunnerBusy), because GitHub may have
-//     handed this runner a job the fleet is not waiting on.
+// First the drain phase re-verifies its own planning premise. Every phase whose
+// premise is "no job is executing on this runner" -- the stalled assignment, the
+// lingering runner, and the event drain the demand projection issues -- asks it
+// on RUNNER-keyed evidence (ControlRouter.RunnerBusy), never on the demand the VM
+// was spawned for (ADR 0074). Until issue #398 the two recovery phases asked the
+// BOUND demand instead, which was wrong in both directions: a duplicate whose
+// demand started on its sibling aborted forever, and a runner executing a job
+// brokered from another demand passed the guard.
 //
 // Then, and only then, the drain reaches GitHub, and githubRefusesDeregister is
 // the second gate. This is the edge that made the 2026-08-02 churn a LOOP rather
-// than a kill: the bound demand showed nothing started, so the stalled-assignment
-// guard passed and the executor really did try to deregister a runner that was
-// executing a sibling. GitHub refused (`runner_busy`), the runner-keyed re-check
-// confirmed it, and the drain aborted (executor.go's deregister-refusal branch).
+// than a kill: the bound demand showed nothing started, so the then demand-keyed
+// stalled-assignment guard passed and the executor really did try to deregister a
+// runner that was executing a sibling. GitHub refused (`runner_busy`), the
+// runner-keyed re-check confirmed it, and the drain aborted (executor.go's
+// deregister-refusal branch). The runner-keyed guard now stops that drain first.
 //
 // The stopped recovery re-reads the power. Until issue #246 that was unreachable
 // here, and the comment this replaces said so — "no fault powers a VM off" — which
@@ -1533,15 +1537,6 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 		return false
 	}
 	switch instance.DrainPhase {
-	case operations.DrainPhaseStalledAssignment, operations.DrainPhaseLingeringRunner:
-		record, err := w.store.DemandRecord(w.ctx, scaleSet, instance.Demand.JobID)
-		if err == nil && record.Status == operations.DemandJobStarted {
-			return true
-		}
-		if err == nil && instance.DrainPhase == operations.DrainPhaseStalledAssignment &&
-			record.Status == operations.DemandJobCompleted {
-			return true
-		}
 	case operations.DrainPhaseStoppedRecovery:
 		// Handled ahead of this function, in nextLifecycleState, because the power
 		// re-read has THREE outcomes and this predicate has two.
@@ -1570,12 +1565,24 @@ func (w *world) drainAbortsNow(instance operations.Instance) bool {
 		// exemption from the deregister-refusal abort below it).
 		return false
 	}
-	// verifyRunnerIdle for an event drain, and the deregister refusal for a
-	// recovery drain, ask the same runner-keyed question of the same durable
-	// evidence. Runner-active evidence implies GitHub would refuse anyway, so one
-	// query answers both.
+	// verifyRunnerIdle for the event, stalled-assignment and lingering-runner
+	// drains, and the deregister refusal for any other recovery drain, ask the
+	// same runner-keyed question of the same durable evidence. Runner-active
+	// evidence implies GitHub would refuse anyway, so one query answers both.
 	busy, err := w.store.RunnerActiveJob(w.ctx, scaleSet, instance.ID)
 	return err == nil && busy
+}
+
+// ownStartUnattributed mirrors ControlRouter.StartUnattributed for the two
+// phases that consult it, on the same durable row. This world's broker always
+// names the runner on a start, so it holds only if the store disagrees with the
+// broker, but the mirror stays edge for edge with executor.go (ADR 0074).
+func (w *world) ownStartUnattributed(instance operations.Instance) bool {
+	if instance.DrainPhase != operations.DrainPhaseStalledAssignment && instance.DrainPhase != operations.DrainPhaseLingeringRunner {
+		return false
+	}
+	record, err := w.store.DemandRecord(w.ctx, w.storeKeyFor(instance), instance.Demand.JobID)
+	return err != nil || (record.Status == operations.DemandJobStarted && record.RunnerName == "")
 }
 
 // storeKeyFor resolves the durable scale-set key an instance's demand lives

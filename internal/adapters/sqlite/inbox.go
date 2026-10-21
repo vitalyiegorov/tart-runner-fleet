@@ -640,7 +640,7 @@ func (s *Store) enqueueDemandDrain(ctx context.Context, instance operations.Inst
 	now := s.instant()
 	id := "event-drain-" + instance.ID
 	_, _, err := s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
-		ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: 1,
+		ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: operations.DrainPhaseEvent,
 		Operation: operations.Operation{ID: id, IdempotencyKey: id, EffectKey: "deregister:" + instance.ID,
 			Kind: lifecycle.OperationDrain, ResourceID: instance.ID, Payload: json.RawMessage(`{}`), AvailableAt: now,
 			DependsOn: append([]string(nil), dependencies...)}})

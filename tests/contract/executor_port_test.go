@@ -634,6 +634,7 @@ func (portControl) ConfirmDeletion(_ context.Context, _ string) (operations.Dele
 func (portControl) RunnerRegistered(context.Context, operations.Instance) (bool, error) {
 	return false, nil
 }
-func (portControl) JobStarted(context.Context, operations.Instance) (bool, error) { return false, nil }
-func (portControl) JobActive(context.Context, operations.Instance) (bool, error)  { return false, nil }
 func (portControl) RunnerBusy(context.Context, operations.Instance) (bool, error) { return false, nil }
+func (portControl) StartUnattributed(context.Context, operations.Instance) (bool, error) {
+	return false, nil
+}

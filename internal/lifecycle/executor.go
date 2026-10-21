@@ -185,15 +185,6 @@ type DrainControl interface {
 	// RunnerRegistered reports whether the instance's runner is currently
 	// registered on GitHub, without folding in demand state.
 	RunnerRegistered(context.Context, operations.Instance) (bool, error)
-	// JobStarted reports whether fresh demand state shows a workflow job has
-	// begun executing on this runner. A stalled-assignment recovery drain aborts
-	// the moment it becomes true: the assignment materialized into real work.
-	JobStarted(context.Context, operations.Instance) (bool, error)
-	// JobActive reports whether fresh demand state shows a workflow job is
-	// currently executing (status exactly JobStarted, not completed). A
-	// lingering-runner recovery drain aborts the moment it becomes true: the
-	// idle runner picked up real work after the planning observation.
-	JobActive(context.Context, operations.Instance) (bool, error)
 	// RunnerBusy reports whether fresh evidence shows a workflow job executing on
 	// this instance's RUNNER, whichever demand GitHub brokered to it. It is
 	// deliberately not keyed by the demand the VM was spawned for: scale-set
@@ -201,6 +192,12 @@ type DrainControl interface {
 	// spawned for demand X may be executing a different matching job Y, and
 	// "demand X completed" then says nothing about whether the runner is idle.
 	RunnerBusy(context.Context, operations.Instance) (bool, error)
+	// StartUnattributed reports whether the demand the VM was spawned for is
+	// executing (exactly JobStarted) with no runner name recorded. RunnerBusy
+	// keys on the runner name, so such a start is invisible to it, yet nothing
+	// proves it is not on this runner. Recovery guards treat it as unreadable
+	// evidence (ADR 0074).
+	StartUnattributed(context.Context, operations.Instance) (bool, error)
 }
 
 // ProvisionExecutor is a restartable state machine. One durable outbox
@@ -435,8 +432,13 @@ type DrainExecutor struct {
 	// cannot re-check a premise this destructive must not proceed on the strength
 	// of an observation the scheduler made a tick ago (ADR 0040).
 	Guest GuestLivenessProbe
-	Now   func() time.Time
-	After func(time.Duration) <-chan time.Time
+	// OnAbort, when set, is told about every drain the executor cancelled because
+	// fresh evidence disproved its premise. It is called only after the rollback
+	// to Running is durable, so a report never describes an abort that did not
+	// happen. Nil reports nothing.
+	OnAbort func(DrainAbort)
+	Now     func() time.Time
+	After   func(time.Duration) <-chan time.Time
 }
 
 // GuestLivenessProbe is the drain executor's half of the guest-liveness port:
@@ -495,7 +497,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				}
 				switch power {
 				case domain.InstancePowerRunning:
-					return e.abort(ctx, instance)
+					return e.abort(ctx, instance, AbortEvidenceVMRunning)
 				case domain.InstancePowerStopped, domain.InstancePowerAbsent:
 					// The premise holds. Proceed.
 				default:
@@ -519,41 +521,45 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 					return e.fail(ctx, instance, StageGuard)
 				}
 				if registered {
-					return e.abort(ctx, instance)
+					return e.abort(ctx, instance, AbortEvidenceRunnerRegistered)
 				}
 				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
 				if guardErr != nil || !safe {
 					return e.fail(ctx, instance, StageGuard)
 				}
-			case operations.DrainPhaseStalledAssignment:
-				// The assignment deadline planned this kill from a single
-				// observation that no job had started. Re-verify against fresh
-				// demand state before deregistering the (idle) runner: if a job has
-				// since started, the assignment materialized after all, so abort to
-				// Running and let normal completion drain it. Deregistering an
-				// assigned-but-not-started runner is safe — GitHub re-queues the job
-				// to another runner, exactly the manual remedy the operator applied.
-				started, startedErr := e.Control.JobStarted(ctx, instance)
-				if startedErr != nil {
+			case operations.DrainPhaseStalledAssignment, operations.DrainPhaseLingeringRunner:
+				// Both deadlines planned this kill from a single observation that no
+				// job was executing: an assignment that never started, or a running
+				// instance whose bound demand carried no active job. Re-verify against
+				// what THIS RUNNER is doing — never against the demand the VM was
+				// spawned for — before deregistering it.
+				//
+				// The spawning demand is the wrong key because brokering is decoupled
+				// from spawning. When two instances are bound to one demand and GitHub
+				// hands the job to the sibling, that demand reads started/active while
+				// this runner is idle; keyed on the demand, the guard aborted the idle
+				// duplicate back to Running forever (issue #398). Conversely a job
+				// GitHub brokered to this runner from another demand left the spawning
+				// demand reading "not started", and the guard let the drain reach a
+				// busy runner — only GitHub's refusal stopped it.
+				//
+				// A busy runner aborts to Running and normal completion drains it; an
+				// idle one is deregistered, which is safe: GitHub re-queues any
+				// assigned-but-unstarted job to another runner. Unreadable evidence
+				// fails the guard and retries (ADR 0074).
+				if proceed, result := e.verifyRunnerIdle(ctx, instance); !proceed {
+					return result
+				}
+				// Runner-keyed evidence cannot see a start GitHub did not attribute
+				// to a runner. When that start is of this instance's OWN demand it
+				// may well be on this runner, which the demand-keyed guard used to
+				// abort on, so it is uncertain: retry, neither deregister nor abort.
+				// An unnamed start of another demand is not consulted — it would
+				// block every reclaim in the scale set — and GitHub's busy refusal
+				// stays the backstop there.
+				unattributed, unattributedErr := e.Control.StartUnattributed(ctx, instance)
+				if unattributedErr != nil || unattributed {
 					return e.fail(ctx, instance, StageGuard)
-				}
-				if started {
-					return e.abort(ctx, instance)
-				}
-			case operations.DrainPhaseLingeringRunner:
-				// The idle-runner deadline planned this kill from a single
-				// observation that the bound demand carried no active job. Re-verify
-				// against fresh demand state before deregistering the (idle) runner:
-				// if a job is now actively executing, the runner is genuinely busy, so
-				// abort to Running and let normal completion drain it. Otherwise the
-				// job has ended (or was cancelled before it began) and deregistering
-				// is safe — GitHub re-queues any pending work to another runner.
-				active, activeErr := e.Control.JobActive(ctx, instance)
-				if activeErr != nil {
-					return e.fail(ctx, instance, StageGuard)
-				}
-				if active {
-					return e.abort(ctx, instance)
 				}
 			case operations.DrainPhaseGuestUnresponsive:
 				// The scheduler planned this reclaim from an unbroken run of refused
@@ -580,7 +586,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				}
 				switch e.Guest.Probe(ctx, instance.ID) {
 				case domain.GuestLivenessAlive:
-					return e.abort(ctx, instance)
+					return e.abort(ctx, instance, AbortEvidenceGuestAnswered)
 				case domain.GuestLivenessRefused:
 					// The premise holds. Proceed.
 				default:
@@ -665,7 +671,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// describing a job whose machine stopped executing minutes ago.
 				if abortsOnBusyRefusal(instance.DrainPhase) {
 					if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
-						return e.abort(ctx, instance)
+						return e.abort(ctx, instance, AbortEvidenceDeregisterRefused)
 					}
 				}
 				// ADR 0007 keeps owned cleanup retrying through a refusal rather than
@@ -765,7 +771,7 @@ func (e DrainExecutor) verifyRunnerIdle(ctx context.Context, instance operations
 		return false, e.fail(ctx, instance, StageGuard)
 	}
 	if busy {
-		return false, e.abort(ctx, instance)
+		return false, e.abort(ctx, instance, AbortEvidenceRunnerBusy)
 	}
 	return true, nil
 }
@@ -773,10 +779,16 @@ func (e DrainExecutor) verifyRunnerIdle(ctx context.Context, instance operations
 // abort cancels a recovery drain whose premise fresh evidence has disproven.
 // The instance returns to Running — the conservative busy state; demand
 // projections advance it as real events arrive — and the drain operation is
-// acknowledged as a completed no-op so it stops being retried.
-func (e DrainExecutor) abort(ctx context.Context, instance operations.Instance) error {
+// acknowledged as a completed no-op so it stops being retried. A durable abort
+// is then reported with the evidence that caused it: an abort is the fleet
+// catching itself about to end a live job, and one nobody can see is how an idle
+// duplicate held a host for two hours in silence (issue #398).
+func (e DrainExecutor) abort(ctx context.Context, instance operations.Instance, evidence AbortEvidence) error {
 	if _, err := e.advance(ctx, instance, operations.StateRunning); err != nil {
 		return safeError(StagePersist)
+	}
+	if e.OnAbort != nil {
+		e.OnAbort(DrainAbort{Instance: instance, Phase: DrainPhaseName(instance.DrainPhase), Evidence: evidence})
 	}
 	return nil
 }

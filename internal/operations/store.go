@@ -40,7 +40,7 @@ type Drainer struct {
 }
 
 func (d Drainer) Confirm(ctx context.Context, instance Instance, operation Operation) (Instance, Operation, error) {
-	if instance.State != StateDraining || instance.DrainPhase != 1 {
+	if instance.State != StateDraining || instance.DrainPhase != DrainPhaseEvent {
 		return Instance{}, Operation{}, ErrConflict
 	}
 	confirmation, err := d.Confirmer.ConfirmDeletion(ctx, instance.ID)

@@ -164,44 +164,36 @@ func TestControlRouterAcceptsStoppedAssignmentRecoveryOnlyAfterRunnerDisappears(
 	}
 }
 
-func TestControlRouterJobStartedReflectsDemandProgress(t *testing.T) {
+// JobActive is the inventory's planning evidence for a lingering runner: only an
+// in-progress JobStarted on the spawning demand counts as live.
+func TestControlRouterJobActiveReflectsDemandProgress(t *testing.T) {
 	state := &memoryState{instance: lifecycleInstance(operations.StateDraining)}
 	newRouter := func(reader DemandReader) ControlRouter {
 		return ControlRouter{State: state, Demand: reader,
 			Sources: map[SourceKey]SourceBinding{{Repo: state.instance.Repo, Profile: state.instance.Profile}: {StoreKey: 3, Source: &fakeScaleControl{}}}}
 	}
-	// JobStarted treats a completed job as "started" (the assignment path); JobActive
-	// treats only an in-progress JobStarted as live (the lingering-runner path).
 	for _, test := range []struct {
-		status      operations.DemandEventKind
-		wantStarted bool
-		wantActive  bool
+		status     operations.DemandEventKind
+		wantActive bool
 	}{
-		{operations.DemandJobAvailable, false, false},
-		{operations.DemandJobAssigned, false, false},
-		{operations.DemandJobStarted, true, true},
-		{operations.DemandJobCompleted, true, false},
+		{operations.DemandJobAvailable, false},
+		{operations.DemandJobAssigned, false},
+		{operations.DemandJobStarted, true},
+		{operations.DemandJobCompleted, false},
 	} {
 		router := newRouter(fakeDemandReader{record: operations.DemandRecord{Status: test.status}})
-		started, startedErr := router.JobStarted(context.Background(), state.instance)
-		active, activeErr := router.JobActive(context.Background(), state.instance)
-		if startedErr != nil || activeErr != nil || started != test.wantStarted || active != test.wantActive {
-			t.Fatalf("progress(%s) started=%v/%v active=%v/%v; want started=%v active=%v",
-				test.status, started, startedErr, active, activeErr, test.wantStarted, test.wantActive)
+		active, err := router.JobActive(context.Background(), state.instance)
+		if err != nil || active != test.wantActive {
+			t.Fatalf("progress(%s) active=%v/%v; want %v", test.status, active, err, test.wantActive)
 		}
 	}
 	// Fail-closed: an unresolvable binding and a demand-lookup error both surface
-	// as errors so the executor retries at the guard stage instead of killing.
-	for _, probe := range []func(ControlRouter) (bool, error){
-		func(r ControlRouter) (bool, error) { return r.JobStarted(context.Background(), state.instance) },
-		func(r ControlRouter) (bool, error) { return r.JobActive(context.Background(), state.instance) },
-	} {
-		if _, err := probe(ControlRouter{State: state}); !errors.Is(err, operations.ErrUncertain) {
-			t.Fatalf("unknown source probe = %v", err)
-		}
-		if _, err := probe(newRouter(fakeDemandReader{err: operations.ErrUncertain})); !errors.Is(err, operations.ErrUncertain) {
-			t.Fatalf("demand error probe = %v", err)
-		}
+	// as errors, which the inventory reads as "not inactive".
+	if _, err := (ControlRouter{State: state}).JobActive(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("unknown source probe = %v", err)
+	}
+	if _, err := newRouter(fakeDemandReader{err: operations.ErrUncertain}).JobActive(context.Background(), state.instance); !errors.Is(err, operations.ErrUncertain) {
+		t.Fatalf("demand error probe = %v", err)
 	}
 }
 

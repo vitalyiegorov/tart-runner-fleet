@@ -587,7 +587,8 @@ func provisionStalled(now time.Time, deadline time.Duration, instance domain.Ins
 // a stopped or already-confirmed-inactive instance is handled by the
 // pre-existing recovery gates — and stays fail-closed when the entry time or
 // deadline is unknown, so it can only open the guarded recovery path (whose
-// execution-time JobActive re-check is the real gate), never bypass it. The
+// execution-time runner-keyed RunnerBusy re-check is the real gate, ADR 0074),
+// never bypass it. The
 // deadline is deliberately generous so a job completing normally drains through
 // the ordinary completion path long before this fires. The busy-drain
 // invariant is preserved: an instance with an active job has JobInactive false

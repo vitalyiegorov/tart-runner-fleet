@@ -113,32 +113,41 @@ func (r ControlRouter) RunnerRegistered(ctx context.Context, instance operations
 	return binding.Source.Registered(ctx, instance.ID)
 }
 
-// JobStarted derives from the durable demand record whether a workflow job has
-// begun executing on this runner. Only a JobStarted (or later) status implies
-// live work; an assignment that never progressed past JobAssigned is a stalled
-// zombie safe to reclaim.
-func (r ControlRouter) JobStarted(ctx context.Context, instance operations.Instance) (bool, error) {
-	status, err := r.demandStatus(ctx, instance)
-	return status == operations.DemandJobStarted || status == operations.DemandJobCompleted, err
+// JobActive reports whether the durable demand this instance was spawned for
+// shows a workflow job executing right now — status exactly JobStarted. It is
+// PLANNING evidence only: the inventory derives a lingering-runner candidate
+// from its negation. No drain guard reads it; a guard re-verifies the runner
+// itself through RunnerBusy, because the spawning demand may be executing on a
+// sibling runner while this one is idle (issue #398, ADR 0074).
+func (r ControlRouter) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
+	record, err := r.spawningDemand(ctx, instance)
+	return err == nil && record.Status == operations.DemandJobStarted, err
 }
 
-// JobActive reports whether fresh demand state shows a workflow job is
-// currently executing on this runner — status exactly JobStarted, not a
-// terminal completion. A lingering-runner recovery uses it as the inverse of
-// its planning premise (the demand showed no active job): if a job is active
-// again the drain aborts, otherwise the idle runner is reclaimed. Distinct from
-// JobStarted, which treats a completed job as "started" for the assignment path.
-func (r ControlRouter) JobActive(ctx context.Context, instance operations.Instance) (bool, error) {
-	status, err := r.demandStatus(ctx, instance)
-	return status == operations.DemandJobStarted, err
+// StartUnattributed reports whether the spawning demand is executing (exactly
+// JobStarted) with no runner name recorded: a start RunnerBusy cannot see and
+// cannot rule out as this runner's. A start named for any runner, or a demand
+// that is not executing, is not unattributed. An unreadable demand is an error,
+// which the guard treats as uncertain (ADR 0074).
+func (r ControlRouter) StartUnattributed(ctx context.Context, instance operations.Instance) (bool, error) {
+	record, err := r.spawningDemand(ctx, instance)
+	return err == nil && record.Status == operations.DemandJobStarted && record.RunnerName == "", err
+}
+
+func (r ControlRouter) spawningDemand(ctx context.Context, instance operations.Instance) (operations.DemandRecord, error) {
+	binding, err := r.binding(instance)
+	if err != nil {
+		return operations.DemandRecord{}, err
+	}
+	return r.demand(ctx, binding, instance)
 }
 
 // RunnerBusy reports whether fresh durable demand evidence shows a workflow job
 // currently executing on this instance's runner, whichever demand GitHub
-// brokered to it. JobStarted/JobActive both read the ONE demand the VM was
-// spawned for; that is the wrong key once brokering is decoupled from spawning,
-// because the runner may be executing a sibling job whose completion the fleet
-// is not waiting on. Scoping stays within the instance's own scale-set binding:
+// brokered to it. JobActive reads the ONE demand the VM was spawned for; that is
+// the wrong key once brokering is decoupled from spawning, because the runner
+// may be executing a sibling job whose completion the fleet is not waiting on,
+// or may be idle while a sibling executes the spawning demand. Scoping stays within the instance's own scale-set binding:
 // GitHub only brokers a scale set's jobs to that scale set's runners.
 func (r ControlRouter) RunnerBusy(ctx context.Context, instance operations.Instance) (bool, error) {
 	binding, err := r.binding(instance)
@@ -149,18 +158,6 @@ func (r ControlRouter) RunnerBusy(ctx context.Context, instance operations.Insta
 		return false, operations.ErrUncertain
 	}
 	return r.Demand.RunnerActiveJob(ctx, binding.StoreKey, instance.ID)
-}
-
-func (r ControlRouter) demandStatus(ctx context.Context, instance operations.Instance) (operations.DemandEventKind, error) {
-	binding, err := r.binding(instance)
-	if err != nil {
-		return "", err
-	}
-	record, err := r.demand(ctx, binding, instance)
-	if err != nil {
-		return "", err
-	}
-	return record.Status, nil
 }
 
 func (r ControlRouter) Deregister(ctx context.Context, instance operations.Instance) error {
