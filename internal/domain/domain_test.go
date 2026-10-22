@@ -303,3 +303,24 @@ func TestProvisioningIsExactlyThePostCloneSetupStates(t *testing.T) {
 		}
 	}
 }
+
+// TestHoldsAssignmentIsALiveIncarnationNotTearingDown is the floor a scale set
+// advertises from (issue #397): every state from planned to running holds the
+// job GitHub gave the set, while a failed, deleted or tearing-down guest, or one
+// with no demand at all, holds nothing.
+func TestHoldsAssignmentIsALiveIncarnationNotTearingDown(t *testing.T) {
+	demand := DemandKey{Repo: "owner/repo", RunID: 1, Attempt: 1, JobID: 1}
+	for state, want := range map[InstanceState]bool{
+		InstancePlanned: true, InstanceCloning: true, InstanceBooting: true, InstanceReachable: true,
+		InstanceRegistering: true, InstanceOnlineIdle: true, InstanceAssigned: true, InstanceRunning: true,
+		InstanceDraining: false, InstanceDeregistering: false, InstanceStopping: false,
+		InstanceDeleted: false, InstanceFailed: false,
+	} {
+		if got := (Instance{State: state, Demand: demand}).HoldsAssignment(); got != want {
+			t.Fatalf("%s: HoldsAssignment = %v, want %v", state, got, want)
+		}
+	}
+	if (Instance{State: InstanceRunning}).HoldsAssignment() {
+		t.Fatal("an instance with no demand holds no assignment")
+	}
+}

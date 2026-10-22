@@ -786,9 +786,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// Only truthful capacity is lowered to the residual (issue #388). Without
 	// canonical inventory the configured capacity is deliberately inflated for
 	// queue lookahead (ADR 0009), and that mechanism needs it advertised as is.
-	var advertiser *residualAdvertiser
+	var advertiser *app.ResidualAdvertisement
 	if canonicalRESTInventory {
-		advertiser = newResidualAdvertiser(d.now, max(residualAdvertisementMaxAge, 3*cfg.PollInterval))
+		advertiser = &app.ResidualAdvertisement{}
 	}
 	// memberSources keys each binding's session by the scale set it polls, which
 	// is the key the scale-set audit's verdict arrives under (ADR 0063).
@@ -823,7 +823,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				var capacity func() int
 				if advertiser != nil {
-					capacity = advertiser.provider(binding.StoreKey, settings.scaleSet.MaxCapacity)
+					key, configured := binding.StoreKey, settings.scaleSet.MaxCapacity
+					capacity = func() int { return advertiser.Capacity(key, configured) }
 				}
 				openSource := func(openCtx context.Context) (scaleSetSource, error) {
 					cursor, cursorErr := d.cursor(openCtx, store, settings.cursorKey)
@@ -2315,16 +2316,10 @@ type engineTicker struct {
 	// its own pending update needs (ADR 0011 amendment, issue #230).
 	drain *updateDrainController
 	// advertiser hands each tick's residual envelope to the scale-set sessions
-	// (issue #388). Nil when capacity is not truthful, which advertises the
-	// configured value unchanged.
-	advertiser *residualAdvertiser
+	// (issues #388 and #397). Nil when capacity is not truthful, which advertises
+	// the configured value unchanged.
+	advertiser *app.ResidualAdvertisement
 }
-
-// residualAdvertisementMaxAge is how old the scheduler's view of the residual
-// may be before scale sets stop trusting it and advertise their configured
-// capacity again. It matches the statistics freshness bound the demand path
-// already uses.
-const residualAdvertisementMaxAge = 2 * time.Minute
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
 // carries. An unclassified error yields no detail rather than free-form text, so
@@ -2341,7 +2336,7 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	result, err := e.engine.Tick(ctx)
 	success := err == nil && result.Plan.Status == "ready"
 	e.health.RecordTick(success)
-	e.advertiser.observe(result, err == nil && success)
+	e.advertiser.Observe(result, err)
 	freshness := telemetry.ObservationFresh
 	// A blocked plan explains itself through the plan reason. An error has no
 	// plan at all -- every failing return yields a zero TickResult -- so the

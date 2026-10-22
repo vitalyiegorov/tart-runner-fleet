@@ -37,7 +37,7 @@ func sharedLabelWorld() worldConfig {
 	for index, repo := range []string{"a/repo", "b/repo", "c/repo"} {
 		cfg.Bindings = append(cfg.Bindings, app.Binding{StoreKey: int64(index + 1), ScaleSetID: int64(index + 1),
 			Scope: "sim/" + repo[:1], Targets: []string{repo}, Profile: maestro, ScaleSetLabels: labels,
-			SharedLabels: true})
+			SharedLabels: true, Capacity: 2})
 	}
 	cfg.Repos = []string{"a/repo", "b/repo", "c/repo"}
 	cfg.BrokerHonorsAdvertisedCapacity = true

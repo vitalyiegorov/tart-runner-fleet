@@ -74,6 +74,17 @@ func TestSimFuzzMacOSOnlyNode(t *testing.T) {
 	sweep(t, "TestSimFuzzMacOSOnlyNode", macOSOnlyNodeWorld())
 }
 
+// TestSimFuzzSharedLabelNode is the same sweep on the Mac of issue #397: three
+// scopes each binding a maestro set with the labels a sibling node also
+// advertises, and a broker that places work only where a set advertised room.
+// No other arm binds two sets of one profile, so property (t) -- that the
+// offers of several sets add up to what the node can start -- was unreachable
+// by the generator before this world existed.
+func TestSimFuzzSharedLabelNode(t *testing.T) {
+	t.Parallel()
+	sweep(t, "TestSimFuzzSharedLabelNode", sharedLabelWorld())
+}
+
 func sweep(t *testing.T, name string, cfg worldConfig) {
 	t.Helper()
 	for offset := range *seedsFlag {

@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by [ADR 0075](0075-a-nodes-residual-is-offered-once.md)
+(issue #397): the residual is now divided once across the node's sets, `held`
+counts only guests that still hold an assignment, and a tick that is not ready
+keeps the last view. The sections below on "Concurrent polls" and "Fail open"
+are superseded where they disagree.
 
 ## Context
 

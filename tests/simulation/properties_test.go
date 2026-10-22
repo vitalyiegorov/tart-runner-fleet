@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
@@ -106,6 +107,12 @@ const (
 	// the bound on property (b)'s fair-share exemption -- without it, "the rule
 	// explains this pass-over" would excuse every pass-over forever.
 	findingScopeShare findingKind = "scope_share"
+	// findingOverOffer is property (t): what a node's scale sets are offered
+	// beyond what they hold, added up over every set of one macOS profile, never
+	// exceeds what that profile's MaxActive can still start. It is issue #397's
+	// oracle: before it every set was offered the node's whole residual, and no
+	// property counted the offers of two sets together.
+	findingOverOffer findingKind = "over_offer"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -232,6 +239,8 @@ type tickObservation struct {
 	InstancesUsable bool
 	Host            domain.Host
 	HostUsable      bool
+	// Headroom is what this tick handed the node's scale sets to advertise.
+	Headroom []app.ScaleSetHeadroom
 }
 
 func (o tickObservation) spawns() []domain.DemandKey {
@@ -284,6 +293,11 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// by (a) as a wedge whose cause is somewhere else entirely.
 		reservationIsJudgedChecker(),
 		conservationChecker(cfg),
+		// (t) sits with (g) because it is conservation one step earlier: (g)
+		// bounds what the node commits, (t) bounds what it invites GitHub to place
+		// on it, and an invitation it cannot honour is a job stranded here while a
+		// sibling has room (issue #397).
+		overOfferChecker(cfg),
 		// (k) sits here for the same causal reason (h) and (i) do, one layer up: an
 		// instance holding a vector past its ceiling is a CAUSE of the wedge, the
 		// pass-over, and the queue that will not drain, and reporting one of those
@@ -784,6 +798,69 @@ func identityUniquenessChecker() checker {
 					Detail: fmt.Sprintf("instances %s and %s both incarnate %s", previous, instance.ID, instance.Demand)})
 			}
 			owners[instance.Demand] = instance.ID
+		}
+		return findings
+	}
+}
+
+// ---------------------------------------------------------------------------
+// (t) Offers add up to what the node can start.
+// ---------------------------------------------------------------------------
+
+// overOfferChecker is the issue #397 oracle. GitHub fills every scale set to the
+// capacity it advertised, so the shares a tick hands a node's sets are an
+// invitation GitHub will act on, all of them at once. For each macOS profile,
+// the shares of every set of that profile added together must fit what its
+// MaxActive leaves once the guests occupying the host and the demand already
+// waiting for one are counted.
+//
+// The oracle counts those from the tick's own observation and the configured
+// MaxActive, never from the scheduler's envelope arithmetic, so it cannot
+// inherit the defect it judges. It is deliberately confined to macOS profiles,
+// whose bound is a count; a Linux bound would have to re-derive the residual
+// envelope, which is the arithmetic under test. It does not cross that
+// boundary.
+func overOfferChecker(cfg worldConfig) checker {
+	return func(_ *world, observation tickObservation) []finding {
+		if observation.Headroom == nil {
+			return nil
+		}
+		offered := map[domain.ProfileID]int{}
+		for _, row := range observation.Headroom {
+			for _, binding := range cfg.Bindings {
+				if binding.StoreKey == row.StoreKey {
+					offered[binding.Profile.ID] += row.Fit
+				}
+			}
+		}
+		incarnated := map[domain.DemandKey]bool{}
+		for _, instance := range observation.Instances {
+			if instance.IncarnatesDemand() {
+				incarnated[instance.Demand] = true
+			}
+		}
+		var findings []finding
+		for profile, total := range offered {
+			definition := cfg.Scheduler.Profiles[profile]
+			if definition.Platform != domain.PlatformMacOS {
+				continue
+			}
+			spoken := 0
+			for _, instance := range observation.Instances {
+				if instance.Profile == profile && instance.ConsumesHostResources() {
+					spoken++
+				}
+			}
+			for _, demand := range observation.Demands {
+				if demand.Profile == profile && !incarnated[demand.Key] {
+					spoken++
+				}
+			}
+			if limit := max(0, max(1, definition.MaxActive)-spoken); total > limit {
+				findings = append(findings, finding{Kind: findingOverOffer, Tick: observation.Tick,
+					Detail: fmt.Sprintf("%s sets offered %d beyond what they hold; MaxActive %d leaves %d (%d spoken for)",
+						profile, total, definition.MaxActive, limit, spoken)})
+			}
 		}
 		return findings
 	}

@@ -57,10 +57,10 @@ type TickResult struct {
 	// can say so out loud: the rows leave the queue silently otherwise, and a
 	// queue that shrinks without a visible cause is its own small mystery.
 	ExpiredOverdue int64
-	// Headroom is, per scale set, what it holds and how many more of its own
-	// vector the node's residual envelope can start (issue #388, ADR 0073). It
-	// is nil when the envelope could not be computed, and a binding absent from
-	// it advertises its configured capacity: unknown is never zero.
+	// Headroom is, per scale set, what it holds and its share of what the node's
+	// residual envelope can start (issues #388 and #397, ADR 0073). It is nil when
+	// the envelope could not be computed, and a binding absent from it advertises
+	// its configured capacity: unknown is never zero.
 	Headroom []ScaleSetHeadroom
 }
 
@@ -199,6 +199,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	// residual for and floors each set at (issue #388).
 	waiting := make([]domain.Demand, 0)
 	held := make(map[int64]int, len(e.Bindings))
+	undelivered := make(map[int64]int, len(e.Bindings))
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
 		// One filter for every path: a demand whose VM is already cloning,
@@ -235,6 +236,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			current.Oldest = summary.Oldest
 		}
 		queues[binding.Profile.ID] = current
+		undelivered[binding.durableKey()] += max(0, summary.Observed-summary.Delivered)
 		scopeQueues = append(scopeQueues, ScopeQueue{Scope: binding.Scope, Profile: binding.Profile.ID,
 			ScaleSetID: binding.ScaleSetID, Count: summary.Count, Oldest: summary.Oldest, Tiers: summary.Tiers,
 			Delivered: summary.Delivered, Observed: summary.Observed, SharedLabels: binding.SharedLabels})
@@ -252,7 +254,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	})
 	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
 	headroom := coordinator.scaleSetHeadroom(ctx, e.Bindings, scheduler.Input{Now: now, Config: e.Config,
-		Demands: domain.Fresh(waiting, now), Instances: instances, Host: host, Prior: prior}, held)
+		Demands: domain.Fresh(waiting, now), Instances: instances, Host: host, Prior: prior}, held, undelivered)
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
