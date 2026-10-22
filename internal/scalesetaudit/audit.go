@@ -51,8 +51,9 @@ type ScaleSet struct {
 	Name    string `json:"name"`
 	State   State  `json:"state"`
 	Profile string `json:"profile,omitempty"`
-	// Labels are what GitHub lists the set as advertising (issue #410).
-	Labels []string `json:"labels,omitempty"`
+	// Labels are what GitHub lists the set as advertising (issue #410). A set
+	// listed with none reads as `[]`, never as an absent field.
+	Labels []string `json:"labels"`
 
 	Assigned   int `json:"assigned"`
 	Busy       int `json:"busy"`
@@ -331,7 +332,7 @@ func auditScope(ctx context.Context, client Client, scope config.GitHubScope, ob
 	sets := make([]ScaleSet, 0, len(listed))
 	for _, summary := range listed {
 		row := ScaleSet{Scope: scope.Name, ID: summary.ID, Name: summary.Name, State: Parked, ObservedAt: observedAt,
-			Labels: append([]string(nil), summary.Labels...)}
+			Labels: append([]string{}, summary.Labels...)}
 		// Identity is the configured id, and the name only for a set whose id was
 		// never persisted: a node that has provisioned but not yet written the id
 		// back still serves the set it created, and calling that parked would be a
