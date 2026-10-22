@@ -100,9 +100,13 @@ every scope.
   four jobs into its one free slot, and the sibling takes the other three.
   Before this change it took three.
 - Property (t), `overOfferChecker`, bounds the sum of every macOS profile's
-  offers by what its MaxActive leaves. A new fuzz arm, `TestSimFuzzSharedLabelNode`,
-  binds three sets of one profile behind a broker that honours advertised
-  capacity. The generator could not reach that state before.
+  offers by what its MaxActive leaves. It runs in every arm. The federated
+  scope's sweep, the one world that binds two sets of one profile, fails it on
+  the per-set offer this record removes. The new `mac-studio-shared-labels`
+  world binds three sets behind a broker that honours advertised capacity. It is
+  pinned by the #397 traces, and its seed sweep waits on issue #405: at seed 1
+  that sweep reaches a quiescence defect that is reproduced on `main` in every
+  world and is not this change's.
 - The Linux 2x4 "assigned then drained without running" rate (9–28% of
   provisions) was a measurement artifact, not a cross-node race. Those guests
   ran jobs of about 8 s that finished between two ticks, so `running` was never
