@@ -104,3 +104,58 @@ func TestScaleSetHeadroomFloorsAtTheLargerHeldCountAndOmitsTheUnknown(t *testing
 		t.Fatalf("a store without statistics leaves the local count: %+v", rows)
 	}
 }
+
+// TestScaleSetHeadroomSharesOneResidualAcrossTheNodesSets is issue #397. Three
+// scopes each bind one set of the same profile on a node whose residual starts
+// four more instances. Every set used to be handed all four, so GitHub, which
+// fills each set to what it advertised, could place twelve jobs on a node that
+// can start four while a sibling advertising the same labels sat idle. What the
+// sets are offered beyond what they hold must add up to the residual, once.
+func TestScaleSetHeadroomSharesOneResidualAcrossTheNodesSets(t *testing.T) {
+	now := time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)
+	in := headroomInput(domain.Fresh([]domain.Instance{}, now))
+	profile := domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}
+	bindings := []Binding{
+		{StoreKey: 1, ScaleSetID: 1, Scope: "fleet", Targets: []string{"a/repo"}, Profile: profile},
+		{StoreKey: 2, ScaleSetID: 2, Scope: "knee", Targets: []string{"b/repo"}, Profile: profile},
+		{StoreKey: 3, ScaleSetID: 3, Scope: "sudoku", Targets: []string{"c/repo"}, Profile: profile},
+	}
+	coordinator := DemandCoordinator{Store: noStatisticsStore{&fakeDemandStore{}}, Now: func() time.Time { return now }}
+	rows := coordinator.scaleSetHeadroom(context.Background(), bindings, in, nil)
+	if len(rows) != len(bindings) {
+		t.Fatalf("every set is sized: %+v", rows)
+	}
+	offered := 0
+	for _, row := range rows {
+		offered += row.Fit
+	}
+	if offered != 4 {
+		t.Fatalf("the sets are offered %d beyond what they hold in total, want the residual of 4 once: %+v", offered, rows)
+	}
+}
+
+// TestScaleSetHeadroomHoldsOnlyWorkGitHubStillAssignsTheSet: a set's floor is
+// the work GitHub has given it and not finished. A failed guest and a guest
+// tearing down after its job are on the node but hold no assignment, so counting
+// them advertised a slot GitHub then filled while the node had none (#397).
+func TestScaleSetHeadroomHoldsOnlyWorkGitHubStillAssignsTheSet(t *testing.T) {
+	now := time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)
+	binding := Binding{StoreKey: 7, ScaleSetID: 7, Targets: []string{"owner/repo"},
+		Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	key := func(job int64) domain.DemandKey {
+		return domain.DemandKey{Repo: "owner/repo", RunID: 1, Attempt: 1, JobID: job}
+	}
+	running := domain.Instance{ID: "i-run", Repo: "owner/repo", Profile: "small", Platform: domain.PlatformLinux,
+		Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1}, State: domain.InstanceRunning,
+		Power: domain.InstancePowerRunning, Demand: key(1)}
+	failed, draining, stopping := running, running, running
+	failed.ID, failed.State, failed.Demand = "i-failed", domain.InstanceFailed, key(2)
+	draining.ID, draining.State, draining.Demand = "i-drain", domain.InstanceDraining, key(3)
+	stopping.ID, stopping.State, stopping.Demand = "i-stop", domain.InstanceStopping, key(4)
+	in := headroomInput(domain.Fresh([]domain.Instance{running, failed, draining, stopping}, now))
+	coordinator := DemandCoordinator{Store: noStatisticsStore{&fakeDemandStore{}}, Now: func() time.Time { return now }}
+	rows := coordinator.scaleSetHeadroom(context.Background(), []Binding{binding}, in, nil)
+	if len(rows) != 1 || rows[0].Held != 1 {
+		t.Fatalf("only the running guest holds an assignment: %+v", rows)
+	}
+}

@@ -97,3 +97,23 @@ func TestRunWiresResidualCapacityIntoTruthfulScaleSets(t *testing.T) {
 		}
 	}
 }
+
+// TestResidualAdvertiserKeepsItsLastViewThroughATickThatWasNotReady is issue
+// #397's third cause. A tick that could not plan used to drop the view, and every
+// set then advertised its configured maximum: a node too unsure of itself to
+// admit anything invited the most work. A node that cannot plan cannot start
+// what it is offered, so it keeps offering what it last knew it could.
+func TestResidualAdvertiserKeepsItsLastViewThroughATickThatWasNotReady(t *testing.T) {
+	now := time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)
+	advertiser := newResidualAdvertiser(func() time.Time { return now }, 2*time.Minute)
+	full := advertiser.provider(18, 2)
+	advertiser.observe(app.TickResult{At: now, Headroom: []app.ScaleSetHeadroom{{StoreKey: 18, Held: 1}}}, true)
+	advertiser.observe(app.TickResult{}, false)
+	if got := full(); got != 1 {
+		t.Fatalf("a tick that was not ready advertised %d, want the last view's 1", got)
+	}
+	now = now.Add(time.Hour)
+	if got := full(); got != 1 {
+		t.Fatalf("an hour of unready ticks advertised %d, want the last view's 1", got)
+	}
+}
