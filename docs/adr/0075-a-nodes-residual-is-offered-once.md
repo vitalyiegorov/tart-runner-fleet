@@ -99,6 +99,12 @@ every scope.
   Studio (`TestIssue397ABurstAcrossScopesTakesTheFreeSlotOnce`) takes one of
   four jobs into its one free slot, and the sibling takes the other three.
   Before this change it took three.
+- The mini's 2026-10-20 14:06Z tick is replayed in
+  `tests/replay/shared_label_offer_incident_test.go`. It had a maestro and a
+  2x4 running and 4 CPU free. Sized one set at a time, its seventeen sets
+  offered 68 CPU of work, and GitHub placed a 4x8 and a maestro into room for
+  one. The maestro waited 21 minutes while the Studio was idle. Sized together,
+  the sets offer one vector that fits.
 - Property (t), `overOfferChecker`, bounds the sum of every macOS profile's
   offers by what its MaxActive leaves. It runs in every arm. The federated
   scope's sweep, the one world that binds two sets of one profile, fails it on
