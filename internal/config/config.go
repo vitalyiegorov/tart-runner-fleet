@@ -357,6 +357,13 @@ const (
 	// maxParkedScaleSetAuditMinutes is a day. A cadence beyond that is indistinguishable
 	// from off and would leave a stranding unreported for longer than any job lives.
 	maxParkedScaleSetAuditMinutes = 1440
+	// alwaysDeclarableSlots is the slot count every node may declare whatever its
+	// vectors: the old fixed ceiling, under which every production file was
+	// written, so no running configuration becomes invalid (ADR 0075).
+	alwaysDeclarableSlots = 4
+	// maxSlots bounds what one controller drives concurrently -- lifecycle
+	// workers, guest boots, runner registrations -- however large the host.
+	maxSlots = 16
 )
 
 // GuestLiveness bounds how long a `running` instance may go on holding its
@@ -1267,11 +1274,15 @@ func (c Config) Validate() error {
 	// nothing at all, forever -- an empty queue on a healthy host, which is
 	// exactly what a fault looks like (#230) and exactly what this fleet's
 	// incident history says nobody spots.
-	if c.Linux.MaxInstances < 1 || c.Linux.MaxInstances > 4 {
-		return errors.New("linux max instances must be between 1 and 4")
+	if c.Linux.MaxInstances < 1 || c.Linux.MaxInstances > maxSlots {
+		return fmt.Errorf("linux max instances must be between 1 and %d", maxSlots)
 	}
 	if c.Linux.Capacity.CPU <= 0 || c.Linux.Capacity.MemoryMiB <= 0 {
 		return errors.New("linux capacity must be positive")
+	}
+	if fillable := c.fillableSlots(); c.Linux.MaxInstances > max(alwaysDeclarableSlots, fillable) {
+		return fmt.Errorf("linux max instances: %d slots exceed the %d the envelope can fill with its smallest Linux guest; above %d, every slot must be one a guest can occupy",
+			c.Linux.MaxInstances, fillable, alwaysDeclarableSlots)
 	}
 	if c.MacOS.NestedVirtualization {
 		return errors.New("macOS guests do not support nested virtualization (Apple Virtualization framework limitation); use linuxNestedVirtualization")
@@ -1665,6 +1676,36 @@ func (a GitHubApp) hasCredentialSource() bool {
 		return true
 	}
 	return strings.TrimSpace(a.KeychainService) != "" && strings.TrimSpace(a.KeychainAccount) != ""
+}
+
+// fillableSlots is the most guests the node's declared envelope can hold at
+// once: the Linux cap narrowed by the host budget, filled with the Linux profile
+// that packs the most guests into it. It is the resource-derived half of the slot
+// ceiling (ADR 0075). A slot beyond it is one no guest can ever occupy, which is
+// capacity the node would advertise and could not serve (ADR 0015).
+//
+// macOS profiles are not counted: Apple's Virtualization framework runs at most
+// two macOS guests and `maxActive` bounds each profile, so they never need more
+// than the four slots every node may declare. Disk is not a term either: a
+// guest's disk is a sparse floor, not a reservation (ADR 0006), and the host's
+// free-disk floor is checked fresh at every admission instead.
+func (c Config) fillableSlots() int {
+	envelope := c.Linux.Capacity
+	if c.HostBudget.CPU > 0 {
+		envelope.CPU = min(envelope.CPU, c.HostBudget.CPU)
+	}
+	if c.HostBudget.MemoryMiB > 0 {
+		envelope.MemoryMiB = min(envelope.MemoryMiB, c.HostBudget.MemoryMiB)
+	}
+	fillable := 0
+	for _, raw := range c.Linux.Profiles {
+		profile := raw.normalized()
+		if profile.Resources.CPU <= 0 || profile.Resources.MemoryMiB <= 0 {
+			continue
+		}
+		fillable = max(fillable, min(envelope.CPU/profile.Resources.CPU, envelope.MemoryMiB/profile.Resources.MemoryMiB))
+	}
+	return fillable
 }
 
 func (c Config) authorityProfileCapacities() map[string]int {

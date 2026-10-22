@@ -148,6 +148,17 @@ Two consequences are worth knowing before editing a file:
   `fleet config validate` refuses a zero envelope, because a node with one
   admits nothing at all while reporting healthy. (`vmPrefix` stays required on
   every node too.)
+- **A slot count above four must be one the envelope can fill.**
+  `maxLinuxWhenMacosIdle` may be up to 16, but above 4 it may not exceed the
+  number of guests of the node's smallest Linux profile that fit
+  `maxLinuxCpu`/`maxLinuxMemoryMb` narrowed by `hostBudget`. A node with 20 CPU /
+  44 GiB and a 2x4 profile may declare ten. One tick still admits at most four
+  Linux guests, so a wide node fills over a few ticks. Raising the slots alone
+  does not widen one scope: under `canonicalJobInventory` each scale set
+  declares `min(profile capacity, the scope's targets' maxActive)`, so raise the
+  repositories' `maxActive` too and set each `maxCapacity` to what
+  `fleet config validate` names. See
+  [`ADR 0075`](docs/adr/0075-a-slot-count-is-backed-by-the-envelope.md).
 - **Retire the scale sets before the profiles.** On a node with no Linux
   execution, a scale set whose profile the node does not declare fails
   validation, naming the set, its scope, and its profile. Without that check a

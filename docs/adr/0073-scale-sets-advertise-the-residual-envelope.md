@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by [ADR 0075](0075-a-slot-count-is-backed-by-the-envelope.md):
+Linux headroom is read from `linuxFreeAged` with the node's true slot count,
+because the four-slot clamp `agedLinuxEnvelope` applied is now a per-tick
+admission pace rather than a capacity.
 
 ## Context
 

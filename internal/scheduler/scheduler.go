@@ -216,9 +216,9 @@ type Envelope struct {
 	// Free is the young-admission envelope: `linuxFree`, every clamp applied.
 	Free domain.Resources
 	// AgedFree is what a demand past the fairness age is judged against:
-	// `agedLinuxEnvelope`, the advisory CPU-idle clamp lifted and the production
-	// slot ceiling applied. It is the envelope a reservation's axis is decided
-	// in, so it is the one that explains a `vector` hold.
+	// `linuxFreeAged`, the advisory CPU-idle clamp lifted. It is the envelope a
+	// reservation's axis is decided in, so it is the one that explains a
+	// `vector` hold.
 	AgedFree domain.Resources
 }
 
@@ -256,7 +256,7 @@ const (
 func PlanTick(in Input) Plan {
 	plan := planTick(in)
 	if in.Demands.Usable() && in.Instances.Usable() && in.Host.Usable() {
-		plan.Envelope = Envelope{Free: linuxFree(in), AgedFree: agedLinuxEnvelope(in)}
+		plan.Envelope = Envelope{Free: linuxFree(in), AgedFree: linuxFreeAged(in)}
 	}
 	return plan
 }
@@ -371,7 +371,7 @@ func judgeCarriedReservation(in Input, plan Plan) Plan {
 		return plan
 	}
 	plan.ReservationAxis = admissionAxis(in.Config.Profiles[reservation.Profile].Resources,
-		agedLinuxEnvelope(in), reservation.Demand.Repo, activeRepoCounts(in.Instances.Value),
+		linuxFreeAged(in), reservation.Demand.Repo, activeRepoCounts(in.Instances.Value),
 		spawnedDemands(plan.Operations), in.Config.RepoCaps)
 	return plan
 }
@@ -833,12 +833,9 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		plan.Next.Reservation = nil
 		return plan
 	}
-	free := linuxFree(in)
-	// The exact Linux allocator deliberately has a tiny, auditable search
-	// envelope. Production owns at most four Linux VM slots even if an adapter
-	// accidentally reports a larger host slot count.
-	free.Slots = min(free.Slots, 4)
-	agedFree := agedLinuxEnvelope(in)
+	free, agedFree := linuxFree(in), linuxFreeAged(in)
+	free.Slots = min(free.Slots, admissionsPerTick)
+	agedFree.Slots = min(agedFree.Slots, admissionsPerTick)
 	baseCounts := activeRepoCounts(in.Instances.Value)
 
 	if reserved, ok := reservedDemand(in.Prior.Reservation, demands); ok && reservationStillHeadsQueue(in, demands, reserved) {
@@ -908,19 +905,17 @@ func linuxFree(in Input) domain.Resources {
 	return freeCapacity(in, in.Instances.Value, false)
 }
 
-// agedLinuxEnvelope is what an aged demand is judged against: the starvation
-// guard envelope under the four-slot production ceiling. Demands past the
-// fairness age lift only the advisory CPU-idle clamp; young admission and
-// backfill keep the throttled envelope, because politeness stays for fresh work.
-//
-// It is a function rather than two lines at each call site so that the head a
-// carried reservation is re-judged against is the same envelope `planLinux`
-// judged it in, by construction rather than by copy.
-func agedLinuxEnvelope(in Input) domain.Resources {
-	free := linuxFreeAged(in)
-	free.Slots = min(free.Slots, 4)
-	return free
-}
+// admissionsPerTick is how many Linux guests one tick may admit. It bounds the
+// exact allocator's search, which is exhaustive -- O(N^k) over N queued
+// candidates -- so k must be a small constant and never the node's slot count,
+// which configuration derives from the envelope and lets reach sixteen (ADR
+// 0075). It is a pace, not a capacity: a node with more free slots fills them
+// over the next ticks, and every envelope this package publishes or judges a
+// single vector against keeps its true slot count. Clamping a slot count that is
+// at least one never changes whether one vector fits, so a reservation judged
+// against the unclamped envelope and admitted against the clamped one reaches
+// the same verdict.
+const admissionsPerTick = 4
 
 // linuxFreeAged is the starvation-guard envelope for demands past the fairness
 // age. It differs from linuxFree in exactly one term: the advisory CPU-idle
@@ -1760,9 +1755,9 @@ func eventRank(event domain.Event) int {
 	return 1
 }
 
-// exactSelect enumerates all feasible combinations while selecting at most the
-// configured slot vector (four in production). That makes feasibility exact
-// without an unbounded 2^N search.
+// exactSelect enumerates all feasible combinations while selecting at most
+// admissionsPerTick candidates, whatever the free slot count. That makes
+// feasibility exact without an unbounded 2^N search.
 func exactSelect(now time.Time, candidates []domain.Demand, free domain.Resources, baseCounts map[string]int, config Config) []domain.Demand {
 	// Priority band per candidate is ADR 0004's scheduling order: lower band is
 	// higher priority. Count maximization is a throughput optimization that
@@ -1781,7 +1776,7 @@ func exactSelect(now time.Time, candidates []domain.Demand, free domain.Resource
 		if betterAdmission(chosen, best, bands, numBands) {
 			best = append([]int(nil), chosen...)
 		}
-		if index >= len(candidates) || len(chosen) >= free.Slots {
+		if index >= len(candidates) || len(chosen) >= min(free.Slots, admissionsPerTick) {
 			return
 		}
 		for i := index; i < len(candidates); i++ {
@@ -2096,7 +2091,7 @@ func besideAgedForeignHead(in Input, candidates, foreign []domain.Demand) []doma
 	// aged work is judged against everywhere else. Using `linuxFree` here would
 	// shrink the remainder by the advisory CPU-idle clamp the head does not pay,
 	// and refuse coexisting work on capacity the head was never denied.
-	remainder, remainderExists := agedLinuxEnvelope(in).Sub(profile.Resources)
+	remainder, remainderExists := linuxFreeAged(in).Sub(profile.Resources)
 	rank := priorityRank(in)
 	headRank, headRanked := rank[foreignHead.Key]
 	beside := make([]domain.Demand, 0, len(candidates))
@@ -2175,7 +2170,7 @@ func priorityRank(in Input) map[domain.DemandKey]int {
 // new admission refilling the platform being drained. When ok, the returned
 // Input treats this tick's planned spawns as live occupancy, so the second pass
 // plans strictly inside the residual envelope and combined consumption can never
-// exceed the shared capacity, Host.Available, or the four-slot ceiling.
+// exceed the shared capacity, Host.Available, or the node's slot count.
 func mixedRemainderInput(in Input, plan Plan) (Input, bool) {
 	if !in.Config.MixedPlatformAdmission || plan.Status != PlanReady || containsDrain(plan.Operations) {
 		return in, false
@@ -2259,7 +2254,7 @@ func reservedRemainderDemands(in Input, plan Plan, demands []domain.Demand) []do
 	if reservation == nil {
 		return demands
 	}
-	remainder, remainderExists := agedLinuxEnvelope(in).Sub(reservation.Resources)
+	remainder, remainderExists := linuxFreeAged(in).Sub(reservation.Resources)
 	kept := make([]domain.Demand, 0, len(demands))
 	for _, demand := range demands {
 		if !jumpsTheReservedHead(in.Config, reservation, remainder, remainderExists, demand) {

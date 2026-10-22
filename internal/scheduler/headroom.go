@@ -15,10 +15,11 @@ import "github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 // through the same functions, so an advertisement and an admission can never be
 // judged against different capacity:
 //
-//   - The hard-bounds envelope (`linuxFreeAged`, and `agedLinuxEnvelope` with its
-//     four-slot production ceiling for Linux). A job placed now is admitted once
-//     it ages if it is not admitted sooner, and the advisory CPU-idle clamp that
-//     young work waits on is not a reason to send work elsewhere.
+//   - The hard-bounds envelope (`linuxFreeAged`) with the node's true slot
+//     count. A job placed now is admitted once it ages if it is not admitted
+//     sooner, and neither the advisory CPU-idle clamp that young work waits on
+//     nor the per-tick admission pace (`admissionsPerTick`) is a reason to send
+//     work elsewhere.
 //   - Every queued demand not already incarnated (`queuedVectors`) is charged
 //     first, wherever it is queued: assigned work that has not launched will take
 //     the residual before anything newly placed can. That also covers the aged
@@ -44,9 +45,6 @@ func Headroom(in Input, profile domain.ProfileID) (int, bool) {
 		return 0, false
 	}
 	free := linuxFreeAged(in)
-	if definition.Platform == domain.PlatformLinux {
-		free = agedLinuxEnvelope(in)
-	}
 	waiting := normalizedDemands(in)
 	for _, vector := range queuedVectors(in.Config, in.Instances.Value, waiting) {
 		free = exhaust(free, vector)

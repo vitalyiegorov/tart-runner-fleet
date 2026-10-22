@@ -5,6 +5,9 @@
 Accepted, default off. Amends [ADR 0012](0012-shared-cross-platform-capacity.md)
 where the admission envelope was a single static configured vector. Promotion on
 any host is an explicit operational action, not a consequence of this change.
+Amended by [ADR 0075](0075-a-slot-count-is-backed-by-the-envelope.md): "the
+four-slot Linux ceiling" below is now the node's configured slot count, backed
+by its envelope, with four admissions per tick as the allocator's pace.
 
 ## Context
 
