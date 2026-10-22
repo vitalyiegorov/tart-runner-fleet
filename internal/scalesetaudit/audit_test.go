@@ -2,6 +2,7 @@ package scalesetaudit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -133,6 +134,11 @@ func TestAnIdleParkedSetIsInformationalRatherThanAFinding(t *testing.T) {
 	}
 	if result.ScaleSets[0].Stranding || len(result.Strandings()) != 0 {
 		t.Fatalf("a sibling's set holding no work is not this node's fault: %#v", result.ScaleSets)
+	}
+	// A set GitHub listed without labels still says so in the JSON row.
+	row, err := json.Marshal(result.ScaleSets[0])
+	if err != nil || !strings.Contains(string(row), `"labels":[]`) {
+		t.Fatalf("a label-less set must serialise labels as []: %s %v", row, err)
 	}
 }
 

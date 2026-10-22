@@ -1668,7 +1668,7 @@ func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleS
 			continue
 		}
 		rows = append(rows, telemetry.ParkedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name,
-			Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
+			Labels: append([]string(nil), set.Labels...), Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
 	}
 	return rows
 }
@@ -1752,7 +1752,8 @@ func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSe
 	var selectors []app.ForeignScaleSetSelector
 	for _, row := range snapshot.ParkedScaleSets {
 		if fresh(row.ObservedAt) {
-			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name})
+			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name,
+				Labels: append([]string(nil), row.Labels...)})
 		}
 	}
 	return selectors
