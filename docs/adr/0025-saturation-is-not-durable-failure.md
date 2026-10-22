@@ -5,7 +5,9 @@
 Accepted. Refines the authority lease introduced with the authority mode cutover
 and the closed scheduler-tick vocabulary
 ([ADR 0020](0020-diagnosable-drain-failures.md) established the pattern for
-runner cleanup).
+runner cleanup). The five-second per-attempt renewal deadline is superseded by
+[ADR 0075](0075-a-slow-lease-renewal-is-let-finish-inside-the-lease.md): an
+attempt's deadline is now the lease's own `ExpiresAt`.
 
 ## Context
 
