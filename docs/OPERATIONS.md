@@ -1798,6 +1798,104 @@ confirmed by eye before anything is diffed. `fleet config validate` with both
 paths still applies ADR 0034's cross-node rules, which is a different question:
 legality, not agreement.
 
+## The LAN Actions cache (ADR 0076)
+
+A podman node can serve its own guests' GitHub Actions cache instead of sending
+every save and restore over the WAN. It is three pieces, all in
+`deploy/actions-cache/`:
+
+| Piece | What it is | Where it listens |
+| --- | --- | --- |
+| `tart-runner-fleet-actions-cache.service` | falcondev-oss/github-actions-cache-server v9.8.0, a rootless quadlet | `127.0.0.1:3018` only |
+| `tart-runner-fleet-cache-gate.service` | `fleet cache-gate`: refuses pull-request saves, routes cache calls to the server and everything else to GitHub | `0.0.0.0:3017` (guests use `host.containers.internal:3017`) |
+| `localhost/trf-runner-amd64:<base>-actions-cache.N` | the node's runner image plus `zstd`, the results-URL patch and `ACTIONS_RESULTS_URL` | — |
+
+Nothing changes for a node until `executor.image` names the patched image. The
+two services can run for days beforehand without any guest using them.
+
+### Budget
+
+| Node | `CACHE_MAX_SIZE_BYTES` | Disk free before | Memory cap |
+| --- | --- | --- | --- |
+| ubuntu-vitalii (site B) | 64424509440 (60 GiB) | 305 GB of 914 GB | 1.5 GiB, 2 CPUs |
+| omarchy (site A) | 64424509440 (60 GiB) | 461 GB of 930 GB | 1.5 GiB, 2 CPUs |
+
+60 GiB is six repositories at GitHub's own 10 GiB each. Past it, the server
+evicts least-recently-used entries; independently it deletes entries nobody
+restored for seven days. Both budgets leave the node far above its
+`minFreeDiskGb` floor with every runner container at its profile's disk size.
+
+### Install on a node
+
+Do this between rollouts, never during another node update or drain: read
+`fleet status` on every node first. The `fleet` release must contain
+`cache-gate` (`fleet cache-gate --listen x` prints its usage).
+
+```sh
+set -eu
+REPO=/path/to/a/clone/of/tart-runner-fleet
+mkdir -p ~/.config/containers/systemd ~/.local/share/tart-runner-fleet-actions-cache
+install -m 0644 "$REPO/deploy/actions-cache/tart-runner-fleet-actions-cache.container" ~/.config/containers/systemd/
+install -m 0600 /dev/null ~/.config/tart-runner-fleet-actions-cache.env
+echo 'CACHE_MAX_SIZE_BYTES=64424509440' > ~/.config/tart-runner-fleet-actions-cache.env
+install -m 0644 "$REPO/deploy/actions-cache/tart-runner-fleet-cache-gate.service" ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user start tart-runner-fleet-actions-cache.service
+systemctl --user enable --now tart-runner-fleet-cache-gate.service
+```
+
+A quadlet unit is generated, so it is started rather than enabled; its
+`[Install]` section starts it at boot.
+
+Build the runner image from the node's **current** `executor.image`:
+
+```sh
+BASE=$(jq -r .executor.image "$CONFIG")
+podman build --build-arg BASE="$BASE" \
+  -t "localhost/trf-runner-amd64:${BASE##*:}-actions-cache.1" \
+  -f "$REPO/deploy/actions-cache/Containerfile.runner" "$REPO/deploy/actions-cache"
+```
+
+### Health
+
+```sh
+curl -fsS http://127.0.0.1:3018/health        # the server: prints healthy
+curl -fsS http://127.0.0.1:3017/health        # through the gate: prints healthy
+podman healthcheck run trf-actions-cache && echo ok
+podman run --rm "localhost/trf-runner-amd64:<tag>" \
+  curl -fsS http://host.containers.internal:3017/health   # what a guest sees
+curl -fsS http://127.0.0.1:3018/metrics | grep -E '^cache_(requests_total|storage_bytes)'
+tail ~/.local/share/tart-runner-fleet/state/cache-gate.log # one line per refused save
+```
+
+The quadlet's health check kills the server after three failed probes and
+systemd restarts it. The gate restarts on any exit. A guest that cannot reach the
+server logs `Failed to restore` / `Failed to save` as warnings and runs cold; its
+artifact uploads do not touch the server.
+
+### Enable and verify
+
+1. Copy the node's configuration, set `executor.image` to the patched tag,
+   `fleet config validate` it, swap it in, and restart the daemon. Running
+   containers keep their image; only new guests get the patched one.
+2. On the next job on that node, the "Set up job" log shows nothing new. Look
+   instead for `Cache saved with key` on a default-branch run, and confirm the
+   entry is local:
+   `curl -s http://127.0.0.1:3018/metrics | grep cache_storage_bytes`.
+3. A pull-request save must log `Failed to save: ... permission_denied` and add
+   a `cache write refused` line to `cache-gate.log` naming `refs/pull/N/merge`.
+
+### Roll back
+
+1. Restore the previous `executor.image` and restart the daemon. New guests use
+   GitHub's cache again.
+2. Wait until no container from the patched image is running
+   (`podman ps --filter ancestor=<patched tag>`): they still send artifacts
+   through the gate.
+3. Then, if wanted, `systemctl --user disable --now tart-runner-fleet-cache-gate.service`
+   and `systemctl --user stop tart-runner-fleet-actions-cache.service`. The
+   cache directory can stay; it is only read again when the image is.
+
 ## Recovery
 
 1. Stop admission; do not delete uncertain VMs.
