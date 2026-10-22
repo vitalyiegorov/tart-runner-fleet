@@ -865,7 +865,14 @@ func planLinux(in Input, plan Plan, demands []domain.Demand) Plan {
 		// a key inside this band, and a rule the macOS pass applies and this one
 		// does not is not a rule. It decides both what is admitted here and, when
 		// the band stops being feasible, which head mints the reservation.
+		admittedBefore := len(plan.Operations)
 		for _, candidate := range agedQueueOrder(in, aged) {
+			// The pace is not a capacity: a tick that has admitted its allowance
+			// stops here rather than reserve the next head against slots only the
+			// pace withheld.
+			if len(plan.Operations)-admittedBefore >= admissionsPerTick {
+				break
+			}
 			profile := in.Config.Profiles[candidate.Profile]
 			selected := spawnedDemands(plan.Operations)
 			if axis := admissionAxis(profile.Resources, agedFree, candidate.Key.Repo, baseCounts, selected, in.Config.RepoCaps); axis != ReservationAxisNone {
@@ -905,7 +912,7 @@ func linuxFree(in Input) domain.Resources {
 	return freeCapacity(in, in.Instances.Value, false)
 }
 
-// admissionsPerTick is how many Linux guests one tick may admit. It bounds the
+// admissionsPerTick is how many Linux guests one admission pass may admit. It bounds the
 // exact allocator's search, which is exhaustive -- O(N^k) over N queued
 // candidates -- so k must be a small constant and never the node's slot count,
 // which configuration derives from the envelope and lets reach sixteen (ADR

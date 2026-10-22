@@ -49,17 +49,28 @@ func TestAWideNodeAdvertisesItsWholeEnvelope(t *testing.T) {
 func TestAWideNodeFillsItsSlotsAFewPerTick(t *testing.T) {
 	for name, age := range map[string]time.Duration{"young": time.Minute, "aged": time.Hour} {
 		t.Run(name, func(t *testing.T) {
-			demands := mediumDemands(12, age)
+			waiting := mediumDemands(12, age)
 			var instances []domain.Instance
 			var perTick []int
-			for range 4 {
-				plan := PlanTick(wideNodeInput(demands, instances))
+			prior := State{}
+			for tick := range 4 {
+				in := wideNodeInput(waiting, instances)
+				in.Prior = prior
+				plan := PlanTick(in)
+				prior = plan.Next
+				// The pace is not a capacity: a tick that has admitted its four while
+				// slots remain free holds no reservation, because nothing refused the
+				// next head but the pace.
+				if tick < 2 && prior.Reservation != nil {
+					t.Fatalf("tick %d minted a reservation for %v with free slots left", tick, prior.Reservation.Demand)
+				}
 				spawned := spawnedKeys(plan)
 				perTick = append(perTick, len(spawned))
 				for _, key := range spawned {
 					instance := runningInstance(testConfig(), "vm-"+key.String(), key.Repo, "medium")
 					instance.Demand = key
 					instances = append(instances, instance)
+					waiting = slices.DeleteFunc(waiting, func(d domain.Demand) bool { return d.Key == key })
 				}
 			}
 			if want := []int{4, 4, 2, 0}; !slices.Equal(perTick, want) {

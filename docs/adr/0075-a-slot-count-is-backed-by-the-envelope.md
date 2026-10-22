@@ -35,11 +35,16 @@ search needed a bounded depth; the node never needed a bounded size.
 
 ## Decision
 
-1. **The search depth is a per-tick pace.** `admissionsPerTick = 4` bounds how
-   many Linux guests one tick admits. `exactSelect` applies it itself, so no
-   caller can hand it an unbounded depth, and `planLinux` applies it to both its
-   young and aged envelopes, so a tick admits at most four Linux guests on every
-   path, as before. A node with more free slots fills them over the next ticks.
+1. **The search depth is a per-pass pace.** `admissionsPerTick = 4` bounds how
+   many Linux guests one `planLinux` pass admits. `exactSelect` applies it
+   itself, so no caller can hand it an unbounded depth; `planLinux` applies it to
+   its young and aged envelopes, and its aged loop stops once it has admitted
+   four, so it never reserves the next head against slots only the pace
+   withheld. A node with more free slots fills them over the next ticks. One
+   tick can run a second Linux pass, the mixed-platform remainder after a macOS
+   handoff's single-job backfill, so a tick's ceiling is the pace plus that one
+   job. Every admission in that pass is still charged against the slots, CPU and
+   memory the first pass took, so the pace can never exceed capacity.
 2. **Every published or judged envelope keeps its true slot count.**
    `agedLinuxEnvelope` is deleted; its callers read `linuxFreeAged`. Headroom
    (ADR 0073) therefore advertises what the node can start rather than what one
@@ -93,7 +98,9 @@ exceeded four, so neither clamp ever bound and every plan is byte-identical.
   Red on the parent: `linux max instances must be between 1 and 4`.
 - `internal/scheduler/scheduler_wide_node_test.go`: headroom and the published
   envelope report all ten slots (red on the parent: 4); young and aged bursts fill
-  ten slots as 4, 4, 2; `exactSelect` admits at most four with sixteen free (red
+  ten slots as 4, 4, 2 with the reservation carried between ticks and no
+  reservation minted while free slots remain (red before the aged loop stopped
+  at the pace: 4, 1, 4, 1); `exactSelect` admits at most four with sixteen free (red
   on the parent: did not terminate within the 15 s test deadline).
 - `tests/simulation`: a new `node-b-wide` world (24 threads, 60 GiB, a
   20 CPU / 44 GiB budget, ten slots) runs as its own sweep arm,
