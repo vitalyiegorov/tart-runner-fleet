@@ -50,21 +50,8 @@ func TestSiblingPinnedJobPreservesLocalInventory(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test", Clock: selectorClock{now}, Repositories: []githubscaleset.Repository{{Owner: "budgie-at", Name: "budgie"}},
-				Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "test", nil }), HTTP: runtimeDoerFunc(func(r *http.Request) (*http.Response, error) {
-					switch r.URL.Path {
-					case "/repos/budgie-at/budgie/actions/runs":
-						return runtimeResponse(`{"workflow_runs":[{"id":10,"run_attempt":1,"status":"queued","created_at":"2026-10-16T04:00:00Z"}]}`), nil
-					case "/repos/budgie-at/budgie/actions/runs/10/jobs":
-						return runtimeResponse(`{"jobs":[{"id":101,"name":"local","status":"queued","created_at":"2026-10-16T04:00:00Z","labels":["self-hosted","macos-builder"]},{"id":102,"name":"peer","status":"queued","created_at":"2026-10-16T04:00:00Z","labels":["self-hosted","macos-builder","trf-budgie-builder-2"]}]}`), nil
-					default:
-						t.Fatalf("unexpected request %s", r.URL.Path)
-						return nil, nil
-					}
-				})})
-			if err != nil {
-				t.Fatal(err)
-			}
+			observer := oneRunObserver(t, now, githubscaleset.Repository{Owner: "budgie-at", Name: "budgie"}, "2026-10-16T04:00:00Z",
+				`[{"id":101,"name":"local","status":"queued","created_at":"2026-10-16T04:00:00Z","labels":["self-hosted","macos-builder"]},{"id":102,"name":"peer","status":"queued","created_at":"2026-10-16T04:00:00Z","labels":["self-hosted","macos-builder","trf-budgie-builder-2"]}]`)
 			binding := app.Binding{Scope: "budgie-org", ScaleSetID: 1, Targets: []string{"budgie-at/budgie"}, ScaleSetLabels: []string{"self-hosted", "macos-builder", "trf-budgie-builder-2-macbook"}, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
 			ingester := restQueueIngester{coordinator: app.DemandCoordinator{Store: store, StrictJobRouting: true}, bindings: []app.Binding{binding}, observer: observer, health: health, observation: "rest", interval: time.Minute, now: func() time.Time { return now }}
 			changed, err := ingester.IngestChanged(ctx)
@@ -92,5 +79,28 @@ func TestSiblingPinnedJobPreservesLocalInventory(t *testing.T) {
 }
 
 type selectorClock struct{ at time.Time }
+
+// oneRunObserver is a REST observer over one repository holding one queued run
+// whose jobs are the given JSON array.
+func oneRunObserver(t *testing.T, now time.Time, repo githubscaleset.Repository, createdAt, jobs string) *githubscaleset.Observer {
+	t.Helper()
+	base := "/repos/" + repo.Owner + "/" + repo.Name + "/actions/runs"
+	observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test", Clock: selectorClock{now}, Repositories: []githubscaleset.Repository{repo},
+		Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "test", nil }), HTTP: runtimeDoerFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case base:
+				return runtimeResponse(`{"workflow_runs":[{"id":10,"run_attempt":1,"status":"queued","created_at":"` + createdAt + `"}]}`), nil
+			case base + "/10/jobs":
+				return runtimeResponse(`{"jobs":` + jobs + `}`), nil
+			default:
+				t.Fatalf("unexpected request %s", r.URL.Path)
+				return nil, nil
+			}
+		})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return observer
+}
 
 func (c selectorClock) Now() time.Time { return c.at }

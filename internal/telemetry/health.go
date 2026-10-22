@@ -143,8 +143,12 @@ type ParkedScaleSetMetric struct {
 	Scope      string
 	ScaleSetID int
 	Name       string
-	Assigned   int
-	Busy       int
+	// Labels are what the set advertises, which is what lets a node prove a
+	// sibling's alias foreign without reading the sibling's configuration
+	// (issue #410).
+	Labels   []string
+	Assigned int
+	Busy     int
 	// Registered is GitHub's own count of runners registered against the
 	// set. A registered runner is proof of a listener, so a parked set with
 	// one is a sibling's traffic, not a stranding.
@@ -597,6 +601,16 @@ func cloneScopeQueues(rows []ScopeQueueMetrics) []ScopeQueueMetrics {
 	return out
 }
 
+// cloneParkedScaleSets copies the rows and each row's label slice, for the same
+// reason cloneScopeQueues does.
+func cloneParkedScaleSets(rows []ParkedScaleSetMetric) []ParkedScaleSetMetric {
+	out := append([]ParkedScaleSetMetric(nil), rows...)
+	for i := range out {
+		out[i].Labels = append([]string(nil), rows[i].Labels...)
+	}
+	return out
+}
+
 // SetParkedScaleSets publishes one completed audit of the scale sets GitHub
 // holds for this node's scopes.
 //
@@ -615,7 +629,7 @@ func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time
 		return errInvalidMetric
 	}
 	h.mu.Lock()
-	h.parkedScaleSets = append([]ParkedScaleSetMetric(nil), rows...)
+	h.parkedScaleSets = cloneParkedScaleSets(rows)
 	h.parkedAuditedAt = observedAt.UTC()
 	h.revision++
 	h.mu.Unlock()
@@ -1184,7 +1198,7 @@ func (h *Health) Snapshot() Snapshot {
 		Envelope:                 h.envelope,
 		AdmissionFloors:          h.admissionFloors,
 		QueueSLO:                 h.queueSLO,
-		ParkedScaleSets:          append([]ParkedScaleSetMetric(nil), h.parkedScaleSets...),
+		ParkedScaleSets:          cloneParkedScaleSets(h.parkedScaleSets),
 		ParkedScaleSetsAuditedAt: h.parkedAuditedAt,
 		StrandedScaleSets:        append([]StrandedScaleSetMetric(nil), h.strandedScaleSets...),
 		ScaleSetInstances:        append([]ScaleSetInstanceMetric(nil), h.scaleSetInstances...),
