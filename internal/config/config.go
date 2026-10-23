@@ -359,7 +359,7 @@ const (
 	maxParkedScaleSetAuditMinutes = 1440
 	// alwaysDeclarableSlots is the slot count every node may declare whatever its
 	// vectors: the old fixed ceiling, under which every production file was
-	// written, so no running configuration becomes invalid (ADR 0075).
+	// written, so no running configuration becomes invalid (ADR 0077).
 	alwaysDeclarableSlots = 4
 	// maxSlots bounds what one controller drives concurrently -- lifecycle
 	// workers, guest boots, runner registrations -- however large the host.
@@ -1681,7 +1681,7 @@ func (a GitHubApp) hasCredentialSource() bool {
 // fillableSlots is the most guests the node's declared envelope can hold at
 // once: the Linux cap narrowed by the host budget, filled with the Linux profile
 // that packs the most guests into it. It is the resource-derived half of the slot
-// ceiling (ADR 0075). A slot beyond it is one no guest can ever occupy, which is
+// ceiling (ADR 0077). A slot beyond it is one no guest can ever occupy, which is
 // capacity the node would advertise and could not serve (ADR 0015).
 //
 // macOS profiles are not counted: Apple's Virtualization framework runs at most

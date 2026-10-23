@@ -158,7 +158,7 @@ Two consequences are worth knowing before editing a file:
   declares `min(profile capacity, the scope's targets' maxActive)`, so raise the
   repositories' `maxActive` too and set each `maxCapacity` to what
   `fleet config validate` names. See
-  [`ADR 0075`](docs/adr/0075-a-slot-count-is-backed-by-the-envelope.md).
+  [`ADR 0077`](docs/adr/0077-a-slot-count-is-backed-by-the-envelope.md).
 - **Retire the scale sets before the profiles.** On a node with no Linux
   execution, a scale set whose profile the node does not declare fails
   validation, naming the set, its scope, and its profile. Without that check a

@@ -12,7 +12,7 @@ configured envelope an opt-in elastic one derived from the observed physical
 host, turning `maxLinuxCpu` into a Linux-only cap when enabled; and by
 [ADR 0029](0029-remainder-admission-behind-a-reservation.md), which states when
 the complementary remainder pass may admit work behind a held reservation; and by
-[ADR 0075](0075-a-slot-count-is-backed-by-the-envelope.md), which lets a node's
+[ADR 0077](0077-a-slot-count-is-backed-by-the-envelope.md), which lets a node's
 slot count exceed four when its envelope can fill the slots.
 
 ## Context

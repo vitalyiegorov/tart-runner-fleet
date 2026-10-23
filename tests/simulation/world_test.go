@@ -308,7 +308,7 @@ func containerNodeWorld() worldConfig {
 
 // wideLinuxNodeWorld is issue #393's node-b after its re-budget: 24 threads and
 // 60 GiB, of which the fleet is promised 20 CPU / 44 GiB, and ten slots -- more
-// than the four every node was held to before ADR 0075. It is its own world
+// than the four every node was held to before ADR 0077. It is its own world
 // because no other can reach more than four live guests, so the slot-count half
 // of property (g), the per-tick admission pace, and every reservation and
 // backfill rule above four live instances were unreachable by the generator.

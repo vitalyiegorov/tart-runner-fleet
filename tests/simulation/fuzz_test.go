@@ -75,7 +75,7 @@ func TestSimFuzzMacOSOnlyNode(t *testing.T) {
 }
 
 // TestSimFuzzWideLinuxNode is the same sweep on a node with ten slots (ADR
-// 0075). Its own arm for the reason every world is one: the seed stream is a
+// 0077). Its own arm for the reason every world is one: the seed stream is a
 // function of the world, and only this world can hold more than four guests.
 func TestSimFuzzWideLinuxNode(t *testing.T) {
 	t.Parallel()

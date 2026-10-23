@@ -1,4 +1,4 @@
-# ADR 0075: A slot count is backed by the envelope, not fixed at four
+# ADR 0077: A slot count is backed by the envelope, not fixed at four
 
 ## Status
 

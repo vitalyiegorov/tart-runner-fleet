@@ -916,7 +916,7 @@ func linuxFree(in Input) domain.Resources {
 // exact allocator's search, which is exhaustive -- O(N^k) over N queued
 // candidates -- so k must be a small constant and never the node's slot count,
 // which configuration derives from the envelope and lets reach sixteen (ADR
-// 0075). It is a pace, not a capacity: a node with more free slots fills them
+// 0077). It is a pace, not a capacity: a node with more free slots fills them
 // over the next ticks, and every envelope this package publishes or judges a
 // single vector against keeps its true slot count. Clamping a slot count that is
 // at least one never changes whether one vector fits, so a reservation judged
