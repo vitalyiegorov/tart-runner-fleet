@@ -78,7 +78,7 @@ func TestMainDelegatesExit(t *testing.T) {
 }
 
 // TestExecuteRoutesCacheGateToTheGate pins that `cache-gate` reaches the LAN
-// cache write gate (ADR 0075) and not the operator surface, which would
+// cache write gate (ADR 0078) and not the operator surface, which would
 // reject it as an unknown command.
 func TestExecuteRoutesCacheGateToTheGate(t *testing.T) {
 	var stdout, stderr bytes.Buffer

@@ -1,8 +1,8 @@
-# Quadlet unit for the node's LAN GitHub Actions cache server (ADR 0075).
+# Quadlet unit for the node's LAN GitHub Actions cache server (ADR 0078).
 # Install as ~/.config/containers/systemd/tart-runner-fleet-actions-cache.container;
 # systemd generates tart-runner-fleet-actions-cache.service from it.
 [Unit]
-Description=tart-runner-fleet LAN Actions cache server (ADR 0075)
+Description=tart-runner-fleet LAN Actions cache server (ADR 0078)
 Wants=network-online.target
 After=network-online.target
 

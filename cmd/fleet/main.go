@@ -29,7 +29,7 @@ func main() {
 }
 
 // execute routes `run` to the daemon, `cache-gate` to the LAN cache write gate
-// (ADR 0075) and every other verb to the operator interface. Dispatch is by
+// (ADR 0078) and every other verb to the operator interface. Dispatch is by
 // explicit subcommand rather than by argv[0], so the executable's name on disk
 // never changes its behaviour.
 func execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {

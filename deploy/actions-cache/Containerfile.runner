@@ -1,5 +1,5 @@
 # The runner image a node's containers use once they read their Actions cache
-# from the node's LAN cache server instead of GitHub (ADR 0075).
+# from the node's LAN cache server instead of GitHub (ADR 0078).
 #
 # It is the node's existing runner image plus three things, and nothing else:
 #   * zstd, which @actions/cache prefers over single-threaded gzip;

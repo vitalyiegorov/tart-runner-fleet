@@ -1,4 +1,4 @@
-# The write gate in front of the node's LAN Actions cache (ADR 0075). Install
+# The write gate in front of the node's LAN Actions cache (ADR 0078). Install
 # as ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.
 #
 # It listens on every address because rootless podman's pasta network reaches
@@ -7,7 +7,7 @@
 # cache server verifies every token it is shown, and the gate refuses every
 # save a pull request's token asks for.
 [Unit]
-Description=tart-runner-fleet LAN Actions cache write gate (ADR 0075)
+Description=tart-runner-fleet LAN Actions cache write gate (ADR 0078)
 Wants=tart-runner-fleet-actions-cache.service
 After=tart-runner-fleet-actions-cache.service
 

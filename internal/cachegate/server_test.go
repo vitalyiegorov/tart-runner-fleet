@@ -220,3 +220,81 @@ func TestResultsCallsCarryGitHubsHost(t *testing.T) {
 		t.Fatalf("host=%q want %q", got, target.Host)
 	}
 }
+
+// TestRefusalLoggingIsRateLimited pins the second half of the review finding
+// on #408: refusals arrive before the cache server verifies a token, so their
+// log lines are bounded per window and the excess is counted, not written.
+func TestRefusalLoggingIsRateLimited(t *testing.T) {
+	clock := time.Unix(1_800_000_000, 0)
+	restore := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = restore })
+	target, _ := upstream(t)
+	var logs bytes.Buffer
+	gate := httptest.NewServer(Handler(target, target, &logs))
+	t.Cleanup(gate.Close)
+	pr := token(t, []scope{{Scope: "refs/pull/9/merge", Permission: 3}})
+	refuse := func(times int) {
+		for range times {
+			req, _ := http.NewRequest(http.MethodPost, gate.URL+create, strings.NewReader(`{}`))
+			req.Header.Set("Authorization", pr)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusForbidden {
+				t.Fatalf("status %d, want every request refused whether or not it is logged", resp.StatusCode)
+			}
+		}
+	}
+	refuse(refusalLogBurst + 25)
+	if got := strings.Count(logs.String(), "cache write refused"); got != refusalLogBurst {
+		t.Fatalf("logged %d refusals in one window, want the burst of %d", got, refusalLogBurst)
+	}
+	clock = clock.Add(refusalLogWindow)
+	refuse(1)
+	if !strings.Contains(logs.String(), "suppressed=25") || strings.Count(logs.String(), "cache write refused") != refusalLogBurst+1 {
+		t.Fatalf("the next window must report the 25 suppressed refusals and log again: %q", logs.String())
+	}
+}
+
+// TestTheGateBoundsIdleAndStalledConnections pins the other review finding on
+// #408: an idle keep-alive connection is closed, and a request body that stops
+// arriving is cut once it stalls, without a fixed read timeout that would
+// interrupt a legitimate multi-gigabyte save.
+func TestTheGateBoundsIdleAndStalledConnections(t *testing.T) {
+	server := newServer(http.NotFoundHandler())
+	if server.IdleTimeout != idleTimeout || server.ReadHeaderTimeout != readHeaderTimeout || server.ReadTimeout != 0 {
+		t.Fatalf("server timeouts = idle %v header %v read %v", server.IdleTimeout, server.ReadHeaderTimeout, server.ReadTimeout)
+	}
+	restore := bodyStallTimeout
+	bodyStallTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bodyStallTimeout = restore })
+	target, seen := upstream(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := newServer(Handler(target, target, io.Discard))
+	go func() { _ = gate.Serve(listener) }()
+	t.Cleanup(func() { _ = gate.Close() })
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// A results call (no token needed) that promises ten bytes and sends two.
+	_, _ = io.WriteString(conn, "POST /twirp/results.services.receiver.Receiver/X HTTP/1.1\r\nHost: gate\r\nContent-Length: 10\r\n\r\nab")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	started := time.Now()
+	_, _ = io.ReadAll(conn)
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("a stalled body held the connection for %v", elapsed)
+	}
+	for _, request := range seen() {
+		if strings.HasSuffix(request, " abxxxxxxxx") {
+			t.Fatalf("a stalled body reached the upstream whole: %v", seen())
+		}
+	}
+}

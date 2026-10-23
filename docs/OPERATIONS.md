@@ -1889,13 +1889,21 @@ podman healthcheck run trf-actions-cache && echo ok
 podman run --rm "localhost/trf-runner-amd64:<tag>" \
   curl -fsS http://host.containers.internal:3017/health   # what a guest sees
 curl -fsS http://127.0.0.1:3018/metrics | grep -E '^cache_(requests_total|storage_bytes)'
-tail ~/.local/share/tart-runner-fleet/state/cache-gate.log # one line per refused save
+tail ~/.local/share/tart-runner-fleet/state/cache-gate.log # one line per refused save, at most 60 a minute
 ```
 
 The quadlet's health check kills the server after three failed probes and
 systemd restarts it. The gate restarts on any exit. A guest that cannot reach the
 server logs `Failed to restore` / `Failed to save` as warnings and runs cold; its
 artifact uploads do not touch the server.
+
+The gate judges a refusal before the cache server verifies the token, so it
+bounds what an unverified caller can cost it: a refused scope is quoted to at
+most 128 bytes, refusals are logged at most 60 a minute with the excess counted
+in one `cache write refusals suppressed` line, an idle keep-alive connection is
+closed after two minutes, and a request body that delivers nothing for 60
+seconds is cut. There is no whole-request timeout, so a long save that keeps
+sending is never interrupted.
 
 ### Enable and verify
 

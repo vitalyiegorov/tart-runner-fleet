@@ -1,5 +1,5 @@
 // Package cachegate is the write gate in front of a node's LAN GitHub Actions
-// cache server (ADR 0075).
+// cache server (ADR 0078).
 //
 // The cache server verifies every runtime token's signature and keeps GitHub's
 // cache scoping: a job reads the scopes its token grants and writes the one it
@@ -18,8 +18,10 @@ package cachegate
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 )
 
 const cacheService = "/twirp/github.actions.results.api.v1.CacheService/"
@@ -100,7 +102,7 @@ func Decide(path string, header http.Header) Verdict {
 			continue
 		}
 		if !trusted(s.Scope) {
-			return Verdict{Status: http.StatusForbidden, Reason: "write scope " + s.Scope + " is read-only on this fleet"}
+			return Verdict{Status: http.StatusForbidden, Reason: "write scope " + boundScope(s.Scope) + " is read-only on this fleet"}
 		}
 		writable++
 	}
@@ -108,6 +110,24 @@ func Decide(path string, header http.Header) Verdict {
 		return Verdict{Status: http.StatusForbidden, Reason: "token grants no write scope"}
 	}
 	return Verdict{Allow: true, Upstream: CacheServer}
+}
+
+// maxLoggedScope bounds how much of a refused scope a reason quotes. The scope
+// comes from a token the gate has not verified, and the reason is logged, so a
+// forged token must not be able to write an arbitrarily long line.
+const maxLoggedScope = 128
+
+// boundScope is the scope as a refusal names it: whole when short, otherwise
+// cut to maxLoggedScope bytes on a rune boundary with its true length named.
+func boundScope(value string) string {
+	if len(value) <= maxLoggedScope {
+		return value
+	}
+	cut := maxLoggedScope
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s... (%d bytes)", value[:cut], len(value))
 }
 
 func trusted(ref string) bool { return hasPrefix(ref, trustedRefPrefixes) }

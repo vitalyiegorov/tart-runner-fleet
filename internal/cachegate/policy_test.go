@@ -4,14 +4,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // token builds the bearer value a runner presents: header.payload.signature,
 // with the cache scopes GitHub grants serialised as a JSON *string* inside the
 // `ac` claim. The signature is junk on purpose: the gate never trusts a token
 // to allow anything, it only refuses on what the token claims, and the cache
-// server behind it verifies every signature it is shown (ADR 0075).
+// server behind it verifies every signature it is shown (ADR 0078).
 func token(t *testing.T, scopes []scope) string {
 	t.Helper()
 	ac, err := json.Marshal(scopes)
@@ -136,5 +138,28 @@ func TestEverythingElseGoesStraightToGitHub(t *testing.T) {
 		if v := Decide(path, header("")); !v.Allow || v.Upstream != Results {
 			t.Fatalf("%s: %+v", path, v)
 		}
+	}
+}
+
+// TestARefusalNamesAtMostABoundedScope pins the review finding on #408: the
+// scope a refusal names comes from an unverified token, so a forged token must
+// not be able to write an arbitrarily long line into the gate's log.
+func TestARefusalNamesAtMostABoundedScope(t *testing.T) {
+	long := "refs/pull/" + strings.Repeat("x", 10000)
+	verdict := Decide(create, http.Header{"Authorization": {token(t, []scope{{Scope: long, Permission: 3}})}})
+	if verdict.Allow || verdict.Status != http.StatusForbidden {
+		t.Fatalf("verdict = %+v, want a refusal", verdict)
+	}
+	if len(verdict.Reason) > maxLoggedScope+64 || !strings.Contains(verdict.Reason, "10010 bytes") {
+		t.Fatalf("reason is %d bytes, want the scope cut to %d and its true length named: %.200q",
+			len(verdict.Reason), maxLoggedScope, verdict.Reason)
+	}
+	wide := Decide(create, http.Header{"Authorization": {token(t, []scope{{Scope: "refs/pull/x" + strings.Repeat("é", 200), Permission: 3}})}})
+	if !utf8.ValidString(wide.Reason) {
+		t.Fatalf("a cut through a multi-byte rune must back off to its start: %q", wide.Reason)
+	}
+	short := Decide(create, http.Header{"Authorization": {token(t, []scope{{Scope: "refs/pull/1/merge", Permission: 3}})}})
+	if short.Reason != "write scope refs/pull/1/merge is read-only on this fleet" {
+		t.Fatalf("a short scope must be named whole, got %q", short.Reason)
 	}
 }
