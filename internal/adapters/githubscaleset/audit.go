@@ -87,8 +87,11 @@ type ScaleSetStatistics struct {
 // ScaleSetSummary is one scale set as GitHub reports it. Statistics is nil when
 // the listing carried none, which is why the auditor can fill it in per set.
 type ScaleSetSummary struct {
-	ID         int
-	Name       string
+	ID   int
+	Name string
+	// Labels are the labels the listing says the set advertises, read from the
+	// same response rather than one more request.
+	Labels     []string
 	Statistics *ScaleSetStatistics
 }
 
@@ -262,6 +265,9 @@ func (t *listTap) afterResponse(_ retryablehttp.Logger, resp *http.Response) {
 	sets := make([]ScaleSetSummary, 0, len(payload.Value))
 	for _, set := range payload.Value {
 		summary := ScaleSetSummary{ID: set.ID, Name: set.Name}
+		for _, label := range set.Labels {
+			summary.Labels = append(summary.Labels, label.Name)
+		}
 		if set.Statistics != nil {
 			statistics := convertStatistics(set.Statistics)
 			summary.Statistics = &statistics
