@@ -1798,7 +1798,7 @@ confirmed by eye before anything is diffed. `fleet config validate` with both
 paths still applies ADR 0034's cross-node rules, which is a different question:
 legality, not agreement.
 
-## The LAN Actions cache (ADR 0076)
+## The LAN Actions cache (ADR 0078)
 
 A podman node can serve its own guests' GitHub Actions cache instead of sending
 every save and restore over the WAN. It is three pieces, all in

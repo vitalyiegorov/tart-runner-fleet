@@ -21,7 +21,7 @@
 
 ## The LAN Actions cache
 
-- A node's LAN Actions cache (ADR 0076) verifies every runtime token against
+- A node's LAN Actions cache (ADR 0078) verifies every runtime token against
   GitHub's signing keys and keeps GitHub's per-repository, per-ref scoping.
   Never set `SKIP_TOKEN_VALIDATION`.
 - Only branch and tag runs save. `fleet cache-gate` refuses every save whose

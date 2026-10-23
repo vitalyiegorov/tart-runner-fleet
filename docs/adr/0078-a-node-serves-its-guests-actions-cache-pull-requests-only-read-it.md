@@ -1,4 +1,4 @@
-# ADR 0076: A node serves its guests' Actions cache on the LAN; pull requests only read it
+# ADR 0078: A node serves its guests' Actions cache on the LAN; pull requests only read it
 
 ## Status
 
