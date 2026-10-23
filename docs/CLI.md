@@ -181,6 +181,11 @@ count and the age of the reading come from the daemon on this node, which
 `--endpoint` reaches; with no daemon to ask, the command reports those sets as
 **unjudged** rather than guessing either way.
 
+Each `--output json` row also carries the `labels` GitHub lists the set as
+advertising. The daemon reads the same labels from its own audit to prove a
+sibling-only alias (`linux-go-4x8` served only by the Macs) foreign under strict
+routing (issue #410).
+
 ### Recreating a stranded scale set
 
 `scale-sets recreate` is the guarded remedy for a bound set GitHub holds stale

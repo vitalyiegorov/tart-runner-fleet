@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,8 @@ func TestTheTapListsTheGroupAndKeepsTheAnswer(t *testing.T) {
 	}
 	resp := jsonResponse(req, http.StatusOK,
 		`{"count":2,"value":[{"id":1,"name":"mini","statistics":{"totalAssignedJobs":0}},`+
-			`{"id":7,"name":"studio","statistics":{"totalAssignedJobs":2,"totalBusyRunners":2,"totalIdleRunners":1}}]}`)
+			`{"id":7,"name":"studio","labels":[{"type":"System","name":"linux-go-4x8"},{"type":"System","name":"studio"}],`+
+			`"statistics":{"totalAssignedJobs":2,"totalBusyRunners":2,"totalIdleRunners":1}}]}`)
 	tap.afterResponse(nil, resp)
 
 	body, err := io.ReadAll(resp.Body)
@@ -84,6 +86,11 @@ func TestTheTapListsTheGroupAndKeepsTheAnswer(t *testing.T) {
 	}
 	if sets[1].Statistics.AssignedJobs != 2 || sets[1].Statistics.BusyRunners != 2 || sets[1].Statistics.IdleRunners != 1 {
 		t.Fatalf("GitHub's own counts must survive: %#v", *sets[1].Statistics)
+	}
+	// The advertised labels ride the same listing: they are what proves a
+	// sibling's alias foreign (issue #410) without another request.
+	if !slices.Equal(sets[1].Labels, []string{"linux-go-4x8", "studio"}) || len(sets[0].Labels) != 0 {
+		t.Fatalf("the listing's labels must be kept: %#v", sets)
 	}
 	if sets[0].Statistics == nil || sets[0].Statistics.AssignedJobs != 0 {
 		t.Fatalf("a set reporting zero is not a set reporting nothing: %#v", sets[0])

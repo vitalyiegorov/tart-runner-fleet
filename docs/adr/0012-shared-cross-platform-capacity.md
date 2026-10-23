@@ -11,7 +11,9 @@ infeasible reservation from stranding the residual envelope; and by
 configured envelope an opt-in elastic one derived from the observed physical
 host, turning `maxLinuxCpu` into a Linux-only cap when enabled; and by
 [ADR 0029](0029-remainder-admission-behind-a-reservation.md), which states when
-the complementary remainder pass may admit work behind a held reservation.
+the complementary remainder pass may admit work behind a held reservation; and by
+[ADR 0077](0077-a-slot-count-is-backed-by-the-envelope.md), which lets a node's
+slot count exceed four when its envelope can fill the slots.
 
 ## Context
 

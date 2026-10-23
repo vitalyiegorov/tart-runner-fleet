@@ -394,6 +394,15 @@ func (i Instance) IncarnatesDemand() bool {
 	return i.Demand != (DemandKey{}) && i.State != InstanceDeleted && i.State != InstanceFailed
 }
 
+// HoldsAssignment reports whether GitHub still counts this instance's job as
+// work its scale set holds: a live incarnation of its demand that has not begun
+// tearing down. A failed guest has released its demand, and a guest in the
+// teardown chain has finished its job or never received one -- drain guards
+// prove its runner idle first (ADR 0074) -- so neither is a job GitHub still
+// assigns the set. Counting them advertised slots GitHub then filled on a node
+// that had none (issue #397).
+func (i Instance) HoldsAssignment() bool { return i.IncarnatesDemand() && !i.State.TearingDown() }
+
 // TearingDown reports whether the instance state is one of the cleanup states:
 // it can never execute work again, and a durable drain operation is the actor
 // that finishes it. Every judgement that treats cleanup differently from live

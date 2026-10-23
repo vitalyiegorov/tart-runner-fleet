@@ -306,6 +306,27 @@ func containerNodeWorld() worldConfig {
 	return cfg.servingOnly(domain.PlatformLinux)
 }
 
+// wideLinuxNodeWorld is issue #393's node-b after its re-budget: 24 threads and
+// 60 GiB, of which the fleet is promised 20 CPU / 44 GiB, and ten slots -- more
+// than the four every node was held to before ADR 0077. It is its own world
+// because no other can reach more than four live guests, so the slot-count half
+// of property (g), the per-tick admission pace, and every reservation and
+// backfill rule above four live instances were unreachable by the generator.
+//
+// The repository caps are raised with it: a world whose caps sum to the old
+// slot count would only ever test the caps.
+func wideLinuxNodeWorld() worldConfig {
+	cfg := containerNodeWorld()
+	cfg.Name = "node-b-wide"
+	cfg.PhysicalCPU = 24
+	cfg.PhysicalMemoryMB = 61_440
+	cfg.Guards.MaxLoadAverage = 48
+	cfg.Scheduler.LinuxCapacity = domain.Resources{CPU: 20, MemoryMB: 45_056, Slots: 10}
+	cfg.Scheduler.HostBudget = domain.Resources{CPU: 20, MemoryMB: 45_056}
+	cfg.Scheduler.RepoCaps = map[string]int{"a/repo": 8, "b/repo": 6, "c/repo": 4, simControlPlaneRepo: 3}
+	return cfg
+}
+
 // macOSOnlyNodeWorld is the Mac that ADR 0055's retirement leaves behind: both
 // macOS profiles, no Linux profile at all, on the mini's ten cores.
 //
@@ -800,10 +821,9 @@ type world struct {
 	// arrivalsStopped marks the tick after which no new job may be created, which
 	// is what makes property (f) meaningful.
 	arrivalsStopped bool
-	// lastTick is the fleet's most recent tick, which is what its scale sets
-	// advertise from until the next one completes.
-	lastTick    app.TickResult
-	lastTickErr error
+	// advertisement is the node-wide residual view its scale sets advertise
+	// from, fed by every tick exactly as the daemon feeds it.
+	advertisement app.ResidualAdvertisement
 	// toSibling counts jobs GitHub placed elsewhere because this node's sets
 	// advertised no room for them (issue #388).
 	toSibling int
@@ -1068,7 +1088,7 @@ func (w *world) reconcile() tickObservation {
 	// built from rather than against the state it just created.
 	instances, host := w.engine.Inventory.Observe(w.ctx)
 	result, err := w.engine.Tick(w.ctx)
-	w.lastTick, w.lastTickErr = result, err
+	w.advertisement.Observe(result, err)
 	queued := 0
 	for _, summary := range result.Queues {
 		queued += summary.Count
@@ -1076,7 +1096,7 @@ func (w *world) reconcile() tickObservation {
 	return tickObservation{
 		Tick: w.tick, Now: w.now, Plan: result.Plan, Applied: result.Applied, Err: err,
 		Demands: result.Demands, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
-		Host: host.Value, HostUsable: host.Usable(),
+		Host: host.Value, HostUsable: host.Usable(), Headroom: result.Headroom,
 	}
 }
 
