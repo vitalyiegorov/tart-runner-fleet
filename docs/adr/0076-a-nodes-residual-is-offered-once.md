@@ -15,7 +15,8 @@ amd64 nodes advertised room on about three of their fourteen sets at a time, and
 rnw-community and budgie-at jobs queued while their sets read zero stayed queued
 for up to three hours with both nodes idle; the later runs of the same branch
 waited behind them on their concurrency group. The floor bounds over-offering
-to one instance per set -- at most one job per scope on a node with any room --
+to one instance per set -- at most one job per set on a node with any room, so a
+scope with a 2x4 and a 4x8 set may be offered one of each --
 instead of the whole residual per set that caused #397.
 
 ## Context
@@ -55,8 +56,10 @@ wait on an idle machine.
 profile and both platforms, and grants units of each claim's vector one at a
 time. Each grant is charged exactly like one more waiting demand: against the
 same envelopes the planner admits with, after every queued demand, and within
-each macOS profile's MaxActive. So everything the sets are offered beyond what
-they hold could start on the node at once. Two profiles that share one budget
+each macOS profile's MaxActive. So everything the round robin offers beyond
+what the sets hold could start on the node at once; the #412 floor then adds at
+most one instance to each set the round robin left at zero, which can exceed
+what starts at once by one per such set. Two profiles that share one budget
 (a 2x4 and a 4x8 set, or a maestro and a builder set) also share their offer.
 
 **Fairness is answered by order, not by withholding.** Units are granted round
