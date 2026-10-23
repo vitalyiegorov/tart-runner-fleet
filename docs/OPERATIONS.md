@@ -1798,6 +1798,30 @@ confirmed by eye before anything is diffed. `fleet config validate` with both
 paths still applies ADR 0034's cross-node rules, which is a different question:
 legality, not agreement.
 
+### A job waiting on one node while its sibling has room
+
+Two nodes that advertise the same labels split a scope's jobs by the capacity
+each scale set last advertised, and a job GitHub has placed never moves. Since
+[ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md) a node divides its
+residual among its scale sets once. Everything the sets are offered beyond
+what they hold could start on the node at once, so a burst across several
+scopes lands on whichever node has the room. A set whose scope has a job
+queued that the node has not been handed is served first. The remainder
+rotates every 30 seconds.
+
+Expect a set to advertise only what it holds while its node is full, even
+though its scope's queue is not empty: that is the job going to the sibling.
+Three readings would be a defect to report with the queue rows and instance
+lists of both nodes:
+
+- a job **placed** on a node (`fleet queues` shows it delivered) while that
+  node had no free slot and its sibling had one;
+- a node whose sets advertise nothing for longer than one REST refresh while it
+  has a free slot and a scope it serves has a job queued;
+- either of the above while the node's ticks are failing. A tick that cannot
+  plan keeps the last view rather than advertising the configured maximum, so
+  a struggling node invites no more work than it last knew it could start.
+
 ## Recovery
 
 1. Stop admission; do not delete uncertain VMs.

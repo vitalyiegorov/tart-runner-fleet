@@ -492,14 +492,10 @@ const (
 	authorityLeaseAcquireWindow = authorityLeaseTTL * 3 / 2
 	// authorityLeaseAcquireRetry paces reacquisition attempts inside the window.
 	authorityLeaseAcquireRetry = 1 * time.Second
-	// authorityLeaseRenewTimeout bounds one renewal attempt. It is deliberately
-	// far shorter than the TTL so a wedged attempt leaves room for grace retries
-	// inside the same lease.
-	authorityLeaseRenewTimeout = 5 * time.Second
-	// authorityLeaseRenewRetry paces grace retries after a transient renewal
-	// failure. Two seconds inside a thirty-second TTL leaves roughly nine
-	// attempts after the first scheduled renewal, which is far more resilience
-	// than the single attempt that has been ending the process.
+	// authorityLeaseRenewRetry paces grace retries after a renewal attempt that
+	// failed fast and transiently (SQLite busy, an I/O error) while the lease is
+	// still held. A slow attempt is not retried: it is given the lease's whole
+	// remaining validity to finish (ADR 0075).
 	authorityLeaseRenewRetry   = 2 * time.Second
 	deletionConfirmationMaxAge = 30 * time.Second
 	// containerStopGrace is how long podman lets a runner container's process
@@ -786,9 +782,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// Only truthful capacity is lowered to the residual (issue #388). Without
 	// canonical inventory the configured capacity is deliberately inflated for
 	// queue lookahead (ADR 0009), and that mechanism needs it advertised as is.
-	var advertiser *residualAdvertiser
+	var advertiser *app.ResidualAdvertisement
 	if canonicalRESTInventory {
-		advertiser = newResidualAdvertiser(d.now, max(residualAdvertisementMaxAge, 3*cfg.PollInterval))
+		advertiser = &app.ResidualAdvertisement{}
 	}
 	// memberSources keys each binding's session by the scale set it polls, which
 	// is the key the scale-set audit's verdict arrives under (ADR 0063).
@@ -823,7 +819,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				}
 				var capacity func() int
 				if advertiser != nil {
-					capacity = advertiser.provider(binding.StoreKey, settings.scaleSet.MaxCapacity)
+					key, configured := binding.StoreKey, settings.scaleSet.MaxCapacity
+					capacity = func() int { return advertiser.Capacity(key, configured) }
 				}
 				openSource := func(openCtx context.Context) (scaleSetSource, error) {
 					cursor, cursorErr := d.cursor(openCtx, store, settings.cursorKey)
@@ -1387,12 +1384,27 @@ func startAuthorityLease(ctx context.Context, store operations.Store, owner stri
 // drain — scheduling gaps measured in minutes, caused by a transient I/O blip.
 //
 // So a transient failure is retried INSIDE the lease's own validity, and the
-// guard surrenders the moment it can no longer prove it holds the lease. This
-// only ever narrows the window in which the process claims authority: no attempt
-// may outlive ExpiresAt, and an expired lease is reported as lost rather than
-// renewed. A fencing loss (ErrLeaseLost — another owner or a deleted row) or a
-// malformed request (ErrInvalid) is reported immediately and unchanged: those are
-// proof, not a blip.
+// guard surrenders the moment it can no longer prove it holds the lease. A fencing
+// loss (ErrLeaseLost — another owner or a deleted row) or a malformed request
+// (ErrInvalid) is reported immediately and unchanged: those are proof, not a blip.
+//
+// One attempt's deadline is the lease's own ExpiresAt, not a short fixed budget.
+// Incident 2026-10-22 (issue #295, reopened): on a host at load 135–384 the
+// daemon still exited with "renew lease: context deadline exceeded". A renewal
+// that needs longer than a five-second budget to commit is cut off, each retry
+// restarts the same work and is cut off again, and the guard surrenders while its
+// row still holds validity — then crash-loops on the same starved host. Cutting a
+// slow attempt off early can only discard progress: the lease connection is
+// dedicated, so a retry waits behind nothing the abandoned attempt did not.
+//
+// The invariant, precisely: every renewal attempt is cancelled no later than the
+// ExpiresAt of the last lease this guard durably holds, and a failure that leaves
+// no time for another attempt is reported as lost at once, so the daemon stops
+// acting at that expiry (plus only the latency of cancelling its work — the same
+// bound as before this change). A renewal is stamped from the instant the attempt
+// began, so its committed expiry is never later than began+TTL, however long the
+// commit took. The successor's acquisition rule (absent or expired row, fenced by
+// token) is untouched, so no two controllers can overlap.
 func (g *authorityLease) renew(ctx context.Context, after func(time.Duration) <-chan time.Time) {
 	defer close(g.done)
 	delay := authorityLeaseRenewInterval
@@ -1405,19 +1417,20 @@ func (g *authorityLease) renew(ctx context.Context, after func(time.Duration) <-
 		g.mu.Lock()
 		lease := g.lease
 		g.mu.Unlock()
-		budget := renewBudget(g.now().UTC(), lease.ExpiresAt)
+		began := g.now().UTC()
+		budget := lease.ExpiresAt.Sub(began)
 		if budget <= 0 {
 			g.errors <- fmt.Errorf("renew lease: %w", operations.ErrLeaseLost)
 			return
 		}
 		renewCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
-		renewed, err := g.store.RenewLease(renewCtx, lease, g.now().UTC(), authorityLeaseTTL)
+		renewed, err := g.store.RenewLease(renewCtx, lease, began, authorityLeaseTTL)
 		cancel()
 		if err == nil {
 			g.mu.Lock()
 			g.lease = renewed
 			g.mu.Unlock()
-			delay = authorityLeaseRenewInterval
+			delay = nextRenewal(g.now().UTC(), renewed.ExpiresAt)
 			continue
 		}
 		if !transientRenewFailure(err) || !renewRetryFits(g.now().UTC(), lease.ExpiresAt) {
@@ -1428,11 +1441,13 @@ func (g *authorityLease) renew(ctx context.Context, after func(time.Duration) <-
 	}
 }
 
-// renewBudget bounds one renewal attempt so it can never outlive the lease it is
-// renewing. Blocking past ExpiresAt would leave this process acting on authority
-// a successor is already entitled to acquire.
-func renewBudget(now, expiresAt time.Time) time.Duration {
-	return min(authorityLeaseRenewTimeout, expiresAt.Sub(now))
+// nextRenewal schedules the next renewal for when the lease's remaining validity
+// falls to the ordinary margin (TTL minus the renewal interval). After a prompt
+// renewal that is one interval away; after a slow one it is correspondingly
+// sooner, so a late success does not leave the next attempt with only seconds of
+// validity to work in.
+func nextRenewal(now, expiresAt time.Time) time.Duration {
+	return max(0, expiresAt.Add(authorityLeaseRenewInterval-authorityLeaseTTL).Sub(now))
 }
 
 // renewRetryFits reports whether another grace retry can still complete while
@@ -1654,7 +1669,7 @@ func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleS
 			continue
 		}
 		rows = append(rows, telemetry.ParkedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name,
-			Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
+			Labels: append([]string(nil), set.Labels...), Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
 	}
 	return rows
 }
@@ -1738,7 +1753,8 @@ func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSe
 	var selectors []app.ForeignScaleSetSelector
 	for _, row := range snapshot.ParkedScaleSets {
 		if fresh(row.ObservedAt) {
-			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name})
+			selectors = append(selectors, app.ForeignScaleSetSelector{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name,
+				Labels: append([]string(nil), row.Labels...)})
 		}
 	}
 	return selectors
@@ -2315,16 +2331,10 @@ type engineTicker struct {
 	// its own pending update needs (ADR 0011 amendment, issue #230).
 	drain *updateDrainController
 	// advertiser hands each tick's residual envelope to the scale-set sessions
-	// (issue #388). Nil when capacity is not truthful, which advertises the
-	// configured value unchanged.
-	advertiser *residualAdvertiser
+	// (issues #388 and #397). Nil when capacity is not truthful, which advertises
+	// the configured value unchanged.
+	advertiser *app.ResidualAdvertisement
 }
-
-// residualAdvertisementMaxAge is how old the scheduler's view of the residual
-// may be before scale sets stop trusting it and advertise their configured
-// capacity again. It matches the statistics freshness bound the demand path
-// already uses.
-const residualAdvertisementMaxAge = 2 * time.Minute
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
 // carries. An unclassified error yields no detail rather than free-form text, so
@@ -2341,7 +2351,7 @@ func (e engineTicker) Tick(ctx context.Context) error {
 	result, err := e.engine.Tick(ctx)
 	success := err == nil && result.Plan.Status == "ready"
 	e.health.RecordTick(success)
-	e.advertiser.observe(result, err == nil && success)
+	e.advertiser.Observe(result, err)
 	freshness := telemetry.ObservationFresh
 	// A blocked plan explains itself through the plan reason. An error has no
 	// plan at all -- every failing return yields a zero TickResult -- so the

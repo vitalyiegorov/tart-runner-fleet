@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -2128,23 +2129,22 @@ func TestAuthorityLeaseFencingLossIsNeverRetried(t *testing.T) {
 	}
 }
 
-// TestRenewBudgetNeverOutlivesTheLease proves an in-flight attempt cannot keep
-// this process acting on authority past the expiry a successor is entitled to
-// acquire at.
-func TestRenewBudgetNeverOutlivesTheLease(t *testing.T) {
-	base := time.Date(2026, 8, 1, 18, 15, 0, 0, time.UTC)
+// TestNextRenewalKeepsTheOrdinaryMarginAfterASlowSuccess proves the cadence is
+// measured from the lease's validity, not from when a renewal returned: a slow
+// success is followed sooner, and an overdue one immediately.
+func TestNextRenewalKeepsTheOrdinaryMarginAfterASlowSuccess(t *testing.T) {
+	base := time.Date(2026, 10, 22, 10, 15, 0, 0, time.UTC)
 	for _, testCase := range []struct {
 		remaining time.Duration
 		want      time.Duration
 	}{
-		{remaining: authorityLeaseTTL, want: authorityLeaseRenewTimeout},
-		{remaining: authorityLeaseRenewTimeout, want: authorityLeaseRenewTimeout},
-		{remaining: time.Second, want: time.Second},
-		{remaining: 0, want: 0},
-		{remaining: -time.Second, want: -time.Second},
+		{remaining: authorityLeaseTTL, want: authorityLeaseRenewInterval},
+		{remaining: authorityLeaseTTL - 8*time.Second, want: authorityLeaseRenewInterval - 8*time.Second},
+		{remaining: authorityLeaseTTL - authorityLeaseRenewInterval, want: 0},
+		{remaining: time.Second, want: 0},
 	} {
-		if got := renewBudget(base, base.Add(testCase.remaining)); got != testCase.want {
-			t.Fatalf("renewBudget with %v remaining = %v, want %v", testCase.remaining, got, testCase.want)
+		if got := nextRenewal(base, base.Add(testCase.remaining)); got != testCase.want {
+			t.Fatalf("nextRenewal with %v remaining = %v, want %v", testCase.remaining, got, testCase.want)
 		}
 	}
 }
@@ -2423,4 +2423,153 @@ func TestABindingFailureLineOmitsFactsItDoesNotHave(t *testing.T) {
 	if !strings.Contains(line, "phase="+githubscaleset.PhasePoll) {
 		t.Fatalf("every failure has a phase: %q", line)
 	}
+}
+
+// slowRenewalStore models the 2026-10-22 Mac Studio recurrence (issue #295):
+// load 135–384 from the owner's interactive work, and every renewal UPDATE
+// needed longer than one short per-attempt deadline to commit. Each attempt
+// costs `work` of the guard's (fake) clock. An attempt whose deadline is shorter
+// than that work is cut off at the deadline and fails with
+// context.DeadlineExceeded, exactly as an interrupted SQLite statement does, and
+// that work is lost; an attempt given room to finish commits.
+//
+// It also fails the test outright if any attempt is handed a deadline that
+// reaches past the lease's ExpiresAt: patience may grow, the window in which this
+// process claims authority may not.
+type slowRenewalStore struct {
+	renewalStore
+	t     *testing.T
+	clock *atomic.Int64
+	work  time.Duration
+	held  time.Time
+}
+
+func (s *slowRenewalStore) RenewLease(ctx context.Context, lease operations.Lease, now time.Time, ttl time.Duration) (operations.Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.attempts++
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		s.t.Error("renewal attempt carried no deadline")
+		return operations.Lease{}, errors.New("no deadline")
+	}
+	budget := time.Until(deadline)
+	if remaining := s.held.Sub(now); budget > remaining+time.Second {
+		s.t.Errorf("renewal attempt budget %v outlives the lease's remaining validity %v", budget, remaining)
+	}
+	if budget < s.work {
+		s.clock.Store(now.Add(budget).UnixNano())
+		return operations.Lease{}, fmt.Errorf("renew lease: %w", context.DeadlineExceeded)
+	}
+	s.clock.Store(now.Add(s.work).UnixNano())
+	lease.ExpiresAt = now.Add(ttl)
+	s.held = lease.ExpiresAt
+	return lease, nil
+}
+
+func startSlowLeaseGuard(t *testing.T, base time.Time, work time.Duration) (*slowRenewalStore, leaseGuardHarness) {
+	t.Helper()
+	store := &slowRenewalStore{renewalStore: renewalStore{expires: base.Add(authorityLeaseTTL)}, t: t,
+		work: work, held: base.Add(authorityLeaseTTL)}
+	var clock atomic.Int64
+	clock.Store(base.UnixNano())
+	store.clock = &clock
+	harness := leaseGuardHarness{clock: &clock, ticks: make(chan time.Time), delays: make(chan time.Duration, 16)}
+	guard, err := startAuthorityLease(context.Background(), store, "authority",
+		func() time.Time { return time.Unix(0, clock.Load()).UTC() },
+		func(delay time.Duration) <-chan time.Time {
+			harness.delays <- delay
+			// A scheduled wait spends the guard's clock, so the lease ages
+			// between attempts exactly as it does in production.
+			clock.Add(int64(delay))
+			return harness.ticks
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(guard.Close)
+	harness.guard = guard
+	return store, harness
+}
+
+// TestAuthorityLeaseSurvivesARenewalSlowerThanAShortDeadline is the 2026-10-22
+// recurrence of issue #295. The host was saturated by interactive work, one
+// renewal needed seven seconds to commit, and the lease still had twenty seconds
+// of validity when the attempt began. The guard cut every attempt off at five
+// seconds, so each retry restarted the same seven seconds of work and was cut off
+// again, until no retry fit before ExpiresAt and the daemon exited with
+// "controller authority lost: renew lease: context deadline exceeded" — while the
+// durable row still named it. launchd relaunched it onto the same starved host,
+// where it crash-looped without completing a tick.
+//
+// A renewal that can still commit before the lease expires must be allowed to.
+func TestAuthorityLeaseSurvivesARenewalSlowerThanAShortDeadline(t *testing.T) {
+	base := time.Date(2026, 10, 22, 10, 15, 0, 0, time.UTC)
+	const work = 7 * time.Second
+	store, harness := startSlowLeaseGuard(t, base, work)
+
+	harness.nextDelay(t)
+	// Drive the loop until it either schedules the ordinary next renewal or
+	// surrenders; on a five-second per-attempt deadline it retries and then
+	// gives up.
+	for range 16 {
+		harness.ticks <- time.Time{}
+		select {
+		case err := <-harness.guard.errors:
+			t.Fatalf("a renewal that could commit inside the lease's validity surrendered authority after %d attempts: %v",
+				store.renewals(), err)
+		case delay := <-harness.delays:
+			if delay == authorityLeaseRenewRetry {
+				continue
+			}
+			if got := store.renewals(); got != 1 {
+				t.Fatalf("renewal attempts = %d, want 1: a slow attempt must be let finish, not cut off and restarted", got)
+			}
+			harness.guard.mu.Lock()
+			expiry := harness.guard.lease.ExpiresAt
+			harness.guard.mu.Unlock()
+			if want := base.Add(authorityLeaseRenewInterval).Add(authorityLeaseTTL); !expiry.Equal(want) {
+				t.Fatalf("renewed expiry = %v, want %v (renewal is stamped from when it began)", expiry, want)
+			}
+			// The slow commit consumed seven seconds of the renewed lease, so the
+			// next renewal is due when the remaining validity falls to the
+			// ordinary margin, not a full interval after this late success.
+			if want := authorityLeaseRenewInterval - work; delay != want {
+				t.Fatalf("next renewal scheduled after %v, want %v", delay, want)
+			}
+			return
+		case <-time.After(2 * time.Second):
+			t.Fatal("renewal loop neither rescheduled nor surrendered")
+		}
+	}
+	t.Fatal("renewal loop never settled")
+}
+
+// TestAuthorityLeaseStillSurrendersWhenTheRenewalCannotLandBeforeExpiry pins the
+// fail-closed half. When the commit needs longer than the lease has left, the
+// attempt is cut off no later than ExpiresAt and authority is reported lost: a
+// lease that has truly expired stops this process acting, so a successor may
+// legitimately take over.
+func TestAuthorityLeaseStillSurrendersWhenTheRenewalCannotLandBeforeExpiry(t *testing.T) {
+	base := time.Date(2026, 10, 22, 10, 15, 0, 0, time.UTC)
+	_, harness := startSlowLeaseGuard(t, base, authorityLeaseTTL)
+
+	harness.nextDelay(t)
+	for range 16 {
+		harness.ticks <- time.Time{}
+		select {
+		case err := <-harness.guard.errors:
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, operations.ErrLeaseLost) {
+				t.Fatalf("surrender err=%v, want deadline exceeded or lease lost", err)
+			}
+			if now := time.Unix(0, harness.clock.Load()).UTC(); now.After(base.Add(authorityLeaseTTL)) {
+				t.Fatalf("authority surrendered at %v, after the lease expired at %v", now, base.Add(authorityLeaseTTL))
+			}
+			return
+		case <-harness.delays:
+		case <-time.After(2 * time.Second):
+			t.Fatal("renewal loop neither rescheduled nor surrendered")
+		}
+	}
+	t.Fatal("a lease that could never be renewed was never surrendered")
 }

@@ -33,9 +33,9 @@ func mediumDemands(count int, age time.Duration) []domain.Demand {
 // planner; it is not the node's capacity, and advertising it as one hands work
 // a node can start to a sibling that may not be able to.
 func TestAWideNodeAdvertisesItsWholeEnvelope(t *testing.T) {
-	got, ok := Headroom(wideNodeInput(nil, nil), "medium")
+	got, ok := headroom(wideNodeInput(nil, nil), "medium")
 	if !ok || got != 10 {
-		t.Fatalf("Headroom(medium) = %d, %v; want all ten 2x4 guests the idle envelope holds", got, ok)
+		t.Fatalf("headroom(medium) = %d, %v; want all ten 2x4 guests the idle envelope holds", got, ok)
 	}
 	plan := PlanTick(wideNodeInput(nil, nil))
 	if plan.Envelope.Free.Slots != 10 || plan.Envelope.AgedFree.Slots != 10 {

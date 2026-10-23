@@ -72,6 +72,9 @@ type Binding struct {
 	// observe for itself, and it is what bounds this binding's claim on the
 	// scope's queue to the share GitHub gave it (issue #153).
 	SharedLabels bool
+	// Capacity is the set's configured maxCapacity, the most it ever advertises.
+	// Zero means unknown and bounds nothing.
+	Capacity int
 }
 
 func (b Binding) valid() bool {
@@ -140,6 +143,10 @@ type ForeignScaleSetSelector struct {
 	Scope string
 	ID    int64
 	Name  string
+	// Labels are the labels GitHub lists the set as advertising, from the same
+	// audit listing. A job whose every routing label one sibling advertises is
+	// that sibling's work (issue #410).
+	Labels []string
 }
 
 type DemandCoordinator struct {
@@ -432,10 +439,13 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 }
 
 // jobSelectsForeignSet requires an explicit selector for a freshly audited set
-// outside every local binding in this scope. Unknown labels alone prove nothing.
+// outside every local binding in this scope: the job names the set, or every
+// routing label it carries is one that set advertises (issue #410). Unknown
+// labels alone prove nothing.
 func (c DemandCoordinator) jobSelectsForeignSet(bindings []Binding, job githubscaleset.WorkflowJob) bool {
 	for _, peer := range c.ForeignSelectors {
-		if peer.ID <= 0 || peer.Scope == "" || peer.Name == "" || !containsFold(job.Labels, peer.Name) {
+		if peer.ID <= 0 || peer.Scope == "" || peer.Name == "" ||
+			!containsFold(job.Labels, peer.Name) && !advertisesEveryRoutingLabel(peer.Labels, job.Labels) {
 			continue
 		}
 		accepted, local := false, false
@@ -455,6 +465,22 @@ func (c DemandCoordinator) jobSelectsForeignSet(bindings []Binding, job githubsc
 		}
 	}
 	return false
+}
+
+// advertisesEveryRoutingLabel reports whether one set advertises every label of
+// the job besides `self-hosted`. A job carrying no other label selects nothing.
+func advertisesEveryRoutingLabel(advertised, labels []string) bool {
+	routed := false
+	for _, label := range labels {
+		if strings.EqualFold(label, "self-hosted") {
+			continue
+		}
+		if !containsFold(advertised, label) {
+			return false
+		}
+		routed = true
+	}
+	return routed
 }
 
 var foreignJobRoutePattern = regexp.MustCompile(`(?i)^trf-(linux|macos)-(arm64|amd64)-[1-9][0-9]*x[1-9][0-9]*$`)

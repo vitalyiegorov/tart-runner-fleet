@@ -821,10 +821,9 @@ type world struct {
 	// arrivalsStopped marks the tick after which no new job may be created, which
 	// is what makes property (f) meaningful.
 	arrivalsStopped bool
-	// lastTick is the fleet's most recent tick, which is what its scale sets
-	// advertise from until the next one completes.
-	lastTick    app.TickResult
-	lastTickErr error
+	// advertisement is the node-wide residual view its scale sets advertise
+	// from, fed by every tick exactly as the daemon feeds it.
+	advertisement app.ResidualAdvertisement
 	// toSibling counts jobs GitHub placed elsewhere because this node's sets
 	// advertised no room for them (issue #388).
 	toSibling int
@@ -1089,7 +1088,7 @@ func (w *world) reconcile() tickObservation {
 	// built from rather than against the state it just created.
 	instances, host := w.engine.Inventory.Observe(w.ctx)
 	result, err := w.engine.Tick(w.ctx)
-	w.lastTick, w.lastTickErr = result, err
+	w.advertisement.Observe(result, err)
 	queued := 0
 	for _, summary := range result.Queues {
 		queued += summary.Count
@@ -1097,7 +1096,7 @@ func (w *world) reconcile() tickObservation {
 	return tickObservation{
 		Tick: w.tick, Now: w.now, Plan: result.Plan, Applied: result.Applied, Err: err,
 		Demands: result.Demands, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
-		Host: host.Value, HostUsable: host.Usable(),
+		Host: host.Value, HostUsable: host.Usable(), Headroom: result.Headroom,
 	}
 }
 
