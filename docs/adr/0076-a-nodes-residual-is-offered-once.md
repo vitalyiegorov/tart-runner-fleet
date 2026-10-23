@@ -1,4 +1,4 @@
-# ADR 0075: A node's residual is offered once, not once per scale set
+# ADR 0076: A node's residual is offered once, not once per scale set
 
 ## Status
 

@@ -1802,7 +1802,7 @@ legality, not agreement.
 
 Two nodes that advertise the same labels split a scope's jobs by the capacity
 each scale set last advertised, and a job GitHub has placed never moves. Since
-[ADR 0075](adr/0075-a-nodes-residual-is-offered-once.md) a node divides its
+[ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md) a node divides its
 residual among its scale sets once. Everything the sets are offered beyond
 what they hold could start on the node at once, so a burst across several
 scopes lands on whichever node has the room. A set whose scope has a job
