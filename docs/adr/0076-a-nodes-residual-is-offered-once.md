@@ -6,6 +6,18 @@ Accepted. Amends [ADR 0073](0073-scale-sets-advertise-the-residual-envelope.md):
 it replaces that record's rejection of dividing the residual, its definition of
 `held`, and its fail-open rule for a tick that is not ready. Issue #397.
 
+Amended by issue #412 (2026-10-23): a set the division leaves at zero is
+floored at one when one instance of its vector fits the residual left after
+waiting work. GitHub places a job only on a set advertising room when the job
+is queued and does not move it later, and a shared-label set counts a REST job
+as waiting only once GitHub has assigned it there. On v0.1.725-v0.1.730 the two
+amd64 nodes advertised room on about three of their fourteen sets at a time, and
+rnw-community and budgie-at jobs queued while their sets read zero stayed queued
+for up to three hours with both nodes idle; the later runs of the same branch
+waited behind them on their concurrency group. The floor bounds over-offering
+to one instance per set -- at most one job per scope on a node with any room --
+instead of the whole residual per set that caused #397.
+
 ## Context
 
 The Mac mini and the Mac Studio each serve seven scopes. Every scope binds one
