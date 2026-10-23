@@ -45,10 +45,11 @@ const shareRotation = 30 * time.Second
 // through the same functions, so an offer and an admission are never judged
 // against different capacity:
 //
-//   - the hard-bounds envelope (`linuxFreeAged` for macOS, `agedLinuxEnvelope`
-//     with its four-slot ceiling for Linux). A job placed now is admitted once it
-//     ages if it is not admitted sooner, and the advisory CPU-idle clamp that
-//     young work waits on is not a reason to send work elsewhere;
+//   - the hard-bounds envelope (`linuxFreeAged`) with the node's true slot
+//     count (ADR 0077). A job placed now is admitted once it ages if it is not
+//     admitted sooner, and neither the advisory CPU-idle clamp that young work
+//     waits on nor the per-tick admission pace (`admissionsPerTick`) is a reason
+//     to send work elsewhere;
 //   - every queued demand not already incarnated (`queuedVectors`) is charged
 //     first, wherever it is queued, and that includes the aged head's
 //     reservation. A dimension a demand cannot be charged in full is exhausted
@@ -74,15 +75,9 @@ func PartitionHeadroom(in Input, claims []Claim) ([]int, bool) {
 		return nil, false
 	}
 	waiting := normalizedDemands(in)
-	free := map[domain.Platform]domain.Resources{
-		domain.PlatformMacOS: linuxFreeAged(in), domain.PlatformLinux: agedLinuxEnvelope(in)}
-	charge := func(vector domain.Resources) {
-		for platform, envelope := range free {
-			free[platform] = exhaust(envelope, vector)
-		}
-	}
+	free := linuxFreeAged(in)
 	for _, vector := range queuedVectors(in.Config, in.Instances.Value, waiting) {
-		charge(vector)
+		free = exhaust(free, vector)
 	}
 	cohort := map[domain.ProfileID]int{}
 	shares := make([]int, len(claims))
@@ -99,7 +94,7 @@ func PartitionHeadroom(in Input, claims []Claim) ([]int, bool) {
 	grant := func(index int) bool {
 		profile := claims[index].Profile
 		definition := in.Config.Profiles[profile]
-		if !free[definition.Platform].CanFit(definition.Resources) {
+		if !free.CanFit(definition.Resources) {
 			return false
 		}
 		if definition.Platform == domain.PlatformMacOS {
@@ -108,7 +103,7 @@ func PartitionHeadroom(in Input, claims []Claim) ([]int, bool) {
 			}
 			cohort[profile]--
 		}
-		charge(definition.Resources)
+		free = exhaust(free, definition.Resources)
 		shares[index]++
 		return true
 	}

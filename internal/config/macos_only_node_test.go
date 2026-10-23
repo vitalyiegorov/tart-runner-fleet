@@ -92,7 +92,7 @@ func TestDeclaredLinuxProfilesStillRequireTheLinuxBlock(t *testing.T) {
 	tests := map[string]func(*Config){
 		"no base VM":       func(c *Config) { c.Linux.BaseVM = "" },
 		"no slots":         func(c *Config) { c.Linux.MaxInstances = 0 },
-		"too many slots":   func(c *Config) { c.Linux.MaxInstances = 5 },
+		"too many slots":   func(c *Config) { c.Linux.MaxInstances = 9 },
 		"no capacity cpu":  func(c *Config) { c.Linux.Capacity.CPU = 0 },
 		"no capacity ram":  func(c *Config) { c.Linux.Capacity.MemoryMiB = 0 },
 		"no vm prefix":     func(c *Config) { c.Linux.VMPrefix = "" },

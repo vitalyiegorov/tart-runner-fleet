@@ -74,6 +74,41 @@ func TestSimFuzzMacOSOnlyNode(t *testing.T) {
 	sweep(t, "TestSimFuzzMacOSOnlyNode", macOSOnlyNodeWorld())
 }
 
+// TestSimFuzzWideLinuxNode is the same sweep on a node with ten slots (ADR
+// 0077). Its own arm for the reason every world is one: the seed stream is a
+// function of the world, and only this world can hold more than four guests.
+func TestSimFuzzWideLinuxNode(t *testing.T) {
+	t.Parallel()
+	sweep(t, "TestSimFuzzWideLinuxNode", wideLinuxNodeWorld())
+}
+
+// TestWideLinuxNodeHoldsMoreThanFourGuests guards that world's reason to exist.
+// A generator that never fills more than four slots would let the sweep above
+// pass while proving nothing about the larger ceiling -- the blind spot ADR 0031
+// warns about -- so the sweep's own seeds must reach it.
+func TestWideLinuxNodeHoldsMoreThanFourGuests(t *testing.T) {
+	t.Parallel()
+	cfg := wideLinuxNodeWorld()
+	peak := 0
+	for seed := int64(1); seed <= 8 && peak <= 4; seed++ {
+		w := newWorld(t, cfg, generateTrace(seed, *ticksFlag, cfg))
+		w.run()
+		for _, observation := range w.observations {
+			live := 0
+			for _, instance := range observation.Instances {
+				if instance.ConsumesHostResources() {
+					live++
+				}
+			}
+			peak = max(peak, live)
+		}
+		w.close()
+	}
+	if peak <= 4 {
+		t.Fatalf("the wide node never held more than %d guests across its seeds", peak)
+	}
+}
+
 func sweep(t *testing.T, name string, cfg worldConfig) {
 	t.Helper()
 	for offset := range *seedsFlag {

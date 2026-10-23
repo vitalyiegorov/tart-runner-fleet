@@ -306,6 +306,27 @@ func containerNodeWorld() worldConfig {
 	return cfg.servingOnly(domain.PlatformLinux)
 }
 
+// wideLinuxNodeWorld is issue #393's node-b after its re-budget: 24 threads and
+// 60 GiB, of which the fleet is promised 20 CPU / 44 GiB, and ten slots -- more
+// than the four every node was held to before ADR 0077. It is its own world
+// because no other can reach more than four live guests, so the slot-count half
+// of property (g), the per-tick admission pace, and every reservation and
+// backfill rule above four live instances were unreachable by the generator.
+//
+// The repository caps are raised with it: a world whose caps sum to the old
+// slot count would only ever test the caps.
+func wideLinuxNodeWorld() worldConfig {
+	cfg := containerNodeWorld()
+	cfg.Name = "node-b-wide"
+	cfg.PhysicalCPU = 24
+	cfg.PhysicalMemoryMB = 61_440
+	cfg.Guards.MaxLoadAverage = 48
+	cfg.Scheduler.LinuxCapacity = domain.Resources{CPU: 20, MemoryMB: 45_056, Slots: 10}
+	cfg.Scheduler.HostBudget = domain.Resources{CPU: 20, MemoryMB: 45_056}
+	cfg.Scheduler.RepoCaps = map[string]int{"a/repo": 8, "b/repo": 6, "c/repo": 4, simControlPlaneRepo: 3}
+	return cfg
+}
+
 // macOSOnlyNodeWorld is the Mac that ADR 0055's retirement leaves behind: both
 // macOS profiles, no Linux profile at all, on the mini's ten cores.
 //

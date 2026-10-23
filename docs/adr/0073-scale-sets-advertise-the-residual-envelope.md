@@ -8,6 +8,11 @@ counts only guests that still hold an assignment, and a tick that is not ready
 keeps the last view. The sections below on "Concurrent polls" and "Fail open"
 are superseded where they disagree.
 
+Further amended by [ADR 0077](0077-a-slot-count-is-backed-by-the-envelope.md):
+Linux headroom is read from `linuxFreeAged` with the node's true slot count,
+because the four-slot clamp `agedLinuxEnvelope` applied is now a per-tick
+admission pace rather than a capacity.
+
 ## Context
 
 Issue #388. On 2026-10-21 the MacBook (host budget 10 CPU / 14 GiB, two slots)
