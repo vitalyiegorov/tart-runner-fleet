@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/cachegate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/cli"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/daemon"
 )
@@ -27,12 +28,16 @@ func main() {
 	exit(execute(ctx, os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// execute routes `run` to the daemon and every other verb to the operator
-// interface. Dispatch is by explicit subcommand rather than by argv[0], so the
-// executable's name on disk never changes its behaviour.
+// execute routes `run` to the daemon, `cache-gate` to the LAN cache write gate
+// (ADR 0078) and every other verb to the operator interface. Dispatch is by
+// explicit subcommand rather than by argv[0], so the executable's name on disk
+// never changes its behaviour.
 func execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "run" {
 		return daemon.Execute(ctx, args, stdout, stderr, version)
+	}
+	if len(args) > 0 && args[0] == "cache-gate" {
+		return cachegate.Execute(ctx, args[1:], stdout, stderr)
 	}
 	return cli.Execute(ctx, args, stdout, stderr, version)
 }

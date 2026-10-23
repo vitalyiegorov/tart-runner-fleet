@@ -1,0 +1,36 @@
+# Quadlet unit for the node's LAN GitHub Actions cache server (ADR 0078).
+# Install as ~/.config/containers/systemd/tart-runner-fleet-actions-cache.container;
+# systemd generates tart-runner-fleet-actions-cache.service from it.
+[Unit]
+Description=tart-runner-fleet LAN Actions cache server (ADR 0078)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=trf-actions-cache
+# falcondev-oss/github-actions-cache-server v9.8.0, pinned by digest.
+Image=ghcr.io/falcondev-oss/github-actions-cache-server@sha256:3e685f12100dfb4c9947afb504c85c78c69eb882ce7fa6be2fb3348fd49316ea
+# Loopback only: guests reach the server through the cache gate, never directly.
+PublishPort=127.0.0.1:3018:3000
+Volume=%h/.local/share/tart-runner-fleet-actions-cache:/app/.data
+# The URLs the server signs for uploads and downloads; they lead back through the gate.
+Environment=API_BASE_URL=http://host.containers.internal:3017
+# Signature verification is the server's default and must stay on.
+Environment=SKIP_TOKEN_VALIDATION=false
+# GitHub evicts an entry nobody restored for seven days; so does this server.
+Environment=CACHE_CLEANUP_OLDER_THAN_DAYS=7
+# CACHE_MAX_SIZE_BYTES is per node: see the budget table in docs/OPERATIONS.md.
+EnvironmentFile=%h/.config/tart-runner-fleet-actions-cache.env
+HealthCmd=node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+HealthInterval=30s
+HealthRetries=3
+HealthOnFailure=kill
+PodmanArgs=--memory=1536m --memory-swap=1536m --cpus=2
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

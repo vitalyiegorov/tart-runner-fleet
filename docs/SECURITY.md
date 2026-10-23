@@ -19,6 +19,20 @@
 - Require fresh GitHub, Tart, and host observations before destructive actions.
 - Run as an unprivileged launchd agent with state/config permissions set to 0700.
 
+## The LAN Actions cache
+
+- A node's LAN Actions cache (ADR 0078) verifies every runtime token against
+  GitHub's signing keys and keeps GitHub's per-repository, per-ref scoping.
+  Never set `SKIP_TOKEN_VALIDATION`.
+- Only branch and tag runs save. `fleet cache-gate` refuses every save whose
+  token grants write on anything else, which is what a pull request's token
+  does, and refuses any token it cannot read. Pull requests restore what
+  trusted runs seeded and write nothing.
+- The cache server listens on loopback; guests reach it only through the gate,
+  which does not serve the server's management API, metrics or API docs.
+- `pull_request_target` runs in the base branch's scope and can save, as on
+  GitHub's own cache. Treat it as trusted code.
+
 ## Public repositories served by a private fleet
 
 - Treat a public target repository as a source of untrusted code. The fleet

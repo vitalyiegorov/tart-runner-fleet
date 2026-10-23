@@ -46,6 +46,9 @@ all changes as safety critical.
   renderers all read.
 - `internal/operations`: durable operations, leases, retries, and workers.
 - `internal/discharge`: the one guarded operator mutation and its ordering rules.
+- `internal/cachegate`: `fleet cache-gate`, the write gate in front of a node's
+  LAN Actions cache (ADR 0078); `deploy/actions-cache/` holds its units and
+  the runner image recipe.
 - `internal/telemetry`: coherent status, health, readiness, and metrics.
 - `tests/{contract,integration,replay,chaos}`: cross-package safety evidence.
 - `tests/simulation`: deterministic simulation of the whole fleet (ADR 0031).

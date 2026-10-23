@@ -25,6 +25,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `scale-sets audit --config PATH` | Read the scale sets GitHub holds for each configured scope and classify each as bound or parked; a parked set holding work is printed as evidence, and exits 5 only with `--strict` |
 | `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
 | `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
+| `cache-gate --listen ADDR --upstream URL` | Serve the write gate in front of a node's LAN Actions cache: pull-request saves are refused, cache calls go to the cache server and every other results call to GitHub (ADR 0078). A long-running service, not an operator command |
 | `version` | CLI build version |
 | `api-version` | Machine API compatibility version |
 

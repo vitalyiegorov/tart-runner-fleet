@@ -76,3 +76,16 @@ func TestMainDelegatesExit(t *testing.T) {
 		t.Fatalf("exit=%d", code)
 	}
 }
+
+// TestExecuteRoutesCacheGateToTheGate pins that `cache-gate` reaches the LAN
+// cache write gate (ADR 0078) and not the operator surface, which would
+// reject it as an unknown command.
+func TestExecuteRoutesCacheGateToTheGate(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := execute(context.Background(), []string{"cache-gate", "--listen", "127.0.0.1:0"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "usage: fleet cache-gate") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}

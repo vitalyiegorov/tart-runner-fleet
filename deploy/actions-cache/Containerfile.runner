@@ -1,0 +1,41 @@
+# The runner image a node's containers use once they read their Actions cache
+# from the node's LAN cache server instead of GitHub (ADR 0078).
+#
+# It is the node's existing runner image plus three things, and nothing else:
+#   * zstd, which @actions/cache prefers over single-threaded gzip;
+#   * Runner.Worker.dll patched so the job message's ACTIONS_RESULTS_URL is
+#     written to an unused name (ACTIONS_RESULTS_ORL) and the value below
+#     survives into every step;
+#   * ACTIONS_RESULTS_URL pointing at the node's cache gate.
+#
+# The fleet registers runners from JIT configurations with DisableUpdate set
+# and declares the runner version its image carries (ADR 0041), so the patched
+# binary is never replaced behind the fleet's back. A runner bump means a new
+# base image and a rebuild of this file, never a self-update.
+#
+# Build on the node that will run it:
+#   podman build --build-arg BASE=<the node's current executor.image> \
+#     -t localhost/trf-runner-amd64:<base tag>-actions-cache.1 \
+#     -f deploy/actions-cache/Containerfile.runner deploy/actions-cache
+ARG BASE
+FROM ${BASE}
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# The build fails unless the stock name occurs and the patch removes every
+# occurrence: a runner release that renamed or moved the variable must stop
+# the build, not ship an image whose cache silently goes back to GitHub.
+RUN set -eu; \
+    dll=/home/runner/actions-runner/bin/Runner.Worker.dll; \
+    stock='A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00'; \
+    renamed='A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00'; \
+    grep -q -a -P "$stock" "$dll"; \
+    sed -i "s/$stock/$renamed/g" "$dll"; \
+    if grep -q -a -P "$stock" "$dll"; then echo 'patch left the stock name in place' >&2; exit 1; fi; \
+    grep -q -a -P "$renamed" "$dll"
+
+ENV ACTIONS_RESULTS_URL=http://host.containers.internal:3017/
+USER runner
