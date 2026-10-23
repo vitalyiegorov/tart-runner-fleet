@@ -1,11 +1,22 @@
 package scheduler
 
 import (
+	"math"
 	"testing"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
+
+// headroom is one set alone on the node with unbounded room: the most of its
+// own vector the residual can start.
+func headroom(in Input, profile domain.ProfileID) (int, bool) {
+	shares, ok := PartitionHeadroom(in, []Claim{{Profile: profile, Room: math.MaxInt}})
+	if !ok || shares[0] == Unsized {
+		return 0, false
+	}
+	return shares[0], true
+}
 
 // macbookInput is issue #388's node: a MacBook whose operator budget is 10 CPU,
 // 14 GiB and two slots, on a host physically larger than that, with one
@@ -77,9 +88,9 @@ func TestHeadroomCountsOnlyWhatTheResidualCanStart(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, ok := Headroom(tc.in, tc.profile)
+			got, ok := headroom(tc.in, tc.profile)
 			if !ok || got != tc.want {
-				t.Fatalf("Headroom(%s) = %d, %v; want %d, true", tc.profile, got, ok, tc.want)
+				t.Fatalf("headroom(%s) = %d, %v; want %d, true", tc.profile, got, ok, tc.want)
 			}
 		})
 	}
@@ -107,11 +118,126 @@ func TestHeadroomIsUnknownWithoutUsableObservations(t *testing.T) {
 		}(),
 	}
 	for name, in := range cases {
-		if got, ok := Headroom(in, "large"); ok {
+		if got, ok := headroom(in, "large"); ok {
 			t.Fatalf("%s: Headroom = %d, known; an unusable observation must be unknown", name, got)
 		}
 	}
-	if got, ok := Headroom(macbookInput(nil, nil), "nonexistent"); ok {
+	if got, ok := headroom(macbookInput(nil, nil), "nonexistent"); ok {
 		t.Fatalf("an unknown profile has no vector to count, got %d known", got)
+	}
+}
+
+func shareTotal(shares []int) int {
+	total := 0
+	for _, share := range shares {
+		total += max(0, share)
+	}
+	return total
+}
+
+// TestPartitionHeadroomOffersTheResidualOnceAcrossSets is issue #397: an idle
+// MacBook starts two 2x4 guests, and three scopes each bind a 2x4 set on it.
+// Every set used to be offered both; together they are offered two, one each,
+// whichever set the rotation puts first.
+func TestPartitionHeadroomOffersTheResidualOnceAcrossSets(t *testing.T) {
+	claims := []Claim{{Profile: "medium", Room: math.MaxInt}, {Profile: "medium", Room: math.MaxInt},
+		{Profile: "medium", Room: math.MaxInt}}
+	for step := range 3 {
+		in := macbookInput(nil, nil)
+		in.Now = in.Now.Add(time.Duration(step) * shareRotation)
+		shares, ok := PartitionHeadroom(in, claims)
+		if !ok || shareTotal(shares) != 2 {
+			t.Fatalf("rotation %d: shares %v, want two in total", step, shares)
+		}
+		for _, share := range shares {
+			if share > 1 {
+				t.Fatalf("rotation %d: shares %v; one set took two while another had none", step, shares)
+			}
+		}
+	}
+}
+
+// TestPartitionHeadroomServesWaitingWorkBeforeSpeculating: a set GitHub shows a
+// job queued for gets the slot, wherever the rotation stands, and never more
+// than the work it is waiting on before the others are served.
+func TestPartitionHeadroomServesWaitingWorkBeforeSpeculating(t *testing.T) {
+	maestro := runningInstance(testConfig(), "maestro-1", "a/repo", "maestro")
+	claims := []Claim{{Profile: "medium", Room: math.MaxInt}, {Profile: "medium", Room: math.MaxInt},
+		{Profile: "medium", Room: math.MaxInt, Waiting: 3}}
+	for step := range 3 {
+		in := macbookInput(nil, []domain.Instance{maestro})
+		in.Now = in.Now.Add(time.Duration(step) * shareRotation)
+		shares, ok := PartitionHeadroom(in, claims)
+		if !ok || shares[2] != 1 || shareTotal(shares) != 1 {
+			t.Fatalf("rotation %d: shares %v; the one free slot belongs to the set with work waiting", step, shares)
+		}
+	}
+	shares, _ := PartitionHeadroom(macbookInput(nil, nil), []Claim{{Profile: "medium", Room: math.MaxInt, Waiting: 1},
+		{Profile: "medium", Room: math.MaxInt, Waiting: 1}, {Profile: "medium", Room: math.MaxInt}})
+	if shares[0] != 1 || shares[1] != 1 || shares[2] != 0 {
+		t.Fatalf("two sets with one waiting job each take the two slots: %v", shares)
+	}
+}
+
+// TestPartitionHeadroomNeverHandsASetMoreThanItsRoom: a set already at its
+// configured capacity cannot advertise a share, so it must not absorb one.
+func TestPartitionHeadroomNeverHandsASetMoreThanItsRoom(t *testing.T) {
+	shares, ok := PartitionHeadroom(macbookInput(nil, nil), []Claim{{Profile: "medium", Room: 0, Waiting: 2},
+		{Profile: "medium", Room: math.MaxInt}})
+	if !ok || shares[0] != 0 || shares[1] != 2 {
+		t.Fatalf("shares %v; the full set keeps nothing and its sibling takes both slots", shares)
+	}
+}
+
+// TestPartitionHeadroomChargesEveryProfileAgainstOneBudget: a 2x4 and a 4x8
+// set on the MacBook draw on one 10 CPU / 14 GiB budget with two slots. Each
+// alone would be offered what the whole budget starts; together their offers
+// must start at once.
+func TestPartitionHeadroomChargesEveryProfileAgainstOneBudget(t *testing.T) {
+	in := macbookInput(nil, nil)
+	shares, ok := PartitionHeadroom(in, []Claim{{Profile: "large", Room: math.MaxInt},
+		{Profile: "medium", Room: math.MaxInt}, {Profile: "large", Room: math.MaxInt}})
+	if !ok {
+		t.Fatal("usable observations must be sized")
+	}
+	used := domain.Resources{}
+	profiles := []domain.ProfileID{"large", "medium", "large"}
+	for index, share := range shares {
+		for range share {
+			used = used.Add(in.Config.Profiles[profiles[index]].Resources)
+		}
+	}
+	if !in.Config.HostBudget.CanFit(used) || used.Slots != 2 {
+		t.Fatalf("shares %v offer %+v, which the %+v budget cannot start at once", shares, used, in.Config.HostBudget)
+	}
+}
+
+// TestPartitionHeadroomSharesAMacOSCohortAcrossItsSets: MaxActive bounds the
+// profile on the node, not each set.
+func TestPartitionHeadroomSharesAMacOSCohortAcrossItsSets(t *testing.T) {
+	in := input(nil, nil, State{})
+	shares, ok := PartitionHeadroom(in, []Claim{{Profile: "maestro", Room: math.MaxInt},
+		{Profile: "maestro", Room: math.MaxInt}, {Profile: "maestro", Room: math.MaxInt}})
+	if !ok || shareTotal(shares) != 2 {
+		t.Fatalf("shares %v; a maestro MaxActive of 2 offers two across every set", shares)
+	}
+	running := runningInstance(testConfig(), "maestro-1", "a/repo", "maestro")
+	shares, _ = PartitionHeadroom(input(nil, []domain.Instance{running}, State{}),
+		[]Claim{{Profile: "maestro", Room: math.MaxInt}, {Profile: "maestro", Room: math.MaxInt}})
+	if shareTotal(shares) != 1 {
+		t.Fatalf("shares %v; one running maestro leaves one", shares)
+	}
+}
+
+// TestPartitionHeadroomLeavesAnUnsizableClaimUnknown: a claim the scheduler
+// cannot size is unknown, never zero, and it takes nothing from its siblings.
+func TestPartitionHeadroomLeavesAnUnsizableClaimUnknown(t *testing.T) {
+	shares, ok := PartitionHeadroom(macbookInput(nil, nil), []Claim{{Profile: "nonexistent", Room: math.MaxInt},
+		{Profile: "medium", Room: math.MaxInt}})
+	if !ok || shares[0] != Unsized || shares[1] != 2 {
+		t.Fatalf("shares %v, want [Unsized 2]", shares)
+	}
+	if shares, ok := PartitionHeadroom(macbookInput(nil, nil), nil); !ok || len(shares) != 0 {
+		t.Fatalf("no claim has no share: %v %v", shares, ok)
 	}
 }

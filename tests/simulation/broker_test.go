@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -594,16 +593,14 @@ func splitRepo(repo string) (owner, name string) {
 }
 
 // advertisedCapacity is what one scale set sends GitHub on its long poll, read
-// through the production composition (issue #388) from the last tick the
-// fleet completed. The configured value is the world's truthful per-set
-// capacity: the node's slot count, which no set can exceed.
+// through the production composition (issues #388 and #397) from the fleet's
+// node-wide residual view. The configured value is the set's own declared
+// capacity where the world declares one, else the node's slot count, which no
+// set can exceed.
 func (w *world) advertisedCapacity(binding int) int {
-	configured := w.cfg.Scheduler.LinuxCapacity.Slots
-	key := w.cfg.Bindings[binding].StoreKey
-	for _, headroom := range w.lastTick.Headroom {
-		if headroom.StoreKey == key {
-			return app.AdvertisedCapacity(configured, headroom, w.lastTickErr == nil)
-		}
+	configured := w.cfg.Bindings[binding].Capacity
+	if configured <= 0 {
+		configured = w.cfg.Scheduler.LinuxCapacity.Slots
 	}
-	return app.AdvertisedCapacity(configured, app.ScaleSetHeadroom{}, false)
+	return w.advertisement.Capacity(w.cfg.Bindings[binding].StoreKey, configured)
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
 )
 
 // ---------------------------------------------------------------------------
@@ -118,8 +119,8 @@ func TestIssue388BrokerPlacesOnTheOverlappingSetThatAdvertisesRoom(t *testing.T)
 	}
 	world := newWorld(t, cfg, simTrace{Seed: 388, Ticks: 1, Config: cfg.Name})
 	defer world.close()
-	world.lastTick = app.TickResult{Headroom: []app.ScaleSetHeadroom{
-		{StoreKey: 1, Held: 0, Fit: 0}, {StoreKey: 2, Held: 0, Fit: 1}}}
+	world.advertisement.Observe(app.TickResult{Plan: scheduler.Plan{Status: scheduler.PlanReady},
+		Headroom: []app.ScaleSetHeadroom{{StoreKey: 1, Held: 0, Fit: 0}, {StoreKey: 2, Held: 0, Fit: 1}}}, nil)
 	job := world.arrive("b/repo", "large", "push")
 	if job == nil || job.binding != 1 || world.toSibling != 0 {
 		t.Fatalf("job placed on %+v with %d diverted; want the set that advertised room", job, world.toSibling)

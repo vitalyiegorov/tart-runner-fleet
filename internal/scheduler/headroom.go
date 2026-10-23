@@ -1,65 +1,136 @@
 package scheduler
 
-import "github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+import (
+	"time"
 
-// Headroom reports how many more instances of one profile the node's current
-// residual admission envelope can start, once every demand already waiting on
-// this node has been charged its own vector (issue #388, ADR 0073).
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+)
+
+// Claim is one scale set's request on the node's residual envelope (issue #397).
+type Claim struct {
+	Profile domain.ProfileID
+	// Room is how many more instances the set may advertise: its configured
+	// capacity less what it already holds. Its share never exceeds it, so a set
+	// already at its ceiling does not absorb a share it cannot advertise.
+	Room int
+	// Waiting is how many jobs GitHub shows queued for the set that it has not
+	// delivered here. It is the one evidence a node has that a scope is waiting
+	// for capacity right now, so it is served before any share is speculative.
+	Waiting int
+}
+
+// Unsized is the share of a claim whose profile the scheduler cannot size: an
+// unknown profile or one with no resource vector. Unknown is never zero; the
+// caller falls back to its configured capacity.
+const Unsized = -1
+
+// shareRotation is how long one set keeps its place at the front of the
+// speculative pass. It is one REST refresh, so a scope with a job the rotation
+// has not reached is normally seen waiting first, and served by the first pass.
+const shareRotation = 30 * time.Second
+
+// PartitionHeadroom divides the node's residual admission envelope among the
+// scale sets that draw on it, so that everything the sets are offered beyond
+// what they hold could start here at once (issues #388 and #397, ADR 0073).
 //
-// It is the answer a scale set needs before it tells GitHub how much capacity
-// it has. A node has one envelope -- slots, CPU, memory, the host budget, and the
-// physical bound -- and many scale sets drawing on it, one per scope and
-// profile. Each set's configured capacity is truthful for its scope alone, so
-// GitHub summed them and placed work on a node whose envelope could not start
-// it. This is the envelope `planLinux` and `appendMacSpawns` admit against, read
-// through the same functions, so an advertisement and an admission can never be
-// judged against different capacity:
+// A node has one envelope -- slots, CPU, memory, the host budget, and the
+// physical bound -- and one scale set per scope and profile drawing on it.
+// GitHub fills each set to the capacity it last advertised and cannot move a job
+// it has placed. Handing every set the whole residual offered one free slot once
+// per scope: on 2026-10-19..22 a Mac with no free slot received 80 maestro jobs
+// while the other Mac had room, and sat idle 22 slot-hours while its sibling's
+// queue waited.
 //
-//   - The hard-bounds envelope (`linuxFreeAged`, and `agedLinuxEnvelope` with its
-//     four-slot production ceiling for Linux). A job placed now is admitted once
-//     it ages if it is not admitted sooner, and the advisory CPU-idle clamp that
-//     young work waits on is not a reason to send work elsewhere.
-//   - Every queued demand not already incarnated (`queuedVectors`) is charged
-//     first, wherever it is queued: assigned work that has not launched will take
-//     the residual before anything newly placed can. That also covers the aged
-//     head's reservation, which is one of those demands, without charging it
-//     twice. A dimension a demand cannot be charged in full is exhausted rather
-//     than refused, so one oversized waiting head shrinks the residual instead
-//     of hiding it.
-//   - A macOS profile is also bounded by its own MaxActive less the instances
-//     and queued demands it already has, exactly as `appendMacSpawns` bounds it.
+// The residual is the one `planLinux` and `appendMacSpawns` admit against, read
+// through the same functions, so an offer and an admission are never judged
+// against different capacity:
+//
+//   - the hard-bounds envelope (`linuxFreeAged` for macOS, `agedLinuxEnvelope`
+//     with its four-slot ceiling for Linux). A job placed now is admitted once it
+//     ages if it is not admitted sooner, and the advisory CPU-idle clamp that
+//     young work waits on is not a reason to send work elsewhere;
+//   - every queued demand not already incarnated (`queuedVectors`) is charged
+//     first, wherever it is queued, and that includes the aged head's
+//     reservation. A dimension a demand cannot be charged in full is exhausted
+//     rather than refused, so one oversized head shrinks the residual instead of
+//     hiding it;
+//   - a macOS profile is also bounded by its own MaxActive less the instances and
+//     queued demands it already has, exactly as `appendMacSpawns` bounds it.
+//
+// Each unit granted to a claim is then charged exactly like one more waiting
+// demand, so two profiles drawing on one budget share it too. Units are granted
+// one at a time round robin, in two passes: first to the sets with work GitHub
+// shows waiting for them, up to that work, then the remainder to every set up to
+// its room. The round starts at a position that rotates every shareRotation, so
+// no set is permanently last for a speculative share.
 //
 // The platform lanes (exclusive macOS, handoffs, drain-and-switch) are not
 // modelled: they decide which of two feasible things starts first, not whether
-// the envelope can hold one more, and modelling them could only ever advertise
-// less. The bounds that are modelled are the ones that decided issue #388.
+// the envelope can hold one more, and modelling them could only offer less.
 //
-// ok is false when the answer cannot be computed: an unusable observation or a
-// profile this node does not define. Unknown is never zero; the caller falls
-// back to its configured capacity.
-func Headroom(in Input, profile domain.ProfileID) (int, bool) {
-	definition, known := in.Config.Profiles[profile]
-	if !known || definition.Resources == (domain.Resources{}) ||
-		!in.Demands.Usable() || !in.Instances.Usable() || !in.Host.Usable() {
-		return 0, false
-	}
-	free := linuxFreeAged(in)
-	if definition.Platform == domain.PlatformLinux {
-		free = agedLinuxEnvelope(in)
+// ok is false when no answer can be computed from unusable observations.
+func PartitionHeadroom(in Input, claims []Claim) ([]int, bool) {
+	if !in.Demands.Usable() || !in.Instances.Usable() || !in.Host.Usable() {
+		return nil, false
 	}
 	waiting := normalizedDemands(in)
+	free := map[domain.Platform]domain.Resources{
+		domain.PlatformMacOS: linuxFreeAged(in), domain.PlatformLinux: agedLinuxEnvelope(in)}
+	charge := func(vector domain.Resources) {
+		for platform, envelope := range free {
+			free[platform] = exhaust(envelope, vector)
+		}
+	}
 	for _, vector := range queuedVectors(in.Config, in.Instances.Value, waiting) {
-		free = exhaust(free, vector)
+		charge(vector)
 	}
-	count := 0
-	for free.CanFit(definition.Resources) {
-		free, _ = free.Sub(definition.Resources)
-		count++
+	cohort := map[domain.ProfileID]int{}
+	shares := make([]int, len(claims))
+	for index, claim := range claims {
+		definition, known := in.Config.Profiles[claim.Profile]
+		if !known || definition.Resources == (domain.Resources{}) {
+			shares[index] = Unsized
+			continue
+		}
+		if _, counted := cohort[claim.Profile]; definition.Platform == domain.PlatformMacOS && !counted {
+			cohort[claim.Profile] = max(0, macProfileLimit(definition)-cohortSize(in, claim.Profile, waiting))
+		}
 	}
-	if definition.Platform == domain.PlatformMacOS {
-		count = min(count, max(0, macProfileLimit(definition)-cohortSize(in, profile, waiting)))
+	grant := func(index int) bool {
+		profile := claims[index].Profile
+		definition := in.Config.Profiles[profile]
+		if !free[definition.Platform].CanFit(definition.Resources) {
+			return false
+		}
+		if definition.Platform == domain.PlatformMacOS {
+			if cohort[profile] == 0 {
+				return false
+			}
+			cohort[profile]--
+		}
+		charge(definition.Resources)
+		shares[index]++
+		return true
 	}
-	return count, true
+	start := 0
+	if len(claims) > 0 {
+		start = int(in.Now.Unix()/int64(shareRotation/time.Second)) % len(claims)
+	}
+	for _, limit := range []func(Claim) int{
+		func(claim Claim) int { return min(claim.Room, claim.Waiting) },
+		func(claim Claim) int { return claim.Room },
+	} {
+		for granted := true; granted; {
+			granted = false
+			for offset := range claims {
+				index := (start + offset) % len(claims)
+				if shares[index] != Unsized && shares[index] < limit(claims[index]) && grant(index) {
+					granted = true
+				}
+			}
+		}
+	}
+	return shares, true
 }
 
 // exhaust charges a vector against an envelope one dimension at a time, floored

@@ -72,6 +72,9 @@ type Binding struct {
 	// observe for itself, and it is what bounds this binding's claim on the
 	// scope's queue to the share GitHub gave it (issue #153).
 	SharedLabels bool
+	// Capacity is the set's configured maxCapacity, the most it ever advertises.
+	// Zero means unknown and bounds nothing.
+	Capacity int
 }
 
 func (b Binding) valid() bool {
