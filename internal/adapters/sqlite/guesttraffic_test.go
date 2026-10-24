@@ -92,6 +92,38 @@ func TestGuestTrafficJoinsTheJobThatRanOnTheRunner(t *testing.T) {
 	}
 }
 
+// TestGuestTrafficPrefersTheJobThatStartedOnTheRunner covers one runner name on
+// two demand rows: a job assigned to it but never started (GitHub re-queues it
+// elsewhere), touched after the job that actually ran there. The bytes belong
+// to the job that started, however recently the other row was updated.
+func TestGuestTrafficPrefersTheJobThatStartedOnTheRunner(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	at := time.Date(2026, 10, 24, 15, 2, 0, 0, time.UTC)
+	for _, row := range []struct {
+		request, rank int
+		ref           string
+		updated       time.Time
+	}{
+		{1, 4, "o/r/.github/workflows/ran.yml@refs/heads/main", at.Add(-time.Minute)},
+		{2, 2, "o/r/.github/workflows/requeued.yml@refs/heads/main", at},
+	} {
+		if _, err := store.db.Exec(`INSERT INTO runner_demands(scale_set_id,runner_request_id,status,status_rank,owner,
+			repository,workflow_run_id,job_id,display_name,workflow_ref,event_name,labels,queue_time,runner_id,runner_name,
+			result,updated_at) VALUES(9,?,'x',?,'o','r',1,'j','job',?,'push','[]',0,7,'trf-shared','',?)`,
+			row.request, row.rank, row.ref, row.updated.UnixNano()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.RecordGuestTraffic(ctx, trafficSample("trf-shared", at, 1)); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.GuestTraffic(ctx, at.Add(-time.Hour), 10)
+	if err != nil || len(records) != 1 || records[0].WorkflowRef != "o/r/.github/workflows/ran.yml@refs/heads/main" {
+		t.Fatalf("records = %+v, %v; want the started job", records, err)
+	}
+}
+
 func TestGuestTrafficFailsClosedWhenTheDatabaseIsClosed(t *testing.T) {
 	store := testStore(t)
 	_ = store.Close()

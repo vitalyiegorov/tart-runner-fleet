@@ -32,8 +32,15 @@ func (s *Store) RecordGuestTraffic(ctx context.Context, sample operations.Traffi
 }
 
 // GuestTraffic is every sample taken at or after since, newest first, at most
-// limit rows, each joined with the most recent job GitHub assigned to that
-// runner name.
+// limit rows, each joined with the job GitHub ran on that runner.
+//
+// The join is by runner name, which is the instance id and unique for the life
+// of the database, and never by the demand the instance was spawned for:
+// brokering is decoupled from spawning, so that demand is often a different job
+// (issue #398). One runner name can still appear on more than one demand row
+// when a job assigned to it was re-queued before it started; a row that reached
+// started or completed is the job that actually ran there, so it is preferred
+// over a merely assigned one however recently that was touched.
 func (s *Store) GuestTraffic(ctx context.Context, since time.Time, limit int) ([]operations.TrafficRecord, error) {
 	if limit <= 0 {
 		return nil, operations.ErrInvalid
@@ -42,8 +49,9 @@ func (s *Store) GuestTraffic(ctx context.Context, since time.Time, limit int) ([
 		t.measured,t.receive_bytes,t.transmit_bytes,t.unmeasured,COALESCE(d.scale_set_id,0),COALESCE(d.workflow_run_id,0),
 		COALESCE(d.workflow_ref,''),COALESCE(d.display_name,'')
 		FROM guest_traffic t LEFT JOIN runner_demands d ON d.rowid=(SELECT rowid FROM runner_demands
-			WHERE runner_name=t.instance_id ORDER BY updated_at DESC LIMIT 1)
-		WHERE t.sampled_at>=? ORDER BY t.sampled_at DESC LIMIT ?`, since.UTC().UnixNano(), limit)
+			WHERE runner_name=t.instance_id ORDER BY status_rank>=? DESC,updated_at DESC LIMIT 1)
+		WHERE t.sampled_at>=? ORDER BY t.sampled_at DESC LIMIT ?`, demandRank(operations.DemandJobStarted),
+		since.UTC().UnixNano(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("query guest traffic: %w", err)
 	}

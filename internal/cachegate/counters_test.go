@@ -80,7 +80,7 @@ func TestExecuteServesMetricsOnLoopbackOnly(t *testing.T) {
 	if code := <-done; code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	for _, address := range []string{"0.0.0.0:0", "gate.local:0", "nonsense"} {
+	for _, address := range []string{"0.0.0.0:0", "gate.local:0", "nonsense", "127.0.0.1:", "[::1]:"} {
 		var stderr bytes.Buffer
 		if code := Execute(context.Background(), []string{"--listen", "127.0.0.1:0", "--upstream", target.String(),
 			"--metrics-listen", address}, io.Discard, &stderr); code != 2 {

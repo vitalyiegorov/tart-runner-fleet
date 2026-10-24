@@ -19,7 +19,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `health` | Liveness and readiness probes |
 | `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, parked scale sets, session yield, membership (ADR 0063), policy declaration, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
-| `traffic [--since 24h]` | Bytes each repository's workflow moved per profile, from every guest's own interface counters read at the end of its job; per-job rows in `--output json` (ADR 0080) |
+| `traffic [--since 24h]` | Bytes each repository's workflow moved per profile, from each eligible guest's own interface counters read at the end of its job (unsampled guests have no row); per-job rows in `--output json` (ADR 0080) |
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
 | `config policy PATH...` | Print the load-bearing policy one node runs with; with more than one path, the keys on which they disagree |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |

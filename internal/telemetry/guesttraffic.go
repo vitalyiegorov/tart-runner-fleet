@@ -134,12 +134,15 @@ func trafficHandler(health *Health, reader TrafficReader) http.HandlerFunc {
 			http.Error(response, "method_not_allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Bounded in whole seconds before converting: seconds × time.Second
+		// overflows int64 nanoseconds past ~9.2e9 and would wrap into a window
+		// that passes a Duration comparison.
 		seconds, err := strconv.ParseInt(request.URL.Query().Get("sinceSeconds"), 10, 64)
-		window := time.Duration(seconds) * time.Second
-		if err != nil || seconds <= 0 || window > adminapi.MaxTrafficWindow {
+		if err != nil || seconds <= 0 || seconds > int64(adminapi.MaxTrafficWindow/time.Second) {
 			http.Error(response, "invalid_window", http.StatusBadRequest)
 			return
 		}
+		window := time.Duration(seconds) * time.Second
 		now := health.clock.Now().UTC()
 		since := now.Add(-window)
 		jobs, truncated, err := reader.GuestTraffic(request.Context(), since)

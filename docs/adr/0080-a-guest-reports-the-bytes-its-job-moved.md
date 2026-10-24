@@ -28,7 +28,7 @@ backends.
 ## Decision
 
 **Read the guest's own interface counters once, at the end of its job, over the
-existing `exec` path. Store one row per instance and report it by repository,
+existing `exec` path. Store at most one row per instance and report it by repository,
 workflow and profile.**
 
 1. **Source: the guest's own kernel.**
@@ -53,8 +53,10 @@ workflow and profile.**
      unresponsive.
    - There is no periodic sampling. Each guest boots for exactly one job, so its
      counters since boot are that job's traffic.
-3. **What is recorded.** Migration 14 adds `guest_traffic`, one row per
-   instance:
+3. **What is recorded.** Migration 14 adds `guest_traffic`, with at most one
+   row per instance. An instance that was never sampled has no row: its guest
+   died first, its drain only escalated, or it was reclaimed as unresponsive
+   (see Limits). Each row has:
    - Identity: repository, platform, profile, start time and sample time,
      copied from the instance at sample time.
    - The counters, or `measured=0` with a closed reason (`exec_failed`,

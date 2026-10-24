@@ -222,8 +222,8 @@ re-run.
 ## Analyze CI traffic
 
 To answer "which repo or workflow pulled the most bytes in the last 24 hours",
-run this on each node. Every guest's own interface counters are read once at
-the end of its job ([ADR 0080](adr/0080-a-guest-reports-the-bytes-its-job-moved.md)).
+run this on each node. Each eligible guest's own interface counters are read
+once at the end of its job ([ADR 0080](adr/0080-a-guest-reports-the-bytes-its-job-moved.md)).
 
 ```sh
 "$FLEET" traffic --endpoint "$ENDPOINT" --since 24h                  # totals, largest first
@@ -243,8 +243,13 @@ How to read the output:
   (`curl -fsS http://127.0.0.1:3019/metrics`). That is a node-wide estimate,
   not a per-job one.
 - An `unmeasured` job has no bytes, which is not the same as zero bytes. Its
-  guest could not be read (`exec_failed`, `exec_timeout`, `unreadable`,
-  `no_command`) or had already died.
+  guest was sampled but could not be read (`exec_failed`, `exec_timeout`,
+  `unreadable`, `no_command`).
+- Some jobs have no row at all. A guest is sampled only on its drain's first
+  stop: a drain that reached only escalated stops, a guest already reclaimed
+  as unresponsive, and a guest that died first are never sampled. So the job
+  count here can be lower than the jobs the node ran. Missing rows are
+  unknown, not zero.
 - `truncated: true` means only the newest 1500 jobs were summed. Shorten
   `--since`.
 - `jobs[].workflowRef` empty means GitHub never assigned a recorded job to that

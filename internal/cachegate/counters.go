@@ -73,9 +73,11 @@ func metricsHandler(counters *Counters) http.Handler {
 	return mux
 }
 
-// loopbackAddress accepts only a literal loopback IP and port.
+// loopbackAddress accepts only a literal loopback IP and an explicit port. An
+// empty port would bind an ephemeral one nobody is told about, leaving the
+// configured endpoint unscrapeable; `:0` stays available on purpose.
 func loopbackAddress(address string) bool {
-	host, _, err := net.SplitHostPort(address)
+	host, port, err := net.SplitHostPort(address)
 	ip := net.ParseIP(host)
-	return err == nil && ip != nil && ip.IsLoopback()
+	return err == nil && port != "" && ip != nil && ip.IsLoopback()
 }

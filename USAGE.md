@@ -363,10 +363,12 @@ an image nobody has vouched for is one nobody can vouch for. See
 [`ADR 0041`](docs/adr/0041-a-base-image-declares-its-runner-version.md).
 
 `fleet traffic --since 24h` reports how many bytes each repository's workflow
-moved on each profile. Every guest's own interface counters are read once, at
-the end of its job, through the same `exec` path readiness uses, so podman
-containers and Tart VMs are measured alike. A guest that could not be read is
-reported as unmeasured, never as zero. See
+moved on each profile. Each eligible guest's own interface counters are read
+once, at the end of its job, through the same `exec` path readiness uses, so
+podman containers and Tart VMs are measured alike. A guest that was sampled but
+could not be read is reported as unmeasured, never as zero. A guest that was
+never sampled has no row at all: one whose drain reached only escalated stops,
+one already reclaimed as unresponsive, or one that died first. See
 [`ADR 0080`](docs/adr/0080-a-guest-reports-the-bytes-its-job-moved.md) and the
 recipe in [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md#analyze-ci-traffic).
 

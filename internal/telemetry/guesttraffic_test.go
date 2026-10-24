@@ -123,7 +123,10 @@ func TestTrafficEndpointNeverAnswersAnUnreadableStoreAsEmpty(t *testing.T) {
 		"?sinceSeconds=60"); recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", recorder.Code)
 	}
-	for _, query := range []string{"", "?sinceSeconds=0", "?sinceSeconds=x", "?sinceSeconds=99999999"} {
+	for _, query := range []string{"", "?sinceSeconds=0", "?sinceSeconds=x", "?sinceSeconds=99999999",
+		// Large enough that seconds × time.Second overflows int64 nanoseconds and
+		// wraps to a negative or small positive window.
+		"?sinceSeconds=18446744073", "?sinceSeconds=18446744074", "?sinceSeconds=9223372036854775807"} {
 		if recorder := trafficRequest(t, &fakeTrafficReader{}, http.MethodGet, query); recorder.Code != http.StatusBadRequest {
 			t.Fatalf("query %q status = %d, want 400", query, recorder.Code)
 		}

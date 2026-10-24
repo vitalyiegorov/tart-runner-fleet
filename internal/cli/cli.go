@@ -1400,7 +1400,7 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleet health|doctor [--output table|json]
   fleet metrics
   fleet traffic [--since 24h] [--output table|json]
-    Bytes each repository's workflow moved per profile, from every guest's own
+    Bytes each repository's workflow moved per profile, from each eligible guest's own
     interface counters read at the end of its job (ADR 0080). Includes LAN
     cache traffic; subtract the cache gate's bytes for the WAN share.
   fleet config validate [--mode observe|shadow|canary|authority] <path>...
