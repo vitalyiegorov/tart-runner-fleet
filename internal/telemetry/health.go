@@ -340,15 +340,19 @@ type Snapshot struct {
 	Occupancy          []OccupancyMetric
 	GuestSilences      []GuestSilenceMetric
 	RunnerImages       []RunnerImageMetric
-	GuestTraffic       []GuestTrafficSeries
-	GuestConsole       *GuestConsoleMetric
-	Policy             *PolicyMetric
-	SessionYield       *SessionYieldMetric
-	Membership         *MembershipMetric
-	UpdateDrain        *UpdateDrainMetric
-	Reservation        *ReservationMetric
-	Envelope           EnvelopeMetric
-	AdmissionFloors    AdmissionFloors
+	// ImageToolsPublished separates "published, nothing drifted" from "never
+	// published", which ImageTools alone cannot (AGENTS.md rule 4).
+	ImageTools          []ImageToolsMetric
+	ImageToolsPublished bool
+	GuestTraffic        []GuestTrafficSeries
+	GuestConsole        *GuestConsoleMetric
+	Policy              *PolicyMetric
+	SessionYield        *SessionYieldMetric
+	Membership          *MembershipMetric
+	UpdateDrain         *UpdateDrainMetric
+	Reservation         *ReservationMetric
+	Envelope            EnvelopeMetric
+	AdmissionFloors     AdmissionFloors
 	// ParkedScaleSets is what the last completed parked-scale-set audit found,
 	// and ParkedScaleSetsAuditedAt is when it completed. A zero time means no
 	// audit has ever run on this node -- an observe-mode daemon never runs one --
@@ -399,37 +403,39 @@ type Health struct {
 	critical               map[string]struct{}
 	failureComponents      map[string]struct{}
 
-	lastLoopTick       time.Time
-	lastSuccessfulTick time.Time
-	mode               Mode
-	queues             map[string]QueueMetrics
-	scopeQueues        []ScopeQueueMetrics
-	parkedScaleSets    []ParkedScaleSetMetric
-	scaleSetInstances  []ScaleSetInstanceMetric
-	strandedScaleSets  []StrandedScaleSetMetric
-	parkedAuditedAt    time.Time
-	instances          map[string]InstanceMetrics
-	observations       map[string]ObservationMetric
-	operationRetries   int
-	deadOperations     int
-	operationFailures  []OperationFailure
-	componentFailures  map[componentFailureKey]int
-	deadLetters        []DeadLetter
-	stalled            []Stalled
-	occupancy          []OccupancyMetric
-	guestSilences      []GuestSilenceMetric
-	runnerImages       []RunnerImageMetric
-	guestTraffic       map[guestTrafficKey]*GuestTrafficSeries
-	guestConsole       *GuestConsoleMetric
-	policy             *PolicyMetric
-	sessionYield       *SessionYieldMetric
-	membership         *MembershipMetric
-	updateDrain        *UpdateDrainMetric
-	reservation        *ReservationMetric
-	envelope           EnvelopeMetric
-	admissionFloors    AdmissionFloors
-	hostPressure       HostPressureMetric
-	revision           uint64
+	lastLoopTick        time.Time
+	lastSuccessfulTick  time.Time
+	mode                Mode
+	queues              map[string]QueueMetrics
+	scopeQueues         []ScopeQueueMetrics
+	parkedScaleSets     []ParkedScaleSetMetric
+	scaleSetInstances   []ScaleSetInstanceMetric
+	strandedScaleSets   []StrandedScaleSetMetric
+	parkedAuditedAt     time.Time
+	instances           map[string]InstanceMetrics
+	observations        map[string]ObservationMetric
+	operationRetries    int
+	deadOperations      int
+	operationFailures   []OperationFailure
+	componentFailures   map[componentFailureKey]int
+	deadLetters         []DeadLetter
+	stalled             []Stalled
+	occupancy           []OccupancyMetric
+	guestSilences       []GuestSilenceMetric
+	runnerImages        []RunnerImageMetric
+	imageTools          []ImageToolsMetric
+	imageToolsPublished bool
+	guestTraffic        map[guestTrafficKey]*GuestTrafficSeries
+	guestConsole        *GuestConsoleMetric
+	policy              *PolicyMetric
+	sessionYield        *SessionYieldMetric
+	membership          *MembershipMetric
+	updateDrain         *UpdateDrainMetric
+	reservation         *ReservationMetric
+	envelope            EnvelopeMetric
+	admissionFloors     AdmissionFloors
+	hostPressure        HostPressureMetric
+	revision            uint64
 }
 
 func NewHealth(clock Clock, config HealthConfig) (*Health, error) {
@@ -1192,6 +1198,8 @@ func (h *Health) Snapshot() Snapshot {
 		GuestSilences:            append([]GuestSilenceMetric(nil), h.guestSilences...),
 		RunnerImages:             append([]RunnerImageMetric(nil), h.runnerImages...),
 		GuestTraffic:             h.guestTrafficSeries(),
+		ImageTools:               append([]ImageToolsMetric(nil), h.imageTools...),
+		ImageToolsPublished:      h.imageToolsPublished,
 		GuestConsole:             h.guestConsole,
 		Policy:                   h.policy,
 		SessionYield:             h.sessionYield,

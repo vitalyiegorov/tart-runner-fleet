@@ -78,6 +78,14 @@ type Status struct {
 	// none of it, which is why EffectiveRunnerVersionCheck exists.
 	RunnerImages       []RunnerImage `json:"runnerImages,omitempty"`
 	RunnerVersionCheck *Check        `json:"runnerVersionCheck,omitempty"`
+	// ImageTools is an additive fleet.v1 field: the exact tool versions each of
+	// this node's guest images declares it carries, and every version a scale
+	// set routed to it pins that it does not. A gap is a download every such job
+	// repeats over the node's uplink — 315 MB per Maestro shard in issue #414,
+	// while every other check read healthy. ImageToolCheck is absent, not
+	// passing, when the daemon has not published (EffectiveImageToolCheck).
+	ImageTools     []ImageTools `json:"imageTools,omitempty"`
+	ImageToolCheck *Check       `json:"imageToolCheck,omitempty"`
 	// GuestConsole is an additive fleet.v1 field: whether this node boots Linux
 	// guests and whether their serial consoles are written somewhere durable.
 	// It exists because #236, #258 and #259 each ended at *trigger unidentified*
@@ -338,6 +346,32 @@ type RunnerImage struct {
 	// against 2.10.0 and be wrong.
 	BelowFloor bool `json:"belowFloor"`
 	// Reason is empty when the image is compliant.
+	Reason string `json:"reason,omitempty"`
+}
+
+// EffectiveImageToolCheck is the handoff accessor for the tool-drift judgement
+// (ADR 0079). Its absence means the daemon predates it or has not published,
+// which is reported as an unspecified pass rather than a measured one; the CLI
+// says "not reported" rather than inventing coverage.
+func (s Status) EffectiveImageToolCheck() Check {
+	if s.ImageToolCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.ImageToolCheck
+}
+
+// ImageTools is one guest image's declared tool versions and the required ones
+// it lacks. Platform is the closed `linux`/`macOS` vocabulary.
+type ImageTools struct {
+	Platform string   `json:"platform"`
+	VM       string   `json:"vm"`
+	Declared []string `json:"declared"`
+	// Missing is every exact `tool@version` a scale set routed to this image
+	// pins and the image does not declare, sorted.
+	Missing []string `json:"missing,omitempty"`
+	// Drift is the verdict: at least one job on this image is expected to
+	// download a tool the image could have carried.
+	Drift  bool   `json:"drift"`
 	Reason string `json:"reason,omitempty"`
 }
 

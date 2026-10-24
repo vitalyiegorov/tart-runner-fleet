@@ -263,6 +263,25 @@ The same totals are on the daemon's metrics endpoint as
 `increase(...[24h])` in Prometheus. They reset when the daemon restarts; the
 `fleet traffic` rows do not.
 
+## Jobs that download tools the image should carry
+
+When the uplink is saturated by CI, read the `image tools` row first. It names
+each exact `tool@version` a scale set pins that its base image does not declare
+([ADR 0079](adr/0079-a-pinned-tool-the-image-lacks-is-a-red-flag.md), issue
+#414). Every such job downloads the tool on every run.
+
+```sh
+"$FLEET" doctor --endpoint "$ENDPOINT" --output json | jq '.checks[] | select(.name == "image tools")'
+"$FLEET" status --endpoint "$ENDPOINT" --output json | jq '.data.imageTools'
+```
+
+Exit 5 here is degraded, not broken. Do not stop, drain or delete anything
+because of it. `imageToolCheck` absent means the daemon did not report, which
+is unknown and not covered. A passing row only proves the *declarations*
+agree. A consumer pin bump that nobody mirrored into `requiresTools` stays
+invisible, so when a job log shows a tool download on a green row, report the
+missing declaration rather than calling the check wrong.
+
 ## A scale set this node excluded on purpose
 
 On a node that declares `membership` ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)), a wedged

@@ -161,6 +161,13 @@ type Linux struct {
 	// never opens the image, and the image build scripts seal whatever release
 	// was newest at build time and then never touch it again. See ADR 0041.
 	BaseImageRunnerVersion string
+	// BaseImageTools declares the exact tool versions BaseVM carries in the
+	// layout the consumers' setup actions read (setup-node reads
+	// RUNNER_TOOL_CACHE, not PATH), as `tool@version`. It is declared for the
+	// same reason the runner version beside it is, and it is judged against the
+	// RequiresTools of the scale sets this image boots: a pin the image does not
+	// carry is a download every job repeats over the node's uplink (ADR 0079).
+	BaseImageTools []string
 }
 
 // ExecutorBackend names the execution technology of this node. It is empty on
@@ -241,6 +248,8 @@ type MacOS struct {
 	// carries. A node's two images are built by two different procedures and have
 	// already drifted a whole release apart, so each declares its own.
 	BaseImageRunnerVersion string
+	// BaseImageTools is Linux.BaseImageTools for the macOS BaseVM.
+	BaseImageTools []string
 }
 
 type Timeouts struct {
@@ -532,6 +541,12 @@ type ScaleSet struct {
 	// in a consumer's workflow in another repository. Absent is a byte-for-byte
 	// no-op.
 	RequiresCapabilities []string `json:"requiresCapabilities,omitempty"`
+	// RequiresTools declares the exact tool versions the consumers behind these
+	// labels pin, as `tool@version`. Unlike a capability it is not a gate: a
+	// guest that lacks one still runs the job after downloading the tool, so a
+	// gap is a `fleet doctor` finding rather than a refusal (ADR 0079). Absent
+	// is a byte-for-byte no-op.
+	RequiresTools []string `json:"requiresTools,omitempty"`
 }
 
 type Config struct {
@@ -623,6 +638,8 @@ type wireConfig struct {
 	// it encoded before issue #206.
 	BaseImageRunnerVersion string `json:"baseImageRunnerVersion,omitempty"`
 	RunnerVersionFloor     string `json:"runnerVersionFloor,omitempty"`
+	// BaseImageTools is omitted when empty for the same reason (ADR 0079).
+	BaseImageTools []string `json:"baseImageTools,omitempty"`
 	// GuestArch is omitted when empty for the same reason: an Apple-silicon node
 	// declares nothing and encodes the file it encoded before issue #269.
 	GuestArch             string `json:"guestArch,omitempty"`
@@ -692,6 +709,7 @@ type wireConfig struct {
 		BaseVM                 string               `json:"baseVm"`
 		BaseImageCapabilities  []string             `json:"baseImageCapabilities,omitempty"`
 		BaseImageRunnerVersion string               `json:"baseImageRunnerVersion,omitempty"`
+		BaseImageTools         []string             `json:"baseImageTools,omitempty"`
 		VMPrefix               string               `json:"vmPrefix"`
 		Builder                Profile              `json:"builder"`
 		Maestro                Profile              `json:"maestro"`
@@ -735,7 +753,8 @@ func Decode(r io.Reader) (Config, error) {
 			NestedVirtualization:   w.LinuxNestedVirtualization,
 			SerialLogDirectory:     w.LinuxSerialLogDirectory,
 			BaseImageCapabilities:  append([]string(nil), w.BaseImageCapabilities...),
-			BaseImageRunnerVersion: w.BaseImageRunnerVersion},
+			BaseImageRunnerVersion: w.BaseImageRunnerVersion,
+			BaseImageTools:         append([]string(nil), w.BaseImageTools...)},
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
 			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
 			BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
@@ -743,7 +762,8 @@ func Decode(r io.Reader) (Config, error) {
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
 			NestedVirtualization:   w.MacOSBurst.NestedVirtualization,
 			BaseImageCapabilities:  append([]string(nil), w.MacOSBurst.BaseImageCapabilities...),
-			BaseImageRunnerVersion: w.MacOSBurst.BaseImageRunnerVersion},
+			BaseImageRunnerVersion: w.MacOSBurst.BaseImageRunnerVersion,
+			BaseImageTools:         append([]string(nil), w.MacOSBurst.BaseImageTools...)},
 		GitHub: w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
@@ -830,6 +850,7 @@ func Encode(w io.Writer, cfg Config) error {
 		MaxLinuxCPU: cfg.Linux.Capacity.CPU, MaxLinuxMemoryMiB: cfg.Linux.Capacity.MemoryMiB,
 		BaseImageCapabilities:   append([]string(nil), cfg.Linux.BaseImageCapabilities...),
 		BaseImageRunnerVersion:  cfg.Linux.BaseImageRunnerVersion,
+		BaseImageTools:          append([]string(nil), cfg.Linux.BaseImageTools...),
 		RunnerVersionFloor:      cfg.RunnerVersionFloor,
 		GuestArch:               cfg.GuestArch,
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
@@ -892,6 +913,7 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.BaseVM = cfg.MacOS.BaseVM
 	wire.MacOSBurst.BaseImageCapabilities = append([]string(nil), cfg.MacOS.BaseImageCapabilities...)
 	wire.MacOSBurst.BaseImageRunnerVersion = cfg.MacOS.BaseImageRunnerVersion
+	wire.MacOSBurst.BaseImageTools = append([]string(nil), cfg.MacOS.BaseImageTools...)
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
 	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
@@ -1154,6 +1176,8 @@ func (c Config) Clone() Config {
 	}
 	out.Linux.BaseImageCapabilities = append([]string(nil), c.Linux.BaseImageCapabilities...)
 	out.MacOS.BaseImageCapabilities = append([]string(nil), c.MacOS.BaseImageCapabilities...)
+	out.Linux.BaseImageTools = append([]string(nil), c.Linux.BaseImageTools...)
+	out.MacOS.BaseImageTools = append([]string(nil), c.MacOS.BaseImageTools...)
 	out.MacOS.Builder.Aliases = append([]string(nil), c.MacOS.Builder.Aliases...)
 	out.MacOS.Maestro.Aliases = append([]string(nil), c.MacOS.Maestro.Aliases...)
 	out.MacOS.Builder.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Builder.OccupancyBudgetSeconds)
@@ -1364,6 +1388,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateRunnerVersions(); err != nil {
+		return err
+	}
+	if err := c.validateTools(); err != nil {
 		return err
 	}
 	if err := c.validateGuestArch(); err != nil {

@@ -1277,6 +1277,54 @@ visible, it does not make it self-correcting.
 that renders as a pass with the detail `not reported by this daemon`. That is a
 statement about the daemon, not about the images.
 
+### A pinned tool the image does not carry
+
+`fleet doctor` reports `FAIL  image tools` (exit 5) when a scale set's
+`requiresTools` pins an exact `tool@version` that its base image's
+`baseImageTools` does not declare. ADR 0079, issue #414.
+
+Nothing fails. The job runs, but the setup action downloads the tool first, on
+every run and every shard, over the node's uplink. On 2026-10-24 that was 315 MB
+per Maestro shard (the macOS image carried 2.6.1 and the workflow pinned 2.10.0)
+and a 57 MB Node archive per Linux job. `setup-node` reads `RUNNER_TOOL_CACHE`,
+not `PATH`, so Node in the image did not help. Every other check read healthy.
+
+```sh
+fleet doctor --endpoint "$ENDPOINT" --output json |
+  jq '.checks[] | select(.name == "image tools")'
+fleet status --endpoint "$ENDPOINT" --output json | jq '.data.imageTools, .data.imageToolCheck'
+```
+
+| Field | Meaning |
+| --- | --- |
+| `platform`, `vm` | The booted base image, one row per platform. |
+| `declared` | `baseImageTools` as declared, sorted. Empty means nobody has declared what it carries. |
+| `missing` | Every pinned version the image does not declare. |
+| `drift` | The verdict. `fleet_image_tools_missing{platform}` carries the count. |
+
+Matching is exact. `maestro@2.11.0` does not cover a `maestro@2.10.0` pin, and
+`node@24.22.1` does not cover `node@22.22.2`. That is how the setup actions
+decide whether to download.
+
+**Remedy, in order of preference:**
+
+1. Bake the version into the image in the layout its setup action reads (the
+   tool cache for `setup-node`; see `deploy/actions-cache/Containerfile.runner`
+   and PR #417 for Node). Then add it to `baseImageTools`.
+2. If the consumer's pin is wrong or stale, fix the consumer, and then remove
+   the pin from `requiresTools`.
+
+**The declaration is only as good as its upkeep.** A consumer that bumps a pin
+in its own repository opens the gap again silently until someone mirrors the
+new pin into `requiresTools`. Do that in the same change that bumps a pin on a
+self-hosted label. An unmirrored pin bump still shows up as a heavy job in
+`fleet traffic` (ADR 0080), which an operator has to read: this check does not
+warn on bytes.
+
+A daemon older than this check publishes no `imageToolCheck`. The row then
+reads `not reported by this daemon`, which is a statement about the daemon and
+not a pass.
+
 ### A dead guest with no console to leave behind
 
 `fleet doctor` reports `FAIL  guest console` when a node boots Linux guests and

@@ -255,6 +255,10 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	guestLivenessCheck := adminapi.Check{OK: guestLiveness.OK, Reasons: nonNilStrings(guestLiveness.Reasons)}
 	runnerVersionCheck := adminapi.Check{OK: runnerVersions.OK, Reasons: nonNilStrings(runnerVersions.Reasons)}
 	guestConsoleCheck := adminapi.Check{OK: guestConsole.OK, Reasons: nonNilStrings(guestConsole.Reasons)}
+	var imageToolCheck *adminapi.Check
+	if tools := imageToolsResult(snapshot); tools != nil {
+		imageToolCheck = &adminapi.Check{OK: tools.OK, Reasons: nonNilStrings(tools.Reasons)}
+	}
 	yield := sessionYieldResult(snapshot.SessionYield)
 	drain := updateDrainResult(snapshot.UpdateDrain)
 	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
@@ -284,6 +288,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Stalled:                  stalledRows(snapshot), ProgressCheck: &progressCheck,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
+			ImageTools: imageToolRows(snapshot), ImageToolCheck: imageToolCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
 			Policy:       policyRow(snapshot),
 			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,
@@ -393,6 +398,22 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 	for _, metric := range snapshot.RunnerImages {
 		rows = append(rows, adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM,
 			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
+	}
+	return rows
+}
+
+// imageToolRows projects each base image's tool coverage into the versioned
+// DTO. Nil stays nil; ImageToolCheck beside it is what says whether that means
+// "nothing to report" or "never published".
+func imageToolRows(snapshot Snapshot) []adminapi.ImageTools {
+	if len(snapshot.ImageTools) == 0 {
+		return nil
+	}
+	rows := make([]adminapi.ImageTools, 0, len(snapshot.ImageTools))
+	for _, metric := range snapshot.ImageTools {
+		rows = append(rows, adminapi.ImageTools{Platform: metric.Platform, VM: metric.VM,
+			Declared: nonNilStrings(metric.Declared), Missing: metric.Missing, Drift: metric.Reason != "",
+			Reason: metric.Reason})
 	}
 	return rows
 }
@@ -720,6 +741,17 @@ func renderMetrics(snapshot Snapshot) string {
 		}
 	}
 	renderGuestTraffic(&output, snapshot.GuestTraffic)
+	if len(snapshot.ImageTools) > 0 {
+		// A count, not a label per version: a tool version changes on every
+		// consumer pin bump and would churn the series (ADR 0079). The versions
+		// travel in the status document.
+		writeHelpType("fleet_image_tools_missing",
+			"How many exact tool versions pinned by this image's scale sets the image does not carry.", "gauge")
+		for _, metric := range snapshot.ImageTools {
+			fmt.Fprintf(&output, "fleet_image_tools_missing{platform=%s} %d\n",
+				prometheusLabel(metric.Platform), len(metric.Missing))
+		}
+	}
 	if reservation := snapshot.Reservation; reservation != nil {
 		// A reservation is singular by design (State.Reservation is one pointer),
 		// so these are scalars. The head's demand key and repository are

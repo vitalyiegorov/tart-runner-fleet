@@ -372,6 +372,15 @@ one already reclaimed as unresponsive, or one that died first. See
 [`ADR 0080`](docs/adr/0080-a-guest-reports-the-bytes-its-job-moved.md) and the
 recipe in [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md#analyze-ci-traffic).
 
+`baseImageTools` (top level for Linux, inside `macosBurst` for macOS) declares
+the exact tool versions an image carries, as `tool@version` (`node@22.22.2`,
+`maestro@2.10.0`). A scale set's `requiresTools` declares the versions its
+consumers pin. `fleet doctor` prints what each image carries. It degrades its
+`image tools` row when a booted image lacks a pinned version, because every job
+on that set then downloads the tool over the node's uplink. Matching is exact,
+and an uncovered pin never refuses the file. See
+[`ADR 0079`](docs/adr/0079-a-pinned-tool-the-image-lacks-is-a-red-flag.md).
+
 `linuxSerialLogDirectory` writes each Linux guest's serial console to a file on
 the host while it runs, which is the only artifact that survives a guest kernel
 dying mid-job. `fleet doctor` fails its `guest console` check when a node boots
