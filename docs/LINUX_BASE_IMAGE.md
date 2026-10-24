@@ -31,6 +31,7 @@ the build failed without them.
 - [Size and time expectations](#size-and-time-expectations)
 - [Adapting this for geekom (amd64, containers)](#adapting-this-for-geekom-amd64-containers)
 - [Known unknowns](#known-unknowns)
+- [Tooling layers for the site-A Tart guests (issue #414)](#tooling-layers-for-the-site-a-tart-guests-issue-414)
 
 ## Provenance: the legacy script and what it gets wrong
 
@@ -83,7 +84,7 @@ Every item is a code contract, not a preference. The file is the citation.
 | --- | --- |
 | `$HOME/actions-runner/run.sh`, an executable **regular file**, not a symlink | `cmd/tart-runner-fleet-bootstrap/main.go`, `internal/guestbootstrap/bootstrap.go` |
 | `$HOME/actions-runner` a real directory (the helper's `WorkDir`, and it creates `.tart-runner-fleet/` at `0700` inside it) | `internal/guestbootstrap/bootstrap.go` |
-| No `.runner`, `.credentials`, or `_work` in that directory | registration state must stay unique to each ephemeral clone |
+| No `.runner` or `.credentials` in that directory, and no job state under `_work` (only the runner-owned `_work/_tool` tool cache and an empty `_work/_temp`, see [Tooling layers](#tooling-layers-for-the-site-a-tart-guests-issue-414)) | registration state must stay unique to each ephemeral clone |
 | `/usr/local/libexec/tart-runner-fleet-bootstrap`, executable, from the release the node runs | `internal/lifecycle/executor.go:25` |
 | `/bin/sh`, `/usr/bin/sudo`, `/sbin/shutdown`, `/usr/bin/systemd-run` — all executable | `internal/guestbootstrap/process.go` `paths()` |
 | Passwordless `sudo -n /sbin/shutdown -h now` for the runner user | [ADR 0010](adr/0010-ephemeral-guest-shutdown.md); the supervisor powers the guest off when the runner exits |
@@ -1422,3 +1423,150 @@ candidate configurations using the existing provision/validate/audit tools,
 canonical inventory and truthful set capacity; do not change production files
 from an image setup script. Initial one-job activation and rollback require
 ADR 0015 evidence. Linux-only native/emulator/release jobs stay AMD64-pinned.
+
+## Tooling layers for the site-A Tart guests (issue #414)
+
+Applied 2026-10-24 to the Mac mini's and the MacBook's
+`linux-runner-base-arm64-overflow-20261008` (runner 2.338.0) by extending the
+incumbent, as described in [Maintenance](#maintenance-rebuild-or-extend-the-incumbent).
+Each layer is its own dated candidate, so each one is also a rollback point.
+
+| candidate | adds | role |
+| --- | --- | --- |
+| `linux-runner-base-arm64-tools-20261024a` | Node tool cache | rollback target without the LAN cache |
+| `linux-runner-base-arm64-tools-20261024b` | `a` + the ADR 0078 runner patch and `.env` | superseded: cache saves and restores failed, see below |
+| `linux-runner-base-arm64-tools-20261024c` | `b` + `host.containers.internal` in `/etc/hosts` | promoted on both Macs (`baseVm`); `overflow-20261008`, `a` and `b` kept |
+
+The MacBook is an M1-class machine, so its build and verification guests run
+without `--nested`. The production adapter decides `--nested` for itself.
+
+**The incumbent was not clean.** It still held one job's residue from
+2026-10-08: `_diag/*.log`, `_work/tart-runner-fleet` and
+`_work/_PipelineMapping`. Layer `a` deletes those. It also has no Node, JDK
+or capability manifest, and `zstd` was already present.
+
+### Layer a: Node in setup-node's tool cache
+
+`actions/setup-node` looks in `$RUNNER_TOOL_CACHE`
+(`$HOME/actions-runner/_work/_tool` by default), not at a `node` on `PATH`.
+Without an entry there, every job downloads Node from nodejs.org. The versions
+are the consumer pins for these labels: exact `22.22.2` (budgie) and `22.19.0`
+(knee-doctor), and the `22`, `22.x` and `24.x` ranges (rnw-community,
+hotel-provence, suuudokuuu). They match the podman runner image.
+
+```sh
+"$TART" exec "$BUILD" bash -lc '
+set -euo pipefail
+cache=$HOME/actions-runner/_work/_tool/node
+for version in 22.22.2 22.19.0 24.22.1; do
+  asset=node-v$version-linux-arm64.tar.xz
+  scratch=$(mktemp -d)
+  curl -fsSL --retry 3 -o "$scratch/$asset" "https://nodejs.org/dist/v$version/$asset"
+  curl -fsSL --retry 3 -o "$scratch/SHASUMS256.txt" "https://nodejs.org/dist/v$version/SHASUMS256.txt"
+  (cd "$scratch" && grep " $asset\$" SHASUMS256.txt | sha256sum --check)
+  mkdir -p "$cache/$version/arm64"
+  tar -xJf "$scratch/$asset" --strip-components=1 -C "$cache/$version/arm64"
+  test "$("$cache/$version/arm64/bin/node" --version)" = "v$version"
+  touch "$cache/$version/arm64.complete"   # setup-node ignores an entry without it
+  rm -rf "$scratch"
+done
+mkdir -p "$HOME/actions-runner/_work/_temp"
+cd "$HOME/actions-runner" && rm -rf _diag/* _work/tart-runner-fleet _work/_PipelineMapping
+'
+```
+
+`_work` and everything under it must belong to the runner user (`admin`). A
+root-owned `_work` broke the podman canary in #417.
+
+### Layer b: the ADR 0078 runner patch, and the endpoint in `.env`
+
+The patch is `deploy/actions-cache/Containerfile.runner`'s, with the same
+fail-unless-fully-replaced check. The endpoint goes in the runner's own
+`.env`, because a Tart guest has no image `ENV`:
+
+```sh
+"$TART" exec "$BUILD" bash -lc '
+set -euo pipefail
+dll=$HOME/actions-runner/bin/Runner.Worker.dll
+stock="A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00U\x00R\x00L\x00"
+renamed="A\x00C\x00T\x00I\x00O\x00N\x00S\x00_\x00R\x00E\x00S\x00U\x00L\x00T\x00S\x00_\x00O\x00R\x00L\x00"
+grep -q -a -P "$stock" "$dll"
+sed -i "s/$stock/$renamed/g" "$dll"
+! grep -q -a -P "$stock" "$dll"
+grep -q -a -P "$renamed" "$dll"
+printf "ACTIONS_RESULTS_URL=http://192.168.1.64:3017/\n" > "$HOME/actions-runner/.env"
+test "$(curl -fsS http://192.168.1.64:3017/health)" = healthy
+'
+```
+
+On runner 2.338.0 the stock name occurs once. `Runner.Worker.dll` changes from
+`61247b8e…a8d9c` to `2b962413…bed28`, and both Macs produced the same bytes.
+
+### Layer c: the name the cache server signs
+
+Layer `b` alone is not enough. A canary job on `b` saw `ACTIONS_RESULTS_URL`
+in its steps and a `healthy` gate. Then every save and restore failed with
+`getaddrinfo ENOTFOUND host.containers.internal`, because the server signs
+its upload and download URLs with the podman host name (canary run
+40108302496). Artifacts still worked. Layer `b` was live on both Macs from
+15:38 to 15:53 UTC on 2026-10-24, and Linux jobs that ran there missed the
+cache. Both nodes were rolled back to `a`, then layer `c` was built:
+
+```sh
+"$TART" exec "$BUILD" bash -lc '
+printf "192.168.1.64 host.containers.internal\n" | sudo tee -a /etc/hosts
+test "$(curl -fsS http://host.containers.internal:3017/health)" = healthy
+'
+```
+
+Cloud-init on this image does not manage `/etc/hosts` (no `manage_etc_hosts`),
+so the line survives a clone's boot. The two fresh-clone checks below confirm
+it.
+
+### Verify on two fresh clones, with the network removed
+
+The checks run on each of two fresh clones per node, and each clone is then
+deleted. The real `actions/setup-node` code runs (v4.0.0, v6.5.0 and v7.1.0,
+which are the versions consumers pin) under `sudo unshare -n`, so there is no
+network at all:
+
+```text
+fleet contracts: OK            (run.sh regular file, helper, no .runner/.credentials)
+cache 22.22.2 / 22.19.0 / 24.22.1: present with .complete markers
+setup-node v4/v6/v7.1 22.x     Found in cache @ …/_tool/node/22.22.2/arm64   exit=0
+setup-node v4/v6/v7.1 24.x     Found in cache @ …/_tool/node/24.22.1/arm64   exit=0
+setup-node v4/v6/v7.1 22.22.2  Found in cache @ …/_tool/node/22.22.2/arm64   exit=0
+setup-node v4/v6/v7.1 22.19.0  Found in cache @ …/_tool/node/22.19.0/arm64   exit=0
+negative control 20.x          Attempting to download 20.x…   exit=1
+gate health from the guest     healthy (via 192.168.1.64 and via host.containers.internal)
+Runner.Worker.dll              stock name 0, renamed 1
+```
+
+The negative control shows that a version missing from the cache really is
+downloaded. A hit is therefore not just a symptom of an action that never
+looks.
+
+### Then prove a real job on each node
+
+Offline checks cannot show that the runner loads `.env` into job steps, or that
+saves and restores go through. `.github/workflows/arm64-lan-cache-canary.yml`
+on the `canary/414-arm64-lan-cache` branch selects each node's
+`trf-fleet-linux-arm64-2x4-<node>` scale set by name. One job saves an 8 MiB
+random payload and uploads an artifact. A second, fresh guest restores the
+payload and checks its digest, then downloads the artifact:
+
+| node, image `…-20261024c` | run | setup-node | cache save | restore | artifact |
+| --- | --- | --- | --- | --- | --- |
+| MacBook | 40111659640 | 22.x, 24.x `Found in cache` | 33.8 MB/s to omarchy | hit, `payload: OK` | round trip OK |
+| Mac mini | 40119266768 | 22.x, 24.x `Found in cache` | 70.2 MB/s to omarchy | hit, `payload: OK` | round trip OK |
+
+### When consumer pins change
+
+Inventory the `node-version` inputs in the consumer workflows that run on
+`trf-linux-arm64-*` / `linux-portable-*` / `linux-go-*`. A range resolves to
+the highest cached version that satisfies it, so one entry per major line covers the
+ranges. An exact pin needs its exact version. Add the version to layer `a`'s
+list on a new dated candidate, re-apply `b` and `c` on top, run the
+fresh-clone checks, and promote. Keep the podman image's list
+(`deploy/actions-cache/`) identical, so that shared labels behave the same on
+every node.

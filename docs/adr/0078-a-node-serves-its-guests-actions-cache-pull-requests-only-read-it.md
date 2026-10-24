@@ -4,8 +4,11 @@
 
 Accepted for the two podman nodes (omarchy, site A; ubuntu-vitalii, site B).
 Issue #401, with the site diagnosis in #391; part of rnw-community/mobile-ci#273.
-Tart guests (macOS and the arm64 Linux overflow) are out of scope here; see
-"Not decided here".
+Tart guests (macOS and the arm64 Linux overflow) were out of scope here; see
+"Not decided here". **Amended 2026-10-24 (issue #414):** the site-A arm64
+Linux Tart guests (Mac mini, MacBook) read omarchy's cache through its gate;
+see [Amendment 2026-10-24](#amendment-2026-10-24-site-a-arm64-tart-guests-share-omarchys-cache).
+macOS guests remain out of scope.
 
 ## Context
 
@@ -128,11 +131,10 @@ guests then use GitHub's cache again; running guests finish as they are.
 
 ## Not decided here
 
-- **Tart guests.** Patching the macOS and arm64 Linux base images is a base
-  image rebuild (BASE_IMAGE.md, LINUX_BASE_IMAGE.md). At site A those guests
-  would also need to reach a host other than their own through omarchy's
-  firewall. That is a separate change with its own validation on pony-labirinth
-  and the iOS lanes.
+- **macOS Tart guests.** Patching the macOS base images is a base image
+  rebuild (BASE_IMAGE.md) with its own validation on pony-labirinth and the
+  iOS lanes. The arm64 Linux Tart guests were decided by the 2026-10-24
+  amendment below.
 - **Gradle build cache, remote ccache.** mobile-ci#269.
 
 ## Evidence
@@ -146,3 +148,46 @@ gate, a forged trusted token got `401` from the server's signature check, the
 artifact service answered from GitHub, and `/metrics` got 404. The production
 before/after measurement and the pull-request write test on the live fleet are
 in #401.
+
+## Amendment 2026-10-24: site-A arm64 Tart guests share omarchy's cache
+
+Issue #414. The Mac mini and the MacBook run arm64 Linux Tart guests at site A,
+on the same LAN as omarchy. Decision 1's one-cache-per-node rule exists because
+a cache across sites crosses a residential uplink. A cache on the same LAN does
+not, so these guests read **omarchy's** gate at `http://192.168.1.64:3017/`
+instead of each Mac running its own server. Site A then has one warm cache, not
+three cold ones.
+
+What differs from a podman guest, and how the image provides it
+(LINUX_BASE_IMAGE.md, "Tooling layers for the site-A Tart guests"):
+
+1. **There is no image `ENV`.** A Tart guest is started through `tart exec`,
+   and decision 4's "every image variable" does not exist for it. The base
+   writes `ACTIONS_RESULTS_URL=http://192.168.1.64:3017/` to the runner's own
+   `$HOME/actions-runner/.env`, which the runner loads into its environment at
+   start. The `Runner.Worker.dll` patch is the Containerfile's, byte for byte,
+   and has the same fail-unless-fully-replaced check. It was re-checked against
+   runner 2.338.0: one stock occurrence, none after the patch.
+2. **The server signs URLs for `host.containers.internal`.** That name only
+   resolves on pasta. A Tart guest got
+   `getaddrinfo ENOTFOUND host.containers.internal` on every save and restore
+   while `ACTIONS_RESULTS_URL` itself answered `healthy` (canary run
+   40108302496). The base therefore maps `host.containers.internal` to
+   `192.168.1.64` in `/etc/hosts`. Cloud-init does not manage that file on this
+   image, so the mapping survives a clone's boot.
+3. **omarchy's firewall admits the LAN.** The operator opened `3017/tcp` to
+   `192.168.1.0/24`. Only the gate listens there, and the server stays on
+   loopback.
+
+Consequences:
+
+- **Shared fate with omarchy.** The gate also forwards artifact and other
+  results calls (decision 2). When omarchy or its gate is down, a site-A Tart
+  guest's cache calls *and artifact uploads* fail. Before this amendment, only
+  omarchy's own containers had that dependency. Rollback is the same as for a
+  podman node: point the node's `baseVm` back at the base that precedes the
+  gate layer, and restart the daemon. The tool-cache-only base is kept for
+  exactly that purpose.
+- The pull-request write refusal, the token checks and the per-repository
+  scoping are omarchy's, unchanged. No new write path exists.
+- A runner bump means rebuilding this layer, as with the Containerfile.
