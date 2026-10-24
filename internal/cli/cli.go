@@ -929,6 +929,30 @@ func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
 	return fmt.Sprintf("%s (floor %s)", strings.Join(carried, ", "), status.RunnerImages[0].Floor)
 }
 
+// imageToolsDetail renders the tool-drift verdict on the runner-version row's
+// terms: the reasons when it fails, what each image carries when it passes, and
+// "not reported" — never a pass — when the daemon published no check.
+func imageToolsDetail(status adminapi.Status, check adminapi.Check) string {
+	if status.ImageToolCheck == nil {
+		return "not reported by this daemon"
+	}
+	if !check.OK {
+		return joinReasons(check)
+	}
+	if len(status.ImageTools) == 0 {
+		return "no base image is booted on this node"
+	}
+	carried := make([]string, 0, len(status.ImageTools))
+	for _, image := range status.ImageTools {
+		tools := "none declared"
+		if len(image.Declared) > 0 {
+			tools = strings.Join(image.Declared, " ")
+		}
+		carried = append(carried, image.Platform+" "+tools)
+	}
+	return strings.Join(carried, "; ") + "; every pinned version is carried"
+}
+
 // guestConsoleDetail states the node's posture in one line, whether or not the
 // check passes, on the same terms as runnerVersionDetail: a bare "ok" would
 // leave the question — can a dead guest leave evidence? — as invisible as it
@@ -1136,6 +1160,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	progress := status.Data.EffectiveProgress()
 	guests := status.Data.EffectiveGuestLiveness()
 	runners := status.Data.EffectiveRunnerVersionCheck()
+	tools := status.Data.EffectiveImageToolCheck()
 	console := status.Data.EffectiveGuestConsoleCheck()
 	yield := status.Data.EffectiveSessionYieldCheck()
 	member := status.Data.EffectiveMembershipCheck()
@@ -1200,6 +1225,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// runner too old to register does not fail loudly, it simply stops being
 		// given jobs, which on this fleet is indistinguishable from a quiet day.
 		{Name: "runner version", OK: runners.OK, Detail: runnerVersionDetail(status.Data, runners)},
+		// The image-tools row names every exact tool version a scale set pins
+		// that its guest image does not carry. Such a job still succeeds; it
+		// downloads the tool first, over the node's uplink, on every run — 315 MB
+		// per Maestro shard in issue #414 while every other row read healthy. It
+		// prints what each image carries even when it passes (ADR 0079).
+		{Name: "image tools", OK: tools.OK, Detail: imageToolsDetail(status.Data, tools)},
 		// The guest-console check says whether a Linux guest's kernel can leave
 		// evidence when it dies mid-job. Three incidents (#236, #258, #259) ended
 		// at *trigger unidentified* because the serial sink was off on every node,

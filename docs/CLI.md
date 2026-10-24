@@ -17,7 +17,7 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `operations discharge` | Close one dead-lettered cleanup an operator has established can never complete; optionally retire the phantom instance row and its stopped VM |
 | `observations` | Scheduler observation freshness and age |
 | `health` | Liveness and readiness probes |
-| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, parked scale sets, session yield, membership (ADR 0063), policy declaration, and metrics checks |
+| `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, image tools (ADR 0079), parked scale sets, session yield, membership (ADR 0063), policy declaration, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
 | `traffic [--since 24h]` | Bytes each repository's workflow moved per profile, from each eligible guest's own interface counters read at the end of its job (unsampled guests have no row); per-job rows in `--output json` (ADR 0080) |
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |

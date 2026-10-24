@@ -64,6 +64,7 @@ func (s ScaleSet) clone() ScaleSet {
 	out := s
 	out.Labels = append([]string(nil), s.Labels...)
 	out.RequiresCapabilities = append([]string(nil), s.RequiresCapabilities...)
+	out.RequiresTools = append([]string(nil), s.RequiresTools...)
 	return out
 }
 

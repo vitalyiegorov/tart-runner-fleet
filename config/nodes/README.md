@@ -25,6 +25,10 @@ only with every node in hand:
   because GitHub's 30-day rolling rule makes today's compliant declaration
   tomorrow's stale one without anyone touching this repository.
 
+`baseImageTools` and `requiresTools` (ADR 0079) are not compared across nodes.
+A tool version an image lacks costs a download, not a job, so each node's
+`fleet doctor` judges its own coverage. None of the files here declare them yet.
+
 The same rules run on demand:
 
 ```sh

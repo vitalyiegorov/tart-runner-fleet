@@ -767,6 +767,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		reporter.logger.Warn("runner image versions were refused, so this node cannot judge its own "+
 			"brownout compliance", "error", err, "linuxBaseVm", cfg.Linux.BaseVM, "macosBaseVm", cfg.MacOS.BaseVM)
 	}
+	// Which pinned tool versions each base image lacks is the same kind of fact,
+	// published once for the same reason (ADR 0079). A refusal leaves the check
+	// unreported rather than passing.
+	if err := health.SetImageTools(imageTools(cfg)); err != nil {
+		reporter.logger.Warn("image tool declarations were refused, so this node cannot report tool drift",
+			"error", err, "linuxBaseVm", cfg.Linux.BaseVM, "macosBaseVm", cfg.MacOS.BaseVM)
+	}
 	// Whether a Linux guest's kernel can leave evidence behind when it dies is
 	// also a fact about the configuration this process started with. Three
 	// incidents (#236, #258, #259) ended at *trigger unidentified* because the
@@ -1020,6 +1027,22 @@ func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
 	for _, image := range declared {
 		images = append(images, telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM,
 			Version: image.Version, Floor: image.Floor, Reason: image.Reason()})
+	}
+	return images
+}
+
+// imageTools projects each base image's tool coverage into the telemetry DTO,
+// carrying the verdict config.ImageTools.Reason computed (ADR 0079).
+func imageTools(cfg config.Config) []telemetry.ImageToolsMetric {
+	declared := cfg.ImageTools()
+	images := make([]telemetry.ImageToolsMetric, 0, len(declared))
+	for _, image := range declared {
+		missing := make([]string, 0, len(image.Missing))
+		for _, gap := range image.Missing {
+			missing = append(missing, gap.Tool)
+		}
+		images = append(images, telemetry.ImageToolsMetric{Platform: image.Platform, VM: image.VM,
+			Declared: image.Declared, Missing: missing, Reason: image.Reason()})
 	}
 	return images
 }
