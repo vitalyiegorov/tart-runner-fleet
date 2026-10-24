@@ -48,5 +48,16 @@ RUN set -eu; \
     done; \
     chown -R runner:runner /home/runner/actions-runner/_work
 
+# codeql-action takes its default bundle version from GitHub at run time, not
+# from its pinned SHA; bake the version jobs actually request.
+ARG CODEQL_VERSIONS="2.27.3"
+COPY install-codeql-cache.sh /usr/local/libexec/trf-install-codeql-cache.sh
+RUN set -eu; \
+    test "$(uname -m)" = x86_64 || exit 0; \
+    for version in $CODEQL_VERSIONS; do \
+      sh /usr/local/libexec/trf-install-codeql-cache.sh "$version" /home/runner/actions-runner/_work/_tool/CodeQL; \
+    done; \
+    chown -R runner:runner /home/runner/actions-runner/_work
+
 ENV ACTIONS_RESULTS_URL=http://host.containers.internal:3017/
 USER runner
