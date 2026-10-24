@@ -7,7 +7,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Container]
-ContainerName=trf-actions-cache
+ContainerName=fleet-actions-cache
 # falcondev-oss/github-actions-cache-server v9.8.0, pinned by digest.
 Image=ghcr.io/falcondev-oss/github-actions-cache-server@sha256:3e685f12100dfb4c9947afb504c85c78c69eb882ce7fa6be2fb3348fd49316ea
 # Loopback only: guests reach the server through the cache gate, never directly.

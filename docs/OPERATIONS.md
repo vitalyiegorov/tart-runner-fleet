@@ -1837,6 +1837,15 @@ every save and restore over the WAN. It is three pieces, all in
 Nothing changes for a node until `executor.image` names the patched image. The
 two services can run for days beforehand without any guest using them.
 
+Keep the sidecar's `ContainerName=fleet-actions-cache` outside the reserved
+`trf-` runner namespace. Issue #415 reproduced the old `trf-actions-cache`
+name making the scheduler unavailable with `untracked controller VM requires
+reconciliation`, even before any runner used the cache. To repair an existing
+installation, stop only the cache service, install the corrected quadlet,
+reload systemd and start that service again. Keep its data directory. Do not
+delete runner instances or alter fleet state to work around a sidecar name.
+Verify `fleet doctor` reports scheduler ready after the next observation.
+
 ### Budget
 
 | Node | `CACHE_MAX_SIZE_BYTES` | Disk free before | Memory cap |
@@ -1885,7 +1894,7 @@ podman build --build-arg BASE="$BASE" \
 ```sh
 curl -fsS http://127.0.0.1:3018/health        # the server: prints healthy
 curl -fsS http://127.0.0.1:3017/health        # through the gate: prints healthy
-podman healthcheck run trf-actions-cache && echo ok
+podman healthcheck run fleet-actions-cache && echo ok
 podman run --rm "localhost/trf-runner-amd64:<tag>" \
   curl -fsS http://host.containers.internal:3017/health   # what a guest sees
 curl -fsS http://127.0.0.1:3018/metrics | grep -E '^cache_(requests_total|storage_bytes)'
