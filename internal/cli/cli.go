@@ -52,6 +52,7 @@ type apiClient interface {
 	Probe(context.Context, bool) (adminapi.Check, error)
 	Metrics(context.Context) (string, error)
 	Discharge(context.Context, adminapi.DischargeRequest) (adminapi.DischargeResult, error)
+	Traffic(context.Context, time.Duration) (adminapi.TrafficEnvelope, error)
 }
 
 type dependencies struct {
@@ -188,6 +189,8 @@ func executeWith(ctx context.Context, args []string, stdout, stderr io.Writer, d
 			return runDischarge(ctx, connectionArgs, args[2:], stdout, stderr, deps)
 		}
 		return runRemote(ctx, args[0], appendConnectionArgs(connectionArgs, args[1:]), stdout, stderr, deps)
+	case "traffic":
+		return runTraffic(ctx, connectionArgs, args[1:], stdout, stderr, deps)
 	case "status", "queues", "instances", "observations", "health", "doctor", "metrics":
 		return runRemote(ctx, args[0], appendConnectionArgs(connectionArgs, args[1:]), stdout, stderr, deps)
 	default:
@@ -1396,6 +1399,10 @@ READ-ONLY COMMANDS (observe/shadow safe)
   fleet queues|instances|operations|observations [--output table|json]
   fleet health|doctor [--output table|json]
   fleet metrics
+  fleet traffic [--since 24h] [--output table|json]
+    Bytes each repository's workflow moved per profile, from each eligible guest's own
+    interface counters read at the end of its job (ADR 0080). Includes LAN
+    cache traffic; subtract the cache gate's bytes for the WAN share.
   fleet config validate [--mode observe|shadow|canary|authority] <path>...
     More than one path additionally checks the cross-node rules of ADR 0034:
     guest-capability parity behind a shared label, and one owner per scale set.

@@ -19,13 +19,14 @@ GitHub, shell, and SQL passthroughs do not exist.
 | `health` | Liveness and readiness probes |
 | `doctor` | Deterministic API, liveness, readiness, queue SLO, occupancy, reservation, drain progress, guest liveness, runner version, parked scale sets, session yield, membership (ADR 0063), policy declaration, and metrics checks |
 | `metrics` | Raw Prometheus exposition |
+| `traffic [--since 24h]` | Bytes each repository's workflow moved per profile, from each eligible guest's own interface counters read at the end of its job (unsampled guests have no row); per-job rows in `--output json` (ADR 0080) |
 | `config validate PATH...` | Decode and validate one configuration without starting the daemon; with more than one path, additionally check the cross-node rules |
 | `config policy PATH...` | Print the load-bearing policy one node runs with; with more than one path, the keys on which they disagree |
 | `scale-sets provision --config PATH` | Plan drift-free scoped runner scale sets; explicit guards are required to apply and persist IDs |
 | `scale-sets audit --config PATH` | Read the scale sets GitHub holds for each configured scope and classify each as bound or parked; a parked set holding work is printed as evidence, and exits 5 only with `--strict` |
 | `update adopt` | Adopt one already-running exact generation and install its reboot-safe automatic updater |
 | `update apply-latest` | Idempotently verify and apply the latest forward-only normal production release while idle |
-| `cache-gate --listen ADDR --upstream URL` | Serve the write gate in front of a node's LAN Actions cache: pull-request saves are refused, cache calls go to the cache server and every other results call to GitHub (ADR 0078). A long-running service, not an operator command |
+| `cache-gate --listen ADDR --upstream URL` | Serve the write gate in front of a node's LAN Actions cache: pull-request saves are refused, cache calls go to the cache server and every other results call to GitHub (ADR 0078). `--metrics-listen 127.0.0.1:PORT` serves its byte counters on loopback (ADR 0080). A long-running service, not an operator command |
 | `version` | CLI build version |
 | `api-version` | Machine API compatibility version |
 

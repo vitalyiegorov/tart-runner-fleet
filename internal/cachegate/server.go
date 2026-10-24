@@ -47,6 +47,11 @@ const shutdownGrace = 20 * time.Second
 // GitHub's results service, and answers every other one itself. Refusals are
 // logged with the reason, which names the scope; the token is never logged.
 func Handler(cache, results *url.URL, logOutput io.Writer) http.Handler {
+	return countingHandler(cache, results, logOutput, &Counters{})
+}
+
+// countingHandler is Handler counting the bytes of every request it proxies.
+func countingHandler(cache, results *url.URL, logOutput io.Writer, counters *Counters) http.Handler {
 	logger := slog.New(slog.NewTextHandler(logOutput, nil))
 	proxies := map[Upstream]*httputil.ReverseProxy{
 		CacheServer: httputil.NewSingleHostReverseProxy(cache),
@@ -56,8 +61,9 @@ func Handler(cache, results *url.URL, logOutput io.Writer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		verdict := Decide(r.URL.Path, r.Header)
 		if verdict.Allow {
-			r.Body = &progressBody{ReadCloser: r.Body, control: http.NewResponseController(w)}
-			proxies[verdict.Upstream].ServeHTTP(w, r)
+			r.Body = &progressBody{ReadCloser: countedBody{r.Body, &counters.fromGuest[verdict.Upstream]},
+				control: http.NewResponseController(w)}
+			proxies[verdict.Upstream].ServeHTTP(countedWriter{w, &counters.toGuest[verdict.Upstream]}, r)
 			return
 		}
 		if verdict.Status == http.StatusForbidden {
@@ -141,13 +147,15 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	listen := flags.String("listen", "", "address guests reach the gate on, host:port")
 	cacheRaw := flags.String("upstream", "", "absolute URL of the cache server, normally on loopback")
 	resultsRaw := flags.String("results-upstream", defaultResults, "absolute URL of GitHub's results service")
+	metricsListen := flags.String("metrics-listen", "", "optional loopback host:port serving /metrics byte counters")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	cache, cacheOK := absoluteURL(*cacheRaw)
 	results, resultsOK := absoluteURL(*resultsRaw)
-	if flags.NArg() != 0 || *listen == "" || !cacheOK || !resultsOK {
-		_, _ = fmt.Fprintln(stderr, "usage: fleet cache-gate --listen host:port --upstream http://127.0.0.1:port [--results-upstream url]")
+	if flags.NArg() != 0 || *listen == "" || !cacheOK || !resultsOK || (*metricsListen != "" && !loopbackAddress(*metricsListen)) {
+		_, _ = fmt.Fprintln(stderr, "usage: fleet cache-gate --listen host:port --upstream http://127.0.0.1:port "+
+			"[--results-upstream url] [--metrics-listen 127.0.0.1:port]")
 		return 2
 	}
 	listener, err := listenTCP("tcp", *listen)
@@ -155,9 +163,21 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "cache-gate: listen: %v\n", err)
 		return 1
 	}
-	server := newServer(Handler(cache, results, stdout))
+	counters := &Counters{}
+	server := newServer(countingHandler(cache, results, stdout, counters))
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
+	if *metricsListen != "" {
+		metricsListener, err := listenTCP("tcp", *metricsListen)
+		if err != nil {
+			_ = server.Close()
+			_, _ = fmt.Fprintf(stderr, "cache-gate: metrics listen: %v\n", err)
+			return 1
+		}
+		metrics := newServer(metricsHandler(counters))
+		go func() { _ = metrics.Serve(metricsListener) }()
+		defer func() { _ = metrics.Close() }()
+	}
 	_, _ = fmt.Fprintf(stdout, "cache-gate: serving %s, cache %s, results %s\n", listener.Addr(), cache.Redacted(), results.Redacted())
 	select {
 	case err := <-served:

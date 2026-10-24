@@ -53,6 +53,9 @@ type ServerConfig struct {
 	ControllerVersion string
 	ControllerMode    string
 	Mutator           Mutator
+	// Traffic, when set, serves adminapi.TrafficPath. Like Mutator it is wired
+	// only into the private Unix-socket server.
+	Traffic TrafficReader
 }
 
 type Server struct {
@@ -93,6 +96,9 @@ func NewServer(health *Health, config ServerConfig) (*Server, error) {
 	mux.HandleFunc(adminapi.StatusPath, statusHandler(health, config.ControllerVersion, config.ControllerMode))
 	if config.Mutator != nil {
 		mux.HandleFunc(adminapi.DischargePath, dischargeHandler(config.Mutator))
+	}
+	if config.Traffic != nil {
+		mux.HandleFunc(adminapi.TrafficPath, trafficHandler(health, config.Traffic))
 	}
 	return &Server{httpServer: &http.Server{
 		Handler: mux, ReadTimeout: config.ReadTimeout, WriteTimeout: config.WriteTimeout,
@@ -713,6 +719,7 @@ func renderMetrics(snapshot Snapshot) string {
 				prometheusLabel(metric.Platform), boolGauge(metric.Reason != ""))
 		}
 	}
+	renderGuestTraffic(&output, snapshot.GuestTraffic)
 	if reservation := snapshot.Reservation; reservation != nil {
 		// A reservation is singular by design (State.Reservation is one pointer),
 		// so these are scalars. The head's demand key and repository are

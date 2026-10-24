@@ -219,6 +219,50 @@ sibling node may be serving the set, and deleting it takes its assigned jobs
 with it (ADR 0054). The jobs on the recreated set are lost too and must be
 re-run.
 
+## Analyze CI traffic
+
+To answer "which repo or workflow pulled the most bytes in the last 24 hours",
+run this on each node. Each eligible guest's own interface counters are read
+once at the end of its job ([ADR 0080](adr/0080-a-guest-reports-the-bytes-its-job-moved.md)).
+
+```sh
+"$FLEET" traffic --endpoint "$ENDPOINT" --since 24h                  # totals, largest first
+"$FLEET" traffic --endpoint "$ENDPOINT" --since 24h --output json | \
+  jq '.data.totals[:10]'                                             # repo, workflow, profile, bytes
+"$FLEET" traffic --endpoint "$ENDPOINT" --since 24h --output json | \
+  jq '[.data.jobs[] | select(.measured)] | sort_by(-.receiveBytes)[:10] |
+      .[] | {instance, repo, workflowRef, job, runId, receiveBytes}'  # the heaviest single jobs
+```
+
+How to read the output:
+
+- Bytes include the LAN Actions cache. On a podman node whose gate runs with
+  `--metrics-listen 127.0.0.1:3019`, the WAN share over a window is guest
+  receive minus the increase of
+  `fleet_cache_gate_bytes_total{upstream="cache",direction="to_guest"}`
+  (`curl -fsS http://127.0.0.1:3019/metrics`). That is a node-wide estimate,
+  not a per-job one.
+- An `unmeasured` job has no bytes, which is not the same as zero bytes. Its
+  guest was sampled but could not be read (`exec_failed`, `exec_timeout`,
+  `unreadable`, `no_command`).
+- Some jobs have no row at all. A guest is sampled only on its drain's first
+  stop: a drain that reached only escalated stops, a guest already reclaimed
+  as unresponsive, and a guest that died first are never sampled. So the job
+  count here can be lower than the jobs the node ran. Missing rows are
+  unknown, not zero.
+- `truncated: true` means only the newest 1500 jobs were summed. Shorten
+  `--since`.
+- `jobs[].workflowRef` empty means GitHub never assigned a recorded job to that
+  runner, for example an idle runner reclaimed as lingering.
+- An older daemon answers HTTP 404 here. Treat that as not measured, not as
+  zero.
+
+The same totals are on the daemon's metrics endpoint as
+`fleet_guest_network_receive_bytes_total{platform,profile,repo}` (and
+`…_transmit_…`, `fleet_guest_network_jobs_total{…,measured}`), for
+`increase(...[24h])` in Prometheus. They reset when the daemon restarts; the
+`fleet traffic` rows do not.
+
 ## A scale set this node excluded on purpose
 
 On a node that declares `membership` ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)), a wedged

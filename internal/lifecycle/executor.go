@@ -437,8 +437,19 @@ type DrainExecutor struct {
 	// to Running is durable, so a report never describes an abort that did not
 	// happen. Nil reports nothing.
 	OnAbort func(DrainAbort)
+	// Traffic, when set, reads the guest's network counters once, just before
+	// its first stop, which is the end of its one job (ADR 0080). Nil records
+	// nothing. It cannot fail the drain: it returns nothing.
+	Traffic GuestTrafficRecorder
 	Now     func() time.Time
 	After   func(time.Duration) <-chan time.Time
+}
+
+// GuestTrafficRecorder samples and stores one guest's network counters. An
+// implementation bounds its own deadline and records an unreadable sample as
+// unmeasured, never as zero bytes; teardown proceeds whatever it does.
+type GuestTrafficRecorder interface {
+	RecordGuestTraffic(context.Context, operations.Instance)
 }
 
 // GuestLivenessProbe is the drain executor's half of the guest-liveness port:
@@ -733,6 +744,12 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instance, operation operations.Operation) error {
 	if e.VM == nil {
 		return e.fail(ctx, instance, StageStop)
+	}
+	// Sample on the first stop only: an escalated stop is a guest that would not
+	// power down, and asking it again only delays the vector. A guest proved
+	// unresponsive cannot answer an exec, so it is not asked at all.
+	if e.Traffic != nil && StopAttempts(operation) == 0 && instance.DrainPhase != operations.DrainPhaseGuestUnresponsive {
+		e.Traffic.RecordGuestTraffic(ctx, instance)
 	}
 	var stopErr error
 	switch force := StopEscalation(StopAttempts(operation)); force {
