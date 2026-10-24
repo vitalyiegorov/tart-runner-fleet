@@ -22,7 +22,7 @@ FROM ${BASE}
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends zstd \
+    && apt-get install -y --no-install-recommends zstd xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # The build fails unless the stock name occurs and the patch removes every
@@ -36,6 +36,17 @@ RUN set -eu; \
     sed -i "s/$stock/$renamed/g" "$dll"; \
     if grep -q -a -P "$stock" "$dll"; then echo 'patch left the stock name in place' >&2; exit 1; fi; \
     grep -q -a -P "$renamed" "$dll"
+
+# setup-node reads this layout, not the Node already present on PATH.
+# Exact versions are image inputs; rebuild when consumers change their pins.
+ARG NODE_VERSIONS="22.22.2 22.19.0 24.22.1"
+COPY install-node-cache.sh /usr/local/libexec/trf-install-node-cache.sh
+RUN set -eu; \
+    case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) exit 2 ;; esac; \
+    for version in $NODE_VERSIONS; do \
+      sh /usr/local/libexec/trf-install-node-cache.sh "$version" "$arch" /home/runner/actions-runner/_work/_tool/node; \
+    done; \
+    chown -R runner:runner /home/runner/actions-runner/_work
 
 ENV ACTIONS_RESULTS_URL=http://host.containers.internal:3017/
 USER runner

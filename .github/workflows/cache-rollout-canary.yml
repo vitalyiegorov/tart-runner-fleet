@@ -1,0 +1,59 @@
+name: Cache rollout canary
+on:
+  push:
+    branches: [fix/414-reduce-runner-downloads]
+permissions:
+  contents: read
+jobs:
+  seed:
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    runs-on: [self-hosted, trf-fleet-linux-amd64-2x4]
+    timeout-minutes: 10
+    steps:
+      - name: Require the local cache endpoint
+        run: |
+          test "${ACTIONS_RESULTS_URL:-}" = http://host.containers.internal:3017/
+          curl --fail --silent --show-error "${ACTIONS_RESULTS_URL}health"
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22.22.2
+          package-manager-cache: false
+      - name: Create disposable cache payload and artifact receipt
+        run: |
+          mkdir -p .cache-canary
+          head -c 8388608 /dev/urandom > .cache-canary/payload
+          sha256sum .cache-canary/payload > .cache-canary/payload.sha256
+          printf 'artifact routing canary\n' > artifact-receipt.txt
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache-canary
+          key: rollout-canary-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7.0.0
+        with:
+          name: cache-rollout-artifact-receipt
+          path: artifact-receipt.txt
+          retention-days: 1
+  restore:
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    needs: seed
+    runs-on: [self-hosted, trf-fleet-linux-amd64-2x4]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: .cache-canary
+          key: rollout-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Verify exact restore and payload integrity
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" = true
+          sha256sum --check .cache-canary/payload.sha256
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: cache-rollout-artifact-receipt
+          path: artifact-receipt
+      - name: Verify artifact routing
+        run: grep -Fx 'artifact routing canary' artifact-receipt/artifact-receipt.txt
