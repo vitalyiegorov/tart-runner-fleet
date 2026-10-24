@@ -1,0 +1,82 @@
+name: arm64 LAN cache canary
+on:
+  push:
+    branches: [canary/414-arm64-lan-cache]
+permissions:
+  contents: read
+jobs:
+  seed:
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [macmini, macbook]
+    runs-on: trf-fleet-linux-arm64-2x4-${{ matrix.node }}
+    timeout-minutes: 15
+    steps:
+      - name: Require the site-A LAN cache endpoint
+        run: |
+          echo "runner=$RUNNER_NAME tool_cache=$RUNNER_TOOL_CACHE"
+          test "${ACTIONS_RESULTS_URL:-}" = http://192.168.1.64:3017/
+          test "$(curl --fail --silent --show-error "${ACTIONS_RESULTS_URL}health")" = healthy
+          command -v zstd
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        id: node22
+        with:
+          node-version: 22.x
+          package-manager-cache: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        id: node24
+        with:
+          node-version: 24.x
+          package-manager-cache: false
+      - name: Require tool-cache hits, not downloads
+        run: |
+          test "${{ steps.node22.outputs.node-version }}" = v22.22.2
+          test "${{ steps.node24.outputs.node-version }}" = v24.22.1
+          case "$(command -v node)" in "$RUNNER_TOOL_CACHE"/node/24.22.1/arm64/bin/node) ;; *) exit 1 ;; esac
+          ls "$RUNNER_TOOL_CACHE/node"
+      - name: Create disposable cache payload and artifact receipt
+        run: |
+          mkdir -p .cache-canary
+          head -c 8388608 /dev/urandom > .cache-canary/payload
+          sha256sum .cache-canary/payload > .cache-canary/payload.sha256
+          printf 'artifact routing canary %s\n' "${{ matrix.node }}" > artifact-receipt.txt
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache-canary
+          key: arm64-canary-${{ matrix.node }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v7.0.0
+        with:
+          name: arm64-canary-receipt-${{ matrix.node }}
+          path: artifact-receipt.txt
+          retention-days: 1
+  restore:
+    if: github.repository == 'vitalyiegorov/tart-runner-fleet'
+    needs: seed
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [macmini, macbook]
+    runs-on: trf-fleet-linux-arm64-2x4-${{ matrix.node }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: .cache-canary
+          key: arm64-canary-${{ matrix.node }}-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - name: Verify exact restore and payload integrity
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          echo "runner=$RUNNER_NAME"
+          test "$CACHE_HIT" = true
+          sha256sum --check .cache-canary/payload.sha256
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: arm64-canary-receipt-${{ matrix.node }}
+          path: artifact-receipt
+      - name: Verify artifact routing
+        run: grep -Fx "artifact routing canary ${{ matrix.node }}" artifact-receipt/artifact-receipt.txt
