@@ -17,6 +17,18 @@ monitoring, while the operator commands default to the Unix socket.
 - `GET /readyz`: readiness with bounded reason codes.
 - `GET /metrics`: Prometheus text exposition.
 - `POST /v1/operations/discharge`: the one guarded mutation; private socket only.
+- `GET /v1/traffic?sinceSeconds=N`: per-job guest network accounting (ADR 0080);
+  private socket only. Read-only. `N` is 1 to 2592000 (30 days); anything else
+  is 400. An unreadable store is 503, never an empty answer. The `Traffic`
+  envelope carries `data.since`, `data.truncated` (more than 1500 samples in the
+  window; only the newest are returned), `data.totals[]` (`repo`, `workflow`
+  without its `@ref`, `profile`, `jobs`, `measuredJobs`, `unmeasuredJobs`,
+  `receiveBytes`, `transmitBytes`, largest receive first) and `data.jobs[]`
+  (`instance`, `repo`, `platform`, `profile`, `scaleSetId`, `runId`,
+  `workflowRef`, `job`, `startedAt`, `sampledAt`, `measured`, and either
+  `receiveBytes`/`transmitBytes` or an `unmeasured` reason: `exec_failed`,
+  `exec_timeout`, `unreadable`, `no_command`). A daemon older than this route
+  answers 404.
 
 All other methods return 405 and all unknown paths return 404. Responses are
 `Cache-Control: no-store`. Status includes an `ETag` backed by a monotonic

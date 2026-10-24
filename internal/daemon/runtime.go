@@ -46,6 +46,7 @@ type runtimeStore interface {
 	OperationFailures(context.Context) ([]operations.OperationFailure, error)
 	operations.DeadLetterStore
 	operations.StalledOperationStore
+	guestTrafficStore
 	Close() error
 }
 
@@ -471,6 +472,7 @@ type dependencies struct {
 	// drain holds its own so a standing kill order re-derives its premise from
 	// ground truth rather than trusting the observation that planned it.
 	guestProbe func(config.Config) app.GuestProbe
+	guestExec  func(config.Config) executor.CommandRunner
 	now        func() time.Time
 	after      func(time.Duration) <-chan time.Time
 	leaseOwner func(config.Config) string
@@ -573,6 +575,7 @@ func newDependencies(goos string) dependencies {
 		readiness:  node.readiness,
 		bootstrap:  node.bootstrap,
 		guestProbe: node.guestProbe,
+		guestExec:  node.guestExec,
 		now:        time.Now,
 		after:      time.After,
 		leaseOwner: func(cfg config.Config) string {
@@ -725,6 +728,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	adminConfig.Mutator = discharge.Service{Store: store, VM: d.newReaper(store, cfg),
 		Authority: opts.Mode == reconcile.Authority, Now: d.now,
 		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
+	adminConfig.Traffic = guestTrafficReader{Store: store}
 	adminServer, _ := telemetry.NewServer(health, adminConfig)
 	adminListener, err := d.adminListen(opts.AdminSocket)
 	if err != nil {
@@ -948,7 +952,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort},
+					OnAbort: reporter.reportDrainAbort, Traffic: d.guestTraffic(store, health, cfg, reporter.logger.Warn)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{

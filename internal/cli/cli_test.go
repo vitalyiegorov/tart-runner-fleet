@@ -34,6 +34,15 @@ type fakeClient struct {
 	discharge                     adminapi.DischargeResult
 	dischargeErr                  error
 	discharged                    *adminapi.DischargeRequest
+	traffic                       adminapi.TrafficEnvelope
+	trafficWindow                 *time.Duration
+}
+
+func (f fakeClient) Traffic(_ context.Context, window time.Duration) (adminapi.TrafficEnvelope, error) {
+	if f.trafficWindow != nil {
+		*f.trafficWindow = window
+	}
+	return f.traffic, f.err
 }
 
 func (f fakeClient) Status(context.Context) (adminapi.StatusEnvelope, error) {

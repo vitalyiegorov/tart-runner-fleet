@@ -66,6 +66,9 @@ type platform struct {
 	// because the question is not "has it booted yet" but "is it still there"
 	// (ADR 0040).
 	guestProbe func(config.Config) app.GuestProbe
+	// guestExec is the `exec <instance> ...` runner the guest probe and the
+	// end-of-job traffic sample share, or nil on a node with no guest (ADR 0080).
+	guestExec func(config.Config) executor.CommandRunner
 }
 
 // platformFor reports the wiring goos implies. macOS is Tart and the `vm_stat`
@@ -113,6 +116,7 @@ func applePlatform() platform {
 		guestProbe: func(cfg config.Config) app.GuestProbe {
 			return execGuestProbe{Runner: tart.ExecRunner{}, Timeout: cfg.GuestLiveness.ProbeTimeout}
 		},
+		guestExec: func(config.Config) executor.CommandRunner { return tart.ExecRunner{} },
 	}
 }
 
@@ -181,6 +185,12 @@ func linuxPlatform() platform {
 			}
 			return execGuestProbe{Runner: podman.ExecRunner{Binary: cfg.Executor.Binary},
 				Timeout: cfg.GuestLiveness.ProbeTimeout}
+		},
+		guestExec: func(cfg config.Config) executor.CommandRunner {
+			if !runsContainers(cfg) {
+				return nil
+			}
+			return podman.ExecRunner{Binary: cfg.Executor.Binary}
 		},
 	}
 }

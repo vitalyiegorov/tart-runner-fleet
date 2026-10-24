@@ -340,6 +340,7 @@ type Snapshot struct {
 	Occupancy          []OccupancyMetric
 	GuestSilences      []GuestSilenceMetric
 	RunnerImages       []RunnerImageMetric
+	GuestTraffic       []GuestTrafficSeries
 	GuestConsole       *GuestConsoleMetric
 	Policy             *PolicyMetric
 	SessionYield       *SessionYieldMetric
@@ -418,6 +419,7 @@ type Health struct {
 	occupancy          []OccupancyMetric
 	guestSilences      []GuestSilenceMetric
 	runnerImages       []RunnerImageMetric
+	guestTraffic       map[guestTrafficKey]*GuestTrafficSeries
 	guestConsole       *GuestConsoleMetric
 	policy             *PolicyMetric
 	sessionYield       *SessionYieldMetric
@@ -1189,6 +1191,7 @@ func (h *Health) Snapshot() Snapshot {
 		Occupancy:                append([]OccupancyMetric(nil), h.occupancy...),
 		GuestSilences:            append([]GuestSilenceMetric(nil), h.guestSilences...),
 		RunnerImages:             append([]RunnerImageMetric(nil), h.runnerImages...),
+		GuestTraffic:             h.guestTrafficSeries(),
 		GuestConsole:             h.guestConsole,
 		Policy:                   h.policy,
 		SessionYield:             h.sessionYield,

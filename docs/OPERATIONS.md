@@ -1889,6 +1889,18 @@ podman build --build-arg BASE="$BASE" \
   -f "$REPO/deploy/actions-cache/Containerfile.runner" "$REPO/deploy/actions-cache"
 ```
 
+### Byte counters (ADR 0080)
+
+`fleet cache-gate --metrics-listen 127.0.0.1:3019` serves
+`fleet_cache_gate_bytes_total{upstream,direction}` on loopback only. It is
+refused on any non-loopback address, and the guest-facing `:3017` never serves
+it. The shipped unit does not pass the flag. Add it to `ExecStart` once the
+installed `fleet` release contains it; an older release exits with its usage
+text and systemd restarts it in a loop.
+`cache/to_guest` is what guests read from the LAN cache. Subtract its increase
+from `fleet traffic`'s receive bytes for the WAN estimate (see
+[`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md#analyze-ci-traffic)).
+
 ### Health
 
 ```sh

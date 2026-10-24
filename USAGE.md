@@ -362,6 +362,14 @@ a guest here registers with `DisableUpdate` set and can never upgrade itself, so
 an image nobody has vouched for is one nobody can vouch for. See
 [`ADR 0041`](docs/adr/0041-a-base-image-declares-its-runner-version.md).
 
+`fleet traffic --since 24h` reports how many bytes each repository's workflow
+moved on each profile. Every guest's own interface counters are read once, at
+the end of its job, through the same `exec` path readiness uses, so podman
+containers and Tart VMs are measured alike. A guest that could not be read is
+reported as unmeasured, never as zero. See
+[`ADR 0080`](docs/adr/0080-a-guest-reports-the-bytes-its-job-moved.md) and the
+recipe in [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md#analyze-ci-traffic).
+
 `linuxSerialLogDirectory` writes each Linux guest's serial console to a file on
 the host while it runs, which is the only artifact that survives a guest kernel
 dying mid-job. `fleet doctor` fails its `guest console` check when a node boots

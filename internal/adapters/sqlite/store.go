@@ -820,6 +820,36 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 13: %w", err)
 		}
 	}
+	if version < 14 {
+		// One row per instance: the guest's interface counters, read once at the
+		// end of its job (ADR 0080). Identity is copied in at sample time so a
+		// report never decodes instance metadata; the job is joined from
+		// runner_demands by runner name, which is the instance id.
+		for _, step := range []struct{ point, query string }{
+			{"table", `CREATE TABLE IF NOT EXISTS guest_traffic (
+				instance_id TEXT PRIMARY KEY,
+				repo TEXT NOT NULL,
+				platform TEXT NOT NULL,
+				profile TEXT NOT NULL,
+				started_at INTEGER NOT NULL,
+				sampled_at INTEGER NOT NULL,
+				measured INTEGER NOT NULL,
+				receive_bytes INTEGER NOT NULL,
+				transmit_bytes INTEGER NOT NULL,
+				unmeasured TEXT NOT NULL
+			)`},
+			{"sampled", `CREATE INDEX IF NOT EXISTS guest_traffic_sampled ON guest_traffic(sampled_at)`},
+			{"runner", `CREATE INDEX IF NOT EXISTS runner_demands_runner ON runner_demands(runner_name)`},
+		} {
+			if _, err := s.txExec(ctx, tx, "migrate.v14."+step.point, step.query); err != nil {
+				return fmt.Errorf("migration 14 %s: %w", step.point, err)
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v14.record", `INSERT INTO schema_migrations(version, applied_at) VALUES(14, ?)`,
+			s.instant().UnixNano()); err != nil {
+			return fmt.Errorf("record migration 14: %w", err)
+		}
+	}
 	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
 	// creates and first seeds the table, so it always exists by this point; an
 	// operator deleting the row (incident 2026-07-22, which wedged every tick on
