@@ -624,6 +624,134 @@ pull:
 The image manifest gained the capability `ios-simulator-templates` — see
 [The macOS capability vocabulary](#the-macos-capability-vocabulary).
 
+### 4d. Preinstall the tool versions consumers pin
+
+Added 2026-10-24 on both Macs (issue #414). The mini is at site A on a
+150 Mbps home uplink. There, every disposable Maestro shard was downloading
+the 314,828,521-byte Maestro 2.10.0 archive and the 4,088,762-byte simslim
+0.12.2 archive, because the image only carried Maestro 2.6.1 and simslim
+0.10.0. A Tart clone starts from the base every time, so nothing a job
+downloads survives into the next job.
+
+**What the installers check, exactly.** The image has to satisfy mobile-ci's
+own install steps. A binary that is merely "somewhere" does not count.
+
+| tool | mobile-ci reuses, in order | otherwise |
+| --- | --- | --- |
+| Maestro (`run-maestro-ios`, `capture-screenshots-ios`) | `maestro` on `PATH` whose `--version` is exactly the pin, then `~/.maestro-pinned/<ver>/maestro/bin/maestro` whose `--version` is exactly the pin | downloads `cli-<ver>/maestro.zip` (~315 MB) |
+| simslim (`run-maestro-ios`, `capture-screenshots-ios`, `simulator-lease`) | `simslim` on `PATH` whose `simslim version` is exactly the pin, then `~/.simslim-pinned/simslim-v<ver>-macos-arm64.tar.gz` whose SHA-256 is `simslim-sha256`, extracted into a job-private directory | downloads the tarball |
+| Node (`actions/setup-node` in the build, publish and seed jobs on `macos-maestro`) | `$RUNNER_TOOL_CACHE/node/<ver>/arm64` plus `arm64.complete` (`~/actions-runner/_work/_tool`), matched by semver | downloads from nodejs.org |
+
+`~/.maestro/bin` is **not** on the daemon's runner `PATH` (see
+[The daemon replaces PATH](#the-daemon-replaces-path-and-the-android-environment-outright)).
+So the image's `~/.maestro` 2.6.1 was never a hit. Even 2.6.1 needs its own
+`~/.maestro-pinned/2.6.1`. `~/.maestro` is left in place, because
+`BASE_IMAGE.md`'s verification and older workflows call it by absolute path.
+`simslim` 0.10.0 stays on `PATH` from Homebrew. Its version does not match,
+so the step falls through to the verified tarball, which costs no download.
+Replacing a Homebrew keg's binary by hand would leave `brew` lying about it.
+
+**Versions, inventoried 2026-10-24 from the consumer workflows and the
+mobile-ci versions they pin (v4.3.1, v4.4.0 and v4.4.1 all have the same
+defaults):**
+
+| tool | versions | who asks |
+| --- | --- | --- |
+| Maestro | 2.10.0 | `ios-maestro.yml` default: budgie `pr.yml`, suuudokuuu `mobile-e2e.yml` |
+| Maestro | 2.8.0 | `store-screenshots.yml` default, and budgie `ios-e2e-ai-build`/`media-smoke`/`store-screenshots` plus rnw-community `ios-maestro`/`pr.yml` explicitly |
+| Maestro | 2.6.1 | suuudokuuu `MAESTRO_VERSION` (its Android lane runs on Linux, so this one is cheap insurance on macOS) |
+| simslim | 0.12.2, sha256 `b47302da…70887` | every mobile-ci action default |
+| Node | 22.22.2 | satisfies `22`, `22.x` (the `ios-maestro`, `native-publish`, `native-dev-release`, `seed-native-cache`, `store-screenshots` defaults) and budgie's exact `22.22.2` |
+
+The archives are fetched once on the host and checked twice: against the
+release's own `checksums_sha256.txt` (Maestro) or `SHASUMS256.txt` (Node), and
+against the asset digest that GitHub's release API reports. simslim publishes
+no checksum file, so its tarball is checked against the digest mobile-ci pins.
+They reach the guest through a read-only `--dir` share, not the network:
+
+```sh
+D=$HOME/trf414/cache   # host: maestro-<ver>.zip, simslim-v0.12.2-macos-arm64.tar.gz, node-v22.22.2-darwin-arm64.tar.gz, each verified
+tart run "$BASE" --no-graphics --no-audio --no-clipboard --dir=tools:$D:ro &
+tart exec "$BASE" bash -lc '
+set -euo pipefail
+SRC="/Volumes/My Shared Files/tools"
+export MAESTRO_CLI_NO_ANALYTICS=true
+for v in 2.6.1 2.8.0 2.10.0; do      # re-check each archive sha256 in the guest first
+  mkdir -p "$HOME/.maestro-pinned"; st=$(mktemp -d "$HOME/.maestro-pinned/.staging-XXXXXX")
+  unzip -q "$SRC/maestro-$v.zip" -d "$st"
+  test "$("$st/maestro/bin/maestro" --version | tail -n 1)" = "$v"
+  rm -rf "$HOME/.maestro-pinned/$v"; mkdir -p "$HOME/.maestro-pinned/$v"
+  mv "$st/maestro" "$HOME/.maestro-pinned/$v/maestro"; rmdir "$st"
+done
+mkdir -p "$HOME/.simslim-pinned"
+cp "$SRC/simslim-v0.12.2-macos-arm64.tar.gz" "$HOME/.simslim-pinned/"
+tc=$HOME/actions-runner/_work/_tool/node/22.22.2
+mkdir -p "$tc/arm64" "$HOME/actions-runner/_work/_temp"
+tar -xzf "$SRC/node-v22.22.2-darwin-arm64.tar.gz" --strip-components=1 -C "$tc/arm64"
+test "$("$tc/arm64/bin/node" --version)" = v22.22.2
+touch "$tc/arm64.complete"
+'
+```
+
+The layer adds about 1.2 GB: 1.0 GB for three unpacked Maestro releases,
+187 MB for Node, and 4 MB for simslim. Both Macs' bases went from 51–53 GB to
+53–54 GB in `tart list`. On mini, `~/.ci-base-manifest` is a **directory**
+(legacy `macos-runner` file inside). On mac-studio it is a file. Append the
+layer record accordingly: a blind `>> ~/.ci-base-manifest` fails on mini.
+
+**Measured, 2026-10-24.** The real install steps, extracted from mobile-ci at
+the pinned SHAs (`Install Maestro` ×2 variants, `Install simslim` ×2 variants),
+and the real `actions/setup-node` v6.5.0 and v7.1.0, ran on fresh clones with
+the guest's network blocked by `pf` (`block return out quick all`, loopback
+allowed):
+
+| | old base `macos-tartelet-base-tpl-20260922` (studio clone) | `macos-tartelet-base-tools-20261024` (2 fresh clones per Mac, 4 total) |
+| --- | --- | --- |
+| Install Maestro 2.6.1 / 2.8.0 / 2.10.0 | all attempt `github.com/.../maestro.zip` and fail offline | all `Installed and using maestro <ver> at ~/.maestro-pinned/<ver>/…`, rc 0 |
+| Install simslim 0.12.2 | attempts the release download, fails offline | `extracted from the digest-verified ~/.simslim-pinned/…`, rc 0 |
+| setup-node `22`, `22.x`, `22.22.2` | attempts nodejs.org, fails offline | `Found in cache @ ~/actions-runner/_work/_tool/node/22.22.2/arm64` |
+| negative controls (Maestro 2.9.0, Node 20.x) | — | attempt the download, so a hit is a real lookup |
+| Xcode, JDK | 26.4.1 (17E202), OpenJDK 17.0.19 | unchanged |
+| iPhone 17 Pro | — | boots in 6–8 s; both `mobile-ci-template-*` devices present |
+
+At site A, each Maestro shard therefore stops transferring about 315 MB
+(Maestro) plus 4 MB (simslim), and each macOS build/publish job about 50 MB
+(Node), on a 150 Mbps link. The roughly 43 MiB app artifact each shard
+downloads is expected traffic, and it remains.
+
+One observation is **not** caused by this layer, but it surfaced here. simslim
+0.12.2's `verify` reports the shipped `iPhone 17 Pro` as needing
+`simslim on` again under the fleet profile. The device was slimmed by 0.10.0
+in step 4b, and the layer does not touch simulator data. mobile-ci's
+`simulator-slim-repair` (default `true`) re-applies the profile per job. `doctor`
+still reports `storekit` ok.
+
+**Promoted 2026-10-24.** On both mac-mini and mac-studio,
+`macosBurst.baseVm` is `macos-tartelet-base-tools-20261024`, and the runner
+version is unchanged (2.336.0 and 2.337.0). The outgoing
+`macos-tartelet-base-tpl-20260922` is kept on both for rollback. The MacBook
+runs with `macosBurst.enabled: false` and got no macOS candidate. Each build
+needed one of Apple's two macOS VM slots, which a constantly full maestro
+queue never frees. Admission was therefore paused with the
+`minFreeDiskGb: 9999` step from [4c](#4c-bake-mobile-ci-simulator-templates).
+That held new work for about 95 minutes on mac-studio (waiting for a slot)
+and 11 minutes on mac-mini (it was idle). The floor went back in the same
+restart that switched `baseVm`. A reduced `hostBudget` cannot do this job:
+`fleet config validate` rejects it, because the scale sets' `maxCapacity`
+must stay truthful.
+
+#### When a consumer pin changes
+
+A new Maestro or simslim version in mobile-ci's defaults, or a new
+`maestro-version` / `node-version` in a consumer, is a new download per
+disposable guest until the image carries it. Re-run the inventory above
+(`grep -rn "maestro-version\|simslim-version\|node-version"` across the
+consumers' `.github/` and the mobile-ci SHAs they pin). Then add the version to
+a new dated candidate cloned from the promoted base, verify two fresh clones
+with the network blocked, and promote. Keep the old version until no consumer
+pins it, because removing it only re-creates the download. simslim's pin comes
+with its `simslim-sha256`. Take both from the same mobile-ci release.
+
 ### 5. Host hygiene
 
 A sealed CI guest must not start an OS update, sleep, or index in the middle of
