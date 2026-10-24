@@ -95,7 +95,7 @@ func (c Config) imageTools(platform, vm string, declared []string) ImageTools {
 			if requiredBy[tool] == nil {
 				requiredBy[tool] = map[string]struct{}{}
 			}
-			requiredBy[tool][scoped.Name()] = struct{}{}
+			requiredBy[tool][scopedSetName(scoped)] = struct{}{}
 		}
 	}
 	missing := make([]ToolGap, 0, len(requiredBy))
@@ -103,6 +103,15 @@ func (c Config) imageTools(platform, vm string, declared []string) ImageTools {
 		missing = append(missing, ToolGap{Tool: tool, RequiredBy: sortedCapabilities(requiredBy[tool])})
 	}
 	return ImageTools{Platform: platform, VM: vm, Declared: sortedCopy(declared), Missing: missing}
+}
+
+// scopedSetName qualifies a scale set by its scope: two scopes may own sets of
+// the same name, and a gap must say which one pins the tool (ADR 0034 §2).
+func scopedSetName(scoped ScopedScaleSet) string {
+	if scoped.ScopeName == "" {
+		return scoped.Name()
+	}
+	return scoped.ScopeName + "/" + scoped.Name()
 }
 
 func toolSet(requiredBy map[string]map[string]struct{}) map[string]struct{} {

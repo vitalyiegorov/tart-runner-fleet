@@ -131,12 +131,12 @@ func TestImageToolsNamesEveryVersionTheImageDoesNotCarry(t *testing.T) {
 	if got := missingTools(macOS); got != "maestro@2.10.0" {
 		t.Errorf("macOS missing = %s", got)
 	}
-	if got := strings.Join(macOS.Missing[0].RequiredBy, ","); got != "maestro,maestro-legacy" {
+	if got := strings.Join(macOS.Missing[0].RequiredBy, ","); got != "sudoku/maestro,sudoku/maestro-legacy" {
 		t.Errorf("maestro@2.10.0 required by %s, want both sets", got)
 	}
 	reason := macOS.Reason()
 	for _, fragment := range []string{`macOS base image "macos-tartelet-base"`, "maestro@2.10.0",
-		"maestro, maestro-legacy", "downloads"} {
+		"sudoku/maestro, sudoku/maestro-legacy", "downloads"} {
 		if !strings.Contains(reason, fragment) {
 			t.Errorf("Reason() = %q, missing %q", reason, fragment)
 		}
@@ -220,5 +220,22 @@ func TestToolDeclarationsRoundTrip(t *testing.T) {
 	if decoded.Linux.BaseImageTools[0] == "mutated" || decoded.MacOS.BaseImageTools[0] == "mutated" ||
 		decoded.GitHub.Scopes[0].ScaleSets[0].RequiresTools[0] == "mutated" {
 		t.Error("Clone() aliased a tool slice")
+	}
+}
+
+// TestImageToolsKeepsScopesApartWhenScaleSetNamesCollide: two GitHub scopes
+// may each own a scale set with the same name (ADR 0034 §2 identifies one by
+// the (scope, name) pair), so a gap must name the scope too, not collapse both.
+func TestImageToolsKeepsScopesApartWhenScaleSetNamesCollide(t *testing.T) {
+	cfg := scopedNode(macosToolScaleSet("maestro", "maestro@2.10.0"))
+	other := cfg.GitHub.Scopes[0]
+	other.Name, other.ConfigURL = "budgie", "https://github.com/budgie-at/budgie"
+	other.Targets = []string{"budgie-at/budgie"}
+	cfg.GitHub.Scopes = append(cfg.GitHub.Scopes, other)
+	cfg.MacOS.BaseImageTools = []string{"maestro@2.6.1"}
+	images := cfg.ImageTools()
+	macOS := images[len(images)-1]
+	if got := strings.Join(macOS.Missing[0].RequiredBy, ","); got != "budgie/maestro,sudoku/maestro" {
+		t.Errorf("maestro@2.10.0 required by %s, want each scope named", got)
 	}
 }

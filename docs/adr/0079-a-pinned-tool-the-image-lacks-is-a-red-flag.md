@@ -98,18 +98,14 @@ no state, no pass and no scheduling axis.
   answers for.
 - **No cross-node parity for tools.** Two nodes behind one label may carry
   different tool versions. Each node's doctor reports its own gaps.
-- **No measured network signal, yet.** The brief asked for per-instance network
-  receive bytes as a warning if it fit cleanly. It does not fit cleanly today.
-  Neither the executor ports nor any adapter reads per-instance network
-  counters. Podman exposes them through `podman stats`/`inspect`. Tart has no
-  per-VM equivalent, so a macOS guest (the Maestro case) would stay unmeasured.
-  Adding the signal means a new port method, two adapter implementations (one
-  of which cannot answer), a periodic sampler, a threshold knob and a new
-  status axis. By question 2 of AGENTS.md that needs its own issue and evidence,
-  not a ride-along. The declared check catches the drift the fleet can know
-  about. The measured signal would catch the drift it cannot, meaning a consumer
-  pin change nobody mirrored into `requiresTools`. That gap is recorded here and
-  not hidden.
+- **No measured warning here.** Per-job guest network bytes are measured now,
+  by a separate decision: [ADR 0080](0080-a-guest-reports-the-bytes-its-job-moved.md)
+  reads each eligible guest's own interface counters once at the end of its
+  job, for podman and Tart guests alike, and `fleet traffic` reports them. This
+  check does not consume that data. It adds no periodic sampler, threshold or
+  warning on bytes. The declared check catches the drift the fleet can know
+  about. A consumer pin change nobody mirrored into `requiresTools` shows up
+  only as a heavy job in `fleet traffic`, which an operator has to read.
 - **No guest-manifest backstop.** ADR 0041 explains why reading versions back
   out of the sealed `image-capabilities.json` is a change tied to rebuilding the
   image. The declaration is the operator's word. An image rebuilt without

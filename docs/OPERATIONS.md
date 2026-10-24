@@ -1317,8 +1317,9 @@ decide whether to download.
 **The declaration is only as good as its upkeep.** A consumer that bumps a pin
 in its own repository opens the gap again silently until someone mirrors the
 new pin into `requiresTools`. Do that in the same change that bumps a pin on a
-self-hosted label. The fleet does not measure per-job network bytes yet (ADR
-0079, "not built").
+self-hosted label. An unmirrored pin bump still shows up as a heavy job in
+`fleet traffic` (ADR 0080), which an operator has to read: this check does not
+warn on bytes.
 
 A daemon older than this check publishes no `imageToolCheck`. The row then
 reads `not reported by this daemon`, which is a statement about the daemon and
