@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [macbook]
+        node: [macmini]
     runs-on: trf-fleet-linux-arm64-2x4-${{ matrix.node }}
     timeout-minutes: 15
     steps:
@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [macbook]
+        node: [macmini]
     runs-on: trf-fleet-linux-arm64-2x4-${{ matrix.node }}
     timeout-minutes: 15
     steps:
