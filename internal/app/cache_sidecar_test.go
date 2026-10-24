@@ -46,6 +46,7 @@ func TestShippedCacheSidecarDoesNotBlockRunnerInventory(t *testing.T) {
 	}
 	inv.Executor = fakeTart{values: []executor.Instance{
 		{Name: "trf-small-1", Power: domain.InstancePowerRunning},
+		{Name: name, Power: domain.InstancePowerRunning},
 		{Name: "trf-unknown-job", Power: domain.InstancePowerRunning},
 	}}
 	instances, _ = inv.Observe(context.Background())
