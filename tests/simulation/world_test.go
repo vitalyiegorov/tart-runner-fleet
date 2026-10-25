@@ -149,6 +149,12 @@ type worldConfig struct {
 	// the advertisement read from the fleet's own last tick (issue #388). Off,
 	// the broker places every job regardless, which is every world before it.
 	BrokerHonorsAdvertisedCapacity bool
+	// SiblingsFull makes every other node serving this world's labels full as
+	// well, so a job no set here advertises room for is assigned to no set at
+	// all rather than to a sibling. GitHub never re-evaluates such a job (issue
+	// #422), so the world counts it as unassigned. It needs
+	// BrokerHonorsAdvertisedCapacity, the only broker that can refuse a job.
+	SiblingsFull bool
 }
 
 // simOccupancyBudget is the per-profile ceiling on how long ONE instance may
@@ -827,6 +833,10 @@ type world struct {
 	// toSibling counts jobs GitHub placed elsewhere because this node's sets
 	// advertised no room for them (issue #388).
 	toSibling int
+	// unassigned counts jobs GitHub assigned to no set because every set that
+	// matched them, here and on every full sibling, advertised no room (issue
+	// #422).
+	unassigned int
 
 	observations []tickObservation
 	findings     []finding

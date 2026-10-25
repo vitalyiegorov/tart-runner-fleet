@@ -13,7 +13,8 @@ import (
 
 // TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld is issue #388's
 // composition rule: min(configured, held + fit), with the configured value as
-// the answer whenever the headroom is unknown.
+// the answer whenever the headroom is unknown, floored at a standing offer of
+// one (issue #422).
 func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -23,11 +24,12 @@ func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 		want       int
 	}{
 		{"unknown fails open", 2, ScaleSetHeadroom{}, false, 2},
-		{"nothing held, nothing fits", 2, ScaleSetHeadroom{}, true, 0},
+		{"a full node keeps a standing offer of one", 2, ScaleSetHeadroom{}, true, 1},
+		{"a set configured at zero stays at zero", 0, ScaleSetHeadroom{Fit: 3}, true, 0},
 		{"already assigned work is kept", 2, ScaleSetHeadroom{Held: 1}, true, 1},
 		{"held plus fit", 4, ScaleSetHeadroom{Held: 1, Fit: 2}, true, 3},
 		{"never above the configured ceiling", 2, ScaleSetHeadroom{Held: 1, Fit: 5}, true, 2},
-		{"negative terms are not capacity", 2, ScaleSetHeadroom{Held: -1, Fit: -4}, true, 0},
+		{"negative terms are not capacity", 2, ScaleSetHeadroom{Held: -1, Fit: -4}, true, 1},
 	}
 	for _, tc := range cases {
 		if got := AdvertisedCapacity(tc.configured, tc.headroom, tc.known); got != tc.want {
