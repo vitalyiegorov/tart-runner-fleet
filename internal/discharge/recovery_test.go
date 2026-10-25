@@ -2,6 +2,7 @@ package discharge
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,12 +22,12 @@ func (f *recoveryConfirmation) ConfirmDeletion(context.Context, string) (operati
 }
 
 type automaticRecoverer interface {
-	RecoverStoppedCleanup(context.Context, operations.DeadLetter, domain.Instance, interface {
+	RecoverCleanup(context.Context, operations.DeadLetter, domain.Instance, bool, interface {
 		ConfirmDeletion(context.Context, string) (operations.DeletionConfirmation, error)
 	}) error
 }
 
-func (f *fakeStore) ResumeStoppedCleanup(_ context.Context, op, id string, at time.Time) error {
+func (f *fakeStore) ResumeCleanup(_ context.Context, op, id string, _ bool, at time.Time) error {
 	f.requests = append(f.requests, operations.Discharge{OperationID: op, InstanceID: id, At: at})
 	return f.err
 }
@@ -42,7 +43,7 @@ func TestParkedStoppedCleanupRecoversWithoutOperator(t *testing.T) {
 	letter := operations.DeadLetter{OperationID: req.OperationID, ResourceID: req.InstanceID, Kind: "deregister", Code: "stop"}
 	instance := domain.Instance{ID: req.InstanceID, State: domain.InstanceDraining, Power: domain.InstancePowerStopped}
 	confirmation := &recoveryConfirmation{value: operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: time.Unix(9000, 0)}}
-	if err := recovery.RecoverStoppedCleanup(context.Background(), letter, instance, confirmation); err != nil {
+	if err := recovery.RecoverCleanup(context.Background(), letter, instance, false, confirmation); err != nil {
 		t.Fatal(err)
 	}
 	if len(store.requests) != 1 || len(vm.reaped) != 0 {
@@ -112,12 +113,76 @@ func TestAutomaticCleanupPreservesEveryUnprovedOrBusyResource(t *testing.T) {
 				letter.Code = "delete"
 				wantResume = true
 			}
-			err := svc.RecoverStoppedCleanup(context.Background(), letter, instance, input)
+			err := svc.RecoverCleanup(context.Background(), letter, instance, false, input)
 			if (err != nil) != wantError {
 				t.Fatalf("error=%v wantError=%v", err, wantError)
 			}
 			if len(vm.reaped) > 0 || ((len(store.requests) > 0 && err == nil) != wantResume) {
 				t.Fatalf("reaped=%v", vm.reaped)
+			}
+		})
+	}
+}
+
+// TestDeadStopWithRunningGuestRecoversOnlyOnAHealthyHost is issue #424: a drain
+// that spent its stop budget during a host-wide fault died with its VM still
+// running. Once the host is healthy again, GitHub confirms the runner gone and
+// the backend still reads the VM running, a fresh attempt is enqueued -- and the
+// worker, not this observer, stops the VM. Every unproved premise keeps it dead.
+func TestDeadStopWithRunningGuestRecoversOnlyOnAHealthyHost(t *testing.T) {
+	for _, name := range []string{"recovers", "unhealthy host", "delete code", "fresh power stopped", "fresh power unknown",
+		"inventory unknown", "busy runner", "not due", "exhausted", "store not due", "store race", "stopping"} {
+		t.Run(name, func(t *testing.T) {
+			store, vm := &fakeStore{}, &fakeVM{power: domain.InstancePowerRunning}
+			svc, audit := service(store, vm, true)
+			req := request(true)
+			letter := operations.DeadLetter{OperationID: req.OperationID, ResourceID: req.InstanceID, Kind: "deregister", Code: "stop"}
+			instance := domain.Instance{ID: req.InstanceID, State: domain.InstanceDeregistering, Power: domain.InstancePowerRunning}
+			confirm := &recoveryConfirmation{value: operations.DeletionConfirmation{Fresh: true, RunnerInactive: true, JobsInactive: true, ObservedAt: time.Unix(9000, 0)}}
+			healthy, wantResume, wantError := true, false, false
+			switch name {
+			case "recovers":
+				wantResume = true
+			case "unhealthy host":
+				healthy = false
+			case "delete code":
+				letter.Code = "delete"
+			case "fresh power stopped":
+				vm.power = domain.InstancePowerStopped
+			case "fresh power unknown":
+				vm.unreadable = true
+			case "inventory unknown":
+				instance.Power = domain.InstancePowerUnknown
+			case "busy runner":
+				confirm.value.RunnerInactive = false
+			case "not due":
+				letter.Resumptions, letter.DeadAt = 1, time.Unix(9000, 0)
+			case "exhausted":
+				letter.Resumptions, letter.DeadAt = operations.MaxCleanupResumptions, time.Unix(0, 0)
+			case "store not due":
+				store.err = operations.ErrResumptionNotDue
+			case "store race":
+				store.err = operations.ErrResourceProgressing
+				wantError = true
+			case "stopping":
+				instance.State = domain.InstanceStopping
+				wantResume = true
+			}
+			err := svc.RecoverCleanup(context.Background(), letter, instance, healthy, confirm)
+			if (err != nil) != wantError {
+				t.Fatalf("error=%v wantError=%v", err, wantError)
+			}
+			if len(vm.reaped) > 0 {
+				t.Fatal("the observer reaped a VM itself")
+			}
+			if resumed := len(store.requests) > 0 && store.err == nil; resumed != wantResume {
+				t.Fatalf("resumed=%v want %v", resumed, wantResume)
+			}
+			if wantResume && !strings.Contains(audit.String(), "automatic cleanup resumed") {
+				t.Fatalf("resumption was not audited: %q", audit.String())
+			}
+			if (name == "not due" || name == "exhausted") && confirm.calls != 0 {
+				t.Fatal("a resumption that is not due still spent a GitHub probe")
 			}
 		})
 	}

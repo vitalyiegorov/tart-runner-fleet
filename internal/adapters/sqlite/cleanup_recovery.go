@@ -11,11 +11,13 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
-// ResumeStoppedCleanup atomically supersedes a parked stop/delete attempt with
-// a fresh durable cleanup. The caller supplies fresh host and GitHub proof;
-// this transaction rechecks identity, ownership, state and absence of live work.
-// The instance is retained, so an external failure remains owned and retryable.
-func (s *Store) ResumeStoppedCleanup(ctx context.Context, id, resource string, at time.Time) error {
+// ResumeCleanup atomically supersedes a dead stop/delete attempt with a fresh
+// durable cleanup. The caller supplies fresh host, power and GitHub proof, and
+// stopped reports whether that power proof showed the VM powered off; this
+// transaction rechecks identity, ownership, state, absence of live work and the
+// resumption bound. The instance is retained, so an external failure remains
+// owned and retryable.
+func (s *Store) ResumeCleanup(ctx context.Context, id, resource string, stopped bool, at time.Time) error {
 	if id == "" || resource == "" || at.IsZero() {
 		return operations.ErrInvalid
 	}
@@ -55,6 +57,15 @@ func (s *Store) ResumeStoppedCleanup(ctx context.Context, id, resource string, a
 	if progressing != 0 {
 		return operations.ErrResourceProgressing
 	}
+	// The bound is rechecked here, against the same rows the tick read, so two
+	// racing ticks can never spend more resumptions than the rule allows.
+	var resumed int
+	if err := s.txRow(ctx, tx, "cleanup_recovery.resumptions", `SELECT `+resumptionsOf("dead")+` FROM operations dead WHERE dead.id=?`, operations.OperationDischarged, id).Scan(&resumed); err != nil {
+		return err
+	}
+	if !operations.CleanupResumptionDue(resumed, old.UpdatedAt, at) {
+		return operations.ErrResumptionNotDue
+	}
 	sum := sha256.Sum256([]byte("cleanup-recovery\x00" + old.ID))
 	next := "op-" + hex.EncodeToString(sum[:12])
 	stamp := at.UTC().UnixNano()
@@ -72,9 +83,10 @@ func (s *Store) ResumeStoppedCleanup(ctx context.Context, id, resource string, a
 	if _, err := s.txExec(ctx, tx, "cleanup_recovery.supersede", `UPDATE operations SET status=?,updated_at=? WHERE id=?`, operations.OperationDischarged, stamp, id); err != nil {
 		return err
 	}
-	if instance.State == operations.StateDraining {
+	if stopped && instance.State == operations.StateDraining {
 		// Restart through the stopped-recovery guard: a VM that came back aborts
 		// to Running instead of inheriting an old occupancy/guest-death decision.
+		// A running VM keeps its phase, whose own guard re-verifies its premise.
 		if _, err := s.txExec(ctx, tx, "cleanup_recovery.phase", `UPDATE instances SET drain_phase=?,version=version+1,updated_at=? WHERE id=?`, operations.DrainPhaseStoppedRecovery, stamp, resource); err != nil {
 			return err
 		}

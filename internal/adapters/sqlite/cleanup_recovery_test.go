@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,12 +17,12 @@ func TestParkedStopRecoveryIsDurableAndDoesNotRetireTheInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovery, ok := any(store).(interface {
-		ResumeStoppedCleanup(context.Context, string, string, time.Time) error
+		ResumeCleanup(context.Context, string, string, bool, time.Time) error
 	})
 	if !ok {
 		t.Fatal("store has no durable cleanup recovery")
 	}
-	if err := recovery.ResumeStoppedCleanup(context.Background(), op, id, now); err != nil {
+	if err := recovery.ResumeCleanup(context.Background(), op, id, true, now); err != nil {
 		t.Fatal(err)
 	}
 	if got := instanceState(t, store, id); got != operations.StateDraining {
@@ -37,13 +38,13 @@ func TestParkedStopRecoveryIsDurableAndDoesNotRetireTheInstance(t *testing.T) {
 	if claimed[0].Attempts != 0 || claimed[0].ResourceID != id {
 		t.Fatalf("replacement=%v", claimed[0])
 	}
-	if err := recovery.ResumeStoppedCleanup(context.Background(), op, id, now); err != nil {
+	if err := recovery.ResumeCleanup(context.Background(), op, id, true, now); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestCleanupRecoveryRollsBackEveryFailedDurableStep(t *testing.T) {
-	for _, point := range []string{"cleanup_recovery.begin", "cleanup_recovery.operation", "cleanup_recovery.instance", "cleanup_recovery.progress", "cleanup_recovery.enqueue", "cleanup_recovery.dependencies", "cleanup_recovery.supersede", "cleanup_recovery.phase", "cleanup_recovery.commit"} {
+	for _, point := range []string{"cleanup_recovery.begin", "cleanup_recovery.operation", "cleanup_recovery.instance", "cleanup_recovery.progress", "cleanup_recovery.resumptions", "cleanup_recovery.enqueue", "cleanup_recovery.dependencies", "cleanup_recovery.supersede", "cleanup_recovery.phase", "cleanup_recovery.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)
 			now := time.Unix(1000, 0).UTC()
@@ -57,7 +58,7 @@ func TestCleanupRecoveryRollsBackEveryFailedDurableStep(t *testing.T) {
 				}
 				return nil
 			}
-			if err := store.ResumeStoppedCleanup(context.Background(), op, id, now); err == nil {
+			if err := store.ResumeCleanup(context.Background(), op, id, true, now); err == nil {
 				t.Fatal("store fault ignored")
 			}
 			store.injectFault = nil
@@ -102,7 +103,7 @@ func TestCleanupRecoveryRefusesUnrelatedLiveOrUnownedWork(t *testing.T) {
 				_, _ = store.db.Exec(`UPDATE instances SET state='stopping' WHERE id=?`, id)
 				success = true
 			}
-			if err := store.ResumeStoppedCleanup(context.Background(), op, id, now); (err == nil) != success {
+			if err := store.ResumeCleanup(context.Background(), op, id, true, now); (err == nil) != success {
 				t.Fatalf("error=%v success=%v", err, success)
 			}
 		})
@@ -121,7 +122,7 @@ func TestRecoveredCleanupKeepsSuccessorsBehindItsRealCompletion(t *testing.T) {
 	if _, err := store.db.Exec(`INSERT INTO operation_dependencies(operation_id,depends_on) VALUES('successor',?)`, op); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ResumeStoppedCleanup(context.Background(), op, id, now); err != nil {
+	if err := store.ResumeCleanup(context.Background(), op, id, true, now); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := store.Claim(context.Background(), "worker", 10, now, time.Minute)
@@ -134,5 +135,69 @@ func TestRecoveredCleanupKeepsSuccessorsBehindItsRealCompletion(t *testing.T) {
 	claimed, err = store.Claim(context.Background(), "worker", 10, now, time.Minute)
 	if err != nil || len(claimed) != 1 || claimed[0].ID != "successor" {
 		t.Fatalf("successor stayed blocked: %v %v", claimed, err)
+	}
+}
+
+// A running VM's successor keeps its drain phase: the stopped-recovery guard
+// would abort a VM that is running by design back to Running (ADR 0081).
+func TestRunningCleanupRecoveryKeepsTheDrainPhase(t *testing.T) {
+	store := testStore(t)
+	now := time.Unix(1000, 0).UTC()
+	id, op := phantom(t, store, now)
+	if _, err := store.db.Exec(`UPDATE operations SET last_error='runner lifecycle failed at stop' WHERE id=?`, op); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE instances SET drain_phase=? WHERE id=?`, operations.DrainPhaseGuestUnresponsive, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResumeCleanup(context.Background(), op, id, false, now); err != nil {
+		t.Fatal(err)
+	}
+	instance, err := store.Instance(context.Background(), id)
+	if err != nil || instance.DrainPhase != operations.DrainPhaseGuestUnresponsive {
+		t.Fatalf("instance=%#v err=%v", instance, err)
+	}
+}
+
+// The transaction itself enforces the resumption bound, so two racing ticks
+// can never spend more than the rule allows, and the dead-letter projection
+// reports the same count the transaction decides on.
+func TestCleanupRecoveryIsBoundedInsideTheTransaction(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	now := time.Unix(1000, 0).UTC()
+	id, op := phantom(t, store, now)
+	if _, err := store.db.Exec(`UPDATE operations SET last_error='runner lifecycle failed at stop' WHERE id=?`, op); err != nil {
+		t.Fatal(err)
+	}
+	for resumed := range operations.MaxCleanupResumptions + 1 {
+		letters, err := store.DeadLetters(ctx)
+		if err != nil || len(letters) != 1 || letters[0].Resumptions != resumed || !letters[0].DeadAt.Equal(now) {
+			t.Fatalf("resumption %d: letters=%#v err=%v", resumed, letters, err)
+		}
+		op = letters[0].OperationID
+		if resumed > 0 {
+			if err := store.ResumeCleanup(ctx, op, id, true, now); !errors.Is(err, operations.ErrResumptionNotDue) {
+				t.Fatalf("resumption %d skipped its backoff: %v", resumed, err)
+			}
+		}
+		now = now.Add(time.Duration(1<<resumed) * operations.CleanupResumptionBackoff)
+		err = store.ResumeCleanup(ctx, op, id, true, now)
+		if resumed == operations.MaxCleanupResumptions {
+			if !errors.Is(err, operations.ErrResumptionNotDue) {
+				t.Fatalf("resumed past the bound: %v", err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("resumption %d: %v", resumed, err)
+		}
+		claimed, err := store.Claim(ctx, "worker", 1, now, time.Minute)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claimed=%v err=%v", claimed, err)
+		}
+		if _, err := store.db.Exec(`UPDATE operations SET status='dead',lease_owner='',last_error='runner lifecycle failed at stop',updated_at=? WHERE id=?`, now.UnixNano(), claimed[0].ID); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

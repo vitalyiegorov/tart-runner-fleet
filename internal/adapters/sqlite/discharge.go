@@ -18,9 +18,10 @@ import (
 // lifecycle code exactly as the aggregate does.
 func (s *Store) DeadLetters(ctx context.Context) ([]operations.DeadLetter, error) {
 	rows, err := s.dbQuery(ctx, "operations.deadletters.query", `SELECT dead.id,dead.kind,dead.resource_id,dead.last_error,dead.attempts,
-		EXISTS(SELECT 1 FROM operations live WHERE live.resource_id=dead.resource_id AND live.status IN (?,?))
+		EXISTS(SELECT 1 FROM operations live WHERE live.resource_id=dead.resource_id AND live.status IN (?,?)),
+		`+resumptionsOf("dead")+`,dead.updated_at
 		FROM operations dead WHERE dead.status=? ORDER BY dead.id`,
-		operations.OperationPending, operations.OperationClaimed, operations.OperationDead)
+		operations.OperationPending, operations.OperationClaimed, operations.OperationDischarged, operations.OperationDead)
 	if err != nil {
 		return nil, fmt.Errorf("list dead letters: %w", err)
 	}
@@ -29,17 +30,27 @@ func (s *Store) DeadLetters(ctx context.Context) ([]operations.DeadLetter, error
 	for rows.Next() {
 		var letter operations.DeadLetter
 		var lastError string
+		var deadAt int64
 		if err := rows.Scan(&letter.OperationID, &letter.Kind, &letter.ResourceID, &lastError,
-			&letter.Attempts, &letter.ResourceProgressing); err != nil {
+			&letter.Attempts, &letter.ResourceProgressing, &letter.Resumptions, &deadAt); err != nil {
 			return nil, fmt.Errorf("scan dead letter: %w", err)
 		}
 		letter.Code = lifecycle.FailureCode(lastError)
+		letter.DeadAt = time.Unix(0, deadAt).UTC()
 		letters = append(letters, letter)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate dead letters: %w", err)
 	}
 	return letters, nil
+}
+
+// resumptionsOf counts the earlier attempts of an operation's effect that were
+// superseded (discharged) on the same resource: the automatic recoveries already
+// spent on it. Its one placeholder binds operations.OperationDischarged.
+func resumptionsOf(alias string) string {
+	return `(SELECT COUNT(*) FROM operations prior WHERE prior.resource_id=` + alias + `.resource_id AND prior.effect_key=` +
+		alias + `.effect_key AND prior.status=?)`
 }
 
 // cleanupStates are the durable instance states that mean "this row is being

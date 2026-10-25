@@ -52,6 +52,9 @@ type TickResult struct {
 	Instances   []domain.Instance
 	HostMode    domain.HostMode
 	Host        domain.Host
+	// HostHealthy is a fresh host observation whose guardrails pass. Host above
+	// is a value only, which cannot tell a healthy host from an unobserved one.
+	HostHealthy bool
 	// ExpiredOverdue counts queued demand this tick retired because GitHub's own
 	// job-start bound had long passed (issue #315). It is carried so the daemon
 	// can say so out loud: the rows leave the queue silently otherwise, and a
@@ -260,6 +263,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			ScopeInstances: ScaleSetInstances(e.Bindings, instances),
 			Instances:      append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
+			HostHealthy:    hostHealthy(host),
 			ExpiredOverdue: expiredOverdue, Headroom: headroom},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }

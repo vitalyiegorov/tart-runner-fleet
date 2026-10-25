@@ -93,9 +93,9 @@ func TestDeadLettersNameParkedOperationsWithoutStoredText(t *testing.T) {
 	}
 	want := []operations.DeadLetter{
 		{OperationID: "op-dead-2", Kind: lifecycle.OperationDrain, Code: "deregister:runner_forbidden",
-			ResourceID: "trf-linux-2", Attempts: 720, ResourceProgressing: true},
+			ResourceID: "trf-linux-2", Attempts: 720, ResourceProgressing: true, DeadAt: now},
 		{OperationID: operationID, Kind: lifecycle.OperationDrain, Code: "deregister:runner_busy",
-			ResourceID: instanceID, Attempts: 835, ResourceProgressing: false},
+			ResourceID: instanceID, Attempts: 835, ResourceProgressing: false, DeadAt: now},
 	}
 	if !reflect.DeepEqual(letters, want) {
 		t.Fatalf("dead letters=%#v", letters)
