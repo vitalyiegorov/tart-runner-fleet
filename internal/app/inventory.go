@@ -373,6 +373,18 @@ func (p ProductionInventory) recoveryConfirmationMaxAge() time.Duration {
 	return p.RecoveryConfirmationMaxAge
 }
 
+// updateDrainReason is the admission refusal an update drain imposes on a host
+// whose own guardrails passed.
+const updateDrainReason = "update drain"
+
+// hostHealthy reports a fresh host observation whose own guardrails admit work.
+// An update drain's refusal is not host pressure: it replaces only a decision
+// the guardrails had already allowed. Stale or unavailable evidence is never
+// healthy (Rule 4).
+func hostHealthy(host domain.Observation[domain.Host]) bool {
+	return host.Usable() && (host.Value.Pressure.AdmissionAllowed || host.Value.Pressure.AdmissionReason == updateDrainReason)
+}
+
 // hostObservation converts a host probe into the scheduler's admission facts.
 //
 // When elastic is false the CPU dimension echoes the configured capacity and no
@@ -407,7 +419,7 @@ func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, 
 	// on. The reason is stated so `fleet status` never shows an unexplained
 	// refusal on an idle machine.
 	if draining && decision.Allowed {
-		decision = executor.AdmissionDecision{Reason: "update drain"}
+		decision = executor.AdmissionDecision{Reason: updateDrainReason}
 	}
 	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
 		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts,

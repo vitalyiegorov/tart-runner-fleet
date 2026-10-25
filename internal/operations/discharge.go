@@ -24,7 +24,35 @@ var (
 	// ErrInstanceNotReapable reports an instance row that is not in a cleanup or
 	// terminal state, so retiring it would abandon a live runner.
 	ErrInstanceNotReapable = fmt.Errorf("%w: instance state is not reapable", ErrConflict)
+	// ErrResumptionNotDue reports a dead cleanup the authority tick may not
+	// resume yet, or ever again on its own: its backoff has not elapsed, or its
+	// effect has spent every automatic resumption (ADR 0081).
+	ErrResumptionNotDue = fmt.Errorf("%w: cleanup resumption is not due", ErrConflict)
 )
+
+// MaxCleanupResumptions bounds how many times the authority tick may supersede
+// one dead cleanup effect with a fresh attempt (ADR 0061, ADR 0081). A fault the
+// worker's own retry ladder could not outlast that many times is not transient;
+// the dead letter then stays for an operator.
+const MaxCleanupResumptions = 3
+
+// CleanupResumptionBackoff is the wait before the second automatic resumption
+// of one effect; each later one doubles it. The first is immediate: the fresh
+// host, power and GitHub proof the tick requires is the reason to try again.
+const CleanupResumptionBackoff = 10 * time.Minute
+
+// CleanupResumptionDue is the one rule bounding automatic cleanup recovery:
+// resumed is how many earlier attempts of the same effect were superseded, and
+// deadAt is when the current attempt died.
+func CleanupResumptionDue(resumed int, deadAt, now time.Time) bool {
+	if resumed < 0 || resumed >= MaxCleanupResumptions {
+		return false
+	}
+	if resumed == 0 {
+		return true
+	}
+	return !deadAt.IsZero() && !now.Before(deadAt) && now.Sub(deadAt) >= CleanupResumptionBackoff<<(resumed-1)
+}
 
 // DeadLetter names one durable operation that has stopped retrying and now waits
 // for an operator. Code is the same closed lifecycle vocabulary the failure
@@ -41,6 +69,11 @@ type DeadLetter struct {
 	// is pending or claimed. While it is true the resource is not parked on this
 	// dead letter: work can still advance without an operator.
 	ResourceProgressing bool
+	// Resumptions counts earlier attempts of the same effect that automatic
+	// cleanup recovery superseded, and DeadAt is when this attempt died. Together
+	// they are CleanupResumptionDue's input.
+	Resumptions int
+	DeadAt      time.Time
 }
 
 // Discharge is an operator's authorized closure of one dead-lettered operation.

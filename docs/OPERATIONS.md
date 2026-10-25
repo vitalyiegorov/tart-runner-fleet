@@ -713,7 +713,7 @@ a repeat reports `false` for the steps that were already done.
 | `operation_not_dead` | 6 | The operation is still pending, claimed, or already completed. Nothing to discharge. |
 | `resource_not_parked` | 6 | Another operation for the same resource is pending or claimed; let it finish. |
 | `instance_not_reapable` | 6 | The row is not in a cleanup or terminal state. Retiring it would abandon a live runner. |
-| `vm_running` | 6 | Fresh Tart evidence shows the guest is running. `Reap` never stops a VM. |
+| `vm_running` | 6 | Fresh Tart evidence shows the guest is running. `Reap` never stops a VM. A dead `stop` cleanup is resumed by the controller once the host heals (ADR 0081). |
 | `vm_state_unknown` | 6 | Tart could not be read. Fail closed and retry. |
 | `not_authority` | 6 | The controller is not in authority mode. |
 | `unconfirmed` / `reason_required` | 6 | The confirmation token or reason is missing. |
@@ -2024,6 +2024,24 @@ No extra monitor, restart or cleanup script is needed. Public failure codes stay
 `stop`/`delete`; `automatic cleanup resumed` identifies the old operation and
 instance without logging its payload. Legacy stop rows restart conservatively
 rather than counting old GitHub/guard failures as stop attempts.
+
+### Automatic recovery of a dead stop with a running guest (ADR 0081)
+
+A drain that spent its stop budget during a host-wide fault (for example inode
+or disk exhaustion) dies with the plain `stop` code and its VM still running.
+It is not parked, so `fleet operations discharge` refuses it (`vm_running`).
+Once the host's own guardrails pass again on a fresh observation, GitHub freshly
+confirms the runner and its jobs inactive, and the backend still reads the VM
+running, the authority tick queues one new durable attempt. The worker, not the
+tick, then stops and deletes the VM. The log line is the same `automatic
+cleanup resumed`, with `power=running`.
+
+Automatic recovery of one cleanup (stopped or running) happens at most three
+times: immediately, then 10 and 20 minutes after each successor dies. A dead
+letter that is still there after that has failed four times; diagnose it and
+recover it by hand. Do not `podman stop` or `tart stop` a guest whose dead
+letter the controller may still resume while the host is under pressure; fix
+the pressure first and let the tick resume it.
 
 ### A queue observation fails on a sibling's explicit selector
 

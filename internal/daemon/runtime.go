@@ -942,8 +942,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	if opts.Mode == reconcile.Authority {
 		cleanup := discharge.Service{Store: store, VM: d.newReaper(store, cfg), Authority: true, Now: d.now,
 			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
-		ticker.recoverCleanup = func(ctx context.Context, letter operations.DeadLetter, instance domain.Instance) error {
-			return cleanup.RecoverStoppedCleanup(ctx, letter, instance, control)
+		ticker.recoverCleanup = func(ctx context.Context, letter operations.DeadLetter, instance domain.Instance, hostHealthy bool) error {
+			return cleanup.RecoverCleanup(ctx, letter, instance, hostHealthy, control)
 		}
 	}
 	var worker app.WorkRunner
@@ -2340,7 +2340,7 @@ type engineTicker struct {
 	operationCounts   func(context.Context) (int, int, error)
 	operationFailures func(context.Context) ([]operations.OperationFailure, error)
 	deadLetters       func(context.Context) ([]operations.DeadLetter, error)
-	recoverCleanup    func(context.Context, operations.DeadLetter, domain.Instance) error
+	recoverCleanup    func(context.Context, operations.DeadLetter, domain.Instance, bool) error
 	// stalledOperations names what is not finishing: the operations still
 	// retrying and the instances still held in a cleanup state (ADR 0039).
 	stalledOperations func(context.Context, time.Time) ([]operations.StalledOperation, error)
@@ -2404,10 +2404,10 @@ func (e engineTicker) Tick(ctx context.Context) error {
 		if e.operationCounts != nil {
 			retrying, dead, countErr := e.operationCounts(ctx)
 			failures, failureErr := e.operationFailureMetrics(ctx)
-			letters, letterErr := e.deadLetterMetrics(ctx, result.Instances)
+			letters, durable, letterErr := e.deadLetterMetrics(ctx, result.Instances)
 			stalled, stalledErr := e.stalledMetrics(ctx)
 			if countErr == nil && failureErr == nil && letterErr == nil && stalledErr == nil {
-				letterErr = e.recoverParkedCleanup(ctx, letters, result.Instances)
+				letterErr = e.recoverDeadCleanup(ctx, durable, result.Instances, result.HostHealthy)
 			}
 			if countErr != nil || failureErr != nil || letterErr != nil || stalledErr != nil {
 				// Rule 4: an unreadable aggregate degrades the observation. It never
@@ -2515,13 +2515,13 @@ func (e engineTicker) operationFailureMetrics(ctx context.Context) ([]telemetry.
 // stronger evidence of the two: a generation swap cannot interrupt a guest that
 // does not exist. Withholding it would let the wedge ADR 0021 removed return in a
 // new shape — a dead letter whose VM is already gone disabling updates forever.
-func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.Instance) ([]telemetry.DeadLetter, error) {
+func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.Instance) ([]telemetry.DeadLetter, []operations.DeadLetter, error) {
 	if e.deadLetters == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	durable, err := e.deadLetters(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	provenIdle := make(map[string]struct{}, len(instances))
 	for _, instance := range instances {
@@ -2536,7 +2536,7 @@ func (e engineTicker) deadLetterMetrics(ctx context.Context, instances []domain.
 			Code: letter.Code, ResourceID: letter.ResourceID, Attempts: letter.Attempts,
 			Parked: idle && !letter.ResourceProgressing})
 	}
-	return letters, nil
+	return letters, durable, nil
 }
 
 // stalledMetrics converts the durable stall projection into telemetry values. A
@@ -2790,21 +2790,19 @@ func (wallClock) Now() time.Time { return time.Now().UTC() }
 var _ operations.Store = (*sqlite.Store)(nil)
 
 // Recovery runs on the existing tick, after all observations are coherent.
-// Metric readers remain read-only; only the authority wires this callback.
-func (e engineTicker) recoverParkedCleanup(ctx context.Context, letters []telemetry.DeadLetter, instances []domain.Instance) error {
+// Metric readers remain read-only; only the authority wires this callback. Every
+// durable dead letter is offered, parked or not: a drain that died at stop with
+// its VM still running is not parked, and is exactly what ADR 0081 resumes.
+func (e engineTicker) recoverDeadCleanup(ctx context.Context, letters []operations.DeadLetter, instances []domain.Instance, hostHealthy bool) error {
 	if e.recoverCleanup == nil {
 		return nil
 	}
 	for _, letter := range letters {
-		if !letter.Parked {
-			continue
-		}
 		for _, instance := range instances {
 			if instance.ID != letter.ResourceID {
 				continue
 			}
-			durable := operations.DeadLetter{OperationID: letter.OperationID, ResourceID: letter.ResourceID, Kind: letter.Kind, Code: letter.Code, Attempts: letter.Attempts}
-			if err := e.recoverCleanup(ctx, durable, instance); err != nil {
+			if err := e.recoverCleanup(ctx, letter, instance, hostHealthy); err != nil {
 				return err
 			}
 		}

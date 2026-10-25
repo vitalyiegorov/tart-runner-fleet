@@ -51,7 +51,7 @@ func TestParkedDeadLettersRequireAStoppedVMAndNoProgressingWork(t *testing.T) {
 			ticker := engineTicker{deadLetters: func(context.Context) ([]operations.DeadLetter, error) {
 				return []operations.DeadLetter{phantomDeadLetter(testCase.progressing)}, nil
 			}}
-			letters, err := ticker.deadLetterMetrics(context.Background(), testCase.instances)
+			letters, _, err := ticker.deadLetterMetrics(context.Background(), testCase.instances)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -71,7 +71,7 @@ func TestParkedDeadLettersRequireAStoppedVMAndNoProgressingWork(t *testing.T) {
 
 // A daemon wired without the durable port publishes none rather than guessing.
 func TestDeadLetterMetricsAreAbsentWithoutTheDurablePort(t *testing.T) {
-	letters, err := engineTicker{}.deadLetterMetrics(context.Background(), nil)
+	letters, _, err := engineTicker{}.deadLetterMetrics(context.Background(), nil)
 	if err != nil || letters != nil {
 		t.Fatalf("letters=%#v err=%v", letters, err)
 	}

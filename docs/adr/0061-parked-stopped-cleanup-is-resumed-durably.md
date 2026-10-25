@@ -4,6 +4,9 @@
 
 Accepted for implementation, issue #371. Amends ADR0039's stop counter and
 ADR0021's operator-only recovery for the narrow safely inactive cleanup case.
+Extended and bounded by ADR 0081: a dead stop whose VM is still running is
+also resumed once the host is healthy, and every automatic resumption of one
+effect is limited to three, with backoff.
 
 ## Evidence and cause
 
