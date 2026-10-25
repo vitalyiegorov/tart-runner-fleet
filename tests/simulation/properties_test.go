@@ -107,13 +107,11 @@ const (
 	// the bound on property (b)'s fair-share exemption -- without it, "the rule
 	// explains this pass-over" would excuse every pass-over forever.
 	findingScopeShare findingKind = "scope_share"
-	// findingOverOffer is property (t): what any one of a node's scale sets is
-	// offered beyond what it holds never exceeds what its macOS profile's
-	// MaxActive can still start. Issue #397 made it a bound on the sum over every
-	// set of the profile; issue #412 floors a set the division leaves at zero at
-	// one, because GitHub places a job only on a set advertising room when the
-	// job is queued, so the bound is per set again -- one each, not the whole
-	// residual each as before #397.
+	// findingOverOffer is property (t): what a node's scale sets are offered
+	// beyond what they hold, added up over every set of one macOS profile, never
+	// exceeds what that profile's MaxActive can still start. It is issue #397's
+	// oracle: before it every set was offered the node's whole residual, and no
+	// property counted the offers of two sets together.
 	findingOverOffer findingKind = "over_offer"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
@@ -831,7 +829,7 @@ func overOfferChecker(cfg worldConfig) checker {
 		for _, row := range observation.Headroom {
 			for _, binding := range cfg.Bindings {
 				if binding.StoreKey == row.StoreKey {
-					offered[binding.Profile.ID] = max(offered[binding.Profile.ID], row.Fit)
+					offered[binding.Profile.ID] += row.Fit
 				}
 			}
 		}
@@ -860,7 +858,7 @@ func overOfferChecker(cfg worldConfig) checker {
 			}
 			if limit := max(0, max(1, definition.MaxActive)-spoken); total > limit {
 				findings = append(findings, finding{Kind: findingOverOffer, Tick: observation.Tick,
-					Detail: fmt.Sprintf("a %s set offered %d beyond what it holds; MaxActive %d leaves %d (%d spoken for)",
+					Detail: fmt.Sprintf("%s sets offered %d beyond what they hold; MaxActive %d leaves %d (%d spoken for)",
 						profile, total, definition.MaxActive, limit, spoken)})
 			}
 		}

@@ -111,20 +111,10 @@ func PartitionHeadroom(in Input, claims []Claim) ([]int, bool) {
 	if len(claims) > 0 {
 		start = int(in.Now.Unix()/int64(shareRotation/time.Second)) % len(claims)
 	}
-	// floor is the residual once the waiting work is charged: what a stranded set
-	// is measured against below, before the speculative round robin spends it.
-	var floor domain.Resources
-	floorCohort := map[domain.ProfileID]int{}
-	for index, limit := range []func(Claim) int{
+	for _, limit := range []func(Claim) int{
 		func(claim Claim) int { return min(claim.Room, claim.Waiting) },
 		func(claim Claim) int { return claim.Room },
 	} {
-		if index == 1 {
-			floor = free
-			for profile, left := range cohort {
-				floorCohort[profile] = left
-			}
-		}
 		for granted := true; granted; {
 			granted = false
 			for offset := range claims {
@@ -134,24 +124,6 @@ func PartitionHeadroom(in Input, claims []Claim) ([]int, bool) {
 				}
 			}
 		}
-	}
-	// A set left with nothing although one instance of its vector could start is
-	// offered that one. GitHub places a job only on a set advertising room when
-	// the job is queued and does not move it, so a set at zero on a node with
-	// room strands every job its scope queues meanwhile -- the node cannot see
-	// them waiting until GitHub assigns them (issue #412, ADR 0076 amended). The
-	// floor is one, so an idle node over-offers by at most one per set, not by
-	// its whole residual per set as before ADR 0076.
-	for index, claim := range claims {
-		if shares[index] != 0 || claim.Room < 1 {
-			continue
-		}
-		definition := in.Config.Profiles[claim.Profile]
-		if !floor.CanFit(definition.Resources) ||
-			(definition.Platform == domain.PlatformMacOS && floorCohort[claim.Profile] < 1) {
-			continue
-		}
-		shares[index] = 1
 	}
 	return shares, true
 }

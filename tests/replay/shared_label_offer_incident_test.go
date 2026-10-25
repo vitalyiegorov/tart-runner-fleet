@@ -60,10 +60,9 @@ func miniOfferInstance(now time.Time, id, profile string, job int64) domain.Inst
 }
 
 // TestSharedLabelOfferIncidentOffersTheMinisResidualOnce is the decisive tick.
-// The mini's seventeen sets are sized together. Each is offered at most one of
-// its own vector -- the residual is divided once and a set it leaves with
-// nothing is floored at one (issue #412) -- where sizing each set alone offered
-// 68 CPU into the 4 that were free.
+// The mini's seventeen sets are sized together. What they are offered beyond
+// what they hold has to start on the mini at once, so a maestro and a 4x8 can
+// no longer both be invited into the 4 CPU that fit one of them.
 func TestSharedLabelOfferIncidentOffersTheMinisResidualOnce(t *testing.T) {
 	now := time.Date(2026, 10, 20, 14, 5, 50, 0, time.UTC)
 	in := scheduler.Input{Now: now, Config: miniOfferConfig(),
@@ -97,17 +96,9 @@ func TestSharedLabelOfferIncidentOffersTheMinisResidualOnce(t *testing.T) {
 			offered = offered.Add(miniOfferConfig().Profiles[claims[index].Profile].Resources)
 		}
 	}
-	// Issue #412 floors every set whose vector fits at one, so a scope whose
-	// jobs the mini cannot see waiting is still offered somewhere. No set is
-	// offered more than one: the bound is one per set, not 68 CPU into 4.
-	for index, share := range shares {
-		if share != 1 {
-			t.Fatalf("set %d (%s) offered %d (shares %v); each set offers exactly one of the instances the 4 free CPU start",
-				index, claims[index].Profile, share, shares)
-		}
-	}
-	if offered.CPU >= 68 {
-		t.Fatalf("the mini offered %+v, as much as sizing each set alone", offered)
+	if offered.CPU == 0 || offered.CPU > 4 {
+		t.Fatalf("the mini offered %+v beyond what it held (shares %v); its 4 free CPU start exactly one maestro, "+
+			"one 4x8, or two 2x4s, and it must offer one of those", offered, shares)
 	}
 
 	// The figure the incident ran on: each set sized alone against the same

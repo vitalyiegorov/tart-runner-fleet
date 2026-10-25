@@ -50,10 +50,14 @@ func macbookWorld() worldConfig {
 
 // TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart replays the
 // incident. A maestro guest runs a long suite; while it holds 7 GiB of the 14
-// GiB budget, a 4x8 job arrives in each of the two other scopes. GitHub must not
-// place either on this node -- its sets advertise only what they hold, which is
-// nothing -- and once the maestro has exited, a 4x8 job is placed here and runs,
-// so the clamp never starves the node of work it can start.
+// GiB budget, a 4x8 job arrives in each of the two other scopes, and a second
+// in one of them. Each 4x8 set advertises only what it holds, floored at the
+// standing offer of one that issue #422 keeps so a job queued while every node
+// is full is still assigned somewhere. So GitHub places at most one job on each
+// set here while the maestro holds the residual, none of them starts beside it,
+// and the scope's second job goes to a sibling. Once the maestro has exited,
+// the node runs what it holds and a 4x8 placed later, so the clamp never
+// starves the node of work it can start.
 func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 	t.Parallel()
 	cfg := macbookWorld()
@@ -62,6 +66,7 @@ func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 		{Tick: 1, Kind: eventArrive, Repo: "a/repo", Profile: "maestro", Event: "push"},
 		{Tick: 12, Kind: eventArrive, Repo: "c/repo", Profile: "large", Event: "pull_request"},
 		{Tick: 14, Kind: eventArrive, Repo: "b/repo", Profile: "large", Event: "pull_request"},
+		{Tick: 16, Kind: eventArrive, Repo: "c/repo", Profile: "large", Event: "push"},
 		{Tick: 90, Kind: eventArrive, Repo: "b/repo", Profile: "large", Event: "push"},
 	}}
 	world := newWorld(t, cfg, trace)
@@ -78,24 +83,37 @@ func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 	if maestro == nil || maestro.startedAt.IsZero() || maestro.finishedAt.IsZero() {
 		t.Fatalf("the maestro suite never ran to completion, so the scenario proves nothing: %+v", maestro)
 	}
-	if !maestro.startedAt.Before(simEpoch.Add(12*simTick)) || !maestro.finishedAt.After(simEpoch.Add(14*simTick)) {
+	if !maestro.startedAt.Before(simEpoch.Add(12*simTick)) || !maestro.finishedAt.After(simEpoch.Add(16*simTick)) {
 		t.Fatalf("the 4x8 jobs must arrive while the maestro holds the envelope: started %s finished %s",
 			maestro.startedAt, maestro.finishedAt)
 	}
+	beside := map[int]int{}
 	for _, job := range world.jobs {
-		if job.binding == 0 || !job.queuedAt.Before(maestro.finishedAt) {
+		if job.binding == 0 {
 			continue
 		}
-		t.Fatalf("GitHub placed %s's 4x8 job on set %d at %s while the maestro held the residual "+
-			"(until %s): the node advertised capacity its envelope could not start",
-			job.repo, cfg.Bindings[job.binding].ScaleSetID, job.queuedAt.Sub(simEpoch), maestro.finishedAt.Sub(simEpoch))
+		if job.startedAt.IsZero() {
+			t.Fatalf("%s's 4x8 job was placed on set %d and never ran", job.repo, cfg.Bindings[job.binding].ScaleSetID)
+		}
+		if !job.queuedAt.Before(maestro.finishedAt) {
+			continue
+		}
+		if job.startedAt.Before(maestro.finishedAt) {
+			t.Fatalf("%s's 4x8 job started at %s while the maestro held the residual (until %s)",
+				job.repo, job.startedAt.Sub(simEpoch), maestro.finishedAt.Sub(simEpoch))
+		}
+		if beside[job.binding]++; beside[job.binding] > 1 {
+			t.Fatalf("GitHub placed a second job on set %d at %s while the maestro held the residual "+
+				"(until %s): the node advertised capacity its envelope could not start beyond the standing offer",
+				cfg.Bindings[job.binding].ScaleSetID, job.queuedAt.Sub(simEpoch), maestro.finishedAt.Sub(simEpoch))
+		}
 	}
-	if world.toSibling != 2 {
-		t.Fatalf("%d jobs went to a sibling, want the two 4x8 jobs that arrived beside the maestro", world.toSibling)
+	if world.toSibling != 1 {
+		t.Fatalf("%d jobs went to a sibling, want the scope's second 4x8 job that arrived beside the maestro", world.toSibling)
 	}
 	var later *simJob
 	for _, job := range world.jobs {
-		if job.binding == 2 {
+		if job.binding == 2 && job.queuedAt.After(maestro.finishedAt) {
 			later = job
 		}
 	}
@@ -105,9 +123,10 @@ func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 }
 
 // TestIssue388BrokerPlacesOnTheOverlappingSetThatAdvertisesRoom: when two sets
-// serve the same job, GitHub places it on one that advertised room. A set
-// advertising nothing must not divert the job to a sibling while its peer on
-// this node still has room.
+// serve the same job, GitHub places it on the one with the most room. A set
+// with only its standing offer of one (issue #422) must not take the job while
+// its peer on this node has more, and once both are full the job goes to a
+// sibling.
 func TestIssue388BrokerPlacesOnTheOverlappingSetThatAdvertisesRoom(t *testing.T) {
 	t.Parallel()
 	cfg := macbookWorld()
@@ -120,12 +139,14 @@ func TestIssue388BrokerPlacesOnTheOverlappingSetThatAdvertisesRoom(t *testing.T)
 	world := newWorld(t, cfg, simTrace{Seed: 388, Ticks: 1, Config: cfg.Name})
 	defer world.close()
 	world.advertisement.Observe(app.TickResult{Plan: scheduler.Plan{Status: scheduler.PlanReady},
-		Headroom: []app.ScaleSetHeadroom{{StoreKey: 1, Held: 0, Fit: 0}, {StoreKey: 2, Held: 0, Fit: 1}}}, nil)
+		Headroom: []app.ScaleSetHeadroom{{StoreKey: 1, Held: 0, Fit: 0}, {StoreKey: 2, Held: 0, Fit: 2}}}, nil)
 	job := world.arrive("b/repo", "large", "push")
 	if job == nil || job.binding != 1 || world.toSibling != 0 {
-		t.Fatalf("job placed on %+v with %d diverted; want the set that advertised room", job, world.toSibling)
+		t.Fatalf("job placed on %+v with %d diverted; want the set that advertised the most room", job, world.toSibling)
 	}
-	if second := world.arrive("b/repo", "large", "push"); second != nil || world.toSibling != 1 {
-		t.Fatalf("with no set advertising room the job goes to a sibling: %+v, %d diverted", second, world.toSibling)
+	world.arrive("b/repo", "large", "push")
+	world.arrive("b/repo", "large", "push")
+	if fourth := world.arrive("b/repo", "large", "push"); fourth != nil || world.toSibling != 1 {
+		t.Fatalf("with no set advertising room the job goes to a sibling: %+v, %d diverted", fourth, world.toSibling)
 	}
 }

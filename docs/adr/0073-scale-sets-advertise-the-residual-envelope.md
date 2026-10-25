@@ -13,6 +13,12 @@ Linux headroom is read from `linuxFreeAged` with the node's true slot count,
 because the four-slot clamp `agedLinuxEnvelope` applied is now a per-tick
 admission pace rather than a capacity.
 
+Further amended by [ADR 0082](0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md)
+(issue #422): a known headroom never advertises below one, so a set holding
+nothing on a full node still offers one and a job queued while every node is
+full is assigned to some set. The hoarding bound becomes one not-yet-startable
+job per set.
+
 ## Context
 
 Issue #388. On 2026-10-21 the MacBook (host budget 10 CPU / 14 GiB, two slots)

@@ -200,10 +200,10 @@ func TestResidualAdvertisementKeepsTheLastReadyView(t *testing.T) {
 		t.Fatal("before any tick the configured capacity is advertised")
 	}
 	ready := TickResult{Plan: scheduler.Plan{Status: scheduler.PlanReady},
-		Headroom: []ScaleSetHeadroom{{StoreKey: 18}, {StoreKey: 20, Held: 1}}}
+		Headroom: []ScaleSetHeadroom{{StoreKey: 18}, {StoreKey: 20, Held: 2}}}
 	advertisement.Observe(ready, nil)
-	if advertisement.Capacity(18, 2) != 0 || advertisement.Capacity(20, 2) != 1 || advertisement.Capacity(99, 3) != 3 {
-		t.Fatalf("ready view: %d %d %d, want 0 1 3", advertisement.Capacity(18, 2), advertisement.Capacity(20, 2),
+	if advertisement.Capacity(18, 2) != 1 || advertisement.Capacity(20, 3) != 2 || advertisement.Capacity(99, 3) != 3 {
+		t.Fatalf("ready view: %d %d %d, want 1 2 3", advertisement.Capacity(18, 2), advertisement.Capacity(20, 3),
 			advertisement.Capacity(99, 3))
 	}
 	for name, tick := range map[string]struct {
@@ -217,13 +217,13 @@ func TestResidualAdvertisementKeepsTheLastReadyView(t *testing.T) {
 			Headroom: []ScaleSetHeadroom{{StoreKey: 20}}}, err: errors.New("commit")},
 	} {
 		advertisement.Observe(tick.result, tick.err)
-		if got := advertisement.Capacity(20, 2); got != 1 {
-			t.Fatalf("%s replaced the last view: advertised %d, want 1", name, got)
+		if got := advertisement.Capacity(20, 3); got != 2 {
+			t.Fatalf("%s replaced the last view: advertised %d, want 2", name, got)
 		}
 	}
 	advertisement.Observe(TickResult{Plan: scheduler.Plan{Status: scheduler.PlanReady},
-		Headroom: []ScaleSetHeadroom{{StoreKey: 20, Held: 1, Fit: 1}}}, nil)
-	if advertisement.Capacity(20, 2) != 2 || advertisement.Capacity(18, 2) != 2 {
+		Headroom: []ScaleSetHeadroom{{StoreKey: 20, Held: 2, Fit: 1}}}, nil)
+	if advertisement.Capacity(20, 3) != 3 || advertisement.Capacity(18, 2) != 2 {
 		t.Fatal("a new ready view replaces the old one whole")
 	}
 	var absent *ResidualAdvertisement
