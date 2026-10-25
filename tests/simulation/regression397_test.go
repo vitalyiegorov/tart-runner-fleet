@@ -77,9 +77,9 @@ func longSuite(t *testing.T, world *world) *simJob {
 
 // TestIssue397ABurstAcrossScopesTakesTheFreeSlotOnce: one maestro suite runs, so
 // one slot is free. Four jobs from three scopes arrive in one poll. Each scope's
-// set is offered at most one (issue #412 floors a set the division leaves at
-// zero, so no scope's jobs are stranded), so at most one job per scope lands
-// here and the rest go to the sibling, which has room.
+// set is offered at most one (issue #422 keeps a standing offer of one on a set
+// holding nothing, so no scope's jobs are stranded), so at most one job per
+// scope lands here and the rest go to the sibling, which has room.
 func TestIssue397ABurstAcrossScopesTakesTheFreeSlotOnce(t *testing.T) {
 	t.Parallel()
 	cfg := sharedLabelWorld()

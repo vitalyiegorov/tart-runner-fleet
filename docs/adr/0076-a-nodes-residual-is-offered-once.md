@@ -19,6 +19,12 @@ to one instance per set -- at most one job per set on a node with any room, so a
 scope with a 2x4 and a 4x8 set may be offered one of each --
 instead of the whole residual per set that caused #397.
 
+Superseded on that point by [ADR 0082](0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md)
+(issue #422, 2026-10-25): the #412 floor is removed from `PartitionHeadroom`.
+The advertised value is now floored at one, so a set holding nothing offers one
+on a full node too. Shares are again exactly the division of what the residual
+can start at once.
+
 ## Context
 
 The Mac mini and the Mac Studio each serve seven scopes. Every scope binds one
@@ -57,9 +63,8 @@ profile and both platforms, and grants units of each claim's vector one at a
 time. Each grant is charged exactly like one more waiting demand: against the
 same envelopes the planner admits with, after every queued demand, and within
 each macOS profile's MaxActive. So everything the round robin offers beyond
-what the sets hold could start on the node at once; the #412 floor then adds at
-most one instance to each set the round robin left at zero, which can exceed
-what starts at once by one per such set. Two profiles that share one budget
+what the sets hold could start on the node at once (the advertised value is
+then floored at one, ADR 0082). Two profiles that share one budget
 (a 2x4 and a 4x8 set, or a maestro and a builder set) also share their offer.
 
 **Fairness is answered by order, not by withholding.** Units are granted round

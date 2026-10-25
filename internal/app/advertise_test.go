@@ -13,7 +13,8 @@ import (
 
 // TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld is issue #388's
 // composition rule: min(configured, held + fit), with the configured value as
-// the answer whenever the headroom is unknown.
+// the answer whenever the headroom is unknown, floored at a standing offer of
+// one (issue #422).
 func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -23,11 +24,19 @@ func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 		want       int
 	}{
 		{"unknown fails open", 2, ScaleSetHeadroom{}, false, 2},
-		{"nothing held, nothing fits", 2, ScaleSetHeadroom{}, true, 0},
+		{"a full node keeps a standing offer of one", 2, ScaleSetHeadroom{}, true, 1},
+		{"a set configured at zero stays at zero", 0, ScaleSetHeadroom{Fit: 3}, true, 0},
 		{"already assigned work is kept", 2, ScaleSetHeadroom{Held: 1}, true, 1},
 		{"held plus fit", 4, ScaleSetHeadroom{Held: 1, Fit: 2}, true, 3},
 		{"never above the configured ceiling", 2, ScaleSetHeadroom{Held: 1, Fit: 5}, true, 2},
-		{"negative terms are not capacity", 2, ScaleSetHeadroom{Held: -1, Fit: -4}, true, 0},
+		{"negative terms are not capacity", 2, ScaleSetHeadroom{Held: -1, Fit: -4}, true, 1},
+		// Issue #422 again: a set whose every held job already has a guest on
+		// the node, on a node with no residual, advertised exactly what it held
+		// -- zero free slots -- so a job queued while every matching set looked
+		// like that was still assigned to no set. One free slot stays open.
+		{"a busy set with nothing waiting keeps one free slot", 4, ScaleSetHeadroom{Held: 1, Placed: 1}, true, 2},
+		{"work waiting for a guest spends the standing offer", 4, ScaleSetHeadroom{Held: 2, Placed: 1}, true, 2},
+		{"the free slot stays under the configured ceiling", 2, ScaleSetHeadroom{Held: 2, Placed: 2}, true, 2},
 	}
 	for _, tc := range cases {
 		if got := AdvertisedCapacity(tc.configured, tc.headroom, tc.known); got != tc.want {
@@ -157,8 +166,13 @@ func TestScaleSetHeadroomHoldsOnlyWorkGitHubStillAssignsTheSet(t *testing.T) {
 	in := headroomInput(domain.Fresh([]domain.Instance{running, failed, draining, stopping}, now))
 	coordinator := DemandCoordinator{Store: noStatisticsStore{&fakeDemandStore{}}, Now: func() time.Time { return now }}
 	rows := coordinator.scaleSetHeadroom(context.Background(), []Binding{binding}, in, nil, nil)
-	if len(rows) != 1 || rows[0].Held != 1 {
-		t.Fatalf("only the running guest holds an assignment: %+v", rows)
+	if len(rows) != 1 || rows[0].Held != 1 || rows[0].Placed != 1 {
+		t.Fatalf("only the running guest holds an assignment, and it is placed: %+v", rows)
+	}
+	// A queued job with no guest yet is held but not placed.
+	rows = coordinator.scaleSetHeadroom(context.Background(), []Binding{binding}, in, map[int64]int{7: 1}, nil)
+	if len(rows) != 1 || rows[0].Held != 2 || rows[0].Placed != 1 {
+		t.Fatalf("a queued job is held, not placed: %+v", rows)
 	}
 }
 
@@ -198,10 +212,10 @@ func TestResidualAdvertisementKeepsTheLastReadyView(t *testing.T) {
 		t.Fatal("before any tick the configured capacity is advertised")
 	}
 	ready := TickResult{Plan: scheduler.Plan{Status: scheduler.PlanReady},
-		Headroom: []ScaleSetHeadroom{{StoreKey: 18}, {StoreKey: 20, Held: 1}}}
+		Headroom: []ScaleSetHeadroom{{StoreKey: 18}, {StoreKey: 20, Held: 2}}}
 	advertisement.Observe(ready, nil)
-	if advertisement.Capacity(18, 2) != 0 || advertisement.Capacity(20, 2) != 1 || advertisement.Capacity(99, 3) != 3 {
-		t.Fatalf("ready view: %d %d %d, want 0 1 3", advertisement.Capacity(18, 2), advertisement.Capacity(20, 2),
+	if advertisement.Capacity(18, 2) != 1 || advertisement.Capacity(20, 3) != 2 || advertisement.Capacity(99, 3) != 3 {
+		t.Fatalf("ready view: %d %d %d, want 1 2 3", advertisement.Capacity(18, 2), advertisement.Capacity(20, 3),
 			advertisement.Capacity(99, 3))
 	}
 	for name, tick := range map[string]struct {
@@ -215,13 +229,13 @@ func TestResidualAdvertisementKeepsTheLastReadyView(t *testing.T) {
 			Headroom: []ScaleSetHeadroom{{StoreKey: 20}}}, err: errors.New("commit")},
 	} {
 		advertisement.Observe(tick.result, tick.err)
-		if got := advertisement.Capacity(20, 2); got != 1 {
-			t.Fatalf("%s replaced the last view: advertised %d, want 1", name, got)
+		if got := advertisement.Capacity(20, 3); got != 2 {
+			t.Fatalf("%s replaced the last view: advertised %d, want 2", name, got)
 		}
 	}
 	advertisement.Observe(TickResult{Plan: scheduler.Plan{Status: scheduler.PlanReady},
-		Headroom: []ScaleSetHeadroom{{StoreKey: 20, Held: 1, Fit: 1}}}, nil)
-	if advertisement.Capacity(20, 2) != 2 || advertisement.Capacity(18, 2) != 2 {
+		Headroom: []ScaleSetHeadroom{{StoreKey: 20, Held: 2, Fit: 1}}}, nil)
+	if advertisement.Capacity(20, 3) != 3 || advertisement.Capacity(18, 2) != 2 {
 		t.Fatal("a new ready view replaces the old one whole")
 	}
 	var absent *ResidualAdvertisement

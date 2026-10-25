@@ -520,7 +520,12 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 		// already chose the eligible set with the most. With none here it waits
 		// for -- or goes to -- a sibling node this world does not model, which is
 		// precisely the outcome issue #388 wants for work this node's residual
-		// cannot start.
+		// cannot start. When every sibling is full too, no set anywhere had room
+		// and GitHub assigns the job to none, for good (issue #422).
+		if w.cfg.SiblingsFull {
+			w.unassigned++
+			return nil
+		}
 		w.toSibling++
 		return nil
 	}

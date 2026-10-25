@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"math"
-	"slices"
 	"testing"
 	"time"
 
@@ -137,51 +136,24 @@ func shareTotal(shares []int) int {
 }
 
 // TestPartitionHeadroomOffersTheResidualOnceAcrossSets is issue #397: an idle
-// MacBook starts two 2x4 guests, and two scopes each bind a 2x4 set on it.
+// MacBook starts two 2x4 guests, and three scopes each bind a 2x4 set on it.
 // Every set used to be offered both; together they are offered two, one each,
 // whichever set the rotation puts first.
 func TestPartitionHeadroomOffersTheResidualOnceAcrossSets(t *testing.T) {
-	claims := []Claim{{Profile: "medium", Room: math.MaxInt}, {Profile: "medium", Room: math.MaxInt}}
-	for step := range 2 {
-		in := macbookInput(nil, nil)
-		in.Now = in.Now.Add(time.Duration(step) * shareRotation)
-		shares, ok := PartitionHeadroom(in, claims)
-		if !ok || shares[0] != 1 || shares[1] != 1 {
-			t.Fatalf("rotation %d: shares %v, want one each", step, shares)
-		}
-	}
-}
-
-// TestPartitionHeadroomNeverStrandsASetWithRoom is issue #412: three scopes bind
-// a 2x4 set on an idle node that starts two. Dividing the two left the third
-// set advertising nothing, and GitHub, which places a job only on a set
-// advertising room when the job is queued and never moves it, left that scope's
-// jobs queued for hours while the node sat idle. A set whose vector the
-// residual can start is offered at least one, whichever way the rotation turns.
-func TestPartitionHeadroomNeverStrandsASetWithRoom(t *testing.T) {
 	claims := []Claim{{Profile: "medium", Room: math.MaxInt}, {Profile: "medium", Room: math.MaxInt},
 		{Profile: "medium", Room: math.MaxInt}}
 	for step := range 3 {
 		in := macbookInput(nil, nil)
 		in.Now = in.Now.Add(time.Duration(step) * shareRotation)
 		shares, ok := PartitionHeadroom(in, claims)
-		if !ok {
-			t.Fatal("usable observations must be sized")
+		if !ok || shareTotal(shares) != 2 {
+			t.Fatalf("rotation %d: shares %v, want two in total", step, shares)
 		}
-		for index, share := range shares {
-			if share != 1 {
-				t.Fatalf("rotation %d: set %d offers %d: %v; every set offers one, and none takes both", step, index, share, shares)
+		for _, share := range shares {
+			if share > 1 {
+				t.Fatalf("rotation %d: shares %v; one set took two while another had none", step, shares)
 			}
 		}
-	}
-	maestro := runningInstance(testConfig(), "maestro-1", "a/repo", "maestro")
-	full := macbookInput(nil, []domain.Instance{maestro, runningInstance(testConfig(), "medium-1", "b/repo", "medium")})
-	if shares, _ := PartitionHeadroom(full, claims); shareTotal(shares) != 0 {
-		t.Fatalf("a node with no free slot offers nothing beyond what it holds, floor or not: %v", shares)
-	}
-	if shares, _ := PartitionHeadroom(macbookInput(nil, nil), []Claim{{Profile: "medium", Room: 0},
-		{Profile: "medium", Room: math.MaxInt}}); shares[0] != 0 || shares[1] != 2 {
-		t.Fatalf("a set at its configured capacity is never floored: %v", shares)
 	}
 }
 
@@ -218,10 +190,9 @@ func TestPartitionHeadroomNeverHandsASetMoreThanItsRoom(t *testing.T) {
 }
 
 // TestPartitionHeadroomChargesEveryProfileAgainstOneBudget: a 2x4 and a 4x8
-// set on the MacBook draw on one 10 CPU / 14 GiB budget with two slots. The
-// round robin charges every grant against that one budget, so no set is handed
-// a second instance at the expense of a sibling; a set it leaves with nothing
-// is floored at the one instance it could start (issue #412).
+// set on the MacBook draw on one 10 CPU / 14 GiB budget with two slots. Each
+// alone would be offered what the whole budget starts; together their offers
+// must start at once.
 func TestPartitionHeadroomChargesEveryProfileAgainstOneBudget(t *testing.T) {
 	in := macbookInput(nil, nil)
 	shares, ok := PartitionHeadroom(in, []Claim{{Profile: "large", Room: math.MaxInt},
@@ -229,33 +200,32 @@ func TestPartitionHeadroomChargesEveryProfileAgainstOneBudget(t *testing.T) {
 	if !ok {
 		t.Fatal("usable observations must be sized")
 	}
+	used := domain.Resources{}
+	profiles := []domain.ProfileID{"large", "medium", "large"}
 	for index, share := range shares {
-		if share != 1 {
-			t.Fatalf("shares %v: set %d offers %d, want one each", shares, index, share)
+		for range share {
+			used = used.Add(in.Config.Profiles[profiles[index]].Resources)
 		}
+	}
+	if !in.Config.HostBudget.CanFit(used) || used.Slots != 2 {
+		t.Fatalf("shares %v offer %+v, which the %+v budget cannot start at once", shares, used, in.Config.HostBudget)
 	}
 }
 
 // TestPartitionHeadroomSharesAMacOSCohortAcrossItsSets: MaxActive bounds the
-// profile on the node, not each set. The round robin hands out the cohort's
-// free places once; a set it leaves with nothing is floored at one while a
-// place is free (issue #412), and no set is offered more than the cohort has.
+// profile on the node, not each set.
 func TestPartitionHeadroomSharesAMacOSCohortAcrossItsSets(t *testing.T) {
 	in := input(nil, nil, State{})
 	shares, ok := PartitionHeadroom(in, []Claim{{Profile: "maestro", Room: math.MaxInt},
 		{Profile: "maestro", Room: math.MaxInt}, {Profile: "maestro", Room: math.MaxInt}})
-	if !ok || shareTotal(shares) != 3 || slices.Max(shares) != 1 {
-		t.Fatalf("shares %v; two free maestro places are handed out once and the third set is floored at one", shares)
+	if !ok || shareTotal(shares) != 2 {
+		t.Fatalf("shares %v; a maestro MaxActive of 2 offers two across every set", shares)
 	}
 	running := runningInstance(testConfig(), "maestro-1", "a/repo", "maestro")
 	shares, _ = PartitionHeadroom(input(nil, []domain.Instance{running}, State{}),
 		[]Claim{{Profile: "maestro", Room: math.MaxInt}, {Profile: "maestro", Room: math.MaxInt}})
-	if shares[0] != 1 || shares[1] != 1 {
-		t.Fatalf("shares %v; one running maestro leaves one place, which each set may offer", shares)
-	}
-	full := []domain.Instance{running, runningInstance(testConfig(), "maestro-2", "b/repo", "maestro")}
-	if shares, _ := PartitionHeadroom(input(nil, full, State{}), []Claim{{Profile: "maestro", Room: math.MaxInt}}); shares[0] != 0 {
-		t.Fatalf("a cohort at MaxActive offers nothing, floor or not: %v", shares)
+	if shareTotal(shares) != 1 {
+		t.Fatalf("shares %v; one running maestro leaves one", shares)
 	}
 }
 

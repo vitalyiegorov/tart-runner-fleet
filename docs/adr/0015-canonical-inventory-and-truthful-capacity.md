@@ -148,5 +148,6 @@ all of its scopes, and GitHub adds up what their sets advertise, so a small
 node kept accepting work it could not start (issue #388).
 [ADR 0073](0073-scale-sets-advertise-the-residual-envelope.md) keeps the
 configured `maxCapacity` as the validated ceiling. On every poll, each set
-advertises `min(maxCapacity, held + fit)`, and falls back to the configured
-value whenever the residual is unknown.
+advertises `min(maxCapacity, held + fit)`, floored at one unless `maxCapacity`
+is 0 ([ADR 0082](0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md)), and
+falls back to the configured value whenever the residual is unknown.

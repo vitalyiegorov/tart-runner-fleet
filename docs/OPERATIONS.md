@@ -197,14 +197,21 @@ repository capped at four, that is `4` for `trf-linux-arm64-1x2`, `4` for
 
 The configured `maxCapacity` is a ceiling, not the number sent on every poll.
 With `canonicalJobInventory: true`, each poll advertises
-`min(maxCapacity, held + fit)`. `held` is what the set already owns: its live
-guests and queued demand, or GitHub's own fresh assigned count if that is
-larger. `fit` is how many more of the set's vector the node's current residual
+`min(maxCapacity, max(held + fit, placed + 1))`. `held` is what the set already
+owns: its live guests and queued demand, or GitHub's own fresh assigned count if
+that is larger. `placed` is the part of `held` that already has a guest here, so
+`placed + 1` is the standing free slot of ADR 0082. `fit` is how many more of the set's vector the node's current residual
 envelope can start once all the demand waiting on the node is charged. That
 envelope is the slots, CPU, memory, host budget and physical bound the scheduler
 admits against. On a small node with many scopes, this keeps GitHub from
 placing work the node cannot start while siblings are idle (issue #388). A set
-never advertises less than it holds. If the scheduler's view is missing, not
+never advertises less than it holds, and never less than one unless its
+`maxCapacity` is 0. On a full node, a set with no job waiting for a guest still
+keeps one free slot,
+so a job queued while every node is full is assigned somewhere and waits there
+rather than in no set at all
+([ADR 0082](adr/0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md), issue
+#422). If the scheduler's view is missing, not
 ready, or older than two minutes, the set advertises the configured value
 ([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md)). A node
 whose scale sets receive no new work while a guest is running is therefore
@@ -1857,8 +1864,11 @@ scopes lands on whichever node has the room. A set whose scope has a job
 queued that the node has not been handed is served first. The remainder
 rotates every 30 seconds.
 
-Expect a set to advertise only what it holds while its node is full, even
-though its scope's queue is not empty: that is the job going to the sibling.
+Expect a set to advertise what it holds plus one free slot while its node is
+full, or exactly what it holds once one job waits here for a guest, even though
+its scope's queue is not empty. Its scope's
+next job then goes to the sibling, or waits here as the set's one
+not-yet-startable job (ADR 0082).
 Three readings would be a defect to report with the queue rows and instance
 lists of both nodes:
 
@@ -1866,6 +1876,9 @@ lists of both nodes:
   node had no free slot and its sibling had one;
 - a node whose sets advertise nothing for longer than one REST refresh while it
   has a free slot and a scope it serves has a job queued;
+- a job `queued` in a scope a node serves that `fleet scale-sets audit` shows
+  assigned to no set (`assigned=0` on every matching set) for more than a few
+  minutes: the standing offer of ADR 0082 should have prevented it;
 - either of the above while the node's ticks are failing. A tick that cannot
   plan keeps the last view rather than advertising the configured maximum, so
   a struggling node invites no more work than it last knew it could start.
