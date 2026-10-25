@@ -1962,7 +1962,13 @@ tail ~/.local/share/tart-runner-fleet/state/cache-gate.log # one line per refuse
 ```
 
 The quadlet's health check kills the server after three failed probes and
-systemd restarts it. The gate restarts on any exit. A guest that cannot reach the
+systemd restarts it. The gate restarts on any exit. A server that logs
+`Listening on http://[::]:3000` and then exits 137 about a minute later, with
+`NRestarts` climbing, is being killed by a probe that cannot run: read
+`podman inspect fleet-actions-cache --format '{{json .State.Health}}'`. The
+probe carries no quoting because Podman 5.7's Quadlet dropped the closing quote
+of a nested-quote `HealthCmd`; every probe then failed with `unterminated
+quoted string` and the server never stayed up on that node. A guest that cannot reach the
 server logs `Failed to restore` / `Failed to save` as warnings and runs cold; its
 artifact uploads do not touch the server.
 

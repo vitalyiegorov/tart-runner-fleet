@@ -21,7 +21,10 @@ Environment=SKIP_TOKEN_VALIDATION=false
 Environment=CACHE_CLEANUP_OLDER_THAN_DAYS=7
 # CACHE_MAX_SIZE_BYTES is per node: see the budget table in docs/OPERATIONS.md.
 EnvironmentFile=%h/.config/tart-runner-fleet-actions-cache.env
-HealthCmd=node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+# No quoting: Podman 5.7's Quadlet dropped the closing quote of a nested-quote
+# probe, so every check failed and HealthOnFailure=kill restarted a healthy
+# server forever. The image's busybox wget exits non-zero on any HTTP error.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:3000/health
 HealthInterval=30s
 HealthRetries=3
 HealthOnFailure=kill
