@@ -25,6 +25,10 @@ type ScaleSetHeadroom struct {
 	// scheduler.PartitionHeadroom. The shares of every set on the node add up to
 	// what the residual can start once, never once per set.
 	Fit int
+	// Placed is the part of Held that already has a guest on this node. Held
+	// beyond it is work waiting for one, which is what the standing offer of
+	// one (issue #422) may never exceed.
+	Placed int
 }
 
 // AdvertisedCapacity is the capacity a scale set sends GitHub on its next long
@@ -36,15 +40,16 @@ type ScaleSetHeadroom struct {
 // lowers it below what the set holds (up to that ceiling): GitHub has already
 // placed that work here, and an assigned job cannot be moved without a cancel.
 //
-// Nor does it ever lower it below one, a standing offer (issue #422). GitHub
-// assigns a job only to a set advertising room when it queues the job and
-// never looks again, so a job queued while every set matching its labels read
-// zero -- every node full, draining, or gated at once -- was assigned to no
-// set and stayed queued after the nodes had freed. With one standing offer it
-// is assigned here and waits in this node's queue until admission starts it;
-// a set holding nothing is offered one, and a set holding anything is offered
-// no more than it holds, so a full node gains at most one job per set it
-// cannot start yet. A set configured at zero still advertises zero.
+// Nor does it ever leave a set without one free slot while none of its work is
+// waiting for a guest, a standing offer (issue #422). GitHub assigns a job only
+// to a set advertising room beyond what it already holds when it queues the
+// job, and never looks again, so a job queued while every set matching its
+// labels had no free slot -- every node full, draining, or gated at once -- was
+// assigned to no set and stayed queued after the nodes had freed. With one
+// free slot it is assigned here and waits in this node's queue until admission
+// starts it; once it waits, Held exceeds Placed and the slot is spent, so a
+// full node gains at most one job per set it cannot start yet. A set
+// configured at zero still advertises zero.
 //
 // Before the node has ever computed its headroom it is the configured value: a
 // node that has never planned has no better answer, and advertising zero would
@@ -53,7 +58,8 @@ func AdvertisedCapacity(configured int, headroom ScaleSetHeadroom, known bool) i
 	if !known {
 		return configured
 	}
-	return max(0, min(configured, max(1, max(0, headroom.Held)+max(0, headroom.Fit))))
+	offered := max(0, headroom.Held) + max(0, headroom.Fit)
+	return max(0, min(configured, max(offered, max(0, headroom.Placed)+1)))
 }
 
 // ResidualAdvertisement carries the scheduler's latest view of the node's
@@ -117,13 +123,14 @@ func (c DemandCoordinator) scaleSetHeadroom(ctx context.Context, bindings []Bind
 		if err != nil {
 			continue
 		}
-		local := held[binding.durableKey()]
+		placed := 0
 		for _, instance := range in.Instances.Value {
 			if instance.HoldsAssignment() && instance.Profile == binding.Profile.ID && binding.accepts(instance.Repo) {
-				local++
+				placed++
 			}
 		}
-		row := ScaleSetHeadroom{StoreKey: binding.durableKey(), Held: max(local, broker)}
+		local := held[binding.durableKey()] + placed
+		row := ScaleSetHeadroom{StoreKey: binding.durableKey(), Held: max(local, broker), Placed: placed}
 		room := math.MaxInt
 		if binding.Capacity > 0 {
 			room = max(0, binding.Capacity-row.Held)

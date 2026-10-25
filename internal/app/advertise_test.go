@@ -30,6 +30,13 @@ func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 		{"held plus fit", 4, ScaleSetHeadroom{Held: 1, Fit: 2}, true, 3},
 		{"never above the configured ceiling", 2, ScaleSetHeadroom{Held: 1, Fit: 5}, true, 2},
 		{"negative terms are not capacity", 2, ScaleSetHeadroom{Held: -1, Fit: -4}, true, 1},
+		// Issue #422 again: a set whose every held job already has a guest on
+		// the node, on a node with no residual, advertised exactly what it held
+		// -- zero free slots -- so a job queued while every matching set looked
+		// like that was still assigned to no set. One free slot stays open.
+		{"a busy set with nothing waiting keeps one free slot", 4, ScaleSetHeadroom{Held: 1, Placed: 1}, true, 2},
+		{"work waiting for a guest spends the standing offer", 4, ScaleSetHeadroom{Held: 2, Placed: 1}, true, 2},
+		{"the free slot stays under the configured ceiling", 2, ScaleSetHeadroom{Held: 2, Placed: 2}, true, 2},
 	}
 	for _, tc := range cases {
 		if got := AdvertisedCapacity(tc.configured, tc.headroom, tc.known); got != tc.want {
@@ -159,8 +166,13 @@ func TestScaleSetHeadroomHoldsOnlyWorkGitHubStillAssignsTheSet(t *testing.T) {
 	in := headroomInput(domain.Fresh([]domain.Instance{running, failed, draining, stopping}, now))
 	coordinator := DemandCoordinator{Store: noStatisticsStore{&fakeDemandStore{}}, Now: func() time.Time { return now }}
 	rows := coordinator.scaleSetHeadroom(context.Background(), []Binding{binding}, in, nil, nil)
-	if len(rows) != 1 || rows[0].Held != 1 {
-		t.Fatalf("only the running guest holds an assignment: %+v", rows)
+	if len(rows) != 1 || rows[0].Held != 1 || rows[0].Placed != 1 {
+		t.Fatalf("only the running guest holds an assignment, and it is placed: %+v", rows)
+	}
+	// A queued job with no guest yet is held but not placed.
+	rows = coordinator.scaleSetHeadroom(context.Background(), []Binding{binding}, in, map[int64]int{7: 1}, nil)
+	if len(rows) != 1 || rows[0].Held != 2 || rows[0].Placed != 1 {
+		t.Fatalf("a queued job is held, not placed: %+v", rows)
 	}
 }
 

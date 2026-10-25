@@ -205,7 +205,8 @@ envelope is the slots, CPU, memory, host budget and physical bound the scheduler
 admits against. On a small node with many scopes, this keeps GitHub from
 placing work the node cannot start while siblings are idle (issue #388). A set
 never advertises less than it holds, and never less than one unless its
-`maxCapacity` is 0. On a full node, a set that holds nothing still offers one,
+`maxCapacity` is 0. On a full node, a set with no job waiting for a guest still
+keeps one free slot,
 so a job queued while every node is full is assigned somewhere and waits there
 rather than in no set at all
 ([ADR 0082](adr/0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md), issue
@@ -1862,8 +1863,9 @@ scopes lands on whichever node has the room. A set whose scope has a job
 queued that the node has not been handed is served first. The remainder
 rotates every 30 seconds.
 
-Expect a set to advertise only what it holds, or 1 if it holds nothing, while
-its node is full, even though its scope's queue is not empty. Its scope's
+Expect a set to advertise what it holds plus one free slot while its node is
+full, or exactly what it holds once one job waits here for a guest, even though
+its scope's queue is not empty. Its scope's
 next job then goes to the sibling, or waits here as the set's one
 not-yet-startable job (ADR 0082).
 Three readings would be a defect to report with the queue rows and instance

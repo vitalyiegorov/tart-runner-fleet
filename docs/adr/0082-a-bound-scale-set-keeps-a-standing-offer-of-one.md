@@ -46,16 +46,19 @@ and `doctor` stayed green.
 
 `app.AdvertisedCapacity` is
 
-    max(1, min(configured, held + fit)), never above configured
+    min(configured, max(held + fit, placed + 1))
 
-whenever the node's headroom is known. Concretely:
+whenever the node's headroom is known, where `placed` is the part of `held`
+that already has a guest on this node (any non-teardown state). Concretely:
 
-- A set holding nothing on a full node advertises **1**. A job its labels match
-  is assigned here and waits in this node's queue until admission starts it,
-  which is ordinary queueing.
-- A set holding anything advertises at least what it holds, as before. The
-  floor adds nothing to it, so a full node takes **at most one job per set that
-  it cannot start yet**.
+- A set with no work waiting for a guest keeps **one free slot**: a set holding
+  nothing on a full node advertises 1, and a set whose every held job is already
+  running here advertises one more than it holds. A job its labels match is
+  assigned here and waits in this node's queue until admission starts it, which
+  is ordinary queueing.
+- Once a job waits for a guest, `held` exceeds `placed` and the free slot is
+  spent: the set advertises what it holds, as before. A full node therefore
+  takes **at most one job per set that it cannot start yet**.
 - A set configured at 0 still advertises 0.
 - Unknown headroom keeps the configured value (ADR 0073's fail-open rule).
 - Admission, the scheduler, and every guard are unchanged. The floor decides
@@ -92,7 +95,13 @@ room, so it cannot advertise 0 only when another set would take the job.
 
 - **Floor `fit`, not the advertisement** (`held + max(1, fit)`): each newly
   assigned job raises `held` again, so a full set would keep inviting one more
-  job. That is #388's unbounded hoarding again.
+  job. That is #388's unbounded hoarding again. The free slot is measured from
+  `placed`, which a waiting job does not raise, so it is offered once.
+- **Floor the advertisement at one** (`max(1, min(configured, held + fit))`):
+  covers a set holding nothing, but a busy set whose jobs all run here
+  advertises exactly what it holds, leaving GitHub no free slot. A job queued
+  while every matching set looked like that was still assigned to no set
+  (`TestIssue422ABusySetKeepsOneFreeSlot`, red with this form).
 - **Report an unassigned REST job in `doctor`**: a job queued in a scope that
   matches a served binding but assigned to no set, for longer than a bound,
   is the missing alarm. It needs a new per-scope "assigned to no set" count
@@ -106,6 +115,9 @@ room, so it cannot advertise 0 only when another set would take the job.
   is full and every sibling is full too (`SiblingsFull`). Both jobs that arrive
   beside the long suite are assigned here and run after it. Before this change,
   both were assigned to no set.
+- `TestIssue422ABusySetKeepsOneFreeSlot`: the second job arrives in the scope
+  whose set already runs the long suite. It is assigned here and runs after the
+  suite.
 - `TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart` now allows one
   waiting 4x8 job per set beside the maestro. None of them starts beside it, and
   the scope's second job still goes to the sibling.
