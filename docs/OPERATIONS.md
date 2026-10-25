@@ -197,9 +197,10 @@ repository capped at four, that is `4` for `trf-linux-arm64-1x2`, `4` for
 
 The configured `maxCapacity` is a ceiling, not the number sent on every poll.
 With `canonicalJobInventory: true`, each poll advertises
-`min(maxCapacity, held + fit)`. `held` is what the set already owns: its live
-guests and queued demand, or GitHub's own fresh assigned count if that is
-larger. `fit` is how many more of the set's vector the node's current residual
+`min(maxCapacity, max(held + fit, placed + 1))`. `held` is what the set already
+owns: its live guests and queued demand, or GitHub's own fresh assigned count if
+that is larger. `placed` is the part of `held` that already has a guest here, so
+`placed + 1` is the standing free slot of ADR 0082. `fit` is how many more of the set's vector the node's current residual
 envelope can start once all the demand waiting on the node is charged. That
 envelope is the slots, CPU, memory, host budget and physical bound the scheduler
 admits against. On a small node with many scopes, this keeps GitHub from

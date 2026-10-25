@@ -106,8 +106,11 @@ room, so it cannot advertise 0 only when another set would take the job.
   matches a served binding but assigned to no set, for longer than a bound,
   is the missing alarm. It needs a new per-scope "assigned to no set" count
   carried from REST reconciliation into the admin DTO, and a threshold. That is
-  not small, and the floor removes the cause, so it is left for a separate
-  issue.
+  not small, so it is left for a separate issue. The free slot removes the
+  common cause, but not every one: a set already holding its configured
+  `maxCapacity` advertises no room by design, so a job queued while every
+  matching set sits at its ceiling can still be assigned to no set. The alarm
+  is still worth having for that case.
 
 ## Consequences
 
