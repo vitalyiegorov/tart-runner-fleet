@@ -38,8 +38,13 @@ func TestIssue358ForeignArchitectureInventory(t *testing.T) {
 			if got := store.githubJobs[1]; len(got) != 1 || got[0].WorkflowJobID != 1 {
 				t.Fatalf("local attribution changed: %+v", got)
 			}
+			// The local architecture at an unadvertised size is foreign too
+			// (issue #434): routing labels match exactly.
+			remote.Labels = []string{"self-hosted", "trf-linux-" + arch + "-4x8"}
+			if _, err = c.ReconcileQueuedJobs(context.Background(), []Binding{binding}, fakeQueueSnapshot{at: now, jobs: []githubscaleset.WorkflowJob{remote}}); err != nil {
+				t.Fatalf("size-unserved route rejected: %v", err)
+			}
 			for _, labels := range [][]string{
-				{"self-hosted", "trf-linux-" + arch + "-4x8"},
 				{"self-hosted", "trf-linux-" + foreign + "-4x8", "linux-medium"},
 				{"self-hosted", "trf-linux-" + foreign + "-4x8", arch},
 			} {
@@ -59,7 +64,7 @@ func TestForeignArchitectureProofRequiresEveryLocalBinding(t *testing.T) {
 		Labels: []string{"self-hosted", "trf-linux-amd64-4x8"}}
 	binding := Binding{Targets: []string{"owner/repo"}, Profile: domain.Profile{Platform: domain.PlatformLinux}}
 	for _, labels := range [][]string{nil, {"linux-medium"}, {"trf-macos-arm64-4x7"},
-		{"trf-linux-arm64-2x4", "trf-linux-amd64-2x4"}} {
+		{"trf-linux-arm64-2x4", "trf-linux-amd64-4x8"}} {
 		binding.ScaleSetLabels = labels
 		if jobRequiresUnservedCapability([]Binding{binding}, job) {
 			t.Fatalf("unproven local capability %v treated as foreign", labels)
