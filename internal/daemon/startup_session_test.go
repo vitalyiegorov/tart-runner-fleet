@@ -76,8 +76,8 @@ func TestAPendingBindingOpensItsSessionOnALaterPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 	commit := func(context.Context, githubscaleset.Demand) error { return nil }
-	if _, err := source.Registered(context.Background(), "trf-x"); !errors.Is(err, operations.ErrInvalid) {
-		t.Fatalf("a binding with no session must refuse control calls, got %v", err)
+	if _, err := source.Registered(context.Background(), "trf-x"); !errors.Is(err, githubscaleset.ErrRunnerAdminUnavailable) {
+		t.Fatalf("a binding with no session has no client to administer runners with, got %v", err)
 	}
 	err = source.Handle(context.Background(), commit)
 	var failure *githubscaleset.SessionFailure

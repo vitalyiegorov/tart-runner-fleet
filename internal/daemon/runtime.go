@@ -72,7 +72,10 @@ type recoveringScaleSetSource struct {
 	closed  bool
 	// suspended is a session this node gave up on purpose, not one that broke.
 	// A suspended source holds no session at all, which is what makes GitHub
-	// stop binding new jobs to the scale set behind it (issue #297).
+	// stop binding new jobs to the scale set behind it (issue #297). It keeps
+	// the client whose session it released: runner administration does not
+	// ride on the session, and a yielded node must still be able to deregister
+	// the runners it already owns (issue #432).
 	suspended bool
 	// released records that the broker no longer owns the current session, so a
 	// later replacement must not try to delete it again. Without this, a
@@ -205,11 +208,26 @@ func (s *recoveringScaleSetSource) pendingOpen() bool {
 	return !s.closed && !s.suspended && s.source == nil
 }
 
+// acquire lends the current client for work that needs a live message
+// session: polling, acquiring a job, generating runner credentials. A
+// suspended binding refuses all of it, because taking work is exactly what it
+// withdrew from.
 func (s *recoveringScaleSetSource) acquire() (scaleSetSource, func(), error) {
+	s.mu.RLock()
+	if s.closed || s.suspended || s.source == nil {
+		s.mu.RUnlock()
+		return nil, func() {}, operations.ErrInvalid
+	}
+	return s.source, s.mu.RUnlock, nil
+}
+
+// acquireAdmin lends the current client for runner administration, which
+// GitHub serves without a message session and so survives a yield.
+func (s *recoveringScaleSetSource) acquireAdmin() (scaleSetSource, func(), error) {
 	s.mu.RLock()
 	if s.closed || s.source == nil {
 		s.mu.RUnlock()
-		return nil, func() {}, operations.ErrInvalid
+		return nil, func() {}, githubscaleset.ErrRunnerAdminUnavailable
 	}
 	return s.source, s.mu.RUnlock, nil
 }
@@ -312,7 +330,9 @@ func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetS
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.source != failed {
+	// A poll that failed while the binding was being suspended must not reopen
+	// the session the yield just released.
+	if s.closed || s.suspended || s.source != failed {
 		return nil
 	}
 	if !s.released {
@@ -336,7 +356,7 @@ func (s *recoveringScaleSetSource) replace(ctx context.Context, failed scaleSetS
 }
 
 func (s *recoveringScaleSetSource) Registered(ctx context.Context, name string) (bool, error) {
-	source, release, err := s.acquire()
+	source, release, err := s.acquireAdmin()
 	if err != nil {
 		return false, err
 	}
@@ -363,7 +383,7 @@ func (s *recoveringScaleSetSource) GenerateJIT(ctx context.Context, name, workFo
 }
 
 func (s *recoveringScaleSetSource) Deregister(ctx context.Context, name string) error {
-	source, release, err := s.acquire()
+	source, release, err := s.acquireAdmin()
 	if err != nil {
 		return err
 	}
@@ -379,6 +399,9 @@ func (s *recoveringScaleSetSource) Deregister(ctx context.Context, name string) 
 // A close GitHub refuses is reported rather than assumed: the caller retries,
 // because a session this node believes it dropped while the broker still holds
 // it is exactly the state that would strand the jobs this exists to free.
+//
+// The client stays: only its session is released, so the node can still
+// deregister the runners it owns while it is out of the fleet (issue #432).
 func (s *recoveringScaleSetSource) Suspend(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -395,7 +418,6 @@ func (s *recoveringScaleSetSource) Suspend(ctx context.Context) error {
 		s.released = true
 	}
 	s.suspended = true
-	s.source = nil
 	return nil
 }
 
