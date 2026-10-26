@@ -226,8 +226,11 @@ With `canonicalJobInventory: true`, each poll advertises
 `min(maxCapacity, max(held + fit, placed + 1))`. `held` is what the set already
 owns: its live guests and queued demand, or GitHub's own fresh assigned count if
 that is larger. `placed` is the part of `held` that already has a guest here, so
-`placed + 1` is the standing free slot of ADR 0082. `fit` is how many more of the set's vector the node's current residual
-envelope can start once all the demand waiting on the node is charged. That
+`placed + 1` is the standing free slot of ADR 0082. `fit` is the set's share of
+what the node's current residual envelope can start once all the demand waiting
+on the node is charged. The node divides that residual once across all of its
+sets, so the sets' offers together fit the node
+([ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md), issue #397). That
 envelope is the slots, CPU, memory, host budget and physical bound the scheduler
 admits against. On a small node with many scopes, this keeps GitHub from
 placing work the node cannot start while siblings are idle (issue #388). A set
@@ -237,9 +240,11 @@ keeps one free slot,
 so a job queued while every node is full is assigned somewhere and waits there
 rather than in no set at all
 ([ADR 0082](adr/0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md), issue
-#422). If the scheduler's view is missing, not
-ready, or older than two minutes, the set advertises the configured value
-([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md)). A node
+#422). Before the node's first ready tick, the set advertises the configured
+value. After that, a tick that is not ready keeps the last ready view, however
+old it is
+([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md), amended by
+[ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md)). A node
 whose scale sets receive no new work while a guest is running is therefore
 expected behaviour, not a session fault. Check the status `envelope` first.
 
