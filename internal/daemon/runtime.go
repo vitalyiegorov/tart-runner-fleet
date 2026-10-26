@@ -552,6 +552,7 @@ func newDependencies(goos string) dependencies {
 				RecoveryConfirmationMaxAge: deletionConfirmationMaxAge,
 				Capacity:                   domain.Resources{CPU: cfg.Linux.Capacity.CPU, MemoryMB: cfg.Linux.Capacity.MemoryMiB, Slots: cfg.Linux.MaxInstances},
 				Guards: executor.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
+					MinFreeInodePercent:  cfg.Guards.MinFreeInodePercent,
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
 					MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
@@ -2655,6 +2656,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
 			FreeDiskGiB: pressure.FreeDiskGB, SwapUsedMiB: pressure.SwapUsedMB, SwapOuts: pressure.SwapOuts,
+			FreeInodes: pressure.FreeInodes, TotalInodes: pressure.TotalInodes,
 			SwapOutRatePerSecond: pressure.SwapOutRatePerSecond, SwapOutRateObserved: pressure.SwapOutRateObserved,
 			CPUIdlePercent: pressure.CPUIdlePercent, LoadAverage: pressure.LoadAverage,
 			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason})
@@ -2776,6 +2778,7 @@ func (e engineTicker) recordReservation(result app.TickResult) {
 func admissionFloors(cfg config.Config) telemetry.AdmissionFloors {
 	return telemetry.AdmissionFloors{
 		MinFreeDiskGiB:        cfg.Guards.MinFreeDiskGiB,
+		MinFreeInodePercent:   cfg.Guards.MinFreeInodePercent,
 		MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB:        cfg.Guards.MaxSwapUsedMiB,
 		MaxLoadAverage:        cfg.Guards.MaxLoadAverage,

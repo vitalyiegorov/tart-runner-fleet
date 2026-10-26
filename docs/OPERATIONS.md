@@ -54,13 +54,39 @@ session, acquires no authority lease, and performs no GitHub/Tart mutation, so a
 canonical observe candidate may safely run beside the incumbent.
 
 Host admission uses two layers. Exact profile vectors enforce CPU, memory, and
-slot envelopes first. A fresh host probe then preserves `minFreeDiskGb` and
-`minAvailableMemoryMb`, treats swap as pressured only when swap used exceeds
+slot envelopes first. A fresh host probe then preserves `minFreeDiskGb`,
+`minFreeInodePercent` and `minAvailableMemoryMb`, treats swap as pressured only when swap used exceeds
 `maxSwapUsedMb` **and** the host is measurably paging out, and treats CPU as
 pressured only when both `maxLoadAverage` is exceeded and idle CPU falls below
 `minCpuIdlePercent`. Missing values decode to the safe defaults in
 `config/fleet.example.json`. Inspect the evidence through `fleet status` or
 the bounded `fleet_host_*` metrics; do not infer pressure from queue age alone.
+
+| Guard | Default | Refusal reason | Refuses when |
+| --- | --- | --- | --- |
+| `minFreeDiskGb` | 60 | `disk reserve` | free bytes on the guest-storage filesystem fall below the floor |
+| `minFreeInodePercent` | 5 | `inode reserve` | free inodes fall below that percentage of the filesystem's total; not applicable when the filesystem has no fixed inode limit |
+| `minAvailableMemoryMb` | 1024 | `memory reserve` | available memory minus the request falls below the floor |
+| `maxSwapUsedMb` | 2048 | `swap pressure` | swap used exceeds the ceiling **and** the host is paging out |
+| `maxLoadAverage` / `minCpuIdlePercent` | 9 / 5 | `cpu pressure` | load exceeds the ceiling **and** idle CPU is below the floor |
+
+Free bytes do not show whether a file can be created. On 2026-10-25,
+ubuntu-vitalii had 29 GiB free and no inode left. It kept admitting guests, and
+every one failed with `No space left on device` (issue #423,
+[ADR 0083](adr/0083-admission-keeps-an-inode-reserve.md)). The inode reserve is
+checked after the disk reserve, so a node out of both is reported as
+`disk reserve`. `fleet status` prints `inodes N% free` beside the free bytes.
+`fleet doctor` names `inode reserve` and the count against its floor. Both
+values are also exported as `fleet_host_free_inodes` and
+`fleet_host_total_inodes`.
+
+A filesystem that allocates inodes on demand, such as btrfs, reports a total of
+zero (`df -i` prints `0 0 0 -`). That total means there is no limit to run out
+of, so the guard does not apply, and status prints `inodes n/a`. An inode count
+the probe cannot read is different: it degrades the host observation exactly as
+an unreadable byte count does. To recover, find what is consuming the inodes on
+that filesystem (`df -i <path>`, then count files per directory) and remove it.
+Raising or lowering the floor does not create inodes.
 
 Both of those guards are conjunctions, and the swap one surprises operators
 because the level is the visible half. macOS does not eagerly reclaim swap, so
@@ -1678,7 +1704,8 @@ not run them ([ADR 0047](adr/0047-a-node-that-cannot-admit-yields-its-sessions.m
 It rejoins by itself once admission has been allowed for
 `sessionYieldHealthyForSeconds` (default 120). The operator's job is the cause,
 not the withdrawal: read `admission` in `HOST PRESSURE` and clear whatever it
-names, usually free disk against `minFreeDiskGb` or load against
+names, usually free disk against `minFreeDiskGb`, free inodes against
+`minFreeInodePercent`, or load against
 `maxLoadAverage`.
 
 Two facts matter while a node is withdrawn. Its bindings report `stale`

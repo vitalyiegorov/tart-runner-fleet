@@ -107,7 +107,7 @@ func TestPolicyProjectsEveryDecidingSetting(t *testing.T) {
 	}
 	if policy.HostPressureFloors.MinFreeDiskGiB != 60 || policy.HostPressureFloors.MaxLoadAverage != 9 ||
 		policy.HostPressureFloors.MaxSwapUsedMiB != 2048 || policy.HostPressureFloors.MinAvailableMemoryMiB != 1024 ||
-		policy.HostPressureFloors.MinCPUIdlePercent != 5 {
+		policy.HostPressureFloors.MinCPUIdlePercent != 5 || policy.HostPressureFloors.MinFreeInodePercent != 5 {
 		t.Errorf("host pressure floors = %+v", policy.HostPressureFloors)
 	}
 	if !policy.ElasticHostEnvelope || !policy.PressureMemoryAccounting || !policy.CanonicalJobInventory {

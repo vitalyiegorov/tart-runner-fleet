@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -42,6 +43,9 @@ ctxt 998877
 	dfBody = `Filesystem     1024-blocks      Used  Available Capacity Mounted on
 /dev/nvme0n1p2   982940334 120000000  810000000      13% /
 `
+	dfInodeBody = `Filesystem       Inodes   IUsed    IFree IUse% Mounted on
+/dev/nvme0n1p2 61054976 4123456 56931520    7% /
+`
 )
 
 func fixture() fstest.MapFS {
@@ -53,13 +57,28 @@ func fixture() fstest.MapFS {
 	}
 }
 
+// diskStub answers `df -P -k` with body and `df -P -i` with inodes, which
+// defaults to dfInodeBody. args and inodeArgs record the last call of each.
 type diskStub struct {
-	body string
-	err  error
-	args []string
+	body      string
+	inodes    string
+	err       error
+	inodeErr  error
+	args      []string
+	inodeArgs []string
 }
 
 func (d *diskStub) Run(_ context.Context, args ...string) ([]byte, error) {
+	if slices.Contains(args, "-i") {
+		d.inodeArgs = args
+		if d.inodeErr != nil {
+			return nil, d.inodeErr
+		}
+		if d.inodes == "" {
+			return []byte(dfInodeBody), nil
+		}
+		return []byte(d.inodes), nil
+	}
 	d.args = args
 	if d.err != nil {
 		return nil, d.err
@@ -106,8 +125,14 @@ func TestFirstObservationReportsTheWholeMachine(t *testing.T) {
 	if snapshot.PhysicalCPU != 2 {
 		t.Errorf("processors = %d", snapshot.PhysicalCPU)
 	}
-	if want := []string{"-P", "-k", "/"}; len(disk.args) != 3 || disk.args[0] != want[0] || disk.args[2] != want[2] {
+	if want := []string{"-P", "-k", "/"}; !slices.Equal(disk.args, want) {
 		t.Errorf("df arguments = %v, want %v", disk.args, want)
+	}
+	if snapshot.FreeInodes != 56_931_520 || snapshot.TotalInodes != 61_054_976 {
+		t.Errorf("inodes free=%d total=%d", snapshot.FreeInodes, snapshot.TotalInodes)
+	}
+	if want := []string{"-P", "-i", "/"}; !slices.Equal(disk.inodeArgs, want) {
+		t.Errorf("df inode arguments = %v, want %v", disk.inodeArgs, want)
 	}
 }
 
@@ -181,6 +206,10 @@ func TestUnreadableCapacityFactsDegradeTheObservation(t *testing.T) {
 		"meminfo": func(files fstest.MapFS, _ *diskStub) { delete(files, memInfoPath) },
 		"vmstat":  func(files fstest.MapFS, _ *diskStub) { delete(files, vmStatPath) },
 		"df":      func(_ fstest.MapFS, disk *diskStub) { disk.err = errors.New("df: no such mount") },
+		// Inodes are a capacity fact like bytes (issue #423): a node whose inode
+		// count cannot be read must not be admitted as if it had inodes to spare.
+		"df -i":       func(_ fstest.MapFS, disk *diskStub) { disk.inodeErr = errors.New("df: no such mount") },
+		"df -i parse": func(_ fstest.MapFS, disk *diskStub) { disk.inodes = "garbage\n" },
 	}
 	for name, breakIt := range broken {
 		t.Run("unavailable without a prior reading/"+name, func(t *testing.T) {
@@ -321,6 +350,46 @@ func TestParseFreeDiskRejectsUnusableContent(t *testing.T) {
 		if _, err := parseFreeDiskGB(body); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+func TestParseInodesRejectsUnusableContent(t *testing.T) {
+	header := "Filesystem Inodes IUsed IFree IUse% Mounted on\n"
+	for name, body := range map[string]string{
+		"header only":     header,
+		"no inode column": "Filesystem Blocks IUsed IFree IUse% Mounted on\n/dev/sda1 1 0 1 0% /\n",
+		"no free column":  "Filesystem Inodes IUsed Avail IUse% Mounted on\n/dev/sda1 1 0 1 0% /\n",
+		"short data row":  header + "/dev/sda1 10 2\n",
+		// GNU df prints `-` where statfs reports an unknown count. That is not
+		// "no inode limit", it is an unread value, and it must fail closed.
+		"unknown total":      header + "/dev/sda1 - - - - /\n",
+		"non-numeric free":   header + "/dev/sda1 10 2 lots 20% /\n",
+		"negative total":     header + "/dev/sda1 -10 2 3 20% /\n",
+		"negative free":      header + "/dev/sda1 10 2 -3 20% /\n",
+		"more free than all": header + "/dev/sda1 10 0 11 0% /\n",
+	} {
+		if _, err := parseInodes(body); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// TestParseInodesReadsAFilesystemWithNoInodeLimit is the btrfs row Omarchy's
+// root prints: every count zero and no use percentage. It is a filesystem that
+// allocates inodes on demand, reported as a zero total so the floor does not
+// apply, never as zero free inodes.
+func TestParseInodesReadsAFilesystemWithNoInodeLimit(t *testing.T) {
+	inodes, err := parseInodes("Filesystem     Inodes IUsed IFree IUse% Mounted on\n/dev/nvme0n1p2      0     0     0     - /\n")
+	if err != nil || inodes != (inodeCount{}) {
+		t.Fatalf("inodes = %#v, %v", inodes, err)
+	}
+}
+
+// TestInodeColumnsAreFoundByNameNotPosition mirrors the byte parser.
+func TestInodeColumnsAreFoundByNameNotPosition(t *testing.T) {
+	inodes, err := parseInodes("Filesystem Type Inodes IUsed IFree IUse% Mounted on\n/dev/sda1 ext4 100 60 40 60% /\n")
+	if err != nil || inodes.free != 40 || inodes.total != 100 {
+		t.Fatalf("inodes = %#v, %v", inodes, err)
 	}
 }
 

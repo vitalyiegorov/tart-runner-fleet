@@ -229,7 +229,7 @@ func defaultWorld() worldConfig {
 		Name:             "m4-mac-mini",
 		PhysicalCPU:      10,
 		PhysicalMemoryMB: 24_576,
-		Guards: executor.Guardrails{MinFreeDiskGB: 20, MinAvailableMemoryMB: 2_048,
+		Guards: executor.Guardrails{MinFreeDiskGB: 20, MinFreeInodePercent: 5, MinAvailableMemoryMB: 2_048,
 			MaxSwapUsedMB: 8_192, MaxLoadAverage: 24, MinCPUidlePercent: 5},
 		Scheduler: scheduler.Config{
 			LinuxCapacity:   domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
@@ -476,8 +476,15 @@ func (h simHost) Snapshot(context.Context) executor.HostSnapshot {
 	if w.hostProbeStale > 0 {
 		return executor.HostSnapshot{Freshness: executor.Stale, ObservedAt: w.now}
 	}
+	// The filesystem is ubuntu-vitalii's: 60,850,176 inodes, all of them in use
+	// while the fault lasts, and the free bytes untouched either way (issue #423).
+	freeInodes := int64(50_000_000)
+	if w.inodeExhausted > 0 {
+		freeInodes = 0
+	}
 	return executor.HostSnapshot{
 		Freshness: executor.Fresh, ObservedAt: w.now, AvailableMemoryMB: available, FreeDiskGB: 400,
+		FreeInodes: freeInodes, TotalInodes: 60_850_176,
 		SwapUsedMB: 0, SwapOuts: 0, CPUidlePercent: idle, LoadAverage: float64(usedCPU + w.tenantCPU),
 		SwapOutRatePerSecond: 0, SwapOutRateObserved: true,
 		PhysicalCPU: w.cfg.PhysicalCPU, PhysicalMemoryMB: w.cfg.PhysicalMemoryMB,
@@ -749,6 +756,7 @@ type world struct {
 	statisticsGap   int
 	restLag         int
 	hostProbeStale  int
+	inodeExhausted  int
 	tartUnavailable int
 	// powerMisreport is how many more ticks the enumeration lies about each named
 	// VM being powered off (issue #246). It is keyed per VM because both production

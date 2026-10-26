@@ -56,10 +56,11 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if err := Encode(&encoded, cfg); err != nil {
 		t.Fatalf("Encode(legacy) = %v", err)
 	}
-	if strings.Contains(encoded.String(), `"admissionPolicy"`) {
+	if strings.Contains(encoded.String(), `"admissionPolicy"`) || strings.Contains(encoded.String(), `"minFreeInodePercent"`) {
 		t.Fatalf("legacy Decode->Encode introduced a field older strict releases reject:\n%s", encoded.String())
 	}
-	wantGuards := Guards{MinFreeDiskGiB: 60, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
+	wantGuards := Guards{MinFreeDiskGiB: 60, MinFreeInodePercent: 5, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048,
+		MaxLoadAverage: 9, MinCPUIdlePercent: 5}
 	if cfg.Guards != wantGuards {
 		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
 	}
@@ -256,14 +257,20 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"negative swap ceiling":   func(c *Config) { c.Guards.MaxSwapUsedMiB = -1 },
 		"negative load ceiling":   func(c *Config) { c.Guards.MaxLoadAverage = -1 },
 		"invalid cpu idle floor":  func(c *Config) { c.Guards.MinCPUIdlePercent = 101 },
-		"invalid load number":     func(c *Config) { c.Guards.MaxLoadAverage = math.NaN() },
-		"too many linux runners":  func(c *Config) { c.Linux.MaxInstances = 17 },
-		"unfillable linux slots":  func(c *Config) { c.Linux.MaxInstances = 9 },
-		"invalid root disk mode":  func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
-		"relative shared path":    func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
-		"invalid mac admission":   func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
-		"unbounded session retry": func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
-		"excessive session retry": func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
+		"invalid inode floor":     func(c *Config) { c.Guards.MinFreeInodePercent = 101 },
+		"negative inode floor":    func(c *Config) { c.Guards.MinFreeInodePercent = -1 },
+		// Zero cannot survive a round trip: Encode omits it and decoding restores
+		// the 5% default, so a disabled floor would silently come back enabled.
+		"zero inode floor":         func(c *Config) { c.Guards.MinFreeInodePercent = 0 },
+		"inode floor not a number": func(c *Config) { c.Guards.MinFreeInodePercent = math.NaN() },
+		"invalid load number":      func(c *Config) { c.Guards.MaxLoadAverage = math.NaN() },
+		"too many linux runners":   func(c *Config) { c.Linux.MaxInstances = 17 },
+		"unfillable linux slots":   func(c *Config) { c.Linux.MaxInstances = 9 },
+		"invalid root disk mode":   func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
+		"relative shared path":     func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
+		"invalid mac admission":    func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
+		"unbounded session retry":  func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
+		"excessive session retry":  func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
 		"impatient session window": func(c *Config) {
 			c.SessionRecovery.FailureWindow = 29 * time.Second
 		},
@@ -763,5 +770,31 @@ func TestSharedLabelsRequireTruthfulCapacity(t *testing.T) {
 	err := cfg.ValidateAuthority()
 	if err == nil || !strings.Contains(err.Error(), "sharedLabels") {
 		t.Fatalf("ValidateAuthority() = %v, want a refusal naming sharedLabels", err)
+	}
+}
+
+// TestInodeFloorDefaultsAndRoundTrips is issue #423's configuration half: every
+// node carries an inode floor whether or not its file names one, and a stated
+// floor survives a rewrite while the default is never written, so a file
+// rewritten by this release stays decodable by an older strict one.
+func TestInodeFloorDefaultsAndRoundTrips(t *testing.T) {
+	if Default().Guards.MinFreeInodePercent != defaultMinFreeInodePercent {
+		t.Fatalf("default inode floor = %v", Default().Guards.MinFreeInodePercent)
+	}
+	cfg := Default()
+	cfg.Guards.MinFreeInodePercent = 12.5
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"minFreeInodePercent": 12.5`) {
+		t.Fatalf("a stated inode floor was not written:\n%s", encoded.String())
+	}
+	decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode = %v", err)
+	}
+	if decoded.Guards.MinFreeInodePercent != 12.5 {
+		t.Fatalf("decoded inode floor = %v", decoded.Guards.MinFreeInodePercent)
 	}
 }

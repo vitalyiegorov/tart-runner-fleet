@@ -54,6 +54,8 @@ in-memory revision so future watch clients can use conditional polling.
     "hostPressure": {
       "availableMemoryMiB": 10240,
       "freeDiskGiB": 203,
+      "freeInodes": 56931520,
+      "totalInodes": 61054976,
       "swapUsedMiB": 0,
       "swapOuts": 0,
       "swapOutRatePerSecond": 0,
@@ -411,6 +413,14 @@ A blocked node reports the guard its **own** `admissionReason` names, because
 that is the one that refused it — not whichever guard happens to be tightest.
 A floor the operator never configured is not rendered: a node with no disk floor
 is not zero GiB away from one.
+
+`freeInodes` and `totalInodes` are additive `fleet.v1` fields (issue #423,
+[ADR 0083](adr/0083-admission-keeps-an-inode-reserve.md)). They describe the same
+filesystem that `freeDiskGiB` measures. A refusal for lack of inodes reads
+`node is admitting no work: inode reserve (inodes 0 free of 60850176 (0.0%),
+floor 5%)`. A `totalInodes` of 0 means the filesystem has no fixed inode limit
+(btrfs). The inode floor does not apply to it, and no inode margin is rendered.
+It is not an unread value. A daemon older than this field also reports 0.
 
 The field is additive and absent on daemons that predate it, and absence is
 reported as passing — a daemon that cannot say whether it is admitting has not

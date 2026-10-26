@@ -422,6 +422,7 @@ func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, 
 		decision = executor.AdmissionDecision{Reason: updateDrainReason}
 	}
 	pressure := domain.HostPressure{AvailableMemoryMB: snapshot.AvailableMemoryMB, FreeDiskGB: snapshot.FreeDiskGB,
+		FreeInodes: snapshot.FreeInodes, TotalInodes: snapshot.TotalInodes,
 		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts,
 		SwapOutRatePerSecond: snapshot.SwapOutRatePerSecond, SwapOutRateObserved: snapshot.SwapOutRateObserved,
 		CPUIdlePercent: snapshot.CPUidlePercent,

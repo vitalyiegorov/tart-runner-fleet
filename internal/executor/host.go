@@ -32,10 +32,19 @@ type HostSnapshot struct {
 	ObservedAt        time.Time
 	AvailableMemoryMB int64
 	FreeDiskGB        int64
-	SwapUsedMB        int64
-	SwapOuts          int64
-	CPUidlePercent    float64
-	LoadAverage       float64
+	// FreeInodes and TotalInodes are the inode counts of the same filesystem
+	// FreeDiskGB measures. Free bytes do not say whether a file can be created:
+	// on 2026-10-25 a node with 29 GiB free had no inode left, and every guest
+	// it started failed with ENOSPC (issue #423, ADR 0083). TotalInodes zero is
+	// a filesystem with no fixed inode limit — btrfs allocates them on demand
+	// and reports none — for which the inode floor does not apply. It is never
+	// an unread value: a probe that cannot read inodes degrades the observation.
+	FreeInodes     int64
+	TotalInodes    int64
+	SwapUsedMB     int64
+	SwapOuts       int64
+	CPUidlePercent float64
+	LoadAverage    float64
 	// SwapOutRatePerSecond is the page-out rate since the previous fresh
 	// observation, the signal that distinguishes a host paging RIGHT NOW from one
 	// merely carrying residue: macOS does not eagerly reclaim swap, so SwapUsedMB
@@ -68,7 +77,10 @@ type HostProbe interface {
 }
 
 type Guardrails struct {
-	MinFreeDiskGB        int64
+	MinFreeDiskGB int64
+	// MinFreeInodePercent is the share of the guest-storage filesystem's inodes
+	// that must stay free. Zero is an unset floor.
+	MinFreeInodePercent  float64
 	MinAvailableMemoryMB int64
 	MaxSwapUsedMB        int64
 	MaxLoadAverage       float64
@@ -99,6 +111,16 @@ func activelyPagingOut(snapshot HostSnapshot) bool {
 	return snapshot.SwapOutRatePerSecond > 0
 }
 
+// inodesBelowFloor reports whether the filesystem's free inodes are under the
+// configured share of its total. A filesystem with no fixed inode limit
+// (TotalInodes zero) has no floor to fall below.
+func (g Guardrails) inodesBelowFloor(snapshot HostSnapshot) bool {
+	if g.MinFreeInodePercent <= 0 || snapshot.TotalInodes <= 0 {
+		return false
+	}
+	return float64(snapshot.FreeInodes)*100 < g.MinFreeInodePercent*float64(snapshot.TotalInodes)
+}
+
 func (g Guardrails) Evaluate(snapshot HostSnapshot, request AdmissionRequest) AdmissionDecision {
 	if snapshot.Freshness != Fresh {
 		return AdmissionDecision{Reason: fmt.Sprintf("host observation %s", snapshot.Freshness)}
@@ -108,6 +130,9 @@ func (g Guardrails) Evaluate(snapshot HostSnapshot, request AdmissionRequest) Ad
 	}
 	if snapshot.FreeDiskGB < g.MinFreeDiskGB {
 		return AdmissionDecision{Reason: "disk reserve"}
+	}
+	if g.inodesBelowFloor(snapshot) {
+		return AdmissionDecision{Reason: "inode reserve"}
 	}
 	if snapshot.AvailableMemoryMB-request.MemoryMB < g.MinAvailableMemoryMB {
 		return AdmissionDecision{Reason: "memory reserve"}

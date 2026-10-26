@@ -63,6 +63,10 @@ const (
 	eventRESTLag         eventKind = "rest_lag"
 	eventHostTenant      eventKind = "host_tenant"
 	eventHostProbeStale  eventKind = "host_probe_stale"
+	// eventInodeExhausted is the 2026-10-25 ubuntu-vitalii incident (issue
+	// #423): the guest-storage filesystem has no free inode left while its free
+	// bytes stay well above the disk floor.
+	eventInodeExhausted  eventKind = "inode_exhausted"
 	eventTartUnavailable eventKind = "tart_unavailable"
 	eventSlowBoot        eventKind = "slow_boot"
 	// eventWedgedBootstrap is the 2026-10-11 Mac Studio incident (ADR 0067): the
@@ -259,7 +263,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
-		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel}
+		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel, eventInodeExhausted}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
@@ -320,6 +324,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.tenantCPU, w.tenantMemoryMB = event.Count, event.Count*1_024
 	case eventHostProbeStale:
 		w.hostProbeStale = event.Count
+	case eventInodeExhausted:
+		w.inodeExhausted = event.Count
 	case eventTartUnavailable:
 		w.tartUnavailable = event.Count
 	case eventSlowBoot:

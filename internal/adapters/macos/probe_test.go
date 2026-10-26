@@ -57,7 +57,7 @@ func (f *fakeCommands) Run(_ context.Context, binary string, args ...string) ([]
 func validOutputs() map[string][]byte {
 	return map[string][]byte{
 		"vm_stat": []byte("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 100000.\nPages speculative: 10000.\nPages inactive: 200000.\nSwapouts: 7.\n"),
-		"df":      []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk 100000000 1000 83886080 1% /\n"),
+		"df":      []byte("Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n/dev/disk 100000000 1000 83886080 1% 400000 1600000 20% /\n"),
 		"sysctl":  []byte("total = 4096.00M  used = 512.00M  free = 3584.00M\n"),
 		"top":     []byte("CPU usage: 5.0% user, 5.0% sys, 90.0% idle\n"),
 	}
@@ -72,7 +72,10 @@ func TestProbeFreshStaleUnavailableAndGuardrails(t *testing.T) {
 	if snapshot.Freshness != executor.Fresh || snapshot.AvailableMemoryMB != 4843 || snapshot.FreeDiskGB != 80 || snapshot.SwapUsedMB != 512 || snapshot.SwapOuts != 7 || snapshot.CPUidlePercent != 90 {
 		t.Fatalf("unexpected snapshot: %#v", snapshot)
 	}
-	guard := executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15}
+	if snapshot.FreeInodes != 1_600_000 || snapshot.TotalInodes != 2_000_000 {
+		t.Fatalf("inodes free=%d total=%d", snapshot.FreeInodes, snapshot.TotalInodes)
+	}
+	guard := executor.Guardrails{MinFreeDiskGB: 60, MinAvailableMemoryMB: 2000, MaxSwapUsedMB: 1024, MaxLoadAverage: 8, MinCPUidlePercent: 15, MinFreeInodePercent: 5}
 	if decision := guard.Evaluate(snapshot, executor.AdmissionRequest{MemoryMB: 2000}); !decision.Allowed {
 		t.Fatalf("healthy host rejected: %#v", decision)
 	}
@@ -102,6 +105,24 @@ func TestParsingFailuresAndUnits(t *testing.T) {
 	}
 	if _, err := parseDisk("header\na b c nope"); err == nil {
 		t.Fatal("nonnumeric df accepted")
+	}
+	// Inodes are read by header name, because `df -i` adds its columns after
+	// Capacity and a position would read Capacity's percentage as a count.
+	inodeHeader := "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n"
+	for name, body := range map[string]string{
+		"no data row":    inodeHeader,
+		"no ifree":       "Filesystem 1024-blocks Used Available Capacity iused %iused Mounted on\n/dev/disk 1 1 1 1% 1 1% /\n",
+		"no iused":       "Filesystem 1024-blocks Used Available Capacity ifree %iused Mounted on\n/dev/disk 1 1 1 1% 1 1% /\n",
+		"short row":      inodeHeader + "/dev/disk 1 1 1 1% 1\n",
+		"non-numeric":    inodeHeader + "/dev/disk 1 1 1 1% many 1 1% /\n",
+		"negative ifree": inodeHeader + "/dev/disk 1 1 1 1% 1 -1 1% /\n",
+	} {
+		if _, _, err := parseInodes(body); err == nil {
+			t.Fatalf("%s inode df accepted", name)
+		}
+	}
+	if free, total, err := parseInodes(inodeHeader + "/dev/disk 1 1 1 1% 0 0 0% /\n"); err != nil || free != 0 || total != 0 {
+		t.Fatalf("a volume with no inode limit: free=%d total=%d %v", free, total, err)
 	}
 	for input, want := range map[string]int64{"used = 1024.00K": 1, "used = 2.00G": 2048, "used = 3.00M": 3} {
 		got, err := parseSwap(input)
@@ -144,6 +165,7 @@ func TestCriticalProbeFailuresDegradeAdvisoryFailuresDoNot(t *testing.T) {
 		{"df command", "df:/", ""},
 		{"vm_stat parse", "", "vm_stat"},
 		{"df parse", "", "df"},
+		{"df without inode columns", "", "df-no-inodes"},
 	}
 	for _, test := range critical {
 		t.Run("critical/"+test.name, func(t *testing.T) {
@@ -152,7 +174,11 @@ func TestCriticalProbeFailuresDegradeAdvisoryFailuresDoNot(t *testing.T) {
 			if test.cmdKey != "" {
 				errs[test.cmdKey] = errors.New("failed")
 			}
-			if test.badKey != "" {
+			switch test.badKey {
+			case "":
+			case "df-no-inodes":
+				outputs["df"] = []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk 100000000 1000 83886080 1% /\n")
+			default:
 				outputs[test.badKey] = []byte("bad")
 			}
 			snapshot := (&Probe{Runner: &fakeCommands{outputs: outputs, errors: errs}, Now: func() time.Time { return now }}).Snapshot(context.Background())

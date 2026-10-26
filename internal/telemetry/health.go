@@ -93,6 +93,7 @@ type HealthConfig struct {
 // not "0 GiB from its disk floor", it simply has no disk floor.
 type AdmissionFloors struct {
 	MinFreeDiskGiB        int
+	MinFreeInodePercent   float64
 	MinAvailableMemoryMiB int
 	MaxSwapUsedMiB        int
 	MaxLoadAverage        float64
@@ -306,8 +307,13 @@ const SessionYieldedObservation = "session_yielded"
 type HostPressureMetric struct {
 	AvailableMemoryMiB int64
 	FreeDiskGiB        int64
-	SwapUsedMiB        int64
-	SwapOuts           int64
+	// FreeInodes and TotalInodes are the guest-storage filesystem's inode
+	// counts (issue #423). TotalInodes zero is a filesystem with no fixed inode
+	// limit, such as btrfs, for which the inode floor does not apply.
+	FreeInodes  int64
+	TotalInodes int64
+	SwapUsedMiB int64
+	SwapOuts    int64
 	// SwapOutRatePerSecond and SwapOutRateObserved are the swap guardrail's
 	// deciding signal: the level is refused only when the host is also paging
 	// out (ADR 0018). An unobserved rate is a fail-closed fallback to the level,
@@ -1147,6 +1153,7 @@ func (h *Health) SetOperations(retries, dead int) error {
 
 func (h *Health) SetHostPressure(metric HostPressureMetric) error {
 	if metric.AvailableMemoryMiB < 0 || metric.FreeDiskGiB < 0 || metric.SwapUsedMiB < 0 || metric.SwapOuts < 0 ||
+		metric.FreeInodes < 0 || metric.TotalInodes < 0 || metric.FreeInodes > metric.TotalInodes ||
 		metric.CPUIdlePercent < 0 || metric.CPUIdlePercent > 100 || metric.LoadAverage < 0 ||
 		metric.SwapOutRatePerSecond < 0 || math.IsNaN(metric.SwapOutRatePerSecond) ||
 		math.IsInf(metric.SwapOutRatePerSecond, 0) ||
@@ -1163,7 +1170,7 @@ func (h *Health) SetHostPressure(metric HostPressureMetric) error {
 
 func validAdmissionReason(reason string) bool {
 	switch reason {
-	case "capacity available", "disk reserve", "memory reserve", "swap pressure", "cpu pressure":
+	case "capacity available", "disk reserve", "inode reserve", "memory reserve", "swap pressure", "cpu pressure":
 		return true
 	default:
 		return false
@@ -1429,6 +1436,14 @@ func admissionMargin(pressure HostPressureMetric, floors AdmissionFloors) string
 		guards = append(guards, guard{"disk reserve",
 			fmt.Sprintf("disk %d GiB free, floor %d", pressure.FreeDiskGiB, floors.MinFreeDiskGiB),
 			float64(pressure.FreeDiskGiB-int64(floors.MinFreeDiskGiB)) / float64(floors.MinFreeDiskGiB)})
+	}
+	// A filesystem with no fixed inode limit has no inode floor to be near.
+	if floors.MinFreeInodePercent > 0 && pressure.TotalInodes > 0 {
+		freePercent := float64(pressure.FreeInodes) * 100 / float64(pressure.TotalInodes)
+		guards = append(guards, guard{"inode reserve",
+			fmt.Sprintf("inodes %d free of %d (%.1f%%), floor %s%%", pressure.FreeInodes, pressure.TotalInodes,
+				freePercent, strconv.FormatFloat(floors.MinFreeInodePercent, 'f', -1, 64)),
+			(freePercent - floors.MinFreeInodePercent) / floors.MinFreeInodePercent})
 	}
 	if floors.MinAvailableMemoryMiB > 0 {
 		guards = append(guards, guard{"memory reserve",

@@ -113,6 +113,13 @@ const (
 	// oracle: before it every set was offered the node's whole residual, and no
 	// property counted the offers of two sets together.
 	findingOverOffer findingKind = "over_offer"
+	// findingInodeAdmission is property (u): no spawn is planned against a host
+	// whose guest-storage filesystem has no free inode. It is issue #423's
+	// oracle: on 2026-10-25 ubuntu-vitalii had 29 GiB free and no inode left,
+	// and every guest it admitted failed with ENOSPC. It reads the world's own
+	// fault state, not the guard's arithmetic, so a guard that measured the
+	// wrong column would still be caught.
+	findingInodeAdmission findingKind = "inode_admission"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -293,6 +300,10 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// by (a) as a wedge whose cause is somewhere else entirely.
 		reservationIsJudgedChecker(),
 		conservationChecker(cfg),
+		// (u) sits with (g) because it is conservation of the one host resource
+		// the envelope does not count: an admission onto a filesystem out of
+		// inodes is a guest that cannot create a file.
+		inodeAdmissionChecker(cfg),
 		// (t) sits with (g) because it is conservation one step earlier: (g)
 		// bounds what the node commits, (t) bounds what it invites GitHub to place
 		// on it, and an invitation it cannot honour is a job stranded here while a
@@ -882,6 +893,19 @@ func overOfferChecker(cfg worldConfig) checker {
 // the declared share is the failure the setting was added to prevent. The
 // oracle derives its own ceiling from the configured facts and never from the
 // scheduler's envelope arithmetic, so it cannot inherit the bug it is checking.
+// inodeAdmissionChecker is property (u). A world whose guards set no inode
+// floor is not judged: it asked for no such guarantee.
+func inodeAdmissionChecker(cfg worldConfig) checker {
+	return func(w *world, observation tickObservation) []finding {
+		if cfg.Guards.MinFreeInodePercent <= 0 || w.inodeExhausted == 0 || len(observation.spawns()) == 0 {
+			return nil
+		}
+		return []finding{{Kind: findingInodeAdmission, Tick: observation.Tick,
+			Detail: fmt.Sprintf("planned %d spawn(s) onto a filesystem with no free inode (admission %q)",
+				len(observation.spawns()), observation.Host.Pressure.AdmissionReason)}}
+	}
+}
+
 func conservationChecker(cfg worldConfig) checker {
 	ceiling := cfg.hostCeiling()
 	return func(w *world, observation tickObservation) []finding {
