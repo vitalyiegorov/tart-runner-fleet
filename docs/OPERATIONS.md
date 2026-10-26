@@ -229,8 +229,10 @@ that is larger. `placed` is the part of `held` that already has a guest here, so
 `placed + 1` is the standing free slot of ADR 0082. `fit` is the set's share of
 what the node's current residual envelope can start once all the demand waiting
 on the node is charged. The node divides that residual once across all of its
-sets, so the sets' offers together fit the node
-([ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md), issue #397). That
+sets, so the `fit` shares together fit the node's residual envelope
+([ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md), issue #397). The
+standing slot described below can add one more per set, so the sets' total
+offer may exceed that residual. That
 envelope is the slots, CPU, memory, host budget and physical bound the scheduler
 admits against. On a small node with many scopes, this keeps GitHub from
 placing work the node cannot start while siblings are idle (issue #388). A set
@@ -240,9 +242,10 @@ keeps one free slot,
 so a job queued while every node is full is assigned somewhere and waits there
 rather than in no set at all
 ([ADR 0082](adr/0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md), issue
-#422). Before the node's first ready tick, the set advertises the configured
-value. After that, a tick that is not ready keeps the last ready view, however
-old it is
+#422). Before the node's first error-free ready tick that reports headroom,
+the set advertises the configured value. After that, any tick without such a
+view (one that failed, is not ready, or reports no headroom) keeps the last
+view, however old it is
 ([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md), amended by
 [ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md)). A node
 whose scale sets receive no new work while a guest is running is therefore
