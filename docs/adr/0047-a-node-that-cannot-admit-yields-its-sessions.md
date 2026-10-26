@@ -20,6 +20,17 @@ A node whose set GitHub stopped delivering to, and whose bounded session heals
 did not restore delivery, releases that set's session and keeps the rest
 (opt-in, `membership`).
 
+Amended by [issue #432](https://github.com/vitalyiegorov/tart-runner-fleet/issues/432)
+(2026-10-26): withdrawal releases the message session, not runner
+administration. A withdrawn binding still observes and deregisters the runners
+it owns, because GitHub serves both without a session; it still refuses to
+acquire a job or generate runner credentials. On 2026-10-26 Omarchy yielded
+under host pressure and could not deregister two in-flight provisions, so the
+drain failed at `deregister_failed` on every attempt while the stranded
+containers held the node over the ceilings that made it yield. A binding with
+no client at all — closed, or never opened — reports
+`runner_admin_unavailable`.
+
 ## Context
 
 GitHub binds a queued job to exactly one runner scale set at queue time, and

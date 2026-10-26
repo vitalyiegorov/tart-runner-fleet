@@ -1713,6 +1713,11 @@ observations detailed `session_yielded`, so it reports NOT READY on purpose —
 it is holding no session and observing nothing. And jobs bound to its scale
 sets *before* it withdrew do not migrate: like a discarded session above, they
 need a cancel and re-run. Withdrawal prevents a backlog; it does not drain one.
+It does not stop the node cleaning up after itself either: a withdrawn binding
+still observes and deregisters the runners it owns, so a drain of a VM the node
+already held completes while it is withdrawn (issue #432). A drain that fails at
+`deregister:runner_admin_unavailable` means the binding has no client at all —
+it was closed, or never opened its first session — not that it withdrew.
 
 `sessionYieldBlockedForSeconds` (default 600) and
 `sessionYieldHealthyForSeconds` (default 120) tune the bounds in `fleet.json`,

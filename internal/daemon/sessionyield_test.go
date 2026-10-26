@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -574,5 +575,122 @@ func TestConstructedControllerLogsThroughTheReporterItWasGiven(t *testing.T) {
 	}
 	if line := logged.String(); !strings.Contains(line, "load average") {
 		t.Fatalf("the constructed controller logged nothing an operator can act on: %q", line)
+	}
+}
+
+// adminSessionSource records runner administration separately from session
+// work, so a test can tell which calls reached the retained client.
+type adminSessionSource struct {
+	fakeSource
+	registered   atomic.Int32
+	deregistered atomic.Int32
+}
+
+func (s *adminSessionSource) Registered(context.Context, string) (bool, error) {
+	s.registered.Add(1)
+	return true, nil
+}
+
+func (s *adminSessionSource) Deregister(context.Context, string) error {
+	s.deregistered.Add(1)
+	return nil
+}
+
+// Regression (issue #432): Omarchy yielded its sessions under host pressure and
+// then could not deregister the two VMs it already owned, so the drain failed
+// at deregister_failed on every attempt and the stranded containers kept the
+// node over the very ceilings that made it yield. Withdrawing the message
+// session withdraws the node from new work, never from administering its own
+// runners.
+func TestSuspendedBindingKeepsRunnerAdministrationButRefusesWork(t *testing.T) {
+	ctx := context.Background()
+	retained := &adminSessionSource{}
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: retained,
+		open:    func(context.Context) (scaleSetSource, error) { return &adminSessionSource{}, nil },
+		limiter: make(chan struct{}, 1), now: time.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Suspend(ctx); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	if registered, err := source.Registered(ctx, "trf-runner"); err != nil || !registered {
+		t.Fatalf("Registered while suspended = %v, %v", registered, err)
+	}
+	if err := source.Deregister(ctx, "trf-runner"); err != nil {
+		t.Fatalf("Deregister while suspended = %v", err)
+	}
+	if retained.registered.Load() != 1 || retained.deregistered.Load() != 1 {
+		t.Fatalf("administration did not reach the retained client: registered=%d deregistered=%d",
+			retained.registered.Load(), retained.deregistered.Load())
+	}
+	if _, err := source.AcquireAndGenerateJIT(ctx, 7, "trf-runner", "_work"); err == nil {
+		t.Fatal("a suspended binding acquired a job")
+	}
+	if _, err := source.GenerateJIT(ctx, "trf-runner", "_work"); err == nil || retained.directJITCalls.Load() != 0 {
+		t.Fatalf("a suspended binding generated runner credentials: err=%v calls=%d", err, retained.directJITCalls.Load())
+	}
+	if err := source.Handle(ctx, func(context.Context, githubscaleset.Demand) error { return nil }); err == nil {
+		t.Fatal("a suspended binding polled a session it released")
+	}
+	if retained.closed.Load() != 1 {
+		t.Fatalf("message session closes = %d, want exactly the yield's release", retained.closed.Load())
+	}
+	if err := source.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if retained.closed.Load() != 1 {
+		t.Fatalf("closing a suspended binding released its session again: closes=%d", retained.closed.Load())
+	}
+	err = source.Deregister(ctx, "trf-runner")
+	if got := githubscaleset.RunnerFailureDetail(err); got != githubscaleset.ReasonRunnerAdminUnavailable {
+		t.Fatalf("Deregister after Close detail = %q (%v), want runner_admin_unavailable", got, err)
+	}
+	if _, err := source.Registered(ctx, "trf-runner"); !errors.Is(err, githubscaleset.ErrRunnerAdminUnavailable) {
+		t.Fatalf("Registered after Close = %v, want ErrRunnerAdminUnavailable", err)
+	}
+}
+
+// A binding that never opened a session has no client to administer runners
+// with, and says so in the closed vocabulary rather than as a generic failure.
+func TestPendingBindingReportsRunnerAdministrationUnavailable(t *testing.T) {
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{pending: true,
+		open:    func(context.Context) (scaleSetSource, error) { return &adminSessionSource{}, nil },
+		limiter: make(chan struct{}, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Suspend(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Deregister(context.Background(), "trf-runner"); !errors.Is(err, githubscaleset.ErrRunnerAdminUnavailable) {
+		t.Fatalf("Deregister without any client = %v, want ErrRunnerAdminUnavailable", err)
+	}
+}
+
+// A suspended binding keeps its client for runner administration, so a poll
+// that failed on that client just as the yield released its session must not
+// recover by opening a new one: that would rejoin the fleet behind the yield
+// controller's back.
+func TestFailedPollRacingASuspendDoesNotReopenTheSession(t *testing.T) {
+	ctx := context.Background()
+	opens := 0
+	wedged := &wedgedSessionSource{err: errors.New("terminal broker session")}
+	source, err := newRecoveringScaleSetSource(recoveringScaleSetConfig{source: wedged,
+		open: func(context.Context) (scaleSetSource, error) {
+			opens++
+			return &adminSessionSource{}, nil
+		}, limiter: make(chan struct{}, 1), now: time.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Suspend(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.replace(ctx, wedged, true); err != nil {
+		t.Fatalf("replace = %v", err)
+	}
+	if opens != 0 || !source.Suspended() {
+		t.Fatalf("a suspended binding reopened its session: opens=%d suspended=%v", opens, source.Suspended())
 	}
 }
