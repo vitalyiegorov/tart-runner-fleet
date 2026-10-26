@@ -237,7 +237,12 @@ keeps one free slot,
 so a job queued while every node is full is assigned somewhere and waits there
 rather than in no set at all
 ([ADR 0082](adr/0082-a-bound-scale-set-keeps-a-standing-offer-of-one.md), issue
-#422). If the scheduler's view is missing, not
+#422). A node whose own guardrails refuse admission (`memory reserve`,
+`swap pressure`, `cpu pressure`, `disk reserve` or `inode reserve` in the status
+`admissionReason`) keeps no free slot and advertises only what it holds, so a
+sibling with room gets the job instead
+([ADR 0084](adr/0084-a-gated-node-keeps-no-standing-offer.md), issue #428). An
+`update drain` keeps the slot. If the scheduler's view is missing, not
 ready, or older than two minutes, the set advertises the configured value
 ([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md)). A node
 whose scale sets receive no new work while a guest is running is therefore
@@ -1892,7 +1897,8 @@ queued that the node has not been handed is served first. The remainder
 rotates every 30 seconds.
 
 Expect a set to advertise what it holds plus one free slot while its node is
-full, or exactly what it holds once one job waits here for a guest, even though
+full, or exactly what it holds once one job waits here for a guest or while its
+node is behind a host-pressure gate (ADR 0084), even though
 its scope's queue is not empty. Its scope's
 next job then goes to the sibling, or waits here as the set's one
 not-yet-startable job (ADR 0082).

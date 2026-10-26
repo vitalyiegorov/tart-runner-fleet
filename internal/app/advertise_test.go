@@ -37,6 +37,12 @@ func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 		{"a busy set with nothing waiting keeps one free slot", 4, ScaleSetHeadroom{Held: 1, Placed: 1}, true, 2},
 		{"work waiting for a guest spends the standing offer", 4, ScaleSetHeadroom{Held: 2, Placed: 1}, true, 2},
 		{"the free slot stays under the configured ceiling", 2, ScaleSetHeadroom{Held: 2, Placed: 2}, true, 2},
+		// Issue #428: a node whose own guardrails refuse admission for host
+		// pressure cannot start the job the free slot attracts, and a sibling
+		// serving the same labels may be idle. It offers only what it holds.
+		{"a gated node's idle set offers nothing extra", 2, ScaleSetHeadroom{Gated: true}, true, 0},
+		{"a gated node's busy set offers what it holds", 4, ScaleSetHeadroom{Held: 1, Placed: 1, Gated: true}, true, 1},
+		{"a gated node still keeps work already assigned", 4, ScaleSetHeadroom{Held: 2, Placed: 1, Gated: true}, true, 2},
 	}
 	for _, tc := range cases {
 		if got := AdvertisedCapacity(tc.configured, tc.headroom, tc.known); got != tc.want {
@@ -242,5 +248,41 @@ func TestResidualAdvertisementKeepsTheLastReadyView(t *testing.T) {
 	absent.Observe(ready, nil)
 	if absent.Capacity(18, 2) != 2 {
 		t.Fatal("no advertisement advertises the configured capacity")
+	}
+}
+
+// TestScaleSetHeadroomMarksANodeItsOwnGuardrailsRefuse is issue #428: a node
+// behind its memory, swap, CPU, disk or inode gate is gated, and loses the
+// standing offer of one. An update drain is not host pressure (hostHealthy): it
+// is bounded and self-imposed, and keeping its offer is what keeps a job queued
+// while every matching node is draining or full from being assigned to no set
+// (issue #422).
+func TestScaleSetHeadroomMarksANodeItsOwnGuardrailsRefuse(t *testing.T) {
+	now := time.Date(2026, 10, 26, 6, 49, 0, 0, time.UTC)
+	binding := Binding{StoreKey: 7, ScaleSetID: 7, Targets: []string{"owner/repo"},
+		Profile: domain.Profile{ID: "small", Route: "tiered", Platform: domain.PlatformLinux}}
+	coordinator := DemandCoordinator{Store: noStatisticsStore{&fakeDemandStore{}}, Now: func() time.Time { return now }}
+	for _, tc := range []struct {
+		reason  string
+		allowed bool
+		gated   bool
+	}{
+		{"capacity available", true, false},
+		{"memory reserve", false, true},
+		{"swap pressure", false, true},
+		{"cpu pressure", false, true},
+		{"disk reserve", false, true},
+		{"inode reserve", false, true},
+		{updateDrainReason, false, false},
+	} {
+		in := headroomInput(domain.Fresh([]domain.Instance{}, now))
+		in.Host.Value.Pressure = domain.HostPressure{AdmissionAllowed: tc.allowed, AdmissionReason: tc.reason}
+		if !tc.allowed {
+			in.Host.Value.Available = domain.Resources{}
+		}
+		rows := coordinator.scaleSetHeadroom(context.Background(), []Binding{binding}, in, nil, nil)
+		if len(rows) != 1 || rows[0].Gated != tc.gated {
+			t.Fatalf("%s: gated = %+v, want %v", tc.reason, rows, tc.gated)
+		}
 	}
 }
