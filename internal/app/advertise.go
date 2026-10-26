@@ -29,6 +29,10 @@ type ScaleSetHeadroom struct {
 	// beyond it is work waiting for one, which is what the standing offer of
 	// one (issue #422) may never exceed.
 	Placed int
+	// Gated is the node's own guardrails refusing admission for host pressure
+	// (hostHealthy is false): memory, swap, CPU, disk or inode. An update drain
+	// is not a gate. A gated node is offered no standing slot (issue #428).
+	Gated bool
 }
 
 // AdvertisedCapacity is the capacity a scale set sends GitHub on its next long
@@ -51,6 +55,11 @@ type ScaleSetHeadroom struct {
 // full node gains at most one job per set it cannot start yet. A set
 // configured at zero still advertises zero.
 //
+// A gated node keeps no standing offer (issue #428, ADR 0084). It cannot start
+// what the free slot attracts, and a job assigned to it waits there while a
+// sibling serving the same labels may be idle. It still advertises what it
+// holds, so nothing GitHub already gave it is taken away.
+//
 // Before the node has ever computed its headroom it is the configured value: a
 // node that has never planned has no better answer, and advertising zero would
 // withdraw it from every scope it serves.
@@ -59,7 +68,10 @@ func AdvertisedCapacity(configured int, headroom ScaleSetHeadroom, known bool) i
 		return configured
 	}
 	offered := max(0, headroom.Held) + max(0, headroom.Fit)
-	return max(0, min(configured, max(offered, max(0, headroom.Placed)+1)))
+	if !headroom.Gated {
+		offered = max(offered, max(0, headroom.Placed)+1)
+	}
+	return max(0, min(configured, offered))
 }
 
 // ResidualAdvertisement carries the scheduler's latest view of the node's
@@ -116,6 +128,7 @@ func (c DemandCoordinator) scaleSetHeadroom(ctx context.Context, bindings []Bind
 	if !in.Instances.Usable() {
 		return nil
 	}
+	gated := !hostHealthy(in.Host)
 	rows := make([]ScaleSetHeadroom, 0, len(bindings))
 	claims := make([]scheduler.Claim, 0, len(bindings))
 	for _, binding := range bindings {
@@ -130,7 +143,8 @@ func (c DemandCoordinator) scaleSetHeadroom(ctx context.Context, bindings []Bind
 			}
 		}
 		local := held[binding.durableKey()] + placed
-		row := ScaleSetHeadroom{StoreKey: binding.durableKey(), Held: max(local, broker), Placed: placed}
+		row := ScaleSetHeadroom{StoreKey: binding.durableKey(), Held: max(local, broker), Placed: placed,
+			Gated: gated}
 		room := math.MaxInt
 		if binding.Capacity > 0 {
 			room = max(0, binding.Capacity-row.Held)

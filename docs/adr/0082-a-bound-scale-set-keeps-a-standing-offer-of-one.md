@@ -8,6 +8,10 @@ advertised value is floored at one) and
 [ADR 0076](0076-a-nodes-residual-is-offered-once.md) (the issue #412 floor in
 `scheduler.PartitionHeadroom` is removed; this record subsumes it).
 
+Amended 2026-10-26 by [ADR 0084](0084-a-gated-node-keeps-no-standing-offer.md)
+(issue #428): a node whose own guardrails refuse admission for host pressure
+keeps no standing free slot. An update drain and a merely full node keep it.
+
 ## Context
 
 Since ADR 0073 each scale set advertises `min(configured, held + fit)`. A node
