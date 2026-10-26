@@ -14,7 +14,7 @@ import (
 // world-model state into the captured scope snapshot, with no local broker
 // assignment for the foreign job.
 func TestMixedPlatformScopeSnapshotPreservesLocalInventory(t *testing.T) {
-	for _, cfg := range []worldConfig{macOSOnlyNodeWorld(), containerNodeWorld(), foreignArchitectureWorld("arm64"), foreignArchitectureWorld("amd64")} {
+	for _, cfg := range []worldConfig{macOSOnlyNodeWorld(), containerNodeWorld(), foreignArchitectureWorld("arm64"), foreignArchitectureWorld("amd64"), foreignSizeWorld()} {
 		t.Run(cfg.Name, func(t *testing.T) {
 			for seed := int64(1); seed <= 24; seed++ {
 				t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
@@ -40,10 +40,16 @@ func TestMixedPlatformScopeSnapshotPreservesLocalInventory(t *testing.T) {
 							arch = "amd64"
 						}
 					}
+					route := "trf-" + string(foreign) + "-" + arch + "-4x8"
+					if cfg.Name == "mixed-size" {
+						// Same OS and architecture as every local set, at a size
+						// none advertises (issue #434).
+						route = "trf-linux-amd64-16x64"
+					}
 					snapshot.jobs = append(snapshot.jobs, githubscaleset.WorkflowJob{
 						ID: 100000 + seed, RunID: 100000 + seed, RunAttempt: 1,
 						Repository: githubscaleset.Repository{Owner: "a", Name: "repo"},
-						Status:     "queued", Labels: []string{"self-hosted", "trf-" + string(foreign) + "-" + arch + "-4x8"}, CreatedAt: w.now})
+						Status:     "queued", Labels: []string{"self-hosted", route}, CreatedAt: w.now})
 					snapshot.outstanding++
 					w.deliverSnapshots()
 					if len(w.findings) > 0 {
@@ -79,5 +85,13 @@ func foreignArchitectureWorld(arch string) worldConfig {
 		canonical := fmt.Sprintf("trf-linux-%s-%dx%d", arch, profile.Resources.CPU, profile.Resources.MemoryMB/1024)
 		cfg.Bindings[i].ScaleSetLabels = append(cfg.Bindings[i].ScaleSetLabels, canonical)
 	}
+	return cfg
+}
+
+// foreignSizeWorld advertises each local set's canonical AMD64 route; the
+// injected job names the same platform and architecture at an unserved size.
+func foreignSizeWorld() worldConfig {
+	cfg := foreignArchitectureWorld("amd64")
+	cfg.Name = "mixed-size"
 	return cfg
 }
