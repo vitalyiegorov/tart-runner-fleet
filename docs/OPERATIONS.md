@@ -226,8 +226,13 @@ With `canonicalJobInventory: true`, each poll advertises
 `min(maxCapacity, max(held + fit, placed + 1))`. `held` is what the set already
 owns: its live guests and queued demand, or GitHub's own fresh assigned count if
 that is larger. `placed` is the part of `held` that already has a guest here, so
-`placed + 1` is the standing free slot of ADR 0082. `fit` is how many more of the set's vector the node's current residual
-envelope can start once all the demand waiting on the node is charged. That
+`placed + 1` is the standing free slot of ADR 0082. `fit` is the set's share of
+what the node's current residual envelope can start once all the demand waiting
+on the node is charged. The node divides that residual once across all of its
+sets, so the `fit` shares together fit the node's residual envelope
+([ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md), issue #397). The
+standing slot described below can add one more per set, so the sets' total
+offer may exceed that residual. That
 envelope is the slots, CPU, memory, host budget and physical bound the scheduler
 admits against. On a small node with many scopes, this keeps GitHub from
 placing work the node cannot start while siblings are idle (issue #388). A set
@@ -242,9 +247,12 @@ rather than in no set at all
 `admissionReason`) keeps no free slot and advertises only what it holds, so a
 sibling with room gets the job instead
 ([ADR 0084](adr/0084-a-gated-node-keeps-no-standing-offer.md), issue #428). An
-`update drain` keeps the slot. If the scheduler's view is missing, not
-ready, or older than two minutes, the set advertises the configured value
-([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md)). A node
+`update drain` keeps the slot. Before the node's first error-free ready tick
+that reports headroom, the set advertises the configured value. After that, any
+tick without such a view (one that failed, is not ready, or reports no
+headroom) keeps the last view, however old it is
+([ADR 0073](adr/0073-scale-sets-advertise-the-residual-envelope.md), amended by
+[ADR 0076](adr/0076-a-nodes-residual-is-offered-once.md)). A node
 whose scale sets receive no new work while a guest is running is therefore
 expected behaviour, not a session fault. Check the status `envelope` first.
 
