@@ -170,8 +170,13 @@ type Status struct {
 // (no prior sample, a non-advancing clock, or a counter reset by a reboot) and
 // the guard fell back to the level; it never means a quiet host.
 type HostPressure struct {
-	AvailableMemoryMiB   int64   `json:"availableMemoryMiB"`
-	FreeDiskGiB          int64   `json:"freeDiskGiB"`
+	AvailableMemoryMiB int64 `json:"availableMemoryMiB"`
+	FreeDiskGiB        int64 `json:"freeDiskGiB"`
+	// FreeInodes and TotalInodes are additive fleet.v1 fields (issue #423): free
+	// bytes cannot show a filesystem out of inodes. TotalInodes 0 is a
+	// filesystem with no fixed inode limit (btrfs), not an unread value.
+	FreeInodes           int64   `json:"freeInodes"`
+	TotalInodes          int64   `json:"totalInodes"`
 	SwapUsedMiB          int64   `json:"swapUsedMiB"`
 	SwapOuts             int64   `json:"swapOuts"`
 	SwapOutRatePerSecond float64 `json:"swapOutRatePerSecond"`

@@ -151,3 +151,61 @@ func TestAnUnobservedHostIsNotARefusal(t *testing.T) {
 		t.Fatalf("silence must be reported as silence, not as health: %v", result.Reasons)
 	}
 }
+
+// TestANodeOutOfInodesNamesInodes is issue #423. ubuntu-vitalii ran out of
+// inodes with 29 GiB free, and the finding must say inodes: "disk reserve" or a
+// generic refusal would send the operator to look for bytes that are there.
+func TestANodeOutOfInodesNamesInodes(t *testing.T) {
+	pressure := HostPressureMetric{AvailableMemoryMiB: 40960, FreeDiskGiB: 29, FreeInodes: 0, TotalInodes: 60850176,
+		CPUIdlePercent: 80, LoadAverage: 2, AdmissionReason: "inode reserve"}
+	floors := AdmissionFloors{MinFreeDiskGiB: 20, MinFreeInodePercent: 5, MinAvailableMemoryMiB: 1024}
+
+	result := admissionResult(Snapshot{HostPressure: pressure, AdmissionFloors: floors})
+
+	if result.OK {
+		t.Fatal("a node out of inodes must not pass its admission check")
+	}
+	detail := strings.Join(result.Reasons, " ")
+	for _, want := range []string{"admitting no work: inode reserve", "inodes 0 free of 60850176", "floor 5%"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("missing %q: %q", want, detail)
+		}
+	}
+}
+
+// TestAnInodeFloorIsTheNearestWhenItIsTightest shows the slide toward the inode
+// floor before it arrives, and never measures a filesystem with no inode limit.
+func TestAnInodeFloorIsTheNearestWhenItIsTightest(t *testing.T) {
+	pressure := HostPressureMetric{AvailableMemoryMiB: 40960, FreeDiskGiB: 200, FreeInodes: 4_000_000,
+		TotalInodes: 60_000_000, CPUIdlePercent: 80, LoadAverage: 2, AdmissionAllowed: true,
+		AdmissionReason: "capacity available"}
+	floors := AdmissionFloors{MinFreeDiskGiB: 20, MinFreeInodePercent: 5, MinAvailableMemoryMiB: 1024}
+
+	detail := strings.Join(admissionResult(Snapshot{HostPressure: pressure, AdmissionFloors: floors}).Reasons, " ")
+	if !strings.Contains(detail, "nearest floor: inodes 4000000 free of 60000000 (6.7%), floor 5%") {
+		t.Fatalf("the inode floor is the tightest: %q", detail)
+	}
+
+	pressure.FreeInodes, pressure.TotalInodes = 0, 0
+	detail = strings.Join(admissionResult(Snapshot{HostPressure: pressure, AdmissionFloors: floors}).Reasons, " ")
+	if strings.Contains(detail, "inodes") {
+		t.Fatalf("a filesystem with no inode limit has no inode margin: %q", detail)
+	}
+}
+
+func TestInodeReserveIsAPublishableReasonAndCountsAreValidated(t *testing.T) {
+	health, _ := newTestHealth(t)
+	valid := HostPressureMetric{FreeDiskGiB: 29, TotalInodes: 10, AdmissionReason: "inode reserve"}
+	if err := health.SetHostPressure(valid); err != nil {
+		t.Fatalf("inode reserve refused: %v", err)
+	}
+	for name, metric := range map[string]HostPressureMetric{
+		"negative free":      {FreeInodes: -1, TotalInodes: 10, AdmissionReason: "inode reserve"},
+		"negative total":     {TotalInodes: -1, AdmissionReason: "inode reserve"},
+		"more free than all": {FreeInodes: 11, TotalInodes: 10, AdmissionReason: "inode reserve"},
+	} {
+		if err := health.SetHostPressure(metric); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

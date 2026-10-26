@@ -142,6 +142,7 @@ type PolicyLinuxCapacity struct {
 // same drift.
 type PolicyFloors struct {
 	MinFreeDiskGiB        int     `json:"minFreeDiskGb"`
+	MinFreeInodePercent   float64 `json:"minFreeInodePercent"`
 	MinAvailableMemoryMiB int     `json:"minAvailableMemoryMb"`
 	MaxSwapUsedMiB        int     `json:"maxSwapUsedMb"`
 	MaxLoadAverage        float64 `json:"maxLoadAverage"`
@@ -224,6 +225,7 @@ func ProjectPolicy(cfg Config) Policy {
 		LinuxCapacity: PolicyLinuxCapacity{CPU: cfg.Linux.Capacity.CPU, MemoryMiB: cfg.Linux.Capacity.MemoryMiB,
 			MaxInstances: cfg.Linux.MaxInstances},
 		HostPressureFloors: PolicyFloors{MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB,
+			MinFreeInodePercent:   cfg.Guards.MinFreeInodePercent,
 			MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB, MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB,
 			MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent},
 		ElasticHostEnvelope:      cfg.Guards.ElasticHostEnvelope,

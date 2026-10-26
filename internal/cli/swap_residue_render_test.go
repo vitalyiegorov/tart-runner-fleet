@@ -73,3 +73,21 @@ func TestStatusRendersAMeasuredPagingRate(t *testing.T) {
 		t.Fatalf("measured page-out rate missing from status:\n%s", rendered)
 	}
 }
+
+// TestStatusShowsInodes is issue #423: ubuntu-vitalii printed "disk 29 GiB"
+// and "admission allowed" while it had no inode left. The line must carry the
+// inode share, and must not invent one for a filesystem with no inode limit.
+func TestStatusShowsInodes(t *testing.T) {
+	pressure := nodeCPressure()
+	pressure.FreeDiskGiB, pressure.FreeInodes, pressure.TotalInodes = 29, 0, 60_850_176
+	pressure.AdmissionAllowed, pressure.AdmissionReason = false, "inode reserve"
+	rendered := renderNodeC(pressure)
+	if !strings.Contains(rendered, "disk 29 GiB  inodes 0.0% free  memory") ||
+		!strings.Contains(rendered, "admission deferred (inode reserve)") {
+		t.Fatalf("inode exhaustion missing from status:\n%s", rendered)
+	}
+	pressure.TotalInodes = 0
+	if rendered := renderNodeC(pressure); !strings.Contains(rendered, "inodes n/a") {
+		t.Fatalf("a filesystem with no inode limit must render as not applicable:\n%s", rendered)
+	}
+}

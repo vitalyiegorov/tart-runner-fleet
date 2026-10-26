@@ -78,8 +78,8 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	}
 	fmt.Fprintln(output, "\nHOST PRESSURE")
 	pressure := status.Data.HostPressure
-	fmt.Fprintf(output, "disk %d GiB  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
-		pressure.FreeDiskGiB, pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pagingState(pressure),
+	fmt.Fprintf(output, "disk %d GiB  inodes %s  memory %d MiB  swap %d MiB (%s)  cpu idle %.1f%%  load %.2f  admission %s (%s)\n",
+		pressure.FreeDiskGiB, inodeState(pressure), pressure.AvailableMemoryMiB, pressure.SwapUsedMiB, pagingState(pressure),
 		pressure.CPUIdlePercent, pressure.LoadAverage, admissionState(pressure.AdmissionAllowed), pressure.AdmissionReason)
 	// A node draining toward an update prints it above the queues too: the queue
 	// growing is the *expected* cost of the drain, not evidence against it.
@@ -175,6 +175,16 @@ func admissionState(allowed bool) string {
 // An unmeasured rate is named, never printed as 0/s: it is the fail-closed case
 // where the level blocks on its own, and reading it as a quiet host is the one
 // mistake this line exists to prevent.
+// inodeState renders the free share of the guest-storage filesystem's inodes.
+// A zero total is a filesystem with no fixed inode limit (btrfs), or a daemon
+// older than issue #423; neither has a share to print.
+func inodeState(pressure adminapi.HostPressure) string {
+	if pressure.TotalInodes <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%% free", float64(pressure.FreeInodes)*100/float64(pressure.TotalInodes))
+}
+
 func pagingState(pressure adminapi.HostPressure) string {
 	if !pressure.SwapOutRateObserved {
 		return "paging unmeasured"

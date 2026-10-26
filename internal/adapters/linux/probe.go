@@ -22,6 +22,12 @@
 // argument-vector runner every other adapter uses, so this package needs no
 // build tags and no per-platform syscall shim, and the whole probe stays
 // testable on any machine.
+//
+// Free inodes come from the same `df`, asked `df -P -i` for the same mount.
+// They are a capacity fact like free bytes: on 2026-10-25 a node with 29 GiB
+// free had no inode left and every guest it started failed with ENOSPC (issue
+// #423, ADR 0083), so an unreadable inode count degrades the observation exactly
+// as an unreadable byte count does.
 package linux
 
 import (
@@ -90,7 +96,8 @@ func (r DiskRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 type Probe struct {
 	// FS is the filesystem `/proc` is read from. Nil means the real root.
 	FS fs.FS
-	// Disk answers `df -P -k <path>`. Nil means the real `df`.
+	// Disk answers `df -P -k <path>` and `df -P -i <path>`. Nil means the real
+	// `df`.
 	Disk executor.CommandRunner
 	// Timeout bounds the one command this probe runs.
 	Timeout time.Duration
@@ -125,6 +132,10 @@ func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 	if err != nil {
 		return p.degraded(now, err)
 	}
+	inodes, err := p.inodes(ctx)
+	if err != nil {
+		return p.degraded(now, err)
+	}
 
 	hasPrior := !p.last.ObservedAt.IsZero()
 	rate, rateObserved := p.pageOutRate(now, pageOuts, hasPrior)
@@ -134,6 +145,8 @@ func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 		ObservedAt:           now,
 		AvailableMemoryMB:    memory.availableMB,
 		FreeDiskGB:           freeDiskGB,
+		FreeInodes:           inodes.free,
+		TotalInodes:          inodes.total,
 		SwapUsedMB:           memory.swapUsedMB,
 		SwapOuts:             pageOuts,
 		SwapOutRatePerSecond: rate,
@@ -244,20 +257,37 @@ func (p *Probe) processorTime() (processorTime, error) {
 }
 
 func (p *Probe) freeDiskGB(ctx context.Context) (int64, error) {
+	output, err := p.df(ctx, "-k")
+	if err != nil {
+		return 0, err
+	}
+	return parseFreeDiskGB(string(output))
+}
+
+func (p *Probe) inodes(ctx context.Context) (inodeCount, error) {
+	output, err := p.df(ctx, "-i")
+	if err != nil {
+		return inodeCount{}, err
+	}
+	return parseInodes(string(output))
+}
+
+// df runs `df -P <unit> <path>` under the probe's deadline.
+func (p *Probe) df(ctx context.Context, unit string) ([]byte, error) {
 	deadline := p.Timeout
 	if deadline <= 0 {
 		deadline = defaultProbeWait
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
-	output, err := p.disk().Run(commandCtx, "-P", "-k", p.diskPath())
+	output, err := p.disk().Run(commandCtx, "-P", unit, p.diskPath())
 	if err != nil {
 		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			return 0, fmt.Errorf("df timeout: %w", context.DeadlineExceeded)
+			return nil, fmt.Errorf("df %s timeout: %w", unit, context.DeadlineExceeded)
 		}
-		return 0, fmt.Errorf("df probe: %w", err)
+		return nil, fmt.Errorf("df %s probe: %w", unit, err)
 	}
-	return parseFreeDiskGB(string(output))
+	return output, nil
 }
 
 func (p *Probe) read(name string) ([]byte, error) {
@@ -423,12 +453,9 @@ func parseLoadAverage(body string) (float64, error) {
 	return load, nil
 }
 
-// parseFreeDiskGB reads POSIX `df` output. The header names the columns and the
-// last row carries the filesystem asked about, so the available column is
-// located by name rather than by position: `df` implementations disagree about
-// how many columns precede it, and reading the wrong one would report a mount's
-// used space as its free space.
-func parseFreeDiskGB(body string) (int64, error) {
+// dfRow returns the header and the last data row of `df` output, which is the
+// filesystem asked about.
+func dfRow(body string) ([]string, []string, error) {
 	lines := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
 		if strings.TrimSpace(line) != "" {
@@ -436,19 +463,68 @@ func parseFreeDiskGB(body string) (int64, error) {
 		}
 	}
 	if len(lines) < 2 {
-		return 0, errors.New("df output has no data row")
+		return nil, nil, errors.New("df output has no data row")
 	}
-	column := slices.Index(strings.Fields(lines[0]), "Available")
+	return strings.Fields(lines[0]), strings.Fields(lines[len(lines)-1]), nil
+}
+
+// dfColumn reads one non-negative count from a data row by its header name.
+func dfColumn(header, row []string, name string) (int64, error) {
+	column := slices.Index(header, name)
 	if column < 0 {
-		return 0, errors.New("df output has no available column")
+		return 0, fmt.Errorf("df output has no %s column", name)
 	}
-	fields := strings.Fields(lines[len(lines)-1])
-	if column >= len(fields) {
-		return 0, errors.New("df data row has no available blocks")
+	if column >= len(row) {
+		return 0, fmt.Errorf("df data row has no %s value", name)
 	}
-	blocks, err := strconv.ParseInt(fields[column], 10, 64)
-	if err != nil || blocks < 0 {
-		return 0, errors.New("df available blocks is not a size")
+	value, err := strconv.ParseInt(row[column], 10, 64)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("df %s is not a count", name)
+	}
+	return value, nil
+}
+
+type inodeCount struct {
+	free, total int64
+}
+
+// parseInodes reads GNU `df -P -i` output, locating `Inodes` and `IFree` by
+// name for the same reason parseFreeDiskGB does. A zero total is a filesystem
+// with no fixed inode limit — btrfs prints `0 0 0 -` — and is reported as such.
+// A `-` count is statfs saying it does not know, which is an unread value and
+// an error, never a filesystem with nothing to run out of.
+func parseInodes(body string) (inodeCount, error) {
+	header, row, err := dfRow(body)
+	if err != nil {
+		return inodeCount{}, err
+	}
+	total, err := dfColumn(header, row, "Inodes")
+	if err != nil {
+		return inodeCount{}, err
+	}
+	free, err := dfColumn(header, row, "IFree")
+	if err != nil {
+		return inodeCount{}, err
+	}
+	if free > total {
+		return inodeCount{}, errors.New("df reports more free inodes than inodes")
+	}
+	return inodeCount{free: free, total: total}, nil
+}
+
+// parseFreeDiskGB reads POSIX `df` output. The header names the columns and the
+// last row carries the filesystem asked about, so the available column is
+// located by name rather than by position: `df` implementations disagree about
+// how many columns precede it, and reading the wrong one would report a mount's
+// used space as its free space.
+func parseFreeDiskGB(body string) (int64, error) {
+	header, row, err := dfRow(body)
+	if err != nil {
+		return 0, err
+	}
+	blocks, err := dfColumn(header, row, "Available")
+	if err != nil {
+		return 0, err
 	}
 	return blocks / kibibytesPerGB, nil
 }

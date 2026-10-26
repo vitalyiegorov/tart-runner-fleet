@@ -300,6 +300,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 				DeadLetters: deadLetters(snapshot.DeadLetters)},
 			HostPressure: adminapi.HostPressure{AvailableMemoryMiB: snapshot.HostPressure.AvailableMemoryMiB,
 				FreeDiskGiB: snapshot.HostPressure.FreeDiskGiB, SwapUsedMiB: snapshot.HostPressure.SwapUsedMiB,
+				FreeInodes: snapshot.HostPressure.FreeInodes, TotalInodes: snapshot.HostPressure.TotalInodes,
 				SwapOuts:             snapshot.HostPressure.SwapOuts,
 				SwapOutRatePerSecond: snapshot.HostPressure.SwapOutRatePerSecond,
 				SwapOutRateObserved:  snapshot.HostPressure.SwapOutRateObserved,
@@ -810,6 +811,11 @@ func renderMetrics(snapshot Snapshot) string {
 	fmt.Fprintf(&output, "fleet_host_available_memory_mib %d\n", snapshot.HostPressure.AvailableMemoryMiB)
 	writeHelpType("fleet_host_free_disk_gib", "Host filesystem free space in GiB.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_free_disk_gib %d\n", snapshot.HostPressure.FreeDiskGiB)
+	writeHelpType("fleet_host_free_inodes", "Host guest-storage filesystem free inodes.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_free_inodes %d\n", snapshot.HostPressure.FreeInodes)
+	writeHelpType("fleet_host_total_inodes",
+		"Host guest-storage filesystem total inodes; 0 means the filesystem has no fixed inode limit.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_total_inodes %d\n", snapshot.HostPressure.TotalInodes)
 	writeHelpType("fleet_host_swap_used_mib", "Host swap currently used in MiB.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_swap_used_mib %d\n", snapshot.HostPressure.SwapUsedMiB)
 	writeHelpType("fleet_host_swapouts_total", "Cumulative host swap-out page count.", "counter")

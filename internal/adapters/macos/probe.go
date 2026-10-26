@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,11 +76,18 @@ func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 			availableMemoryMB = pressureMemoryMB
 		}
 	}
-	disk, err := p.run(ctx, "df", "-k", p.diskPath())
+	// `-i` adds the inode columns to the same row. Inodes are a capacity fact
+	// like bytes: a volume out of them fails every guest with ENOSPC however
+	// many bytes it has free (issue #423, ADR 0083).
+	disk, err := p.run(ctx, "df", "-k", "-i", p.diskPath())
 	if err != nil {
 		return p.degraded(now, err)
 	}
 	freeDiskGB, err := parseDisk(string(disk))
+	if err != nil {
+		return p.degraded(now, err)
+	}
+	freeInodes, totalInodes, err := parseInodes(string(disk))
 	if err != nil {
 		return p.degraded(now, err)
 	}
@@ -95,6 +103,8 @@ func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 		ObservedAt:           now,
 		AvailableMemoryMB:    availableMemoryMB,
 		FreeDiskGB:           freeDiskGB,
+		FreeInodes:           freeInodes,
+		TotalInodes:          totalInodes,
 		SwapOuts:             swapouts,
 		SwapOutRatePerSecond: swapOutRate,
 		SwapOutRateObserved:  swapOutRateObserved,
@@ -292,6 +302,30 @@ func parseDisk(value string) (int64, error) {
 		return 0, fmt.Errorf("parse df: %w", err)
 	}
 	return blocks / 1048576, nil
+}
+
+// parseInodes reads the `iused` and `ifree` columns of `df -k -i` by header
+// name. macOS prints no total, so it is their sum; a zero total is a volume
+// with no fixed inode limit, for which the inode floor does not apply.
+func parseInodes(value string) (int64, int64, error) {
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	if len(lines) < 2 {
+		return 0, 0, errors.New("df output missing data")
+	}
+	header, row := strings.Fields(lines[0]), strings.Fields(lines[len(lines)-1])
+	counts := [2]int64{}
+	for index, name := range []string{"iused", "ifree"} {
+		column := slices.Index(header, name)
+		if column < 0 || column >= len(row) {
+			return 0, 0, fmt.Errorf("df %s missing", name)
+		}
+		count, err := strconv.ParseInt(row[column], 10, 64)
+		if err != nil || count < 0 {
+			return 0, 0, fmt.Errorf("df %s is not a count", name)
+		}
+		counts[index] = count
+	}
+	return counts[1], counts[0] + counts[1], nil
 }
 
 var swapUsedPattern = regexp.MustCompile(`used\s*=\s*([0-9.]+)([KMG])`)

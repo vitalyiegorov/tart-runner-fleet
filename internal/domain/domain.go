@@ -559,6 +559,11 @@ type HostPressure struct {
 	LoadAverage          float64
 	AdmissionAllowed     bool
 	AdmissionReason      string
+	// FreeInodes and TotalInodes are the guest-storage filesystem's inode counts
+	// the inode reserve decides on (issue #423). TotalInodes zero is a
+	// filesystem with no fixed inode limit, such as btrfs.
+	FreeInodes  int64
+	TotalInodes int64
 }
 
 type Reservation struct {

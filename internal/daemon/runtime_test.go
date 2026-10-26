@@ -1056,14 +1056,19 @@ func TestRunValidationAndDependencyErrors(t *testing.T) {
 
 func TestProductionInventoryWiresEveryConfiguredHostGuard(t *testing.T) {
 	cfg := config.Default()
-	cfg.Guards = config.Guards{MinFreeDiskGiB: 70, MinAvailableMemoryMiB: 1536, MaxSwapUsedMiB: 3072, MaxLoadAverage: 8.5, MinCPUIdlePercent: 7.5}
+	cfg.Guards = config.Guards{MinFreeDiskGiB: 70, MinFreeInodePercent: 4.5, MinAvailableMemoryMiB: 1536, MaxSwapUsedMiB: 3072,
+		MaxLoadAverage: 8.5, MinCPUIdlePercent: 7.5}
 	production, ok := newDependencies("darwin").inventory(nil, cfg, nil, nil).(app.ProductionInventory)
 	if !ok {
 		t.Fatal("production inventory adapter type changed")
 	}
-	want := executor.Guardrails{MinFreeDiskGB: 70, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072, MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
+	want := executor.Guardrails{MinFreeDiskGB: 70, MinFreeInodePercent: 4.5, MinAvailableMemoryMB: 1536, MaxSwapUsedMB: 3072,
+		MaxLoadAverage: 8.5, MinCPUidlePercent: 7.5}
 	if production.Guards != want {
 		t.Fatalf("wired guards = %+v, want %+v", production.Guards, want)
+	}
+	if floors := admissionFloors(cfg); floors.MinFreeInodePercent != 4.5 {
+		t.Fatalf("doctor's inode floor = %v, want 4.5", floors.MinFreeInodePercent)
 	}
 }
 

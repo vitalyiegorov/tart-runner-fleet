@@ -60,6 +60,7 @@ func (w *world) advancePhysics() {
 	w.statisticsGap = decay(w.statisticsGap)
 	w.restLag = decay(w.restLag)
 	w.hostProbeStale = decay(w.hostProbeStale)
+	w.inodeExhausted = decay(w.inodeExhausted)
 	w.tartUnavailable = decay(w.tartUnavailable)
 	for id, remaining := range w.wedgedDrain {
 		w.wedgedDrain[id] = decay(remaining)

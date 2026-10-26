@@ -48,8 +48,8 @@ func (c nodeCCommands) Run(_ context.Context, binary string, args ...string) ([]
 			"Pages speculative: 10192.\nPages wired down: 208663.\nSwapouts: " + c.swapouts + ".\n"), nil
 	case "df":
 		// 99 GiB available.
-		return []byte("Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
-			"/dev/disk3s5 1942700360 934821244 103809024 91% /\n"), nil
+		return []byte("Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on\n" +
+			"/dev/disk3s5 1942700360 934821244 103809024 91% 2874211 1038090240 0% /\n"), nil
 	case "top":
 		return []byte("CPU usage: 12.51% user, 8.19% sys, 79.30% idle\n"), nil
 	case "sysctl":
