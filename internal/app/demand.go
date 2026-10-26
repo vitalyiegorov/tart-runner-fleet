@@ -492,8 +492,9 @@ var foreignJobRoutePattern = regexp.MustCompile(`(?i)^trf-(linux|macos)-(arm64|a
 var platformJobRoutePattern = regexp.MustCompile(`(?i)^(linux|macos)-[a-z][a-z0-9]*-[1-9][0-9]*x[1-9][0-9]*$`)
 
 // Repository snapshots include sibling nodes' work. Only an explicit canonical
-// route to an OS/architecture absent from this repository's bindings proves
-// work is foreign; unknown shapes on a served capability still fail closed.
+// route that none of this repository's bindings advertises proves work is
+// foreign (issue #434: the size is part of the route); unknown shapes on a
+// served capability still fail closed.
 func jobRequiresUnservedCapability(bindings []Binding, job githubscaleset.WorkflowJob) bool {
 	if platform, ok := soleRouteLabel(job, platformJobRoutePattern); ok {
 		return jobRequiresUnservedPlatform(bindings, job, platform[1])
@@ -521,23 +522,24 @@ func jobRequiresUnservedCapability(bindings []Binding, job githubscaleset.Workfl
 	}
 	accepted := false
 	for _, binding := range bindings {
-		if binding.accepts(job.Repository.Owner + "/" + job.Repository.Name) {
-			accepted = true
-			if strings.EqualFold(string(binding.Profile.Platform), route[1]) {
-				known := false
-				for _, label := range binding.ScaleSetLabels {
-					local := foreignJobRoutePattern.FindStringSubmatch(label)
-					if local == nil || !strings.EqualFold(local[1], route[1]) {
-						continue
-					}
-					if strings.EqualFold(local[2], route[2]) {
-						return false
-					}
+		if !binding.accepts(job.Repository.Owner + "/" + job.Repository.Name) {
+			continue
+		}
+		accepted = true
+		// Routing labels match exactly, so the whole route (OS, architecture
+		// and size) must be advertised for this set to receive the job.
+		if containsFold(binding.ScaleSetLabels, route[0]) {
+			return false
+		}
+		if strings.EqualFold(string(binding.Profile.Platform), route[1]) {
+			known := false
+			for _, label := range binding.ScaleSetLabels {
+				if local := foreignJobRoutePattern.FindStringSubmatch(label); local != nil && strings.EqualFold(local[1], route[1]) {
 					known = true
 				}
-				if !known {
-					return false
-				}
+			}
+			if !known {
+				return false
 			}
 		}
 	}
