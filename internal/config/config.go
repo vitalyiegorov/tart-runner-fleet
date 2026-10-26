@@ -1346,7 +1346,7 @@ func (c Config) Validate() error {
 		math.IsNaN(c.Guards.MaxLoadAverage) || math.IsInf(c.Guards.MaxLoadAverage, 0) ||
 		c.Guards.MinCPUIdlePercent < 0 || c.Guards.MinCPUIdlePercent > 100 ||
 		math.IsNaN(c.Guards.MinCPUIdlePercent) || math.IsInf(c.Guards.MinCPUIdlePercent, 0) ||
-		!(c.Guards.MinFreeInodePercent >= 0 && c.Guards.MinFreeInodePercent <= 100) {
+		!(c.Guards.MinFreeInodePercent > 0 && c.Guards.MinFreeInodePercent <= 100) {
 		return errors.New("host pressure guards are invalid")
 	}
 	seenProfiles := map[string]struct{}{}
