@@ -285,3 +285,22 @@ enough.
   untouched; fair share simply stops borrowing an answer to another question.
 - Authority, observe and shadow limits are untouched: this remains a
   planning-order change inside the pure scheduler.
+
+## Amendment, 2026-10-27 -- the oracle counted a queued-ahead admission twice (issue #404)
+
+Property/oracle defect; the rule and the fleet are unchanged. `scopeOvertaker`
+added one to a candidate's rank for every earlier admission of its scope on the
+same tick. The band rank already counts every demand of the scope queued
+ahead of the candidate, admitted or not, so a same-tick admission that was
+queued ahead was counted twice. Seed 296 tick 76 of the container arm, red on
+the nightly from 2026-10-18 to 2026-10-25 (seed 157 before that): `c` admitted
+two `medium`s, the second of which asked for `c`'s third slot. `ops`'s
+`medium` also asked for its third slot. Equal asks are decided by age, and
+`c`'s was older, which is what `byScopeFairShare` did. The oracle read the
+second `medium` as asking for a fourth slot and reported the tick as a
+pass-over.
+
+A same-tick admission still spends a slot when the rank does not already count
+it: a young admission, which carries no band rank, or one queued behind the
+candidate. `TestIssue404ScopeShareCountsAQueuedAheadAdmissionOnce` pins the
+corrected tick and both cases the property must go on reporting.

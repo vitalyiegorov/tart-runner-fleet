@@ -124,9 +124,16 @@ func agedHeadsByPlatform(cfg worldConfig, observation tickObservation, admitted 
 }
 
 // outranksInAgedFIFO reports whether the head is entitled to go first under the
-// order ADR 0037 §4 gives the aged band: effective tier, then age. The chosen
-// demand outranks it whenever it is aged and ranks ahead on that order, which is
-// the ordinary case of a queue doing its job.
+// order ADR 0037 §4 gives the aged band: effective tier, then age, then key
+// (ADR 0057). The chosen demand outranks it whenever it is aged and ranks ahead
+// on that order, which is the ordinary case of a queue doing its job.
+//
+// The key matters on an exact age tie, which two jobs of one workflow run
+// produce. Without it the head was whichever demand the observation listed
+// first, not the one `priorityOrder` ranks first: seed 296 tick 149 of the mini
+// arm judged a `medium` as the head while the fleet's head was an `xl` of the
+// same age, and called a `maestro` that could not take the `xl` an inversion
+// (issue #404).
 func outranksInAgedFIFO(cfg worldConfig, observation tickObservation, head, chosen domain.Demand) bool {
 	if !aged(cfg, observation.Now, chosen) {
 		return true
@@ -136,7 +143,7 @@ func outranksInAgedFIFO(cfg worldConfig, observation tickObservation, head, chos
 	if headTier != chosenTier {
 		return headTier > chosenTier
 	}
-	return head.CreatedAt.Before(chosen.CreatedAt)
+	return agedBandLess(head, chosen)
 }
 
 // reposAtCap names the repositories ADR 0012's cap already holds out, which is

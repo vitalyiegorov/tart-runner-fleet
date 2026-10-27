@@ -1693,13 +1693,18 @@ func scopeFairShareBand(cfg worldConfig, observation tickObservation) []domain.D
 			band = append(band, demand)
 		}
 	}
-	sort.Slice(band, func(i, j int) bool {
-		if !band[i].CreatedAt.Equal(band[j].CreatedAt) {
-			return band[i].CreatedAt.Before(band[j].CreatedAt)
-		}
-		return band[i].Key.String() < band[j].Key.String()
-	})
+	sort.Slice(band, func(i, j int) bool { return agedBandLess(band[i], band[j]) })
 	return band
+}
+
+// agedBandLess is the aged band's order below the tier: age, then key, the
+// oracle's own statement of the order `normalizedDemands` gives the queue once
+// per tick (ADR 0057's "lexicographic key as the final tiebreak").
+func agedBandLess(a, b domain.Demand) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.Key.String() < b.Key.String()
 }
 
 // acrossThePlatformBarrier reports whether a demand of the OTHER platform lies
@@ -1886,7 +1891,7 @@ func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[
 	if !ranked {
 		return domain.Demand{}, false
 	}
-	taking := map[string]int{}
+	spent := map[string][]domain.DemandKey{}
 	for _, candidate := range admitted {
 		if candidate.Key == waiting.Key {
 			return domain.Demand{}, false
@@ -1898,6 +1903,19 @@ func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[
 		if !candidateRanked {
 			candidateRank = occupancy[scope]
 		}
+		// An admission also SPENDS its scope's next slot, so a second admission of
+		// one scope on one tick is asking for one more than the first did -- unless
+		// the rank already counts the first, because it is queued AHEAD of this
+		// one in the scope's own FIFO. Counting it twice read a scope's second
+		// `medium` as asking for a fourth slot when it asked for its third, and
+		// called age deciding between equal asks a pass-over (issue #404).
+		taking := 0
+		for _, key := range spent[scope] {
+			if ahead, ranked := ranks[key]; !candidateRanked || !ranked || ahead > candidateRank {
+				taking++
+			}
+		}
+		spent[scope] = append(spent[scope], candidate.Key)
 		// One profile, because the admission is also the FEASIBILITY evidence: a
 		// slot of exactly this shape was available and went to someone else. The
 		// waiting demand's own feasibility is otherwise unknowable on a tick whose
@@ -1905,18 +1923,12 @@ func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[
 		// was not passed over (seed 2, tick 43: a six-core `builder` "passed over"
 		// by a one-core `small` against two free cores).
 		if candidate.Profile != waiting.Profile {
-			taking[scope]++
 			continue
 		}
 		if acrossThePlatformBarrier(scopeFairShareBand(cfg, observation), waiting, candidate) {
-			taking[scope]++
 			continue
 		}
-		// An admission also SPENDS its scope's next slot, so a second admission of
-		// one scope on one tick is asking for one more than the first did.
-		candidateRank += taking[scope]
-		taking[scope]++
-		if candidateRank <= waitingRank {
+		if candidateRank+taking <= waitingRank {
 			continue
 		}
 		if outranksOnTier(cfg, observation.Now, candidate, waiting) {
