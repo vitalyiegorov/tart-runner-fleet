@@ -63,7 +63,8 @@ in-memory revision so future watch clients can use conditional polling.
       "cpuIdlePercent": 54,
       "loadAverage": 3,
       "admissionAllowed": true,
-      "admissionReason": "capacity available"
+      "admissionReason": "capacity available",
+      "admissionSince": "2026-07-12T19:42:10Z"
     },
     "policy": {
       "policyDigest": "0f3c1d9a4b77e1c2d8a5b6f30e91a2c47d5e8b09c1f2a3b4c5d6e7f809a1b2c3",
@@ -117,6 +118,15 @@ absent on daemons older than ADR 0052; a client reading it from such a daemon
 must fall back to `ready`, never to a pass. `fleet status --require-healthy`
 exits 5 unless `healthy.ok` is true, exactly as `--require-ready` does for
 `ready.ok`. `/readyz` keeps its readiness meaning.
+
+`hostPressure.admissionSince` is when the current `admissionAllowed` /
+`admissionReason` state began: the tick on which the gate last opened, closed,
+or changed its refusal reason (issue #436). It dates the admission decision
+and its reason, not the session-yield clock: a refusal whose reason changes
+while admission stays closed advances this field without restarting yield.
+Read flapping from the `admission gate opened` / `closed` log lines. The field
+is additive and absent on daemons that predate it and
+before the daemon has observed its host.
 
 `hostPressure.swapOutRatePerSecond` and `hostPressure.swapOutRateObserved` are
 the swap guardrail's deciding signal. Admission is refused only when

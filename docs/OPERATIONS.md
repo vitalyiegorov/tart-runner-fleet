@@ -113,6 +113,19 @@ since the last tick", which flaps admission on an interactive machine. Size
 `maxSwapUsedMb` against the host you are deploying on rather than inheriting it
 from another node, so the conjunction keeps both of its halves.
 
+The daemon logs each edge of the admission gate once on stderr, never once per
+tick (issue #436). The lines look like this:
+`admission gate closed reason="swap pressure" openFor=1h10m0s`,
+`admission gate closed reason="disk reserve" after="swap pressure" closedFor=1m0s`
+(the refusal reason changed while the gate stayed closed), and
+`admission gate opened after="swap pressure" closedFor=10m0s`. The reason can be
+any refusal in the table above, or `update drain`. A daemon that starts with
+the gate closed logs the closure, and one that starts with it open logs
+nothing. A tick on which the host could not be observed is not an edge.
+`hostPressure.admissionSince` in `fleet status --output json` is when the
+current state began. Compare it, and these lines, against a job's delivery time
+before you conclude that a gated node took work.
+
 Pressure stops new admission, never an active job. Owned ephemeral runners
 still follow durable drain, deregistration, stop, and delete operations with
 indefinite bounded cleanup retries. Bases and unknown VMs are never pressure-

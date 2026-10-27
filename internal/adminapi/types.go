@@ -185,6 +185,10 @@ type HostPressure struct {
 	LoadAverage          float64 `json:"loadAverage"`
 	AdmissionAllowed     bool    `json:"admissionAllowed"`
 	AdmissionReason      string  `json:"admissionReason"`
+	// AdmissionSince is an additive fleet.v1 field (issue #436): when the
+	// current admissionAllowed/admissionReason state began. A flapping gate
+	// shows as a recent value; omitted until the gate has been observed.
+	AdmissionSince time.Time `json:"admissionSince,omitzero"`
 }
 
 type Check struct {

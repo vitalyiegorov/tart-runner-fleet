@@ -961,7 +961,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
 		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain,
-		membership: member, advertiser: advertiser}
+		membership: member, advertiser: advertiser, gate: &admissionGate{}}
 	if opts.Mode == reconcile.Authority {
 		cleanup := discharge.Service{Store: store, VM: d.newReaper(store, cfg), Authority: true, Now: d.now,
 			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
@@ -2069,6 +2069,35 @@ func (r *failureReporter) reportSessionYield(action, reason string, failures int
 	r.logger.Warn("scale-set sessions "+action, "reason", reason, "unreleased", failures)
 }
 
+// reportAdmissionGate records one edge of this node's admission gate (issue
+// #436). It is not rate limited: the gate tracker already emits only edges, and
+// dropping one would leave a closure without its opening. The reason comes from
+// the guardrails' closed vocabulary, never from free text.
+func (r *failureReporter) reportAdmissionGate(edge admissionTransition) {
+	if r == nil || r.logger == nil {
+		return
+	}
+	held := "openFor"
+	if !edge.PreviousAllowed {
+		held = "closedFor"
+	}
+	var attributes []any
+	if !edge.Allowed {
+		attributes = append(attributes, "reason", edge.Reason)
+	}
+	if edge.Previous != "" {
+		if !edge.PreviousAllowed {
+			attributes = append(attributes, "after", edge.Previous)
+		}
+		attributes = append(attributes, held, edge.Held.Round(time.Second).String())
+	}
+	if edge.Allowed {
+		r.logger.Warn("admission gate opened", attributes...)
+		return
+	}
+	r.logger.Warn("admission gate closed", attributes...)
+}
+
 // reportSequenceReset records that a broker restarted its message-id sequence
 // and the fleet adopted a new inbox generation. It is not a failure -- the fleet
 // recovered by itself, which is the whole point of the contract -- but it is
@@ -2384,6 +2413,9 @@ type engineTicker struct {
 	// (issues #388 and #397). Nil when capacity is not truthful, which advertises
 	// the configured value unchanged.
 	advertiser *app.ResidualAdvertisement
+	// gate dates and logs each admission-gate edge (issue #436). Nil logs
+	// nothing and publishes no start time.
+	gate *admissionGate
 }
 
 // schedulerFailureDetail extracts the bounded reason a classified tick error
@@ -2675,13 +2707,17 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordEnvelope(result)
 	e.recordOverdueExpiry(result)
 	pressure := result.Host.Pressure
+	if edge, changed := e.gate.Observe(result.At, pressure.AdmissionAllowed, pressure.AdmissionReason); changed {
+		e.reporter.reportAdmissionGate(edge)
+	}
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
 			FreeDiskGiB: pressure.FreeDiskGB, SwapUsedMiB: pressure.SwapUsedMB, SwapOuts: pressure.SwapOuts,
 			FreeInodes: pressure.FreeInodes, TotalInodes: pressure.TotalInodes,
 			SwapOutRatePerSecond: pressure.SwapOutRatePerSecond, SwapOutRateObserved: pressure.SwapOutRateObserved,
 			CPUIdlePercent: pressure.CPUIdlePercent, LoadAverage: pressure.LoadAverage,
-			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason})
+			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason,
+			AdmissionSince: e.gate.Since()})
 	}
 }
 

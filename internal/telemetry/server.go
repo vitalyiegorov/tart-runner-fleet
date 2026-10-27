@@ -306,7 +306,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 				SwapOutRateObserved:  snapshot.HostPressure.SwapOutRateObserved,
 				CPUIdlePercent:       snapshot.HostPressure.CPUIdlePercent,
 				LoadAverage:          snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
-				AdmissionReason: snapshot.HostPressure.AdmissionReason},
+				AdmissionReason: snapshot.HostPressure.AdmissionReason,
+				AdmissionSince:  snapshot.HostPressure.AdmissionSince},
 		}}
 }
 
