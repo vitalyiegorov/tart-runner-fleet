@@ -146,3 +146,62 @@ func TestIssue404ScopeShareCountsAQueuedAheadAdmissionOnce(t *testing.T) {
 		})
 	}
 }
+
+// TestIssue404AReservedHeadTakingItsVectorIsNotAPassOver is seed 498, tick
+// 148 of the container arm, the one seed a 500-seed sweep of every arm still
+// found once the two oracle defects above were fixed.
+//
+// `b`'s `xl` (1h6m30s) reserved the vector at tick 136, when neither `b` nor
+// `a` held a slot, so ADR 0057's key agreed with age. At tick 145 backfill
+// behind the reservation admitted a `small` of `b`'s in the residual. At tick
+// 148 the vector freed and the reserved head took it, over `a`'s `xl` (1h3m)
+// while `b` held that one `small` and `a` held nothing. Property (s) called
+// that its third pass-over of `a`.
+//
+// It is the reservation contract working. ADR 0017: the reserved head wins the
+// first vector large enough for it, and "backfill may use stranded capacity; it
+// may never take the head's turn". Re-ranking the head by the slot its own
+// backfill took would be exactly that. ADR 0057 leaves the reserved head it
+// mints as it was and amends the no-jump clause only so a CAP-held head lends
+// its vector (ADR 0038). This is a property/oracle defect. The second case keeps
+// the property firing on the same admission when no reservation was carried.
+func TestIssue404AReservedHeadTakingItsVectorIsNotAPassOver(t *testing.T) {
+	t.Parallel()
+	cfg := containerNodeWorld()
+	// One pass-over is enough to report, so the tick under test is the only one.
+	cfg.ScopeShareN = 0
+	live := []domain.Instance{oracleInstance(cfg, "trf-small-1", "b/repo", "small")}
+	reserved := oracleDemand(cfg, "b/repo", 20, 66*time.Minute+30*time.Second, "xl")
+	waiting := oracleDemand(cfg, "a/repo", 27, 63*time.Minute, "xl")
+	queued := []domain.Demand{reserved, waiting}
+	available := domain.Resources{CPU: 7, MemoryMB: 23_552, Slots: 4}
+
+	for _, test := range []struct {
+		name     string
+		carried  *domain.Reservation
+		reported bool
+	}{
+		{"the reserved head takes the vector it reserved", reservationOf(cfg, reserved), false},
+		{"an unreserved demand of a scope holding a slot passes over one holding none", nil, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			check := scopeShareChecker(cfg)
+			// The tick before: the vector is still held and nothing is admitted.
+			findings := check(&world{}, oracleObservation(147, queued, live, domain.Resources{CPU: 5, MemoryMB: 11_264, Slots: 4}, test.carried))
+			findings = append(findings, check(&world{}, admitting(oracleObservation(148, queued, live, available, nil), reserved))...)
+			if got := len(findings) > 0; got != test.reported {
+				t.Fatalf("reported = %v, want %v: %v", got, test.reported, findings)
+			}
+		})
+	}
+}
+
+// TestIssue404SeedFourNineEightIsClean pins the generated trace that reached the
+// tick above.
+func TestIssue404SeedFourNineEightIsClean(t *testing.T) {
+	t.Parallel()
+	cfg := containerNodeWorld()
+	if findings := runTrace(t, cfg, generateTrace(498, 320, cfg)); len(findings) > 0 {
+		t.Fatalf("seed 498 of the container arm is red again: %s", findings[0])
+	}
+}
