@@ -1791,7 +1791,15 @@ func simScopeOf(repo string) string {
 // time.
 func scopeShareChecker(cfg worldConfig) checker {
 	passedOver := map[string]int{}
+	// carried is the reservation the fleet's next plan starts from: the last
+	// APPLIED plan's, because a plan that was not committed left the durable
+	// state where it was.
+	var carried *domain.Reservation
 	return func(w *world, observation tickObservation) []finding {
+		prior := carried
+		if observation.Applied {
+			carried = observation.Plan.Next.Reservation
+		}
 		admitted := admittedDemands(observation)
 		occupancy := scopeOccupancy(observation)
 		// Per SCOPE and PROFILE, never per scope alone: one scope may be waiting
@@ -1814,7 +1822,7 @@ func scopeShareChecker(cfg worldConfig) checker {
 				continue
 			}
 			waiting[scope] = true
-			overtaker, taken := scopeOvertaker(cfg, observation, occupancy, admitted, demand)
+			overtaker, taken := scopeOvertaker(cfg, observation, occupancy, admitted, prior, demand)
 			if !taken {
 				continue
 			}
@@ -1884,7 +1892,7 @@ func scopeShareChecker(cfg worldConfig) checker {
 // 2026-09-21/22 both of those slots went straight back to the scope whose batch
 // had just vacated them.
 func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[string]int,
-	admitted []domain.Demand, waiting domain.Demand) (domain.Demand, bool) {
+	admitted []domain.Demand, carried *domain.Reservation, waiting domain.Demand) (domain.Demand, bool) {
 	classes := cfg.Scheduler.RepoSchedulingClasses
 	ranks := scopeFairShareRanks(cfg, observation)
 	waitingRank, ranked := ranks[waiting.Key]
@@ -1936,6 +1944,17 @@ func scopeOvertaker(cfg worldConfig, observation tickObservation, occupancy map[
 		}
 		if classes[candidate.Key.Repo] == domain.SchedulingControlPlane &&
 			classes[waiting.Key.Repo] != domain.SchedulingControlPlane {
+			continue
+		}
+		// A reserved head taking the vector it reserved is ADR 0017's contract,
+		// not a pass-over. The key ranked it first when the reservation was made;
+		// what can change its rank since is its own scope's backfill in the
+		// residual, and "backfill may never take the head's turn". ADR 0057 leaves
+		// the reserved head it mints as it was (issue #404, seed 498 tick 148 of
+		// the container arm). Whether the head is still the band's head by tier
+		// and age is property (b)'s question and the fleet's
+		// `reservationStillHeadsQueue`, not this one.
+		if carried != nil && carried.Demand == candidate.Key && carried.Profile == candidate.Profile {
 			continue
 		}
 		return candidate, true
