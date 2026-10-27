@@ -324,6 +324,9 @@ type HostPressureMetric struct {
 	LoadAverage          float64
 	AdmissionAllowed     bool
 	AdmissionReason      string
+	// AdmissionSince is when the current admission state began (issue #436).
+	// Zero is a daemon that has not yet observed its gate.
+	AdmissionSince time.Time
 }
 
 // Snapshot is an immutable point-in-time copy suitable for rendering.
