@@ -121,9 +121,11 @@ exits 5 unless `healthy.ok` is true, exactly as `--require-ready` does for
 
 `hostPressure.admissionSince` is when the current `admissionAllowed` /
 `admissionReason` state began: the tick on which the gate last opened, closed,
-or changed its refusal reason (issue #436). A value only minutes old on a node
-whose gate keeps refusing is a flapping gate, which also restarts the session
-yield clock. The field is additive and absent on daemons that predate it and
+or changed its refusal reason (issue #436). It dates the admission decision
+and its reason, not the session-yield clock: a refusal whose reason changes
+while admission stays closed advances this field without restarting yield.
+Read flapping from the `admission gate opened` / `closed` log lines. The field
+is additive and absent on daemons that predate it and
 before the daemon has observed its host.
 
 `hostPressure.swapOutRatePerSecond` and `hostPressure.swapOutRateObserved` are
