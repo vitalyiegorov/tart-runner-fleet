@@ -270,3 +270,20 @@ It does not revisit which pass plans first. Nothing here reorders `PlanTick`; th
 global order that chooses the head is ADR 0037's and is unchanged. The fix is
 that each funnel derives the head it was previously planning in ignorance of, not
 that the passes are merged into one.
+
+## Amendment, 2026-10-27 -- the oracle's head breaks an age tie by key (issue #404)
+
+Property/oracle defect; the rule and the fleet are unchanged. Property (r)
+judges only the head of each platform's aged band, which must be the demand
+`priorityOrder` ranks first: tier, then age, then key (`demandLess`; ADR 0057's
+"lexicographic key as the final tiebreak"). The oracle compared tier and age
+only. On an exact age tie it kept whichever demand the observation listed
+first. Seed 296 tick 149 of the mini arm, red on the nightly of 2026-10-26 and
+2026-10-27, is that tie: `c/repo`'s `xl` and `ops/fleet`'s `medium` arrived on
+the same tick. By key the `xl` is the head. A `maestro` cannot take its six
+cores, so admitting the `maestro` was correct. The oracle judged the `medium`
+as the head and reported an inversion against the second demand in the queue,
+which this record's first finding already ruled out.
+`outranksInAgedFIFO` now breaks the tie the way `normalizedDemands` does.
+`TestIssue404CrossPlatformHeadBreaksAnAgeTieByKey` pins the tick in both
+directions.

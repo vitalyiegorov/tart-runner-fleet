@@ -285,3 +285,53 @@ enough.
   untouched; fair share simply stops borrowing an answer to another question.
 - Authority, observe and shadow limits are untouched: this remains a
   planning-order change inside the pure scheduler.
+
+## Amendment, 2026-10-27 -- the oracle counted a queued-ahead admission twice (issue #404)
+
+Property/oracle defect; the rule and the fleet are unchanged. `scopeOvertaker`
+added one to a candidate's rank for every earlier admission of its scope on the
+same tick. The band rank already counts every demand of the scope queued
+ahead of the candidate, admitted or not, so a same-tick admission that was
+queued ahead was counted twice. Seed 296 tick 76 of the container arm, red on
+the nightly from 2026-10-18 to 2026-10-25 (seed 157 before that): `c` admitted
+two `medium`s, the second of which asked for `c`'s third slot. `ops`'s
+`medium` also asked for its third slot. Equal asks are decided by age, and
+`c`'s was older, which is what `byScopeFairShare` did. The oracle read the
+second `medium` as asking for a fourth slot and reported the tick as a
+pass-over.
+
+A same-tick admission still spends a slot when the rank does not already count
+it: a young admission, which carries no band rank, or one queued behind the
+candidate. `TestIssue404ScopeShareCountsAQueuedAheadAdmissionOnce` pins the
+corrected tick and both cases the property must go on reporting.
+
+### A reserved head taking its vector is not a pass-over (seed 498)
+
+Property/oracle defect; the rule and the fleet are unchanged. With the
+double count fixed, a 500-seed sweep of every arm found one more red seed:
+seed 498 tick 148 of the container arm. `b`'s `xl` reserved the vector at
+tick 136, when neither `b` nor `a` held a slot, so this key agreed with age.
+At tick 145 backfill admitted a `small` of `b`'s in the residual behind the
+reservation. At tick 148 the vector freed and the reserved head took it, over
+`a`'s younger `xl`, while `b` held that `small` and `a` held nothing. Property
+(s) counted that as `a`'s third pass-over.
+
+The reserved head was keeping the turn ADR 0017 gives it: it "wins the first
+vector large enough for it", and backfill "may never take the head's turn".
+Ranking the head again by the slot its own scope's backfill took would let the
+backfill do exactly that. This ADR leaves the reserved head it mints as it was,
+and amends the no-jump clause only so a cap-held head lends its vector (ADR
+0038). So `scopeOvertaker` no longer counts the admission of the reservation
+the plan started from, which is the last applied plan's `Next.Reservation`.
+Whether that head still leads the band by tier and age stays the job of
+`reservationStillHeadsQueue` and property (b).
+
+A fleet-side fix was tried and rejected: ranking the carried reservation by
+`agedQueueOrder`, fair share included. It turned seed 498 green. But it let a
+head's own backfill cost it the reservation, which breaks ADR 0017. It also
+broke `TestSimulationTwoAgedInfeasibleDemands`, where six demands went past
+its 40-tick feasible-wait bound. `TestABackfilledScopeKeepsItsReservedHeadsTurn`
+now pins the fleet's behaviour, and
+`TestIssue404AReservedHeadTakingItsVectorIsNotAPassOver` pins the oracle's.
+The second test includes a case where the same admission, made without a
+carried reservation, is still reported.
