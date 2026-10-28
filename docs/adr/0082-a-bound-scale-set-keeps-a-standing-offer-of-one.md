@@ -12,6 +12,11 @@ Amended 2026-10-26 by [ADR 0084](0084-a-gated-node-keeps-no-standing-offer.md)
 (issue #428): a node whose own guardrails refuse admission for host pressure
 keeps no standing free slot. An update drain and a merely full node keep it.
 
+Amended 2026-10-28 by [ADR 0085](0085-a-standing-offer-waits-only-for-linux-work.md)
+(issue #439): a Linux set keeps the standing free slot only if its vector could
+start on the node once the node's own Linux work has drained. macOS guests and
+queued macOS work stay charged.
+
 ## Context
 
 Since ADR 0073 each scale set advertises `min(configured, held + fit)`. A node
