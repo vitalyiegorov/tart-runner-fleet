@@ -4,7 +4,7 @@
 
 Accepted. Amends ADR 0033 (the execution-time re-check of the stalled-assignment
 and lingering-runner drains). The event drain it guards is also re-derived from
-durable rows on the tick by [ADR 0085](0085-a-durable-completion-drains-its-runner-on-the-tick.md),
+durable rows on the tick by [ADR 0086](0086-a-durable-completion-drains-its-runner-on-the-tick.md),
 which asks the same `RunnerActiveJob` evidence before it enqueues one.
 
 ## Context

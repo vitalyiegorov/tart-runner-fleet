@@ -1053,7 +1053,7 @@ When GitHub reports a job completed, the message path drains the runner
 through `event-drain-<instance>` within seconds. If that projection fails after
 its message was committed, the message is never delivered again: the
 replacement session opens at the durable cursor, which is already past it. The
-authority tick re-derives the same drain from the durable rows (ADR 0085,
+authority tick re-derives the same drain from the durable rows (ADR 0086,
 issue #442) and logs it:
 
 ```sh
