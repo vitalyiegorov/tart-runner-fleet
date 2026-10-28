@@ -257,9 +257,17 @@ func TestDrainExecutorValidationCancellationAndTerminals(t *testing.T) {
 	if err := executor.Execute(context.Background(), valid); err == nil || err.Error() != safeError(StagePersist).Error() {
 		t.Fatalf("failed drain completed and could release a dependent spawn: %v", err)
 	}
-	executor, _, _, _ = drainFixture(operations.StateRunning)
-	if err := executor.Execute(context.Background(), valid); !errors.Is(err, operations.ErrConflict) {
-		t.Fatalf("state error=%v", err)
+	// A drain of a live instance that is not draining was ended by an abort; it
+	// resolves as a no-op instead of retrying a state conflict forever (#447).
+	for _, live := range []operations.State{operations.StatePlanned, operations.StateCloning, operations.StateBooting,
+		operations.StateReachable, operations.StateRegistering, operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning} {
+		executor, state, vm, _ := drainFixture(live)
+		if err := executor.Execute(context.Background(), valid); err != nil {
+			t.Fatalf("%s: a stranded drain must resolve, got %v", live, err)
+		}
+		if len(state.changes) != 0 || len(*vm.calls) != 0 {
+			t.Fatalf("%s: resolving a stranded drain must touch nothing: changes=%#v calls=%#v", live, state.changes, *vm.calls)
+		}
 	}
 }
 

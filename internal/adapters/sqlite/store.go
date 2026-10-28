@@ -962,11 +962,15 @@ func (s *Store) DrainGeneration(ctx context.Context, instanceID string) (int, er
 
 // Advance atomically persists one externally observed lifecycle edge without
 // enqueuing another effect. The owning outbox operation remains claimed until
-// its executor reaches a terminal lifecycle state and completes it.
+// its executor reaches a terminal lifecycle state and completes it, unless the
+// change itself settles that operation (a drain abort, #447): then both land in
+// this one transaction or neither does.
 func (s *Store) Advance(ctx context.Context, change lifecycle.StateChange) (operations.Instance, error) {
+	settles := change.Settles.ID != ""
 	if change.InstanceID == "" || !operations.ValidState(change.ExpectedState) || !operations.ValidState(change.NextState) ||
 		!change.ExpectedState.CanTransitionTo(change.NextState) || len(change.FailureCode) > 64 ||
-		(change.NextState == operations.StateFailed) != (change.FailureCode != "") {
+		(change.NextState == operations.StateFailed) != (change.FailureCode != "") ||
+		settles != (change.Outcome != "") || len(change.Outcome) > 64 {
 		return operations.Instance{}, operations.ErrInvalid
 	}
 	tx, err := s.beginTx(ctx, "advance.begin")
@@ -987,6 +991,18 @@ func (s *Store) Advance(ctx context.Context, change lifecycle.StateChange) (oper
 	if _, err := s.txExec(ctx, tx, "advance.history", `INSERT INTO transition_history(instance_id,from_state,to_state,version,operation_id,created_at) VALUES(?,?,?,?,NULL,?)`,
 		change.InstanceID, change.ExpectedState, change.NextState, change.ExpectedVersion+1, now.UnixNano()); err != nil {
 		return operations.Instance{}, fmt.Errorf("record lifecycle advance: %w", err)
+	}
+	if settles {
+		// No operation_effects row: the settled operation's effect did not happen.
+		result, err := s.txExec(ctx, tx, "advance.settle", `UPDATE operations SET status=?,lease_owner='',lease_until=0,last_error=?,updated_at=?
+			WHERE id=? AND resource_id=? AND status=? AND lease_owner=?`, operations.OperationCompleted, change.Outcome, now.UnixNano(),
+			change.Settles.ID, change.InstanceID, operations.OperationClaimed, change.Settles.LeaseOwner)
+		if err != nil {
+			return operations.Instance{}, fmt.Errorf("settle operation: %w", err)
+		}
+		if settled, err := result.RowsAffected(); err != nil || settled != 1 {
+			return operations.Instance{}, operations.ErrLeaseLost
+		}
 	}
 	instance, err := scanInstance(s.txRow(ctx, tx, "advance.result", `SELECT id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at FROM instances WHERE id=?`, change.InstanceID))
 	if err != nil {

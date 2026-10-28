@@ -95,6 +95,12 @@ invisible.
    limited, for the same reason as `instance recovery drain planned`. It carries
    no payload, JIT configuration or token.
 
+   Amended by [ADR 0087](0087-an-aborted-drain-ends-its-operation-in-the-rollback.md)
+   (issue #447): the rollback and the end of the drain operation are one
+   transaction. The aborted drain is `completed` with
+   `last_error=aborted:<evidence>` and no effect. A later event drain of the
+   same instance gets its own identity.
+
 ## Consequences
 
 - An idle duplicate whose demand ran on its sibling is reclaimed at its own

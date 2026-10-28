@@ -1048,6 +1048,17 @@ shows a job started with **no runner name** recorded: nothing proves the job is
 not on this runner. Such a drain retries at `drain_guard` until the demand
 completes or names a runner.
 
+The abort ends the drain operation in the same transaction as the rollback
+(ADR 0087, issue #447). In `fleet operations` the aborted drain is not retrying.
+Its row is `completed` with `last_error=aborted:<evidence>`, and no effect is
+recorded. When the runner's job later completes, its event drain is a new
+operation, `event-drain-<id>-g<n>`, where `<n>` counts the instance's earlier
+terminal drains. A first event drain keeps `event-drain-<id>`. Exactly one drain
+of an instance is live at a time. A drain that is retrying `state conflict`
+while its instance reads `running` is a row an older release stranded. The
+current release resolves it on its next attempt, so do not discharge it by
+hand.
+
 Each line is one withdrawn decision, so the log is never rate limited. If the
 same instance repeats a plan and abort pair, the planning evidence and the
 runner evidence disagree for that instance. Compare

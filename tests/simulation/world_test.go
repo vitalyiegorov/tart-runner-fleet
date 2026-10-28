@@ -1198,7 +1198,7 @@ func (w *world) stepOperation(pending *simOperation) {
 	}
 	next, done := w.nextLifecycleState(instance)
 	if next != "" {
-		if !w.advance(instance, next) {
+		if !w.persist(edge(pending.operation, instance, next)) {
 			return
 		}
 	}
@@ -1686,11 +1686,23 @@ func (w *world) stopOccupyingGuest(name string) {
 	}
 }
 
-func (w *world) advance(instance operations.Instance, next operations.State) bool {
-	updated, err := w.store.Advance(w.ctx, lifecycle.StateChange{InstanceID: instance.ID,
-		ExpectedState: instance.State, ExpectedVersion: instance.Version, NextState: next})
+// edge is the state change one mirrored lifecycle step persists. A drain that
+// returns its instance to Running is DrainExecutor.abort, which settles the
+// drain in the rollback rather than in a later completion (#447); the mirror
+// does the same, or it would be testing a different fleet (ADR 0043). The
+// evidence code is diagnostic only and is not mirrored.
+func edge(operation operations.Operation, instance operations.Instance, next operations.State) lifecycle.StateChange {
+	change := lifecycle.StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version, NextState: next}
+	if operation.Kind == lifecycle.OperationDrain && instance.State == operations.StateDraining && next == operations.StateRunning {
+		change.Settles, change.Outcome = operation, lifecycle.AbortOutcome(lifecycle.AbortEvidenceRunnerBusy)
+	}
+	return change
+}
+
+func (w *world) persist(change lifecycle.StateChange) bool {
+	updated, err := w.store.Advance(w.ctx, change)
 	if err != nil {
-		w.record(findingStoreError, fmt.Sprintf("advance %s %s->%s: %v", instance.ID, instance.State, next, err))
+		w.record(findingStoreError, fmt.Sprintf("advance %s %s->%s: %v", change.InstanceID, change.ExpectedState, change.NextState, err))
 		return false
 	}
 	w.enteredAt[stateKey(updated)] = w.now
