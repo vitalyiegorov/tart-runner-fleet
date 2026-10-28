@@ -1065,6 +1065,34 @@ runner evidence disagree for that instance. Compare
 `fleet instances --output json` with the instance's demand rows before you
 change anything. Never deregister such a runner by hand.
 
+### A completed job drain re-derived on the tick
+
+When GitHub reports a job completed, the message path drains the runner
+through `event-drain-<instance>` within seconds. If that projection fails after
+its message was committed, the message is never delivered again: the
+replacement session opens at the durable cursor, which is already past it. The
+authority tick re-derives the same drain from the durable rows (ADR 0086,
+issue #442) and logs it:
+
+```sh
+grep 'completed job drain re-derived' fleet-authority.stderr.log
+```
+
+`instance=` names the runner and `reason=completion_projection_lost`. The drain
+is the ordinary event drain, so the rest of its teardown looks like any other
+completion in `fleet operations`.
+
+The tick drains only an `online_idle`, `assigned` or `running` instance with a
+durable `JobCompleted` that GitHub recorded **against that runner's name**. It
+never drains a runner with a job started on it. A completion of the demand the
+VM was spawned for, brokered to a different runner, does not count. The tick
+does this only in `canary` and `authority` mode.
+
+A few lines a day mean ordinary transient projection failures (the
+`binding ingest failure ... phase=poll` line a second or two earlier). A steady
+stream means the message path's projection is failing every time. Investigate
+the store before anything else.
+
 ### A vector that has not come back yet
 
 An instance in `draining` or `deregistering` **still charges the admission

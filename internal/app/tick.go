@@ -60,6 +60,11 @@ type TickResult struct {
 	// can say so out loud: the rows leave the queue silently otherwise, and a
 	// queue that shrinks without a visible cause is its own small mystery.
 	ExpiredOverdue int64
+	// CompletedDrains names the runners this tick drained because GitHub had
+	// durably completed their own job and no drain existed (issue #442). The
+	// message path drains them first in the normal case, so a name here is a
+	// projection the message path lost, and the daemon says so.
+	CompletedDrains []string
 	// Headroom is, per scale set, what it holds and its share of what the node's
 	// residual envelope can start (issues #388 and #397, ADR 0073). It is nil when
 	// the envelope could not be computed, and a binding absent from it advertises
@@ -178,6 +183,17 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	if coordinator.Now == nil {
 		coordinator.Now = func() time.Time { return now }
 	}
+	// Before the inventory is observed, so this tick already sees the drain: a
+	// runner whose own job GitHub durably completed must not wait on a message
+	// redelivery that never comes (issue #442). Only a mode that runs executors
+	// enqueues one, so observe and shadow stay read-only here.
+	var completedDrains []string
+	if e.Mode == reconcile.Canary || e.Mode == reconcile.Authority {
+		completedDrains, err = coordinator.DrainCompletedRunners(ctx, e.Bindings)
+		if err != nil {
+			return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
+		}
+	}
 	instances, host := e.Inventory.Observe(ctx)
 	// Demand keys already owned by a live, non-terminal instance incarnation.
 	// Every admission path is bounded by this one fact: a demand a live instance
@@ -264,6 +280,6 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			ScopeInstances: ScaleSetInstances(e.Bindings, instances),
 			Instances:      append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
 			HostHealthy:    hostHealthy(host),
-			ExpiredOverdue: expiredOverdue, Headroom: headroom},
+			ExpiredOverdue: expiredOverdue, CompletedDrains: completedDrains, Headroom: headroom},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }

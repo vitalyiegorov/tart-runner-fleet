@@ -383,7 +383,7 @@ func (w *world) deliverMessages() {
 		source := &simSource{messages: ready[index]}
 		if _, err := w.demand.IngestOnceResult(w.ctx, w.cfg.Bindings[index], source); err != nil {
 			w.noteIngestFailure(err)
-			w.redeliver(inFlight[index])
+			w.redeliver(w.uncommitted(w.cfg.Bindings[index].StoreKey, inFlight[index]))
 		}
 	}
 }
@@ -403,6 +403,28 @@ func (w *world) noteAdvertised(messages []*simMessage) {
 			}
 		}
 	}
+}
+
+// uncommitted is what production can still be handed again after a failed
+// ingest. The daemon replaces the session on every ingest failure, and the
+// replacement opens at the durable cursor (internal/daemon/runtime.go). A message
+// whose batch committed before its projection failed is at or below that
+// cursor, so GitHub never delivers it again. Redelivering it here was a
+// world-model defect: it let every lost projection heal on its own, which is
+// how issue #442 stayed invisible to this harness.
+func (w *world) uncommitted(storeKey int64, messages []*simMessage) []*simMessage {
+	cursor, err := w.store.DemandCursor(w.ctx, storeKey)
+	if err != nil {
+		w.record(findingStoreError, fmt.Sprintf("read demand cursor: %v", err))
+		return messages
+	}
+	var pending []*simMessage
+	for _, message := range messages {
+		if message.messageID > cursor {
+			pending = append(pending, message)
+		}
+	}
+	return pending
 }
 
 // redeliver returns an uncommitted batch to the broker's outbound queue. The

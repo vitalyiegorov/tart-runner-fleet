@@ -75,3 +75,26 @@ func TestEngineTickerSaysWhenOverdueDemandWasExpired(t *testing.T) {
 		t.Fatalf("a tick that expired nothing must say nothing: %q", buffer.String())
 	}
 }
+
+// A tick that drained a runner from a durable completion names it. The message
+// path drains it first in the normal case, so each line is a projection the
+// message path lost (issue #442).
+func TestEngineTickerSaysWhenACompletedDrainWasRederived(t *testing.T) {
+	var buffer bytes.Buffer
+	reporter := newFailureReporter(&buffer, nil)
+	ticker := engineTicker{health: reservationHealthForTest(t), reporter: reporter}
+
+	ticker.recordCompletedDrains(app.TickResult{CompletedDrains: []string{"trf-linux-4x8-0ab3245aa6dfc6d6"}})
+	line := buffer.String()
+	for _, want := range []string{"completed job drain re-derived", "instance=trf-linux-4x8-0ab3245aa6dfc6d6", "completion_projection_lost"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("drain line missing %q: %q", want, line)
+		}
+	}
+
+	buffer.Reset()
+	ticker.recordCompletedDrains(app.TickResult{})
+	if buffer.Len() != 0 {
+		t.Fatalf("a tick that drained nothing must say nothing: %q", buffer.String())
+	}
+}

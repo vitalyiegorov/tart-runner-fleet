@@ -409,3 +409,86 @@ func TestEngineTickFailsClosedWhenOverdueExpiryFails(t *testing.T) {
 		t.Fatal("a failed expiry write must fail the tick closed")
 	}
 }
+
+// completedDrainTickStore records which bindings the tick swept for durable
+// completions (issue #442).
+type completedDrainTickStore struct {
+	*tickStore
+	swept   []int64
+	drained []string
+	err     error
+}
+
+func (s *completedDrainTickStore) DrainCompletedRunners(_ context.Context, scaleSetID int64) ([]string, error) {
+	s.swept = append(s.swept, scaleSetID)
+	return s.drained, s.err
+}
+
+func completedDrainEngine(store *completedDrainTickStore, mode reconcile.Mode) Engine {
+	now := time.Date(2026, 10, 28, 6, 10, 0, 0, time.UTC)
+	host := domain.Host{Available: tickConfig().LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	return Engine{Store: store, Demand: DemandCoordinator{Store: store}, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
+	}, Config: tickConfig(), Bindings: []Binding{{ScaleSetID: 29, StoreKey: 7195473684968813165, Profile: tickConfig().Profiles["small"]}},
+		ControllerID: "controller", Mode: mode, Now: func() time.Time { return now }}
+}
+
+func newCompletedDrainTickStore() *completedDrainTickStore {
+	prior, _ := json.Marshal(scheduler.State{})
+	return &completedDrainTickStore{tickStore: &tickStore{state: operations.SchedulerState{Version: 2, Data: prior}}}
+}
+
+// Issue #442's wiring. A mode that runs executors re-derives the completion
+// drain on every tick, from the binding's durable key, and reports what it
+// drained. Observe and shadow never enqueue one.
+func TestEngineTickDrainsDurablyCompletedRunnersOnlyWhereExecutorsRun(t *testing.T) {
+	for _, test := range []struct {
+		mode  reconcile.Mode
+		sweep bool
+	}{
+		{mode: reconcile.Authority, sweep: true},
+		{mode: reconcile.Canary, sweep: true},
+		{mode: reconcile.Shadow},
+		{mode: reconcile.Observe},
+	} {
+		t.Run(string(test.mode), func(t *testing.T) {
+			store := newCompletedDrainTickStore()
+			store.drained = []string{"trf-linux-4x8-0ab3245aa6dfc6d6"}
+			result, err := completedDrainEngine(store, test.mode).Tick(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.sweep {
+				if len(store.swept) != 0 || len(result.CompletedDrains) != 0 {
+					t.Fatalf("%s swept %v and reported %v; it must stay read-only", test.mode, store.swept, result.CompletedDrains)
+				}
+				return
+			}
+			if len(store.swept) != 1 || store.swept[0] != 7195473684968813165 {
+				t.Fatalf("swept = %v, want the binding's durable key", store.swept)
+			}
+			if len(result.CompletedDrains) != 1 || result.CompletedDrains[0] != "trf-linux-4x8-0ab3245aa6dfc6d6" {
+				t.Fatalf("CompletedDrains = %v", result.CompletedDrains)
+			}
+		})
+	}
+}
+
+// An unreadable sweep fails the tick closed, like any other unreadable demand.
+func TestEngineTickFailsClosedWhenTheCompletedDrainSweepFails(t *testing.T) {
+	store := newCompletedDrainTickStore()
+	store.err = errors.New("database is locked")
+	_, err := completedDrainEngine(store, reconcile.Authority).Tick(context.Background())
+	var failure interface{ FailureReason() string }
+	if !errors.As(err, &failure) || failure.FailureReason() != ReasonDemandUnreadable {
+		t.Fatalf("err = %v, want %s", err, ReasonDemandUnreadable)
+	}
+}
+
+// A store without the capability drains nothing and fails nothing.
+func TestCompletedDrainSweepIsOptionalForTheStore(t *testing.T) {
+	drained, err := (DemandCoordinator{Store: &fakeDemandStore{}}).DrainCompletedRunners(context.Background(), []Binding{{ScaleSetID: 1}})
+	if err != nil || len(drained) != 0 {
+		t.Fatalf("a store without the capability must be a no-op: %v, %v", drained, err)
+	}
+}
