@@ -1699,10 +1699,6 @@ func edge(operation operations.Operation, instance operations.Instance, next ope
 	return change
 }
 
-func (w *world) advance(instance operations.Instance, next operations.State) bool {
-	return w.persist(lifecycle.StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version, NextState: next})
-}
-
 func (w *world) persist(change lifecycle.StateChange) bool {
 	updated, err := w.store.Advance(w.ctx, change)
 	if err != nil {
