@@ -840,3 +840,21 @@ func TestSwapOutThresholdDefaultsAndRoundTrips(t *testing.T) {
 		t.Fatalf("decoded swap-out threshold = %v", decoded.Guards.SwapOutPagesPerSecond)
 	}
 }
+
+// TestSwapOutThresholdRejectsExplicitZero: omitting swapOutPagesPerSecond means
+// the default, but a file that states 0 asked for something invalid and must be
+// refused rather than silently given the default (#452 review).
+func TestSwapOutThresholdRejectsExplicitZero(t *testing.T) {
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, Default()); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	raw := strings.Replace(encoded.String(), "{", `{"swapOutPagesPerSecond": 0,`, 1)
+	cfg, err := Decode(strings.NewReader(raw))
+	if err == nil {
+		err = cfg.Validate()
+	}
+	if err == nil {
+		t.Fatalf("an explicit swapOutPagesPerSecond of 0 was accepted as %v", cfg.Guards.SwapOutPagesPerSecond)
+	}
+}
