@@ -83,9 +83,13 @@ What stays the same:
 
 The cost is #422's: if every node serving a job's labels is a mixed node whose
 macOS guests hold what the job needs, no set offers room and the job is
-assigned to no set. The `linux-go-*` and `linux-portable-*` aliases are served
-only by the two Macs today, so that state is possible while both run maestro
-suites. We accept it for the same reasons as ADR 0084:
+assigned to no set. GitHub does not reconsider that placement when a guest
+exits, so the job stays queued until an operator cancels and reruns it once a
+matching set advertises room. The `linux-go-*` aliases are served only by the
+two Macs today, so that state is possible while both run maestro suites.
+`linux-portable-*` jobs are also served by the amd64 Linux nodes (Omarchy and
+Ubuntu ran `linux-portable-4x8` jobs on 2026-10-28), and those Linux-only nodes
+keep the standing offer. We accept it for the same reasons as ADR 0084:
 
 1. The other side is measured, not hypothetical. A job placed behind a macOS
    guest waits for that guest's lifetime, up to its occupancy budget, and a

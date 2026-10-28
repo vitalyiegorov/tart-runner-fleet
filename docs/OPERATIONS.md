@@ -1933,8 +1933,9 @@ rotates every 30 seconds.
 
 Expect a set to advertise what it holds plus one free slot while its node is
 full, or exactly what it holds once one job waits here for a guest or while its
-node is behind a host-pressure gate (ADR 0084), or while macOS guests hold
-the CPU or memory its Linux vector needs (ADR 0085), even though
+node is behind a host-pressure gate (ADR 0084), or while running macOS guests
+and queued macOS demand hold the CPU or memory its Linux vector needs
+(ADR 0085), even though
 its scope's queue is not empty. Its scope's
 next job then goes to a sibling whose matching set advertises room, or waits here as the set's one
 not-yet-startable job (ADR 0082).
@@ -1947,11 +1948,14 @@ lists of both nodes:
   has a free slot and a scope it serves has a job queued;
 - a job `queued` in a scope a node serves that `fleet scale-sets audit` shows
   assigned to no set (`assigned=0` on every matching set) for more than a few
-  minutes, while at least one matching node is not behind a host-pressure gate
-  and not held by macOS guests: the standing offer of ADR 0082 should have
-  prevented it. When every matching node is gated (ADR 0084) or held by macOS
-  guests the job's vector cannot fit beside (ADR 0085), an unassigned job is
-  expected until one of them frees;
+  minutes, while at least one matching node is neither behind a host-pressure
+  gate nor held by macOS guests or queued macOS demand: the standing offer of
+  ADR 0082 should have prevented it. When every matching node is gated
+  (ADR 0084) or held by running macOS guests and queued macOS demand that the
+  job's vector cannot fit beside (ADR 0085), an unassigned job is expected.
+  GitHub does not reconsider that placement when a guest exits or a gate
+  opens, so the job stays queued: once a matching set advertises room, cancel
+  and rerun it;
 - either of the above while the node's ticks are failing. A tick that cannot
   plan keeps the last view rather than advertising the configured maximum, so
   a struggling node invites no more work than it last knew it could start.
