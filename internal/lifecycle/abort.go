@@ -24,6 +24,13 @@ const (
 	AbortEvidenceDeregisterRefused AbortEvidence = "deregister_refused_runner_busy"
 )
 
+// AbortOutcome is the durable result an aborted drain operation is completed
+// with: a closed code naming the evidence, never upstream text, so an operator
+// reading the operation can tell an abort from a teardown.
+func AbortOutcome(evidence AbortEvidence) string {
+	return "aborted:" + string(evidence)
+}
+
 // DrainAbort is one drain the executor cancelled, returning its instance to
 // Running. It carries the instance row (identity, profile, repository, demand
 // key — never JIT configuration or an operation payload), the phase that planned

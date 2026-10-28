@@ -187,3 +187,28 @@ func TestDrainRefusedByBusyRunnerAbortsInsteadOfRetrying(t *testing.T) {
 		})
 	}
 }
+
+// TestDrainAbortSettlesItsOperationInTheRollback pins #447 at the port: the
+// abort's one state change carries the claimed drain it ends, with a closed
+// aborted outcome, so the store can make the rollback and the end of the drain
+// a single transaction. A second write after it is exactly what was lost on
+// 2026-10-28.
+func TestDrainAbortSettlesItsOperationInTheRollback(t *testing.T) {
+	calls := []string{}
+	state := &memoryState{instance: eventDrainInstance()}
+	executor := drainExecutor(state, fakeVM{calls: &calls, running: true}, &fakeDrainControl{calls: &calls, safe: true, busy: true})
+	operation := operations.Operation{ID: "event-drain-trf-small-1", Kind: OperationDrain, ResourceID: state.instance.ID,
+		Status: operations.OperationClaimed, LeaseOwner: "controller"}
+
+	if err := executor.Execute(context.Background(), operation); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.changes) != 1 {
+		t.Fatalf("an abort is one state change, got %#v", state.changes)
+	}
+	change := state.changes[0]
+	if change.NextState != operations.StateRunning || change.Settles.ID != operation.ID || change.Settles.LeaseOwner != "controller" ||
+		change.Outcome != "aborted:runner_busy" {
+		t.Fatalf("the rollback must settle its own drain: %#v", change)
+	}
+}
