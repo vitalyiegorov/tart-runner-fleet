@@ -120,6 +120,12 @@ const (
 	// fault state, not the guard's arithmetic, so a guard that measured the
 	// wrong column would still be caught.
 	findingInodeAdmission findingKind = "inode_admission"
+	// findingSwapAdmission is property (v): no spawn is planned against a host
+	// over its swap ceiling that is paging out in earnest. It is the half of
+	// issue #451's fix that must not move: the threshold that stopped the
+	// kernel's background trickle from closing the gate must still close it on
+	// a thrashing host. Like (u) it reads the world's fault state.
+	findingSwapAdmission findingKind = "swap_admission"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -304,6 +310,9 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// the envelope does not count: an admission onto a filesystem out of
 		// inodes is a guest that cannot create a file.
 		inodeAdmissionChecker(cfg),
+		// (v) sits with (u) for the same reason: a host already paging out has
+		// no memory to give a new guest, whatever the envelope says.
+		swapAdmissionChecker(cfg),
 		// (t) sits with (g) because it is conservation one step earlier: (g)
 		// bounds what the node commits, (t) bounds what it invites GitHub to place
 		// on it, and an invitation it cannot honour is a job stranded here while a
@@ -902,6 +911,19 @@ func inodeAdmissionChecker(cfg worldConfig) checker {
 		}
 		return []finding{{Kind: findingInodeAdmission, Tick: observation.Tick,
 			Detail: fmt.Sprintf("planned %d spawn(s) onto a filesystem with no free inode (admission %q)",
+				len(observation.spawns()), observation.Host.Pressure.AdmissionReason)}}
+	}
+}
+
+// swapAdmissionChecker is property (v). A world whose guards set no swap
+// ceiling is not judged: it asked for no such guarantee.
+func swapAdmissionChecker(cfg worldConfig) checker {
+	return func(w *world, observation tickObservation) []finding {
+		if cfg.Guards.MaxSwapUsedMB <= 0 || w.swapThrash == 0 || len(observation.spawns()) == 0 {
+			return nil
+		}
+		return []finding{{Kind: findingSwapAdmission, Tick: observation.Tick,
+			Detail: fmt.Sprintf("planned %d spawn(s) onto a host paging out over its swap ceiling (admission %q)",
 				len(observation.spawns()), observation.Host.Pressure.AdmissionReason)}}
 	}
 }

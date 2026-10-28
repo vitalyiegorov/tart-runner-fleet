@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/membership"
 )
 
@@ -272,6 +273,10 @@ type Guards struct {
 	MinFreeInodePercent   float64
 	MinAvailableMemoryMiB int
 	MaxSwapUsedMiB        int
+	// SwapOutPagesPerSecond is the swap-out rate at or above which a host over
+	// MaxSwapUsedMiB is paging out. Any page at all closed the gate on a node
+	// with 23 GB available on 2026-10-28 (issue #451, ADR 0089).
+	SwapOutPagesPerSecond float64
 	MaxLoadAverage        float64
 	MinCPUIdlePercent     float64
 	// PressureMemoryAccounting selects the kernel memory-pressure availability
@@ -669,17 +674,20 @@ type wireConfig struct {
 	MinFreeDiskGiB            int           `json:"minFreeDiskGb"`
 	// MinFreeInodePercent is omitted while it holds the shipped default, so a
 	// rewritten file stays decodable by a release older than issue #423.
-	MinFreeInodePercent       float64 `json:"minFreeInodePercent,omitempty"`
-	MinAvailableMemoryMiB     int     `json:"minAvailableMemoryMb,omitempty"`
-	MaxSwapUsedMiB            int     `json:"maxSwapUsedMb,omitempty"`
-	MaxLoadAverage            float64 `json:"maxLoadAverage,omitempty"`
-	MinCPUIdlePercent         float64 `json:"minCpuIdlePercent,omitempty"`
-	PressureMemoryAccounting  bool    `json:"pressureMemoryAccounting,omitempty"`
-	ElasticHostEnvelope       bool    `json:"elasticHostEnvelope,omitempty"`
-	GitHubTimeoutSeconds      int     `json:"githubTimeoutSeconds"`
-	TartControlTimeoutSeconds int     `json:"tartControlTimeoutSeconds"`
-	BootTimeoutSeconds        int     `json:"bootTimeoutSeconds"`
-	AssignedTimeoutSeconds    int     `json:"assignedTimeoutSeconds,omitempty"`
+	MinFreeInodePercent   float64 `json:"minFreeInodePercent,omitempty"`
+	MinAvailableMemoryMiB int     `json:"minAvailableMemoryMb,omitempty"`
+	MaxSwapUsedMiB        int     `json:"maxSwapUsedMb,omitempty"`
+	// SwapOutPagesPerSecond is omitted while it holds the shipped default, so a
+	// rewritten file stays decodable by a release older than issue #451.
+	SwapOutPagesPerSecond     *float64 `json:"swapOutPagesPerSecond,omitempty"`
+	MaxLoadAverage            float64  `json:"maxLoadAverage,omitempty"`
+	MinCPUIdlePercent         float64  `json:"minCpuIdlePercent,omitempty"`
+	PressureMemoryAccounting  bool     `json:"pressureMemoryAccounting,omitempty"`
+	ElasticHostEnvelope       bool     `json:"elasticHostEnvelope,omitempty"`
+	GitHubTimeoutSeconds      int      `json:"githubTimeoutSeconds"`
+	TartControlTimeoutSeconds int      `json:"tartControlTimeoutSeconds"`
+	BootTimeoutSeconds        int      `json:"bootTimeoutSeconds"`
+	AssignedTimeoutSeconds    int      `json:"assignedTimeoutSeconds,omitempty"`
 	// GitHubSessionMaxIngestFailures and GitHubSessionFailureWindowSeconds are
 	// omitted while they hold the shipped defaults so a rewritten file stays
 	// decodable by older strict releases.
@@ -879,6 +887,10 @@ func Encode(w io.Writer, cfg Config) error {
 	if cfg.Guards.MinFreeInodePercent != defaultMinFreeInodePercent {
 		wire.MinFreeInodePercent = cfg.Guards.MinFreeInodePercent
 	}
+	if cfg.Guards.SwapOutPagesPerSecond != executor.DefaultSwapOutPagesPerSecond {
+		threshold := cfg.Guards.SwapOutPagesPerSecond
+		wire.SwapOutPagesPerSecond = &threshold
+	}
 	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
 		wire.GitHubSessionMaxIngestFailures = cfg.SessionRecovery.MaxConsecutiveFailures
 	}
@@ -1021,10 +1033,15 @@ func secondsOr(value, fallback int) time.Duration {
 func normalizeGuards(w wireConfig) Guards {
 	guards := Guards{MinFreeDiskGiB: w.MinFreeDiskGiB, MinFreeInodePercent: w.MinFreeInodePercent,
 		MinAvailableMemoryMiB: w.MinAvailableMemoryMiB,
-		MaxSwapUsedMiB:        w.MaxSwapUsedMiB, MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
+		MaxSwapUsedMiB:        w.MaxSwapUsedMiB, SwapOutPagesPerSecond: executor.DefaultSwapOutPagesPerSecond,
+		MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
 		PressureMemoryAccounting: w.PressureMemoryAccounting, ElasticHostEnvelope: w.ElasticHostEnvelope}
 	if guards.MinFreeInodePercent == 0 {
 		guards.MinFreeInodePercent = defaultMinFreeInodePercent
+	}
+	// Omitted means the default; a stated value, even 0, is kept for Validate.
+	if w.SwapOutPagesPerSecond != nil {
+		guards.SwapOutPagesPerSecond = *w.SwapOutPagesPerSecond
 	}
 	if guards.MinAvailableMemoryMiB == 0 {
 		guards.MinAvailableMemoryMiB = defaultMinAvailableMemoryMiB
@@ -1168,7 +1185,8 @@ func Default() Config {
 		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute, Assigned: 15 * time.Minute},
 		Guards: Guards{MinFreeDiskGiB: 60, MinFreeInodePercent: defaultMinFreeInodePercent,
 			MinAvailableMemoryMiB: defaultMinAvailableMemoryMiB,
-			MaxSwapUsedMiB:        defaultMaxSwapUsedMiB, MaxLoadAverage: defaultMaxLoadAverage,
+			MaxSwapUsedMiB:        defaultMaxSwapUsedMiB, SwapOutPagesPerSecond: executor.DefaultSwapOutPagesPerSecond,
+			MaxLoadAverage:    defaultMaxLoadAverage,
 			MinCPUIdlePercent: defaultMinCPUIdlePercent},
 		SessionRecovery: SessionRecovery{MaxConsecutiveFailures: defaultSessionMaxIngestFailures,
 			FailureWindow: defaultSessionFailureWindow},
@@ -1346,7 +1364,8 @@ func (c Config) Validate() error {
 		math.IsNaN(c.Guards.MaxLoadAverage) || math.IsInf(c.Guards.MaxLoadAverage, 0) ||
 		c.Guards.MinCPUIdlePercent < 0 || c.Guards.MinCPUIdlePercent > 100 ||
 		math.IsNaN(c.Guards.MinCPUIdlePercent) || math.IsInf(c.Guards.MinCPUIdlePercent, 0) ||
-		!(c.Guards.MinFreeInodePercent > 0 && c.Guards.MinFreeInodePercent <= 100) {
+		!(c.Guards.MinFreeInodePercent > 0 && c.Guards.MinFreeInodePercent <= 100) ||
+		!(c.Guards.SwapOutPagesPerSecond > 0) || math.IsInf(c.Guards.SwapOutPagesPerSecond, 0) {
 		return errors.New("host pressure guards are invalid")
 	}
 	seenProfiles := map[string]struct{}{}

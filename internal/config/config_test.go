@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 )
 
 func TestDecodeLegacyConfiguration(t *testing.T) {
@@ -56,11 +58,12 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if err := Encode(&encoded, cfg); err != nil {
 		t.Fatalf("Encode(legacy) = %v", err)
 	}
-	if strings.Contains(encoded.String(), `"admissionPolicy"`) || strings.Contains(encoded.String(), `"minFreeInodePercent"`) {
+	if strings.Contains(encoded.String(), `"admissionPolicy"`) || strings.Contains(encoded.String(), `"minFreeInodePercent"`) ||
+		strings.Contains(encoded.String(), `"swapOutPagesPerSecond"`) {
 		t.Fatalf("legacy Decode->Encode introduced a field older strict releases reject:\n%s", encoded.String())
 	}
 	wantGuards := Guards{MinFreeDiskGiB: 60, MinFreeInodePercent: 5, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048,
-		MaxLoadAverage: 9, MinCPUIdlePercent: 5}
+		SwapOutPagesPerSecond: 10, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
 	if cfg.Guards != wantGuards {
 		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
 	}
@@ -264,13 +267,19 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"zero inode floor":         func(c *Config) { c.Guards.MinFreeInodePercent = 0 },
 		"inode floor not a number": func(c *Config) { c.Guards.MinFreeInodePercent = math.NaN() },
 		"invalid load number":      func(c *Config) { c.Guards.MaxLoadAverage = math.NaN() },
-		"too many linux runners":   func(c *Config) { c.Linux.MaxInstances = 17 },
-		"unfillable linux slots":   func(c *Config) { c.Linux.MaxInstances = 9 },
-		"invalid root disk mode":   func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
-		"relative shared path":     func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
-		"invalid mac admission":    func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
-		"unbounded session retry":  func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
-		"excessive session retry":  func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
+		// Zero cannot survive a round trip for the inode floor's reason: Encode
+		// omits it and decoding restores the default.
+		"zero swap-out threshold":     func(c *Config) { c.Guards.SwapOutPagesPerSecond = 0 },
+		"negative swap-out threshold": func(c *Config) { c.Guards.SwapOutPagesPerSecond = -1 },
+		"swap-out threshold NaN":      func(c *Config) { c.Guards.SwapOutPagesPerSecond = math.NaN() },
+		"infinite swap-out threshold": func(c *Config) { c.Guards.SwapOutPagesPerSecond = math.Inf(1) },
+		"too many linux runners":      func(c *Config) { c.Linux.MaxInstances = 17 },
+		"unfillable linux slots":      func(c *Config) { c.Linux.MaxInstances = 9 },
+		"invalid root disk mode":      func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
+		"relative shared path":        func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
+		"invalid mac admission":       func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
+		"unbounded session retry":     func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
+		"excessive session retry":     func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
 		"impatient session window": func(c *Config) {
 			c.SessionRecovery.FailureWindow = 29 * time.Second
 		},
@@ -796,5 +805,56 @@ func TestInodeFloorDefaultsAndRoundTrips(t *testing.T) {
 	}
 	if decoded.Guards.MinFreeInodePercent != 12.5 {
 		t.Fatalf("decoded inode floor = %v", decoded.Guards.MinFreeInodePercent)
+	}
+}
+
+// TestSwapOutThresholdDefaultsAndRoundTrips is issue #451's configuration half:
+// every node judges paging against the named default unless its file states a
+// threshold, a stated one survives a rewrite, and the default is never written,
+// so a rewritten file stays decodable by an older strict release.
+func TestSwapOutThresholdDefaultsAndRoundTrips(t *testing.T) {
+	if Default().Guards.SwapOutPagesPerSecond != executor.DefaultSwapOutPagesPerSecond {
+		t.Fatalf("default swap-out threshold = %v", Default().Guards.SwapOutPagesPerSecond)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, Default()); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if strings.Contains(encoded.String(), `"swapOutPagesPerSecond"`) {
+		t.Fatalf("the default swap-out threshold was written:\n%s", encoded.String())
+	}
+	cfg := Default()
+	cfg.Guards.SwapOutPagesPerSecond = 2.5
+	encoded.Reset()
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"swapOutPagesPerSecond": 2.5`) {
+		t.Fatalf("a stated swap-out threshold was not written:\n%s", encoded.String())
+	}
+	decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode = %v", err)
+	}
+	if decoded.Guards.SwapOutPagesPerSecond != 2.5 {
+		t.Fatalf("decoded swap-out threshold = %v", decoded.Guards.SwapOutPagesPerSecond)
+	}
+}
+
+// TestSwapOutThresholdRejectsExplicitZero: omitting swapOutPagesPerSecond means
+// the default, but a file that states 0 asked for something invalid and must be
+// refused rather than silently given the default (#452 review).
+func TestSwapOutThresholdRejectsExplicitZero(t *testing.T) {
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, Default()); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	raw := strings.Replace(encoded.String(), "{", `{"swapOutPagesPerSecond": 0,`, 1)
+	cfg, err := Decode(strings.NewReader(raw))
+	if err == nil {
+		err = cfg.Validate()
+	}
+	if err == nil {
+		t.Fatalf("an explicit swapOutPagesPerSecond of 0 was accepted as %v", cfg.Guards.SwapOutPagesPerSecond)
 	}
 }

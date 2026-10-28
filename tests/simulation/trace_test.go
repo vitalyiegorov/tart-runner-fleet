@@ -66,7 +66,14 @@ const (
 	// eventInodeExhausted is the 2026-10-25 ubuntu-vitalii incident (issue
 	// #423): the guest-storage filesystem has no free inode left while its free
 	// bytes stay well above the disk floor.
-	eventInodeExhausted  eventKind = "inode_exhausted"
+	eventInodeExhausted eventKind = "inode_exhausted"
+	// eventSwapResidue is the 2026-10-28 ubuntu-vitalii state (issue #451):
+	// swap used far above the ceiling, tens of GB available, and the kernel
+	// trickling out about one page every twenty seconds. It is not pressure.
+	eventSwapResidue eventKind = "swap_residue"
+	// eventSwapThrash is the pressure the swap guard exists for: swap above the
+	// ceiling and the host paging out thousands of pages a second.
+	eventSwapThrash      eventKind = "swap_thrash"
 	eventTartUnavailable eventKind = "tart_unavailable"
 	eventSlowBoot        eventKind = "slow_boot"
 	// eventWedgedBootstrap is the 2026-10-11 Mac Studio incident (ADR 0067): the
@@ -263,7 +270,8 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 		eventStatisticsGap, eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable,
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
-		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel, eventInodeExhausted}
+		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel, eventInodeExhausted,
+		eventSwapResidue, eventSwapThrash}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
@@ -326,6 +334,10 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.hostProbeStale = event.Count
 	case eventInodeExhausted:
 		w.inodeExhausted = event.Count
+	case eventSwapResidue:
+		w.swapResidue = event.Count
+	case eventSwapThrash:
+		w.swapThrash = event.Count
 	case eventTartUnavailable:
 		w.tartUnavailable = event.Count
 	case eventSlowBoot:

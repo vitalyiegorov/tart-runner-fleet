@@ -56,7 +56,7 @@ canonical observe candidate may safely run beside the incumbent.
 Host admission uses two layers. Exact profile vectors enforce CPU, memory, and
 slot envelopes first. A fresh host probe then preserves `minFreeDiskGb`,
 `minFreeInodePercent` and `minAvailableMemoryMb`, treats swap as pressured only when swap used exceeds
-`maxSwapUsedMb` **and** the host is measurably paging out, and treats CPU as
+`maxSwapUsedMb` **and** the host is paging out at or above `swapOutPagesPerSecond`, and treats CPU as
 pressured only when both `maxLoadAverage` is exceeded and idle CPU falls below
 `minCpuIdlePercent`. Missing values decode to the safe defaults in
 `config/fleet.example.json`. Inspect the evidence through `fleet status` or
@@ -67,7 +67,7 @@ the bounded `fleet_host_*` metrics; do not infer pressure from queue age alone.
 | `minFreeDiskGb` | 60 | `disk reserve` | free bytes on the guest-storage filesystem fall below the floor |
 | `minFreeInodePercent` | 5 | `inode reserve` | free inodes fall below that percentage of the filesystem's total; not applicable when the filesystem has no fixed inode limit |
 | `minAvailableMemoryMb` | 1024 | `memory reserve` | available memory minus the request falls below the floor |
-| `maxSwapUsedMb` | 2048 | `swap pressure` | swap used exceeds the ceiling **and** the host is paging out |
+| `maxSwapUsedMb` / `swapOutPagesPerSecond` | 2048 / 10 | `swap pressure` | swap used exceeds the ceiling **and** the swap-out rate is at or above the threshold, or is unmeasured |
 | `maxLoadAverage` / `minCpuIdlePercent` | 9 / 5 | `cpu pressure` | load exceeds the ceiling **and** idle CPU is below the floor |
 
 Free bytes do not show whether a file can be created. On 2026-10-25,
@@ -106,12 +106,17 @@ reported as unmeasured (`paging unmeasured`,
 `fleet_host_swapout_rate_observed 0`) and the level blocks on its own. An
 unmeasured rate is never read as a quiet host.
 
-One consequence is worth checking before promoting a node: on a host whose
-steady-state residue sits far above `maxSwapUsedMb`, the level clause is
-permanently true and the guard degenerates into "did this host page out at all
-since the last tick", which flaps admission on an interactive machine. Size
-`maxSwapUsedMb` against the host you are deploying on rather than inheriting it
-from another node, so the conjunction keeps both of its halves.
+"Paging out" means a rate at or above `swapOutPagesPerSecond` (default 10
+pages/s), averaged over the interval between two observations. It does not mean
+any page at all. A host that holds old swap keeps writing the odd page out in
+the background. On 2026-10-28, ubuntu-vitalii held 3907 MiB against a 1024 MiB
+ceiling with 23189 MiB available and trickled out 0.046 pages/s, and the old
+any-page rule flapped its gate shut for most of the day (issue #451,
+[ADR 0089](adr/0089-paging-out-means-a-sustained-rate-not-a-page.md)). A host
+paging out in earnest runs at thousands of pages a second. The key is optional
+and must be positive. To restore the any-page behaviour on one node, set it to a
+tiny value such as `0.001`. `fleet config policy` shows the effective value as
+`hostPressureFloors.swapOutPagesPerSecond`.
 
 The daemon logs each edge of the admission gate once on stderr, never once per
 tick (issue #436). The lines look like this:

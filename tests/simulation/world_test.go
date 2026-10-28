@@ -482,11 +482,21 @@ func (h simHost) Snapshot(context.Context) executor.HostSnapshot {
 	if w.inodeExhausted > 0 {
 		freeInodes = 0
 	}
+	// Residue is ubuntu-vitalii's 2026-10-28 swap (issue #451): almost four
+	// times the ceiling, trickling out 0.046 pages/s. Thrash is the same level
+	// with the host paging out in earnest. Thrash wins when both are live.
+	swapUsedMB, swapOutRate := int64(0), 0.0
+	if w.swapResidue > 0 {
+		swapUsedMB, swapOutRate = 4*w.cfg.Guards.MaxSwapUsedMB, 0.046
+	}
+	if w.swapThrash > 0 {
+		swapUsedMB, swapOutRate = 4*w.cfg.Guards.MaxSwapUsedMB, 2_000
+	}
 	return executor.HostSnapshot{
 		Freshness: executor.Fresh, ObservedAt: w.now, AvailableMemoryMB: available, FreeDiskGB: 400,
 		FreeInodes: freeInodes, TotalInodes: 60_850_176,
-		SwapUsedMB: 0, SwapOuts: 0, CPUidlePercent: idle, LoadAverage: float64(usedCPU + w.tenantCPU),
-		SwapOutRatePerSecond: 0, SwapOutRateObserved: true,
+		SwapUsedMB: swapUsedMB, SwapOuts: 0, CPUidlePercent: idle, LoadAverage: float64(usedCPU + w.tenantCPU),
+		SwapOutRatePerSecond: swapOutRate, SwapOutRateObserved: true,
 		PhysicalCPU: w.cfg.PhysicalCPU, PhysicalMemoryMB: w.cfg.PhysicalMemoryMB,
 	}
 }
@@ -757,6 +767,8 @@ type world struct {
 	restLag         int
 	hostProbeStale  int
 	inodeExhausted  int
+	swapResidue     int
+	swapThrash      int
 	tartUnavailable int
 	// powerMisreport is how many more ticks the enumeration lies about each named
 	// VM being powered off (issue #246). It is keyed per VM because both production
