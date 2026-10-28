@@ -8,6 +8,9 @@ any host is an explicit operational action, not a consequence of this change.
 Amended by [ADR 0077](0077-a-slot-count-is-backed-by-the-envelope.md): "the
 four-slot Linux ceiling" below is now the node's configured slot count, backed
 by its envelope, with four admissions per tick as the allocator's pace.
+Amended by [ADR 0089](0089-paging-out-means-a-sustained-rate-not-a-page.md):
+"paging out" in the swap section below is now a swap-out rate at or above a
+threshold (default 10 pages/s), not any non-zero rate.
 
 ## Context
 
@@ -126,7 +129,8 @@ machine was not paging at all.
 
 Exceeding the ceiling is now a necessary but insufficient condition: admission is
 refused only when the host is also paging out, derived as the swapout delta
-between consecutive observations. The level remains required, so paging while
+between consecutive observations (since ADR 0089, at or above a threshold rather
+than any page at all). The level remains required, so paging while
 comfortably under the ceiling is treated as the normal virtual-memory behavior it
 is.
 

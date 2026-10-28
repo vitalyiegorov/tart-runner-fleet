@@ -83,9 +83,19 @@ type Guardrails struct {
 	MinFreeInodePercent  float64
 	MinAvailableMemoryMB int64
 	MaxSwapUsedMB        int64
-	MaxLoadAverage       float64
-	MinCPUidlePercent    float64
+	// SwapOutPagesPerSecond is the swap-out rate at or above which a host over
+	// its swap ceiling is paging out. Zero is DefaultSwapOutPagesPerSecond.
+	SwapOutPagesPerSecond float64
+	MaxLoadAverage        float64
+	MinCPUidlePercent     float64
 }
+
+// DefaultSwapOutPagesPerSecond is the swap-out rate, averaged over the interval
+// between two observations, that counts as paging out (issue #451, ADR 0089).
+// It is ten pages a second: 200 pages across a 20-second poll, against the one
+// page every twenty seconds (0.046/s) a Linux kernel trickles out of a host
+// with 23 GB available, and far below the thousands a thrashing host pages out.
+const DefaultSwapOutPagesPerSecond = 10
 
 type AdmissionRequest struct {
 	MemoryMB int64
@@ -102,13 +112,22 @@ type AdmissionDecision struct {
 // swap, so a level-only gate latches the fleet off a healthy host for as long as
 // the residue persists.
 //
+// Paging out means a rate at or above the threshold, not any page at all. A host
+// that holds old swap keeps trickling pages out in the background, and reading
+// that noise floor as pressure flapped the gate all day on a node with 23 GB
+// available (issue #451, ADR 0089).
+//
 // An unmeasured rate fails closed. Without a prior sample the level is the only
 // evidence there is, and it must still block.
-func activelyPagingOut(snapshot HostSnapshot) bool {
+func (g Guardrails) activelyPagingOut(snapshot HostSnapshot) bool {
 	if !snapshot.SwapOutRateObserved {
 		return true
 	}
-	return snapshot.SwapOutRatePerSecond > 0
+	threshold := g.SwapOutPagesPerSecond
+	if threshold <= 0 {
+		threshold = DefaultSwapOutPagesPerSecond
+	}
+	return snapshot.SwapOutRatePerSecond >= threshold
 }
 
 // inodesBelowFloor reports whether the filesystem's free inodes are under the
@@ -137,7 +156,7 @@ func (g Guardrails) Evaluate(snapshot HostSnapshot, request AdmissionRequest) Ad
 	if snapshot.AvailableMemoryMB-request.MemoryMB < g.MinAvailableMemoryMB {
 		return AdmissionDecision{Reason: "memory reserve"}
 	}
-	if g.MaxSwapUsedMB > 0 && snapshot.SwapUsedMB > g.MaxSwapUsedMB && activelyPagingOut(snapshot) {
+	if g.MaxSwapUsedMB > 0 && snapshot.SwapUsedMB > g.MaxSwapUsedMB && g.activelyPagingOut(snapshot) {
 		return AdmissionDecision{Reason: "swap pressure"}
 	}
 	if g.MaxLoadAverage > 0 && snapshot.LoadAverage > g.MaxLoadAverage && snapshot.CPUidlePercent < g.MinCPUidlePercent {

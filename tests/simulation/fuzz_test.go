@@ -194,7 +194,7 @@ func TestGeneratedTraceExercisesTheWholeWorld(t *testing.T) {
 		eventRESTLag, eventHostTenant, eventHostProbeStale, eventTartUnavailable, eventSlowBoot,
 		eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower,
-		eventSiblingReassign, eventSiblingSubstitute, eventInodeExhausted}
+		eventSiblingReassign, eventSiblingSubstitute, eventInodeExhausted, eventSwapResidue, eventSwapThrash}
 	for _, kind := range required {
 		if seen[kind] == 0 {
 			t.Fatalf("the generator never produced %s across 40 seeds", kind)

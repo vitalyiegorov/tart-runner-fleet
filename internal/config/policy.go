@@ -145,6 +145,7 @@ type PolicyFloors struct {
 	MinFreeInodePercent   float64 `json:"minFreeInodePercent"`
 	MinAvailableMemoryMiB int     `json:"minAvailableMemoryMb"`
 	MaxSwapUsedMiB        int     `json:"maxSwapUsedMb"`
+	SwapOutPagesPerSecond float64 `json:"swapOutPagesPerSecond"`
 	MaxLoadAverage        float64 `json:"maxLoadAverage"`
 	MinCPUIdlePercent     float64 `json:"minCpuIdlePercent"`
 }
@@ -227,7 +228,8 @@ func ProjectPolicy(cfg Config) Policy {
 		HostPressureFloors: PolicyFloors{MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB,
 			MinFreeInodePercent:   cfg.Guards.MinFreeInodePercent,
 			MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB, MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB,
-			MaxLoadAverage: cfg.Guards.MaxLoadAverage, MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent},
+			SwapOutPagesPerSecond: cfg.Guards.SwapOutPagesPerSecond,
+			MaxLoadAverage:        cfg.Guards.MaxLoadAverage, MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent},
 		ElasticHostEnvelope:      cfg.Guards.ElasticHostEnvelope,
 		PressureMemoryAccounting: cfg.Guards.PressureMemoryAccounting,
 		MacOSBurst: PolicyMacOSBurst{Enabled: cfg.MacOS.Enabled,
