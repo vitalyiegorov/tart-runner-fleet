@@ -129,6 +129,15 @@ type StateChange struct {
 	ExpectedVersion int64
 	NextState       operations.State
 	FailureCode     string
+	// Settles is the claimed operation this change ends, with Outcome as its
+	// closed-vocabulary result. The store completes it in the same transaction,
+	// records no effect, and refuses the whole change unless the operation is
+	// still claimed by its lease owner. A drain abort uses it: the rollback and
+	// the end of the drain are one fact, and on 2026-10-28 a lost second write
+	// left a drain retrying a state conflict against a running instance (#447).
+	// A zero Settles ends nothing.
+	Settles operations.Operation
+	Outcome string
 }
 
 type StateStore interface {
@@ -508,7 +517,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				}
 				switch power {
 				case domain.InstancePowerRunning:
-					return e.abort(ctx, instance, AbortEvidenceVMRunning)
+					return e.abort(ctx, operation, instance, AbortEvidenceVMRunning)
 				case domain.InstancePowerStopped, domain.InstancePowerAbsent:
 					// The premise holds. Proceed.
 				default:
@@ -532,7 +541,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 					return e.fail(ctx, instance, StageGuard)
 				}
 				if registered {
-					return e.abort(ctx, instance, AbortEvidenceRunnerRegistered)
+					return e.abort(ctx, operation, instance, AbortEvidenceRunnerRegistered)
 				}
 				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
 				if guardErr != nil || !safe {
@@ -558,7 +567,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// idle one is deregistered, which is safe: GitHub re-queues any
 				// assigned-but-unstarted job to another runner. Unreadable evidence
 				// fails the guard and retries (ADR 0074).
-				if proceed, result := e.verifyRunnerIdle(ctx, instance); !proceed {
+				if proceed, result := e.verifyRunnerIdle(ctx, operation, instance); !proceed {
 					return result
 				}
 				// Runner-keyed evidence cannot see a start GitHub did not attribute
@@ -597,7 +606,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				}
 				switch e.Guest.Probe(ctx, instance.ID) {
 				case domain.GuestLivenessAlive:
-					return e.abort(ctx, instance, AbortEvidenceGuestAnswered)
+					return e.abort(ctx, operation, instance, AbortEvidenceGuestAnswered)
 				case domain.GuestLivenessRefused:
 					// The premise holds. Proceed.
 				default:
@@ -658,7 +667,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// destructive step and abort when a job is executing; the guarded
 				// lingering-runner recovery reclaims the instance once its runner is
 				// genuinely idle.
-				if proceed, result := e.verifyRunnerIdle(ctx, instance); !proceed {
+				if proceed, result := e.verifyRunnerIdle(ctx, operation, instance); !proceed {
 					return result
 				}
 				safe, guardErr := e.Control.SafeToDeregister(ctx, instance)
@@ -682,7 +691,7 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 				// describing a job whose machine stopped executing minutes ago.
 				if abortsOnBusyRefusal(instance.DrainPhase) {
 					if busy, busyErr := e.Control.RunnerBusy(ctx, instance); busyErr == nil && busy {
-						return e.abort(ctx, instance, AbortEvidenceDeregisterRefused)
+						return e.abort(ctx, operation, instance, AbortEvidenceDeregisterRefused)
 					}
 				}
 				// ADR 0007 keeps owned cleanup retrying through a refusal rather than
@@ -723,7 +732,15 @@ func (e DrainExecutor) Execute(ctx context.Context, operation operations.Operati
 			}
 			instance, err = e.advance(ctx, instance, operations.StateDeleted)
 		default:
-			return operations.ErrConflict
+			// The instance is live and not draining, so this drain is not the
+			// instance's drain any more. The only edge out of Draining to such a
+			// state is an abort back to Running, which ends its drain in the same
+			// transaction; a row still here was stranded by an abort that predates
+			// that rule (#447). It resolves as the no-op it already is: nothing
+			// destructive ran, nothing will, and retrying a state conflict can
+			// never succeed. A later drain is a new operation with its own
+			// re-verified premise.
+			return nil
 		}
 		if err != nil {
 			return safeError(StagePersist)
@@ -782,13 +799,13 @@ func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instan
 // acknowledged abort when fresh evidence shows a job running, or a guard-stage
 // retry when that evidence cannot be read. It stays fail-closed: an unreadable
 // observation neither kills nor aborts on a guess.
-func (e DrainExecutor) verifyRunnerIdle(ctx context.Context, instance operations.Instance) (bool, error) {
+func (e DrainExecutor) verifyRunnerIdle(ctx context.Context, operation operations.Operation, instance operations.Instance) (bool, error) {
 	busy, err := e.Control.RunnerBusy(ctx, instance)
 	if err != nil {
 		return false, e.fail(ctx, instance, StageGuard)
 	}
 	if busy {
-		return false, e.abort(ctx, instance, AbortEvidenceRunnerBusy)
+		return false, e.abort(ctx, operation, instance, AbortEvidenceRunnerBusy)
 	}
 	return true, nil
 }
@@ -796,12 +813,14 @@ func (e DrainExecutor) verifyRunnerIdle(ctx context.Context, instance operations
 // abort cancels a recovery drain whose premise fresh evidence has disproven.
 // The instance returns to Running — the conservative busy state; demand
 // projections advance it as real events arrive — and the drain operation is
-// acknowledged as a completed no-op so it stops being retried. A durable abort
-// is then reported with the evidence that caused it: an abort is the fleet
-// catching itself about to end a live job, and one nobody can see is how an idle
+// completed as an aborted no-op in the same transaction, so it can neither be
+// retried nor block the instance's next drain (#447). A durable abort is then
+// reported with the evidence that caused it: an abort is the fleet catching
+// itself about to end a live job, and one nobody can see is how an idle
 // duplicate held a host for two hours in silence (issue #398).
-func (e DrainExecutor) abort(ctx context.Context, instance operations.Instance, evidence AbortEvidence) error {
-	if _, err := e.advance(ctx, instance, operations.StateRunning); err != nil {
+func (e DrainExecutor) abort(ctx context.Context, operation operations.Operation, instance operations.Instance, evidence AbortEvidence) error {
+	if _, err := e.State.Advance(ctx, StateChange{InstanceID: instance.ID, ExpectedState: instance.State, ExpectedVersion: instance.Version,
+		NextState: operations.StateRunning, Settles: operation, Outcome: AbortOutcome(evidence)}); err != nil {
 		return safeError(StagePersist)
 	}
 	if e.OnAbort != nil {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -636,10 +637,23 @@ func (s *Store) projectDemandRank(ctx context.Context, instance operations.Insta
 	return operations.ErrUncertain
 }
 
+// enqueueDemandDrain moves the instance to Draining together with its event
+// drain. The identity is scoped to the instance's terminal prior drains, as a
+// recovery drain's is (DrainGeneration): replays of one attempt stay idempotent,
+// and a drain an abort ended never blocks the next one (#447). A first event
+// drain keeps `event-drain-<id>` byte-for-byte. The effect key is not scoped: it
+// names the one physical deregistration.
 func (s *Store) enqueueDemandDrain(ctx context.Context, instance operations.Instance, dependencies []string) error {
 	now := s.instant()
+	generation, err := s.DrainGeneration(ctx, instance.ID)
+	if err != nil {
+		return err
+	}
 	id := "event-drain-" + instance.ID
-	_, _, err := s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
+	if generation > 0 {
+		id += "-g" + strconv.Itoa(generation)
+	}
+	_, _, err = s.Transition(ctx, operations.Transition{InstanceID: instance.ID, ExpectedState: instance.State,
 		ExpectedVersion: instance.Version, NextState: operations.StateDraining, DrainPhase: operations.DrainPhaseEvent,
 		Operation: operations.Operation{ID: id, IdempotencyKey: id, EffectKey: "deregister:" + instance.ID,
 			Kind: lifecycle.OperationDrain, ResourceID: instance.ID, Payload: json.RawMessage(`{}`), AvailableAt: now,
