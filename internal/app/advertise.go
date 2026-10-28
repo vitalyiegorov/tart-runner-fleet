@@ -33,6 +33,11 @@ type ScaleSetHeadroom struct {
 	// (hostHealthy is false): memory, swap, CPU, disk or inode. An update drain
 	// is not a gate. A gated node is offered no standing slot (issue #428).
 	Gated bool
+	// Stranded is the set's vector not fitting this node even once every Linux
+	// guest here has drained (scheduler.FitsOnceLinuxDrains): macOS guests or
+	// queued macOS work hold what it needs. A stranded set is offered no
+	// standing slot either (issue #439).
+	Stranded bool
 }
 
 // AdvertisedCapacity is the capacity a scale set sends GitHub on its next long
@@ -60,6 +65,12 @@ type ScaleSetHeadroom struct {
 // sibling serving the same labels may be idle. It still advertises what it
 // holds, so nothing GitHub already gave it is taken away.
 //
+// Nor does a set whose vector this node could not start even once all its
+// Linux work has drained (issue #439, ADR 0085). The standing offer promises a
+// job a wait for this node's own Linux work. On a mixed-platform node, macOS
+// guests can hold what a Linux vector needs for hours, and the job would wait
+// for them while a sibling has room. Such a set too advertises what it holds.
+//
 // Before the node has ever computed its headroom it is the configured value: a
 // node that has never planned has no better answer, and advertising zero would
 // withdraw it from every scope it serves.
@@ -68,7 +79,7 @@ func AdvertisedCapacity(configured int, headroom ScaleSetHeadroom, known bool) i
 		return configured
 	}
 	offered := max(0, headroom.Held) + max(0, headroom.Fit)
-	if !headroom.Gated {
+	if !headroom.Gated && !headroom.Stranded {
 		offered = max(offered, max(0, headroom.Placed)+1)
 	}
 	return max(0, min(configured, offered))
@@ -144,7 +155,7 @@ func (c DemandCoordinator) scaleSetHeadroom(ctx context.Context, bindings []Bind
 		}
 		local := held[binding.durableKey()] + placed
 		row := ScaleSetHeadroom{StoreKey: binding.durableKey(), Held: max(local, broker), Placed: placed,
-			Gated: gated}
+			Gated: gated, Stranded: !scheduler.FitsOnceLinuxDrains(in, binding.Profile.ID)}
 		room := math.MaxInt
 		if binding.Capacity > 0 {
 			room = max(0, binding.Capacity-row.Held)

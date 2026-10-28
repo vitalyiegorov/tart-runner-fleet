@@ -43,6 +43,13 @@ func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 		{"a gated node's idle set offers nothing extra", 2, ScaleSetHeadroom{Gated: true}, true, 0},
 		{"a gated node's busy set offers what it holds", 4, ScaleSetHeadroom{Held: 1, Placed: 1, Gated: true}, true, 1},
 		{"a gated node still keeps work already assigned", 4, ScaleSetHeadroom{Held: 2, Placed: 1, Gated: true}, true, 2},
+		// Issue #439: a set whose vector cannot start here even once every
+		// Linux guest drains -- macOS guests hold what it needs -- would make the
+		// job the free slot attracts wait for them. It too offers what it holds.
+		{"a stranded idle set offers nothing extra", 2, ScaleSetHeadroom{Stranded: true}, true, 0},
+		{"a stranded set still keeps work already assigned", 4, ScaleSetHeadroom{Held: 1, Stranded: true}, true, 1},
+		{"a stranded busy set keeps what it holds", 4, ScaleSetHeadroom{Held: 2, Placed: 2, Stranded: true}, true, 2},
+		{"a stranded set configured at zero stays at zero", 0, ScaleSetHeadroom{Held: 1, Stranded: true}, true, 0},
 	}
 	for _, tc := range cases {
 		if got := AdvertisedCapacity(tc.configured, tc.headroom, tc.known); got != tc.want {
@@ -284,5 +291,66 @@ func TestScaleSetHeadroomMarksANodeItsOwnGuardrailsRefuse(t *testing.T) {
 		if len(rows) != 1 || rows[0].Gated != tc.gated {
 			t.Fatalf("%s: gated = %+v, want %v", tc.reason, rows, tc.gated)
 		}
+	}
+}
+
+// TestScaleSetHeadroomStrandsAVectorOnlyMacOSGuestsHold is issue #439 on the
+// mini: two maestro guests hold 8 of its 10 CPUs for up to their occupancy
+// budget. The linux-4x8 set cannot start a job until they end, so it keeps no
+// standing offer and the job goes to a sibling; the linux-2x4 set starts one
+// beside them and keeps its offer. Work already assigned is never taken back,
+// and a node full of its own Linux work keeps the offer (issue #422).
+func TestScaleSetHeadroomStrandsAVectorOnlyMacOSGuestsHold(t *testing.T) {
+	now := time.Date(2026, 10, 28, 5, 18, 5, 0, time.UTC)
+	large := domain.Profile{ID: "large", Route: "linux-4x8", Platform: domain.PlatformLinux,
+		Resources: domain.Resources{CPU: 4, MemoryMB: 8_192, Slots: 1}}
+	medium := domain.Profile{ID: "medium", Route: "linux-2x4", Platform: domain.PlatformLinux,
+		Resources: domain.Resources{CPU: 2, MemoryMB: 4_096, Slots: 1}}
+	maestro := domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS,
+		Resources: domain.Resources{CPU: 4, MemoryMB: 7_168, Slots: 1}, MaxActive: 2}
+	guest := func(id string, profile domain.Profile, job int64) domain.Instance {
+		return domain.Instance{ID: id, Repo: "other/repo", Profile: profile.ID, Platform: profile.Platform,
+			Resources: profile.Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning,
+			Demand: domain.DemandKey{Repo: "other/repo", RunID: 1, Attempt: 1, JobID: job}}
+	}
+	mini := func(instances ...domain.Instance) scheduler.Input {
+		return scheduler.Input{Now: now, Demands: domain.Fresh([]domain.Demand{}, now),
+			Instances: domain.Fresh(instances, now),
+			Host: domain.Fresh(domain.Host{Capacity: domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+				Available: domain.Resources{CPU: 10, MemoryMB: 20_000, Slots: 4},
+				Pressure:  domain.HostPressure{AdmissionAllowed: true, AdmissionReason: "capacity available"}}, now),
+			Config: scheduler.Config{ElasticHostEnvelope: true, MixedPlatformAdmission: true,
+				LinuxCapacity: domain.Resources{CPU: 10, MemoryMB: 23_552, Slots: 4},
+				HostBudget:    domain.Resources{CPU: 10, MemoryMB: 23_552},
+				Profiles:      map[domain.ProfileID]domain.Profile{"large": large, "medium": medium, "maestro": maestro}}}
+	}
+	bindings := []Binding{
+		{StoreKey: 18, ScaleSetID: 18, Scope: "knee", Targets: []string{"owner/repo"}, Profile: large, Capacity: 2},
+		{StoreKey: 19, ScaleSetID: 19, Scope: "knee", Targets: []string{"owner/repo"}, Profile: medium, Capacity: 2},
+	}
+	coordinator := DemandCoordinator{Store: noStatisticsStore{&fakeDemandStore{}}, Now: func() time.Time { return now }}
+	advertised := func(in scheduler.Input, held map[int64]int) map[int64]int {
+		t.Helper()
+		rows := coordinator.scaleSetHeadroom(context.Background(), bindings, in, held, nil)
+		if len(rows) != len(bindings) {
+			t.Fatalf("every set is sized: %+v", rows)
+		}
+		got := map[int64]int{}
+		for index, row := range rows {
+			got[row.StoreKey] = AdvertisedCapacity(bindings[index].Capacity, row, true)
+		}
+		return got
+	}
+
+	maestros := mini(guest("maestro-1", maestro, 1), guest("maestro-2", maestro, 2))
+	if got := advertised(maestros, nil); got[18] != 0 || got[19] != 1 {
+		t.Fatalf("beside two maestro guests the 4x8 set offers %d (want 0) and the 2x4 set %d (want 1)", got[18], got[19])
+	}
+	if got := advertised(maestros, map[int64]int{18: 1}); got[18] != 1 {
+		t.Fatalf("a 4x8 job already assigned here is kept: advertised %d, want 1", got[18])
+	}
+	full := mini(guest("large-1", large, 1), guest("large-2", large, 2))
+	if got := advertised(full, nil); got[18] != 1 {
+		t.Fatalf("a node full of its own Linux work keeps the standing offer: advertised %d, want 1", got[18])
 	}
 }

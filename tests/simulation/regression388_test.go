@@ -51,13 +51,12 @@ func macbookWorld() worldConfig {
 // TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart replays the
 // incident. A maestro guest runs a long suite; while it holds 7 GiB of the 14
 // GiB budget, a 4x8 job arrives in each of the two other scopes, and a second
-// in one of them. Each 4x8 set advertises only what it holds, floored at the
-// standing offer of one that issue #422 keeps so a job queued while every node
-// is full is still assigned somewhere. So GitHub places at most one job on each
-// set here while the maestro holds the residual, none of them starts beside it,
-// and the scope's second job goes to a sibling. Once the maestro has exited,
-// the node runs what it holds and a 4x8 placed later, so the clamp never
-// starves the node of work it can start.
+// in one of them. Each 4x8 set advertises only what it holds. Issue #422's
+// standing offer of one is withheld too: the maestro is a macOS guest, so even
+// with every Linux guest drained a 4x8 could not start here until it exits
+// (issue #439, ADR 0085). So every 4x8 job queued beside it goes to a sibling.
+// Once the maestro has exited, the node advertises and runs a 4x8 placed later,
+// so the clamp never starves the node of work it can start.
 func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 	t.Parallel()
 	cfg := macbookWorld()
@@ -87,7 +86,6 @@ func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 		t.Fatalf("the 4x8 jobs must arrive while the maestro holds the envelope: started %s finished %s",
 			maestro.startedAt, maestro.finishedAt)
 	}
-	beside := map[int]int{}
 	for _, job := range world.jobs {
 		if job.binding == 0 {
 			continue
@@ -98,18 +96,12 @@ func TestIssue388SmallNodeStopsAdvertisingAVectorItCannotStart(t *testing.T) {
 		if !job.queuedAt.Before(maestro.finishedAt) {
 			continue
 		}
-		if job.startedAt.Before(maestro.finishedAt) {
-			t.Fatalf("%s's 4x8 job started at %s while the maestro held the residual (until %s)",
-				job.repo, job.startedAt.Sub(simEpoch), maestro.finishedAt.Sub(simEpoch))
-		}
-		if beside[job.binding]++; beside[job.binding] > 1 {
-			t.Fatalf("GitHub placed a second job on set %d at %s while the maestro held the residual "+
-				"(until %s): the node advertised capacity its envelope could not start beyond the standing offer",
-				cfg.Bindings[job.binding].ScaleSetID, job.queuedAt.Sub(simEpoch), maestro.finishedAt.Sub(simEpoch))
-		}
+		t.Fatalf("GitHub placed a job on set %d at %s while the maestro held the residual (until %s): "+
+			"the node offered a vector only the macOS guest's exit could start",
+			cfg.Bindings[job.binding].ScaleSetID, job.queuedAt.Sub(simEpoch), maestro.finishedAt.Sub(simEpoch))
 	}
-	if world.toSibling != 1 {
-		t.Fatalf("%d jobs went to a sibling, want the scope's second 4x8 job that arrived beside the maestro", world.toSibling)
+	if world.toSibling != 3 {
+		t.Fatalf("%d jobs went to a sibling, want all three 4x8 jobs that arrived beside the maestro", world.toSibling)
 	}
 	var later *simJob
 	for _, job := range world.jobs {
