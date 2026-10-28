@@ -2706,6 +2706,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordReservation(result)
 	e.recordEnvelope(result)
 	e.recordOverdueExpiry(result)
+	e.recordCompletedDrains(result)
 	pressure := result.Host.Pressure
 	if edge, changed := e.gate.Observe(result.At, pressure.AdmissionAllowed, pressure.AdmissionReason); changed {
 		e.reporter.reportAdmissionGate(edge)
@@ -2809,6 +2810,20 @@ func (e engineTicker) recordOverdueExpiry(result app.TickResult) {
 	}
 	e.reporter.logger.Warn("overdue demand expired",
 		"count", result.ExpiredOverdue, "reason", "job_start_bound_passed")
+}
+
+// recordCompletedDrains names every runner the tick drained from a durable
+// JobCompleted the message path never projected (issue #442). Each one is a
+// projection the message path lost, so it is said once per runner and never
+// rate limited.
+func (e engineTicker) recordCompletedDrains(result app.TickResult) {
+	if e.reporter == nil || e.reporter.logger == nil {
+		return
+	}
+	for _, instance := range result.CompletedDrains {
+		e.reporter.logger.Warn("completed job drain re-derived", "instance", instance,
+			"reason", "completion_projection_lost")
+	}
 }
 
 func (e engineTicker) recordReservation(result app.TickResult) {

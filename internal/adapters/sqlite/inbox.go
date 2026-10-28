@@ -636,6 +636,86 @@ func (s *Store) projectDemandRank(ctx context.Context, instance operations.Insta
 	return operations.ErrUncertain
 }
 
+// DrainCompletedRunners re-derives, from durable state alone, the event drain a
+// JobCompleted projection exists to enqueue. It returns the runners it drained.
+//
+// The message path is not enough on its own (issue #442). ApplyDemandBatch
+// commits the event and advances the durable cursor in one transaction, and the
+// projection runs after that commit. When the projection fails, the message is
+// nacked and the ingest loop replaces the session. The replacement opens at the
+// durable cursor, which is already past the message, so GitHub never delivers it
+// again. On 2026-10-28 that left a podman runner `running` for eight minutes
+// beside a durable JobCompleted, and a podman guest never powers itself off.
+//
+// The rule is narrow on purpose:
+//
+//   - Only a completion GitHub recorded against THIS runner's name counts. The
+//     spawning reservation completing proves nothing about a runner GitHub
+//     brokered a different job to (ADR 0033).
+//   - A runner with a JobStarted demand is never drained. It is the same
+//     RunnerActiveJob evidence the drain executor re-checks (ADR 0074), so the
+//     sweep never enqueues a drain that would only abort back to Running.
+//   - Only online-idle, assigned and running instances qualify. A completion
+//     before registration is ordered behind provisioning by the message path,
+//     and an instance already tearing down already has its drain.
+//
+// The drain is the message path's own projectDemandRank, so it is the same
+// idempotent event-drain-<id> operation. A row that moved between this read and
+// the write is skipped, and the next tick reads it again.
+func (s *Store) DrainCompletedRunners(ctx context.Context, scaleSetID int64) ([]string, error) {
+	if scaleSetID <= 0 {
+		return nil, operations.ErrInvalid
+	}
+	rows, err := s.dbQuery(ctx, "inbox.completed.runners", `SELECT DISTINCT i.id FROM runner_demands d JOIN instances i ON i.id=d.runner_name
+		WHERE d.scale_set_id=? AND d.status_rank=? AND i.state IN (?,?,?) ORDER BY i.id`, scaleSetID,
+		demandRank(operations.DemandJobCompleted), operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning)
+	if err != nil {
+		return nil, fmt.Errorf("list completed runners: %w", err)
+	}
+	var runners []string
+	for rows.Next() {
+		var runner string
+		if err := rows.Scan(&runner); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan completed runner: %w", err)
+		}
+		runners = append(runners, runner)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, fmt.Errorf("iterate completed runners: %w", err)
+	}
+	var drained []string
+	for _, runner := range runners {
+		busy, err := s.RunnerActiveJob(ctx, scaleSetID, runner)
+		if err != nil {
+			return drained, err
+		}
+		if busy {
+			continue
+		}
+		instance, err := scanInstance(s.dbRow(ctx, "inbox.completed.instance", `SELECT id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at FROM instances WHERE id=?`, runner))
+		if err != nil {
+			return drained, err
+		}
+		// The row may have moved since the query. Anything but a live runner state
+		// is already handled, and projecting it would report a drain not made.
+		switch instance.State {
+		case operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning:
+		default:
+			continue
+		}
+		err = s.projectDemandRank(ctx, instance, operations.DemandJobCompleted)
+		if errors.Is(err, operations.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return drained, err
+		}
+		drained = append(drained, runner)
+	}
+	return drained, nil
+}
+
 func (s *Store) enqueueDemandDrain(ctx context.Context, instance operations.Instance, dependencies []string) error {
 	now := s.instant()
 	id := "event-drain-" + instance.ID

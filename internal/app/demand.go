@@ -46,6 +46,14 @@ type OverdueDemandStore interface {
 	ExpireOverdueDemands(context.Context, int64, operations.OverdueDemandCriteria) (int64, error)
 }
 
+// CompletedRunnerDrainStore re-derives the event drain of every live runner
+// whose own job GitHub has durably completed (issue #442). It is optional for
+// the same reason OverdueDemandStore is: a store without it leaves the message
+// path as the only projection, which is the pre-#442 behaviour.
+type CompletedRunnerDrainStore interface {
+	DrainCompletedRunners(context.Context, int64) ([]string, error)
+}
+
 type GitHubQueueSnapshot interface {
 	ObservedAt() time.Time
 	QueuedJobs() []githubscaleset.WorkflowJob
@@ -770,6 +778,28 @@ func (c DemandCoordinator) ExpireOverdueDemands(ctx context.Context, bindings []
 	return total, nil
 }
 
+// DrainCompletedRunners drains, across every binding, each live runner whose
+// own job is durably JobCompleted. The message path projects the same drain,
+// but only once: a projection that fails after its batch committed is never
+// redelivered, because the replacement session opens past the message (issue
+// #442). Re-deriving the drain from durable rows on the tick needs no
+// redelivery at all.
+func (c DemandCoordinator) DrainCompletedRunners(ctx context.Context, bindings []Binding) ([]string, error) {
+	store, ok := c.Store.(CompletedRunnerDrainStore)
+	if !ok {
+		return nil, nil
+	}
+	var drained []string
+	for _, binding := range bindings {
+		runners, err := store.DrainCompletedRunners(ctx, binding.durableKey())
+		drained = append(drained, runners...)
+		if err != nil {
+			return drained, err
+		}
+	}
+	return drained, nil
+}
+
 func containsFold(values []string, want string) bool {
 	for _, value := range values {
 		if strings.EqualFold(value, want) {
@@ -836,8 +866,11 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 					projectionErr = errors.Join(projectionErr, err)
 				}
 			}
-			// Every event is already durable. Attempt independent neighbors, but
-			// retain the nack so redelivery retries every failed projection.
+			// Every event is already durable. Attempt independent neighbors and
+			// retain the nack, but do not count on a redelivery: the batch has
+			// already advanced the durable cursor, and a replacement session
+			// opens past this message. The completion drain is re-derived from
+			// the durable rows on every tick instead (issue #442).
 			return projectionErr
 		}
 		return nil
