@@ -241,3 +241,76 @@ func TestPartitionHeadroomLeavesAnUnsizableClaimUnknown(t *testing.T) {
 		t.Fatalf("no claim has no share: %v %v", shares, ok)
 	}
 }
+
+// budgetMiniInput is issue #439's node: a Mac mini whose operator budget is 10 CPU
+// and 23 GiB, with every one of its 10 CPUs open to Linux, running the
+// instances given.
+func budgetMiniInput(demands []domain.Demand, instances []domain.Instance) Input {
+	in := macbookInput(demands, instances)
+	in.Config.LinuxCapacity = domain.Resources{CPU: 10, MemoryMB: 23_552, Slots: 4}
+	in.Config.HostBudget = domain.Resources{CPU: 10, MemoryMB: 23_552}
+	in.Host = domain.Fresh(domain.Host{
+		Capacity:  domain.Resources{CPU: 10, MemoryMB: 24_576, Slots: 4},
+		Available: domain.Resources{CPU: 10, MemoryMB: 20_000, Slots: 4},
+	}, testNow)
+	return in
+}
+
+// TestFitsOnceLinuxDrainsAsksOnlyWhatLinuxWorkCannotRelease is issue #439. The
+// standing offer of one (ADR 0082) promises a job that it waits only for this
+// node's own Linux work. Two maestro guests hold 8 of the mini's 10 CPUs for up
+// to their occupancy budget, and nothing a Linux guest does releases them: a
+// 4x8 cannot start until they end, a 2x4 can start beside them. A node full of
+// Linux work, or a host whose measured residual is spent, fits once that Linux
+// work drains.
+func TestFitsOnceLinuxDrainsAsksOnlyWhatLinuxWorkCannotRelease(t *testing.T) {
+	cfg := testConfig()
+	maestros := []domain.Instance{runningInstance(cfg, "maestro-1", "a/repo", "maestro"),
+		runningInstance(cfg, "maestro-2", "b/repo", "maestro")}
+	larges := []domain.Instance{runningInstance(cfg, "large-1", "a/repo", "large"),
+		runningInstance(cfg, "large-2", "b/repo", "large")}
+	cases := map[string]struct {
+		in      Input
+		profile domain.ProfileID
+		want    bool
+	}{
+		"a 4x8 cannot start beside two maestro guests": {
+			in: budgetMiniInput(nil, maestros), profile: "large", want: false},
+		"a 2x4 starts beside two maestro guests": {
+			in: budgetMiniInput(nil, maestros), profile: "medium", want: true},
+		"a 4x8 behind Linux work alone waits only for that work": {
+			in: budgetMiniInput(nil, larges), profile: "large", want: true},
+		"a 4x8 behind one maestro and Linux work waits only for the Linux work": {
+			in: budgetMiniInput(nil, append([]domain.Instance{maestros[0]}, larges...)), profile: "large", want: true},
+		"a queued maestro takes its vector before the 4x8 can": {
+			in:      budgetMiniInput([]domain.Demand{demand("b/repo", 9, time.Minute, "maestro")}, maestros[:1]),
+			profile: "large", want: false},
+		"a queued Linux demand drains like a running one": {
+			in:      budgetMiniInput([]domain.Demand{demand("b/repo", 9, time.Minute, "large")}, maestros[:1]),
+			profile: "large", want: true},
+		"the measured residual is net of Linux work that drains": {
+			in: func() Input {
+				in := budgetMiniInput(nil, larges)
+				in.Host.Value.Available = domain.Resources{}
+				return in
+			}(), profile: "large", want: true},
+		"a static envelope charges a maestro guest too": {
+			in: func() Input {
+				in := budgetMiniInput(nil, maestros)
+				in.Config.ElasticHostEnvelope = false
+				in.Config.HostBudget = domain.Resources{}
+				return in
+			}(), profile: "large", want: false},
+		"a macOS profile keeps ADR 0082's offer": {
+			in: budgetMiniInput(nil, maestros), profile: "maestro", want: true},
+		"a Linux-only node always fits a vector its envelope can hold": {
+			in: input(nil, larges, State{}), profile: "large", want: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := FitsOnceLinuxDrains(tc.in, tc.profile); got != tc.want {
+				t.Fatalf("FitsOnceLinuxDrains(%s) = %v, want %v", tc.profile, got, tc.want)
+			}
+		})
+	}
+}

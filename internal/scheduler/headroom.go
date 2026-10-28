@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"math"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -157,4 +158,46 @@ func cohortSize(in Input, profile domain.ProfileID, waiting []domain.Demand) int
 		}
 	}
 	return size
+}
+
+// FitsOnceLinuxDrains reports whether one instance of a Linux profile could
+// start on this node once every Linux guest and queued Linux demand here has
+// run to its end (issue #439, ADR 0085). It is the promise ADR 0082's standing
+// offer of one makes to the job it attracts: the job waits for this node's own
+// Linux work, which Linux admission and aging bound.
+//
+// What Linux work cannot release stays charged: every live guest of another
+// platform, and every queued macOS demand no guest incarnates yet, which takes
+// its vector before a later Linux job can. A macOS guest holds its vector for up
+// to its occupancy budget, hours on a maestro suite, so a Linux job assigned to
+// wait behind one waits for that, while GitHub never moves it to a sibling with
+// room.
+//
+// The envelope is `freeCapacity`'s, with the same hard bounds the planner
+// admits against -- the Linux-only cap, the physical total and the host budget
+// -- asked of the occupancy that outlasts Linux drain. The measured residual is
+// not: it is net of the very Linux guests that drain, and a host tenant's
+// pressure is ADR 0084's gate, not this rule.
+//
+// A macOS profile, or one the scheduler cannot size, is always true: ADR 0082
+// is unchanged for it.
+func FitsOnceLinuxDrains(in Input, profile domain.ProfileID) bool {
+	definition, known := in.Config.Profiles[profile]
+	if !known || definition.Platform != domain.PlatformLinux {
+		return true
+	}
+	outlasting := make([]domain.Instance, 0, len(in.Instances.Value))
+	for _, instance := range in.Instances.Value {
+		if instance.Platform != domain.PlatformLinux {
+			outlasting = append(outlasting, instance)
+		}
+	}
+	drained := in
+	drained.Host.Value.Available = domain.Resources{CPU: math.MaxInt, MemoryMB: math.MaxInt, Slots: math.MaxInt}
+	free := freeCapacity(drained, outlasting, true)
+	_, macos := partition(normalizedDemands(in))
+	for _, vector := range queuedVectors(in.Config, in.Instances.Value, macos) {
+		free = exhaust(free, vector)
+	}
+	return free.CanFit(definition.Resources)
 }

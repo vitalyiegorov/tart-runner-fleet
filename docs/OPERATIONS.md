@@ -262,7 +262,14 @@ job goes to a sibling whose matching set advertises room
 ([ADR 0084](adr/0084-a-gated-node-keeps-no-standing-offer.md), issue #428). If
 every matching node is behind such a gate, no matching set offers a slot and the
 job can stay assigned to no set until a gate opens. An
-`update drain` keeps the slot. Before the node's first error-free ready tick
+`update drain` keeps the slot. On a node that also runs macOS guests, a Linux
+set keeps the slot only if its vector could start here once every Linux guest
+and queued Linux job on the node has finished. macOS guests and queued macOS
+work stay charged. On the Mac mini (10 CPU budget), two maestro guests hold 8
+CPUs, so its `linux-4x8` sets advertise only what they hold and a 4x8 job goes
+to a sibling, while its `linux-2x4` sets keep the slot
+([ADR 0085](adr/0085-a-standing-offer-waits-only-for-linux-work.md), issue
+#439). A Linux-only node is unchanged. Before the node's first error-free ready tick
 that reports headroom, the set advertises the configured value. After that, any
 tick without such a view (one that failed, is not ready, or reports no
 headroom) keeps the last view, however old it is
@@ -1926,7 +1933,9 @@ rotates every 30 seconds.
 
 Expect a set to advertise what it holds plus one free slot while its node is
 full, or exactly what it holds once one job waits here for a guest or while its
-node is behind a host-pressure gate (ADR 0084), even though
+node is behind a host-pressure gate (ADR 0084), or while running macOS guests
+and queued macOS demand hold the CPU or memory its Linux vector needs
+(ADR 0085), even though
 its scope's queue is not empty. Its scope's
 next job then goes to a sibling whose matching set advertises room, or waits here as the set's one
 not-yet-startable job (ADR 0082).
@@ -1939,9 +1948,14 @@ lists of both nodes:
   has a free slot and a scope it serves has a job queued;
 - a job `queued` in a scope a node serves that `fleet scale-sets audit` shows
   assigned to no set (`assigned=0` on every matching set) for more than a few
-  minutes, while at least one matching node is not behind a host-pressure gate:
-  the standing offer of ADR 0082 should have prevented it. When every matching
-  node is gated (ADR 0084), an unassigned job is expected until a gate opens;
+  minutes, while at least one matching node is neither behind a host-pressure
+  gate nor held by macOS guests or queued macOS demand: the standing offer of
+  ADR 0082 should have prevented it. When every matching node is gated
+  (ADR 0084) or held by running macOS guests and queued macOS demand that the
+  job's vector cannot fit beside (ADR 0085), an unassigned job is expected.
+  GitHub does not reconsider that placement when a guest exits or a gate
+  opens, so the job stays queued: once a matching set advertises room, cancel
+  and rerun it;
 - either of the above while the node's ticks are failing. A tick that cannot
   plan keeps the last view rather than advertising the configured maximum, so
   a struggling node invites no more work than it last knew it could start.
