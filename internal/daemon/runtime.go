@@ -725,7 +725,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	}
 	if canonicalRESTInventory {
 		for scope := range bindingsByScope(bindings) {
-			criticalObservations = append(criticalObservations, "github-rest-"+scope)
+			criticalObservations = append(criticalObservations, telemetry.RESTInventoryObservationPrefix+scope)
 		}
 	}
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: profiles,
@@ -942,7 +942,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
 					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
 					auditInterval: cfg.GitHub.ParkedScaleSetAuditInterval(),
-					observation:   "github-rest-" + scope, now: d.now})
+					observation:   telemetry.RESTInventoryObservationPrefix + scope, now: d.now})
 			}
 		}
 	}
@@ -1753,12 +1753,21 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	}
 	now := r.now().UTC()
 	if wait := r.next.Sub(now); wait > 0 {
-		timer := time.NewTimer(wait)
+		// A budget deferral can outlast the observation TTL. It wakes at the
+		// ordinary pace and re-records the inventory as stale on the rate limit,
+		// so health reads a loop that chose to wait, not one that stopped
+		// (issue #449, ADR 0088).
+		deferred := wait > r.interval
+		timer := time.NewTimer(min(wait, r.interval))
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()
 		case <-timer.C:
+		}
+		if deferred {
+			r.record(r.previous != nil, githubscaleset.ReasonRateLimited)
+			return false, nil
 		}
 		now = r.now().UTC()
 	}
@@ -1766,13 +1775,7 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	r.next = now.Add(r.pace(now, observation))
 	if observation.Err != nil {
 		reason := restObservationReason(observation)
-		if r.health != nil && r.observation != "" {
-			freshness := telemetry.ObservationUnavailable
-			if observation.Freshness == githubscaleset.Stale {
-				freshness = telemetry.ObservationStale
-			}
-			_ = r.health.RecordObservationDetail(r.observation, freshness, reason)
-		}
+		r.record(observation.Freshness == githubscaleset.Stale, reason)
 		return false, &githubscaleset.SessionFailure{Reason: reason, Cause: observation.Err}
 	}
 	r.previous = observation.Snapshot
@@ -1787,6 +1790,19 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
 	return changed, err
+}
+
+// record marks the inventory not refreshed: stale over a prior snapshot, or
+// unavailable when this process has never taken one.
+func (r *restQueueIngester) record(stale bool, reason string) {
+	if r.health == nil || r.observation == "" {
+		return
+	}
+	freshness := telemetry.ObservationUnavailable
+	if stale {
+		freshness = telemetry.ObservationStale
+	}
+	_ = r.health.RecordObservationDetail(r.observation, freshness, reason)
 }
 
 // foreignSelectors reuses the completed audit's scope-qualified names. Neither

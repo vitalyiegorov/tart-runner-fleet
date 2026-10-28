@@ -1576,10 +1576,10 @@ fleet status --endpoint "unix://$ROOT/state/fleetd.sock" --output json |
 | `session_create_failed` | The replacement session could not be opened. | Check GitHub App installation permissions and rate limits. |
 | `session_held` | GitHub refused the session with `409`: another session still holds the scale set. Usually this node's own previous process, whose session GitHub has not expired yet (after a crash, a restart, or a laptop waking). The binding waits and retries each poll; the node keeps running ([ADR 0063](adr/0063-an-absent-nodes-work-is-adopted-a-failing-node-excludes-itself.md)). | None if it clears within minutes. If it persists, another daemon is configured with this scale set: run `fleet config validate` over every node's configuration (ADR 0034 §2). |
 | `message_poll_failed` | Ordinary long-poll failure that no closer classification fits. | None if transient. |
-| `rate_limited` | GitHub answered with its primary or a secondary rate limit. On a `github-rest-*` observation the inventory is already waiting for the window reset and keeps the last snapshot stale. | None if occasional. A count that climbs across hours means the nodes sharing this installation poll too aggressively — widen the poll interval before GitHub widens it for you, or give a busy scope its own installation. |
+| `rate_limited` | GitHub answered with its primary or a secondary rate limit. On a `github-rest-*` observation the inventory is already waiting for the window reset, keeps the last snapshot stale, and re-records this detail at the poll interval while it waits, so a wait never reads as an expired observation ([ADR 0088](adr/0088-a-slow-rest-inventory-degrades-its-scope-not-the-node.md)). | None if occasional. A count that climbs across hours means the nodes sharing this installation poll too aggressively — widen the poll interval before GitHub widens it for you, or give a busy scope its own installation. |
 | `server_error` | GitHub answered 5xx: the fault is GitHub's own, not this node's network or credentials. | Wait it out; escalate only if it persists across regions or outlives GitHub's status page. |
 | `demand_commit_conflict` | The durable store refused a broker message. This is not a network condition and redelivering the same message cannot clear it: the fleet holds state the message contradicts. | Read the `binding ingest failure` warning for the scope, profile, and scale set, then see [ADR 0035](adr/0035-a-broker-message-id-is-unique-only-within-its-sequence.md). A restarted message-id sequence resolves itself on the next colliding delivery; anything else is a genuine durable contradiction and needs the demand rows read. |
-| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out for a reason that is neither a rate limit nor a GitHub 5xx (those carry `rate_limited` and `server_error` on the same `github-rest-*` observation). | Check API reachability and the App's Actions permission. |
+| `queue_observation_failed` / `queue_observation_stale` | The REST queue inventory is unavailable or aged out for a reason that is neither a rate limit nor a GitHub 5xx (those carry `rate_limited` and `server_error` on the same `github-rest-*` observation). Each request has its own `githubTimeoutSeconds`; the refresh as a whole does not, so a burst of active runs makes it longer, not failed ([ADR 0088](adr/0088-a-slow-rest-inventory-degrades-its-scope-not-the-node.md)). | Check API reachability and the App's Actions permission. |
 | `queue_reconcile_failed` | The REST queue snapshot could not be persisted. | Check the database and disk. |
 
 The rate-limited `component loop failure` warning now carries the same
@@ -1759,7 +1759,11 @@ rather than permanently stuck. `zero instances but not healthy (...)` names what
 is actually blocking the candidate: the daemon has stopped ticking cleanly or
 cannot take one of its critical observations, and no release will apply until it
 does. Before ADR 0052 both states rendered as a drain that could run forever,
-and one node stayed `prepare update: exit status 5` for a day (#320).
+and one node stayed `prepare update: exit status 5` for a day (#320). A stale
+`github-rest-*` inventory whose loop is still writing it does not block a
+release ([ADR 0088](adr/0088-a-slow-rest-inventory-degrades-its-scope-not-the-node.md),
+#449). It still makes the node NOT READY. An `unavailable` or expired one does
+block a release.
 
 To ask the question directly, without waiting for a doctor run:
 

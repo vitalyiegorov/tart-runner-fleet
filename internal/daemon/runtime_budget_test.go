@@ -135,3 +135,37 @@ func reasonOf(err error) string {
 	}
 	return ""
 }
+
+// Issue #449: a budget deferral waits up to an hour for the window reset, and
+// the observation used to go unwritten for that whole wait. After the critical
+// observation TTL it read as expired, the mark of a stopped loop, so a node
+// that had only decided to wait was unhealthy and refused every release until
+// the reset. The deferring ingester wakes at its ordinary pace, spends nothing,
+// and re-records its inventory as stale on the rate limit.
+func TestRESTQueueIngesterKeepsWritingItsObservationWhileDeferred(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 28, 14, 10, 0, 0, time.UTC)
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"builder"},
+		CriticalObservations: []string{"github-rest-budgie-org"}})
+	_ = health.RecordObservation("github-rest-budgie-org", telemetry.ObservationFresh)
+	for name, previous := range map[string]*githubscaleset.Snapshot{"stale": {}, "unavailable": nil} {
+		observer := &scriptedQueueObserver{observations: []githubscaleset.Observation{{Freshness: githubscaleset.Fresh}}}
+		ingester := &restQueueIngester{observer: observer, interval: time.Millisecond, health: health,
+			observation: "github-rest-budgie-org", now: func() time.Time { return now },
+			previous: previous, next: now.Add(20 * time.Minute)}
+		changed, err := ingester.IngestChanged(ctx)
+		if changed || err != nil || observer.calls != 0 {
+			t.Fatalf("%s: deferred refresh = changed %v err %v refreshes %d, want a quiet wait", name, changed, err, observer.calls)
+		}
+		want := telemetry.ObservationStale
+		if previous == nil {
+			want = telemetry.ObservationUnavailable
+		}
+		if got := health.Snapshot().Observations["github-rest-budgie-org"]; got.Freshness != want || got.Detail != githubscaleset.ReasonRateLimited {
+			t.Fatalf("%s: observation while deferred = %+v, want %s/%s", name, got, want, githubscaleset.ReasonRateLimited)
+		}
+		if !ingester.next.Equal(now.Add(20 * time.Minute)) {
+			t.Fatalf("%s: the wait moved the reset horizon to %v", name, ingester.next)
+		}
+	}
+}
