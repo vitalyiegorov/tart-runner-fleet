@@ -13,6 +13,10 @@ and leaves everything else in it, and in
 cannot admit still releases its sessions, still reports NOT READY, and still
 fails its own `session yield` check.
 
+Amended by [ADR 0088](0088-a-slow-rest-inventory-degrades-its-scope-not-the-node.md):
+`healthy` also excuses a stale `github-rest-*` inventory whose record is still
+being written.
+
 ## Context
 
 ADR 0047 gave a node under host pressure a duty: release the scale-set sessions
