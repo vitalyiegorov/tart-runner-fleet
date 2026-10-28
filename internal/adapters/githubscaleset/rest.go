@@ -72,9 +72,12 @@ func NewObserver(c ObserverConfig) (*Observer, error) {
 		clock: c.Clock, timeout: c.Timeout, includeRunners: c.IncludeRunnerInventory, cache: map[string]cachedPage{}}, nil
 }
 
+// Refresh takes one inventory. The timeout bounds each request, never the
+// pass: a refresh is one listing per run status plus one per active run, issued
+// in sequence, so its length grows with the queue. Bounding the whole pass made
+// every node's inventory of a busy repository fail at the same moment during a
+// burst although GitHub answered each request promptly (issue #449).
 func (o *Observer) Refresh(ctx context.Context, previous *Snapshot) Observation {
-	ctx, cancel := context.WithTimeout(ctx, o.timeout)
-	defer cancel()
 	s, err := o.fetch(ctx)
 	if err == nil {
 		return Observation{Freshness: Fresh, Snapshot: s, Budget: o.budget}
@@ -214,47 +217,10 @@ func activeRun(status string) bool {
 func (o *Observer) pages(ctx context.Context, path string, target any, consume func()) error {
 	next, _ := o.resolve(path) // all call sites use fixed, already-valid URL templates
 	for next != nil {
-		token, err := o.tokens.Token(ctx)
-		if err != nil {
-			return fmt.Errorf("authenticate GitHub App: %w", err)
-		}
 		key := next.String()
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, key, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		cached, revalidate := o.cache[key]
-		if revalidate {
-			req.Header.Set("If-None-Match", cached.etag)
-		}
-		resp, err := o.http.Do(req)
+		page, err := o.page(ctx, key)
 		if err != nil {
 			return err
-		}
-		// Each answer replaces the budget, so a headerless one leaves it
-		// unobserved instead of carrying an older window forward.
-		o.budget = ParseBudget(resp.Header)
-		page := cached
-		switch {
-		case revalidate && resp.StatusCode == http.StatusNotModified:
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-			if err := resp.Body.Close(); err != nil {
-				return fmt.Errorf("close GitHub response: %w", err)
-			}
-		case resp.StatusCode < 200 || resp.StatusCode >= 300:
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-			_ = resp.Body.Close()
-			return ClassifyResponse(resp, o.clock.Now(), nil)
-		default:
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
-			closeErr := resp.Body.Close()
-			if err != nil {
-				return fmt.Errorf("read GitHub response: %w", err)
-			}
-			if closeErr != nil {
-				return fmt.Errorf("close GitHub response: %w", closeErr)
-			}
-			page = cachedPage{etag: resp.Header.Get("ETag"), body: body, link: resp.Header.Get("Link")}
 		}
 		if err := json.Unmarshal(page.body, target); err != nil {
 			return fmt.Errorf("decode GitHub response: %w", err)
@@ -273,6 +239,52 @@ func (o *Observer) pages(ctx context.Context, path string, target any, consume f
 		next = nextURL
 	}
 	return nil
+}
+
+// page fetches one page within its own timeout, revalidating a cached copy.
+func (o *Observer) page(ctx context.Context, key string) (cachedPage, error) {
+	ctx, cancel := context.WithTimeout(ctx, o.timeout)
+	defer cancel()
+	token, err := o.tokens.Token(ctx)
+	if err != nil {
+		return cachedPage{}, fmt.Errorf("authenticate GitHub App: %w", err)
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, key, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	cached, revalidate := o.cache[key]
+	if revalidate {
+		req.Header.Set("If-None-Match", cached.etag)
+	}
+	resp, err := o.http.Do(req)
+	if err != nil {
+		return cachedPage{}, err
+	}
+	// Each answer replaces the budget, so a headerless one leaves it
+	// unobserved instead of carrying an older window forward.
+	o.budget = ParseBudget(resp.Header)
+	switch {
+	case revalidate && resp.StatusCode == http.StatusNotModified:
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if err := resp.Body.Close(); err != nil {
+			return cachedPage{}, fmt.Errorf("close GitHub response: %w", err)
+		}
+		return cached, nil
+	case resp.StatusCode < 200 || resp.StatusCode >= 300:
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return cachedPage{}, ClassifyResponse(resp, o.clock.Now(), nil)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return cachedPage{}, fmt.Errorf("read GitHub response: %w", err)
+	}
+	if closeErr != nil {
+		return cachedPage{}, fmt.Errorf("close GitHub response: %w", closeErr)
+	}
+	return cachedPage{etag: resp.Header.Get("ETag"), body: body, link: resp.Header.Get("Link")}, nil
 }
 
 func (o *Observer) resolve(path string) (*url.URL, error) {

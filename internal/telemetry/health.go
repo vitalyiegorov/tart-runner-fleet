@@ -304,6 +304,16 @@ type ObservationMetric struct {
 // predicate that reads it cannot drift apart.
 const SessionYieldedObservation = "session_yielded"
 
+// RESTInventoryObservationPrefix names a scope's REST job inventory among the
+// critical observations. Healthy excuses one that is stale — it answered at
+// least once in this process and its loop is still writing it — because a
+// slow, failing or budget-deferred GitHub listing is an external answer to a
+// working loop, and the scale-set stream for the same scope is judged on its
+// own (ADR 0088, issue #449). Ready excuses none of it. A constant so the
+// daemon that names the observation and the predicate that reads it cannot
+// drift apart.
+const RESTInventoryObservationPrefix = "github-rest-"
+
 type HostPressureMetric struct {
 	AvailableMemoryMiB int64
 	FreeDiskGiB        int64
@@ -1292,8 +1302,11 @@ func (h *Health) Ready() HealthResult { return h.readiness(false) }
 
 // Healthy is the weaker of the two predicates ADR 0052 split readiness into:
 // this process is live and ticking, its store is writable, and every critical
-// observation is either fresh or stale for exactly one reason the node chose —
-// it withdrew the sessions behind it under ADR 0047 because it could not admit.
+// observation is either fresh or stale for one of two reasons that are not a
+// fault of this process: the node withdrew the sessions behind it under ADR
+// 0047 because it could not admit, or a scope's REST inventory that has
+// answered before is now slow, refused or deferred on GitHub's budget (ADR
+// 0088).
 //
 // It exists because a release transaction and the scheduler ask different
 // questions of the same daemon. The transaction asks whether the daemon is a
@@ -1310,17 +1323,18 @@ func (h *Health) Ready() HealthResult { return h.readiness(false) }
 func (h *Health) Healthy() HealthResult { return h.readiness(true) }
 
 // readiness computes both predicates from one body, so ready can never drift
-// from healthy. excuseSessionYield is the whole difference between them: a
-// critical observation that is stale because this node released the session
-// behind it records a decision, not a failed observation.
-func (h *Health) readiness(excuseSessionYield bool) HealthResult {
-	return readinessResult(h.Snapshot(), excuseSessionYield)
+// from healthy. excuseStale is the whole difference between them: a critical
+// observation that is stale because this node released the session behind it
+// records a decision, and a stale REST inventory records GitHub's answer to a
+// working loop; neither is a failed observation of this process.
+func (h *Health) readiness(excuseStale bool) HealthResult {
+	return readinessResult(h.Snapshot(), excuseStale)
 }
 
 // readinessResult is the judgement as a pure function of one snapshot, so the
 // status document and the health accessors can never disagree about whether
 // this node is working — the property admissionResult already holds.
-func readinessResult(snapshot Snapshot, excuseSessionYield bool) HealthResult {
+func readinessResult(snapshot Snapshot, excuseStale bool) HealthResult {
 	now := snapshot.Now
 	reasons := make(map[string]struct{})
 	if snapshot.LastSuccessfulTick.IsZero() {
@@ -1336,11 +1350,12 @@ func readinessResult(snapshot Snapshot, excuseSessionYield bool) HealthResult {
 				reasons["critical_observation_expired"] = struct{}{}
 			}
 		case ObservationStale:
-			// A yielded binding is still written every tick. The excuse holds only
-			// while that keeps being true: a withdrawal whose own record has expired
-			// is evidence the loop stopped, which is the fault healthiness exists to
-			// catch.
-			if excuseSessionYield && observation.Detail == SessionYieldedObservation {
+			// A yielded binding and a REST inventory are still written every tick
+			// or refresh. The excuse holds only while that keeps being true: a
+			// record that has expired is evidence the loop stopped, which is the
+			// fault healthiness exists to catch.
+			if excuseStale && (observation.Detail == SessionYieldedObservation ||
+				strings.HasPrefix(name, RESTInventoryObservationPrefix)) {
 				if observation.ObservedAt.IsZero() || now.Sub(observation.ObservedAt) > snapshot.ObservationTTL {
 					reasons["critical_observation_expired"] = struct{}{}
 				}
