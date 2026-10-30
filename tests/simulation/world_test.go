@@ -368,6 +368,38 @@ func macOSOnlyNodeWorld() worldConfig {
 	return cfg.servingOnly(domain.PlatformMacOS)
 }
 
+// hostProcessNodeWorld is ADR 0090's second daemon instance on mac-studio:
+// iOS Maestro jobs as host processes, each leasing its own simulator from the
+// host's simlock worker, inside the owner's 6 vCPU / 14 GiB share of the
+// 14-core / 36 GiB machine. The job's vector is 1 vCPU / 2 GiB because the
+// simulator is the simlock worker's process, not the job's.
+//
+// It is its own world because it reaches a state no other can: more than two
+// live macOS instances. Every other world declares a macOS profile with
+// `maxActive` at most two -- Apple's guest limit -- so a macOS cohort of five,
+// and every reservation, cap, and fair-share rule above two macOS instances,
+// was unreachable by the generator. The backend itself is below the seam
+// (ADR 0031): a host process that exits is, to the fleet, a guest that powered
+// off, and the world models exactly that.
+func hostProcessNodeWorld() worldConfig {
+	cfg := defaultWorld()
+	cfg.Name = "mac-studio-host-sim"
+	cfg.PhysicalCPU = 14
+	cfg.PhysicalMemoryMB = 36_864
+	cfg.Guards.MaxLoadAverage = 28
+	cfg.Scheduler.LinuxCapacity = domain.Resources{CPU: 6, MemoryMB: 14_336, Slots: 5}
+	cfg.Scheduler.HostBudget = domain.Resources{CPU: 6, MemoryMB: 14_336}
+	cfg.Scheduler.MixedPlatformAdmission = false
+	cfg.Scheduler.MixedProfileCohorts = false
+	profiles := map[domain.ProfileID]domain.Profile{"host-sim": {ID: "host-sim", Platform: domain.PlatformMacOS,
+		Route: "trf-macos-arm64-host-sim", Resources: domain.Resources{CPU: 1, MemoryMB: 2_048, Slots: 1},
+		MaxActive: 5, OccupancyBudget: simOccupancyBudget}}
+	cfg.Scheduler.Profiles = profiles
+	cfg.Bindings = simBindings(profiles)
+	cfg.Profiles = sortedProfileIDs(profiles)
+	return cfg
+}
+
 // servingOnly narrows a world to the profiles of one platform, keeping the
 // three coupled fields — the scheduler's profile map, the bindings derived from
 // it, and the generator's draw list — in agreement. They are set together

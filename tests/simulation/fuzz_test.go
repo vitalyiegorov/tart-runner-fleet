@@ -3,6 +3,8 @@ package simulation_test
 import (
 	"flag"
 	"testing"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
 
 // The fuzz driver is bounded by flags so one binary serves every budget:
@@ -106,6 +108,40 @@ func TestWideLinuxNodeHoldsMoreThanFourGuests(t *testing.T) {
 	}
 	if peak <= 4 {
 		t.Fatalf("the wide node never held more than %d guests across its seeds", peak)
+	}
+}
+
+// TestSimFuzzHostProcessNode is the same sweep on ADR 0090's host-process node.
+// Its own arm because only this world can hold more than two macOS instances.
+func TestSimFuzzHostProcessNode(t *testing.T) {
+	t.Parallel()
+	sweep(t, "TestSimFuzzHostProcessNode", hostProcessNodeWorld())
+}
+
+// TestHostProcessNodeHoldsMoreThanTwoMacOSInstances guards that world's reason
+// to exist, as TestWideLinuxNodeHoldsMoreThanFourGuests does for its own: a
+// generator that never fills a third macOS slot would let the sweep pass while
+// proving nothing beyond Apple's guest limit.
+func TestHostProcessNodeHoldsMoreThanTwoMacOSInstances(t *testing.T) {
+	t.Parallel()
+	cfg := hostProcessNodeWorld()
+	peak := 0
+	for seed := int64(1); seed <= 8 && peak <= 2; seed++ {
+		w := newWorld(t, cfg, generateTrace(seed, *ticksFlag, cfg))
+		w.run()
+		for _, observation := range w.observations {
+			live := 0
+			for _, instance := range observation.Instances {
+				if instance.ConsumesHostResources() && instance.Platform == domain.PlatformMacOS {
+					live++
+				}
+			}
+			peak = max(peak, live)
+		}
+		w.close()
+	}
+	if peak <= 2 {
+		t.Fatalf("the host-process node never held more than %d macOS instances across its seeds", peak)
 	}
 }
 
