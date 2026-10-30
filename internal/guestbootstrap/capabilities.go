@@ -81,7 +81,7 @@ type capabilityManifest struct {
 	Capabilities  []string `json:"capabilities"`
 }
 
-// checkCapabilities compares what the daemon expected of this guest against what
+// CheckCapabilities compares what the daemon expected of this guest against what
 // the guest itself says it provides.
 //
 // It is fail-closed in both directions and deliberately so. Requiring nothing
@@ -90,7 +90,7 @@ type capabilityManifest struct {
 // failure, not a pass: a declaration that went stale when an image was rebuilt
 // is the only thing this check catches which the configuration gates cannot, and
 // treating an absent manifest as consent would catch nothing at all.
-func checkCapabilities(path string, required []string) error {
+func CheckCapabilities(path string, required []string) error {
 	if len(required) == 0 {
 		return nil
 	}

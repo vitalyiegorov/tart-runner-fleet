@@ -35,6 +35,11 @@ const (
 // guest knows what it created, and that side is `internal/daemon`.
 const ContainerFlag = "--container"
 
+// HelperPath is where every guest image installs this helper, and so the fourth
+// token of the `exec -i <instance> <helper>` vector the daemon sends. The host
+// launcher of ADR 0090 accepts exactly this token in the same position.
+const HelperPath = "/usr/local/libexec/tart-runner-fleet-bootstrap"
+
 var (
 	ErrInput      = errors.New("invalid runner bootstrap input")
 	ErrFilesystem = errors.New("runner bootstrap filesystem validation failed")
@@ -102,10 +107,10 @@ func (b Bootstrap) Run(ctx context.Context, stdin io.Reader, config Config) erro
 	// Before a byte of standard input is read, so a capability failure provably
 	// cannot carry the JIT configuration and is therefore the one failure this
 	// helper is allowed to describe out loud.
-	if err := checkCapabilities(validated.capabilityManifestPath(), validated.RequiredCapabilities); err != nil {
+	if err := CheckCapabilities(validated.capabilityManifestPath(), validated.RequiredCapabilities); err != nil {
 		return err
 	}
-	jit, err := readJIT(stdin, validated.MaxJITBytes)
+	jit, err := ReadJIT(stdin, validated.MaxJITBytes)
 	if err != nil {
 		return err
 	}
@@ -161,7 +166,10 @@ func inside(root, path string) bool {
 	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func readJIT(reader io.Reader, maximum int) (string, error) {
+// ReadJIT reads one JIT configuration from reader, bounded by maximum bytes,
+// and zeroes every byte it buffered. It is shared by the guest helper and the
+// host launcher (ADR 0090), which receive the same value over the same channel.
+func ReadJIT(reader io.Reader, maximum int) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(reader, int64(maximum)+1))
 	if err != nil || len(data) == 0 || len(data) > maximum {
 		zero(data)

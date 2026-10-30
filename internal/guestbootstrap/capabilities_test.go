@@ -54,16 +54,16 @@ func TestCapabilityCheckIsFailClosed(t *testing.T) {
 			if !test.absent {
 				path = writeManifest(t, test.manifest)
 			}
-			err := checkCapabilities(path, test.required)
+			err := CheckCapabilities(path, test.required)
 			if test.wantNoFailed {
 				if err != nil {
-					t.Fatalf("checkCapabilities() = %v, want nil", err)
+					t.Fatalf("CheckCapabilities() = %v, want nil", err)
 				}
 				return
 			}
 			var failure *CapabilityError
 			if !errors.As(err, &failure) {
-				t.Fatalf("checkCapabilities() = %v, want a *CapabilityError", err)
+				t.Fatalf("CheckCapabilities() = %v, want a *CapabilityError", err)
 			}
 			if test.wantMissing != "" {
 				if failure.MissingCapability != test.wantMissing || failure.Unverifiable() {

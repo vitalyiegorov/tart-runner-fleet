@@ -24,7 +24,7 @@ const (
 	OperationProvision = "clone"
 	OperationDrain     = "deregister"
 	defaultWorkFolder  = "_work"
-	bootstrapHelper    = "/usr/local/libexec/tart-runner-fleet-bootstrap"
+	bootstrapHelper    = guestbootstrap.HelperPath
 	maxJITBytes        = 1 << 20
 )
 
