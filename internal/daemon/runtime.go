@@ -476,6 +476,7 @@ type dependencies struct {
 	// configured execution technology is actually usable on this machine.
 	preflight       func(context.Context, config.Config) error
 	linuxImage      func(config.Config) string
+	macOSImage      func(config.Config) string
 	openConfig      func(string) (io.ReadCloser, error)
 	openStore       func(context.Context, string) (runtimeStore, error)
 	loadKey         func(context.Context, string, string, string) (*credentials.Secret, error)
@@ -554,6 +555,7 @@ func newDependencies(goos string) dependencies {
 		executes:   node.executes,
 		preflight:  node.preflight,
 		linuxImage: node.linuxImage,
+		macOSImage: node.macOSImage,
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
 		openConfig: func(path string) (io.ReadCloser, error) { return os.Open(path) },
 		openStore:  func(ctx context.Context, path string) (runtimeStore, error) { return sqlite.Open(ctx, path) },
@@ -979,7 +981,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
 					Registration: control, Bootstrap: d.bootstrap(cfg), Bases: map[domain.Platform]string{
-						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
+						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: d.macOSImage(cfg)}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,

@@ -67,6 +67,10 @@ linters:
               desc: use the internal/executor port; a backend adapter is chosen only in internal/daemon
             - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/podman
               desc: use the internal/executor port; a backend adapter is chosen only in internal/daemon
+            - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/hostprocess
+              desc: use the internal/executor port; a backend adapter is chosen only in internal/daemon (ADR 0090)
+            - pkg: github.com/vitalyiegorov/tart-runner-fleet/internal/hostlauncher
+              desc: the launcher runs as the runner user behind sudo; only its adapter and command may import it (ADR 0090)
     nolintlint:
       require-explanation: true
       require-specific: true

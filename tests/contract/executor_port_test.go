@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/hostprocess"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/podman"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/tart"
@@ -46,6 +47,7 @@ import (
 var (
 	_ executor.Backend = (*tart.Adapter)(nil)
 	_ executor.Backend = (*podman.Adapter)(nil)
+	_ executor.Backend = (*hostprocess.Adapter)(nil)
 )
 
 // One backend serves every caller. These assignments fail to compile the moment
@@ -57,6 +59,8 @@ var (
 	_ discharge.VM           = executor.Backend(nil)
 	_ executor.CommandRunner = tart.ExecRunner{}
 	_ executor.CommandRunner = podman.ExecRunner{}
+	_ executor.CommandRunner = hostprocess.Runner{}
+	_ lifecycle.StdinRunner  = hostprocess.StdinRunner{}
 	_ executor.HostProbe     = (*macos.Probe)(nil)
 	_ executor.Backend       = (*memoryBackend)(nil)
 )
@@ -161,7 +165,8 @@ func TestNoLayerAboveThePortNamesABackend(t *testing.T) {
 		for _, file := range packageImports(t, filepath.Join(root, pkg)) {
 			for _, path := range file.imports {
 				for _, backend := range []string{"internal/adapters/tart", "internal/adapters/macos",
-					"internal/adapters/linux", "internal/adapters/podman", "internal/adapters/noexecutor"} {
+					"internal/adapters/linux", "internal/adapters/podman", "internal/adapters/noexecutor",
+					"internal/adapters/hostprocess", "internal/hostlauncher"} {
 					if strings.Contains(path, backend) {
 						t.Errorf("%s imports %s; the executor port exists so it does not have to", file.name, path)
 					}
@@ -379,6 +384,9 @@ func conformingBackends(t *testing.T) []conformingBackend {
 		{name: "podman", image: "ghcr.io/example/trf-runner-amd64:1", backend: &podman.Adapter{
 			Runner: newScriptedPodman(), Ownership: registry, Confirmation: portControl{},
 			Image: "ghcr.io/example/trf-runner-amd64:1"}},
+		// The host-process adapter is driven over the REAL launcher, in process:
+		// only sudo and the second user are simulated (ADR 0090).
+		hostProcessBackend(t, registry),
 	}
 }
 

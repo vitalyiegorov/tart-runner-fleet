@@ -1763,9 +1763,11 @@ func (a GitHubApp) hasCredentialSource() bool {
 // ceiling (ADR 0077). A slot beyond it is one no guest can ever occupy, which is
 // capacity the node would advertise and could not serve (ADR 0015).
 //
-// macOS profiles are not counted: Apple's Virtualization framework runs at most
-// two macOS guests and `maxActive` bounds each profile, so they never need more
-// than the four slots every node may declare. Disk is not a term either: a
+// macOS profiles are not counted on a Tart node: Apple's Virtualization
+// framework runs at most two macOS guests and `maxActive` bounds each profile,
+// so they never need more than the four slots every node may declare. On a
+// host-process node they are the node's only profiles and no guest limit
+// applies, so they are counted exactly as Linux profiles are (ADR 0090). Disk is not a term either: a
 // guest's disk is a sparse floor, not a reservation (ADR 0006), and the host's
 // free-disk floor is checked fresh at every admission instead.
 func (c Config) fillableSlots() int {
@@ -1777,7 +1779,11 @@ func (c Config) fillableSlots() int {
 		envelope.MemoryMiB = min(envelope.MemoryMiB, c.HostBudget.MemoryMiB)
 	}
 	fillable := 0
-	for _, raw := range c.Linux.Profiles {
+	profiles := c.Linux.Profiles
+	if c.RunsHostProcesses() {
+		profiles = c.budgetedProfiles()
+	}
+	for _, raw := range profiles {
 		profile := raw.normalized()
 		if profile.Resources.CPU <= 0 || profile.Resources.MemoryMiB <= 0 {
 			continue

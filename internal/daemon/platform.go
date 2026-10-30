@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/hostprocess"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/linux"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/macos"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/noexecutor"
@@ -61,6 +62,9 @@ type platform struct {
 	// VM on node A, an OCI reference on node B. It is the one dimension of
 	// executor.InstanceSpec whose meaning is a property of the backend.
 	linuxImage func(config.Config) string
+	// macOSImage is what a macOS instance is made from: the Tart base VM, or the
+	// runner template directory a host-process node clones (ADR 0090).
+	macOSImage func(config.Config) string
 	// guestProbe asks a running guest whether it is still executing anything. It
 	// is the same command runner readiness polls, under a much shorter deadline,
 	// because the question is not "has it booted yet" but "is it still there"
@@ -72,21 +76,113 @@ type platform struct {
 }
 
 // platformFor reports the wiring goos implies. macOS is Tart and the `vm_stat`
-// host probe, unchanged. Every other platform is ADR 0034's second node, whose
+// host probe, unless the node's file names the hostprocess backend: then it is
+// the second daemon instance on the Mac of ADR 0090, and every constructor but
+// the host probe follows. Every other platform is ADR 0034's second node, whose
 // backend its own configuration names.
 func platformFor(goos string) platform {
 	if goos == "darwin" {
-		return applePlatform()
+		return eitherPlatform(config.Config.RunsHostProcesses, hostProcessPlatform(), applePlatform())
 	}
 	return linuxPlatform()
 }
 
-func applePlatform() platform {
+// eitherPlatform is the one place a configuration chooses between two wirings
+// of one operating system, so no constructor can follow the file while another
+// does not.
+func eitherPlatform(choose func(config.Config) bool, chosen, otherwise platform) platform {
+	pick := func(cfg config.Config) platform {
+		if choose(cfg) {
+			return chosen
+		}
+		return otherwise
+	}
+	return platform{
+		executes:  func(cfg config.Config) bool { return pick(cfg).executes(cfg) },
+		preflight: func(ctx context.Context, cfg config.Config) error { return pick(cfg).preflight(ctx, cfg) },
+		host:      func(cfg config.Config) executor.HostProbe { return pick(cfg).host(cfg) },
+		executor:  func(cfg config.Config) app.ExecutorInventory { return pick(cfg).executor(cfg) },
+		newVM: func(store runtimeStore, cfg config.Config, control lifecycle.DrainControl) lifecycle.VMControl {
+			return pick(cfg).newVM(store, cfg, control)
+		},
+		newReaper:  func(store runtimeStore, cfg config.Config) discharge.VM { return pick(cfg).newReaper(store, cfg) },
+		readiness:  func(cfg config.Config) lifecycle.Readiness { return pick(cfg).readiness(cfg) },
+		bootstrap:  func(cfg config.Config) lifecycle.Bootstrapper { return pick(cfg).bootstrap(cfg) },
+		linuxImage: func(cfg config.Config) string { return pick(cfg).linuxImage(cfg) },
+		macOSImage: func(cfg config.Config) string { return pick(cfg).macOSImage(cfg) },
+		guestProbe: func(cfg config.Config) app.GuestProbe { return pick(cfg).guestProbe(cfg) },
+		guestExec:  func(cfg config.Config) executor.CommandRunner { return pick(cfg).guestExec(cfg) },
+	}
+}
+
+func appleHost(cfg config.Config) executor.HostProbe {
+	return &macos.Probe{Timeout: cfg.Timeouts.Tart, PressureAccounting: cfg.Guards.PressureMemoryAccounting}
+}
+
+func macOSBaseVM(cfg config.Config) string { return cfg.MacOS.BaseVM }
+
+// hostSudo is the sudo a host-process node invokes; a test points it at a stub.
+var hostSudo = hostprocess.SudoPath
+
+// hostRunner is the launcher behind sudo, as the runner user. It is the
+// CommandRunner for every verb, the readiness poll, and the liveness probe.
+func hostRunner(cfg config.Config) hostprocess.Runner {
+	runner := hostprocess.Runner{User: cfg.Executor.RunnerUser, Launcher: cfg.HostLauncherPath()}
+	if hostSudo != hostprocess.SudoPath {
+		runner.Sudo = hostSudo
+	}
+	return runner
+}
+
+func newHostProcessAdapter(store runtimeStore, cfg config.Config, control lifecycle.DrainControl) *hostprocess.Adapter {
+	return &hostprocess.Adapter{Runner: hostRunner(cfg), Ownership: store, Confirmation: control,
+		CommandTimeout: cfg.Timeouts.Tart, StopTimeout: containerStopGrace, ConfirmationMaxAge: deletionConfirmationMaxAge}
+}
+
+// hostProcessPlatform is the second daemon instance on a Mac (ADR 0090). It
+// measures the same machine the Tart instance does, with the same probe, and
+// runs each job as a host process under the runner user. The JIT reaches the
+// launcher on sudo's standard input exactly as it reaches a guest helper on
+// `tart exec -i`'s, and the launcher accepts the same `exec` vectors, so the
+// lifecycle's readiness, bootstrap, and liveness code is reused unchanged. A
+// host process has no guest filesystem, so there is no traffic sample.
+func hostProcessPlatform() platform {
 	return platform{
 		executes: func(config.Config) bool { return true },
-		host: func(cfg config.Config) executor.HostProbe {
-			return &macos.Probe{Timeout: cfg.Timeouts.Tart, PressureAccounting: cfg.Guards.PressureMemoryAccounting}
+		preflight: func(ctx context.Context, cfg config.Config) error {
+			return newHostProcessAdapter(nil, cfg, nil).Healthy(ctx)
 		},
+		host:     appleHost,
+		executor: func(cfg config.Config) app.ExecutorInventory { return newHostProcessAdapter(nil, cfg, nil) },
+		newVM: func(store runtimeStore, cfg config.Config, control lifecycle.DrainControl) lifecycle.VMControl {
+			return newHostProcessAdapter(store, cfg, control)
+		},
+		// The reaper omits Confirmation for the reason every other node's does.
+		newReaper: func(store runtimeStore, cfg config.Config) discharge.VM {
+			return newHostProcessAdapter(store, cfg, nil)
+		},
+		readiness: func(cfg config.Config) lifecycle.Readiness {
+			return execReadiness{Runner: hostRunner(cfg), Timeout: cfg.Timeouts.Boot,
+				AttemptTimeout: cfg.Timeouts.Tart, RetryInterval: 250 * time.Millisecond, After: time.After}
+		},
+		bootstrap: func(cfg config.Config) lifecycle.Bootstrapper {
+			return lifecycle.StdinBootstrapper{Runner: hostprocess.StdinRunner{Runner: hostRunner(cfg)},
+				Timeout: cfg.Timeouts.Tart}
+		},
+		linuxImage: func(cfg config.Config) string { return cfg.Linux.BaseVM },
+		macOSImage: func(cfg config.Config) string { return cfg.Executor.Image },
+		guestProbe: func(cfg config.Config) app.GuestProbe {
+			return execGuestProbe{Runner: hostRunner(cfg), Timeout: cfg.GuestLiveness.ProbeTimeout}
+		},
+		guestExec: func(config.Config) executor.CommandRunner { return nil },
+	}
+}
+
+func applePlatform() platform {
+	return platform{
+		executes:  func(config.Config) bool { return true },
+		preflight: func(context.Context, config.Config) error { return nil },
+		host:      appleHost,
 		executor: func(cfg config.Config) app.ExecutorInventory {
 			return &tart.Adapter{CommandTimeout: cfg.Timeouts.Tart, StartTimeout: cfg.Timeouts.Boot}
 		},
@@ -113,6 +209,7 @@ func applePlatform() platform {
 			return lifecycle.StdinBootstrapper{Runner: lifecycle.ExecStdinRunner{Binary: "tart"}, Timeout: cfg.Timeouts.Tart}
 		},
 		linuxImage: func(cfg config.Config) string { return cfg.Linux.BaseVM },
+		macOSImage: macOSBaseVM,
 		guestProbe: func(cfg config.Config) app.GuestProbe {
 			return execGuestProbe{Runner: tart.ExecRunner{}, Timeout: cfg.GuestLiveness.ProbeTimeout}
 		},
@@ -176,6 +273,7 @@ func linuxPlatform() platform {
 			}
 			return cfg.Executor.Image
 		},
+		macOSImage: macOSBaseVM,
 		// A node with no execution technology has no guest to probe, and reporting
 		// an unprobed guest as a refusing one would be an unavailable observation
 		// dressed as a measurement (AGENTS.md §4).

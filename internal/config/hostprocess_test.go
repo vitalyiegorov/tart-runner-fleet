@@ -127,3 +127,23 @@ func TestTheDeployedHostProcessExampleValidates(t *testing.T) {
 		t.Fatal("the host-process example does not name the hostprocess backend")
 	}
 }
+
+// TestAHostProcessNodeFillsSlotsWithItsMacOSProfiles is the slot half of ADR
+// 0090. Apple's two-guest limit is why a macOS profile never justified more
+// than four slots; a host process is not a guest, so on a host-process node the
+// macOS profiles are what fill the envelope, and a Tart node is unchanged.
+func TestAHostProcessNodeFillsSlotsWithItsMacOSProfiles(t *testing.T) {
+	cfg := hostProcessNode()
+	cfg.Linux.MaxInstances = 5
+	cfg.Linux.Capacity = Resources{CPU: 6, MemoryMiB: 14336}
+	cfg.HostBudget = Resources{CPU: 6, MemoryMiB: 14336}
+	cfg.MacOS.Maestro = Profile{ID: "host-sim-1x2", Label: "trf-macos-arm64-1x2", Resources: Resources{CPU: 1, MemoryMiB: 2048}, MaxActive: 5}
+	cfg.MacOS.Builder = Profile{ID: "host-unexposed", Label: "trf-macos-arm64-2x4", Resources: Resources{CPU: 2, MemoryMiB: 4096}, MaxActive: 1}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a host-process node with five 1x2 slots was refused: %v", err)
+	}
+	cfg.Executor = Executor{}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "slots") {
+		t.Fatalf("a Tart node justified five slots with macOS guests: %v", err)
+	}
+}
