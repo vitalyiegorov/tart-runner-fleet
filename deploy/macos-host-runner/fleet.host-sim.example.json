@@ -1,0 +1,56 @@
+{
+  "vmPrefix": "gha-host",
+  "pollSeconds": 20,
+  "maxLinuxWhenMacosIdle": 3,
+  "maxLinuxCpu": 6,
+  "maxLinuxMemoryMb": 12288,
+  "hostBudget": { "cpu": 6, "memoryMb": 12288 },
+  "linuxReservationAgeSeconds": 300,
+  "minFreeDiskGb": 60,
+  "githubTimeoutSeconds": 15,
+  "tartControlTimeoutSeconds": 45,
+  "bootTimeoutSeconds": 180,
+  "linuxProfiles": [],
+  "executor": {
+    "backend": "hostprocess",
+    "image": "/Users/ci-runner/actions-runner-template",
+    "binary": "/usr/local/libexec/tart-runner-fleet-host-launcher",
+    "runnerUser": "ci-runner"
+  },
+  "macosBurst": {
+    "enabled": true,
+    "admissionPolicy": "shared",
+    "baseVm": "unused-on-a-hostprocess-node",
+    "baseImageCapabilities": ["ios-simulator-simlock", "maestro-cli", "node-runtime", "xcode"],
+    "vmPrefix": "gha-host-macos",
+    "builder": { "id": "host-unexposed", "label": "trf-macos-arm64-4x8", "cpu": 4, "memoryMb": 8192, "maxActive": 1 },
+    "maestro": { "id": "host-sim-2x4", "label": "trf-macos-arm64-2x4", "aliases": ["trf-macos-arm64-host-sim"], "cpu": 2, "memoryMb": 4096, "maxActive": 3 }
+  },
+  "github": {
+    "sessionOwner": "mac-studio-host-sim",
+    "canonicalJobInventory": true,
+    "app": { "clientId": "", "keychainService": "", "keychainAccount": "" },
+    "installations": [{ "name": "personal", "installationId": 0 }],
+    "scopes": [
+      {
+        "name": "suuudokuuu",
+        "kind": "repository",
+        "configUrl": "https://github.com/vitalyiegorov/suuudokuuu",
+        "installation": "personal",
+        "targets": ["vitalyiegorov/suuudokuuu"],
+        "scaleSets": [
+          {
+            "profile": "host-sim-2x4",
+            "name": "trf-sudoku-host-sim-studio",
+            "maxCapacity": 3,
+            "labels": ["self-hosted", "trf-macos-arm64-host-sim"],
+            "requiresCapabilities": ["ios-simulator-simlock", "maestro-cli"]
+          }
+        ]
+      }
+    ]
+  },
+  "targets": [
+    { "type": "repo", "slug": "vitalyiegorov/suuudokuuu", "maxActive": 3 }
+  ]
+}

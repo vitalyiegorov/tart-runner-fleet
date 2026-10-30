@@ -175,12 +175,14 @@ type Linux struct {
 // every node whose backend its operating system already decides -- macOS is
 // Tart, and a Linux node that names none is ADR 0034's observe-only node with
 // nothing to provision onto -- and it is `podman` on the x86 Linux node of
-// issue #139.
+// issue #139, and `hostprocess` on the second daemon instance of a Mac that
+// runs macOS jobs as host processes under a dedicated runner user (ADR 0090).
 type ExecutorBackend string
 
 const (
-	ExecutorNone   ExecutorBackend = ""
-	ExecutorPodman ExecutorBackend = "podman"
+	ExecutorNone        ExecutorBackend = ""
+	ExecutorPodman      ExecutorBackend = "podman"
+	ExecutorHostProcess ExecutorBackend = "hostprocess"
 )
 
 // Executor is the container backend of a Linux node. It is absent from every
@@ -211,6 +213,12 @@ type Executor struct {
 	// HoldCommand keeps a created container alive and idle so the JIT bootstrap
 	// can be executed inside it. Empty means the adapter's default.
 	HoldCommand []string
+	// RunnerUser is the account a host-process node's jobs run as (ADR 0090). It
+	// is never the daemon's own user: the daemon reaches it only through
+	// `sudo -n -u <RunnerUser> <launcher>`, so a job cannot read the GitHub App
+	// key, the database, or another runner's JIT configuration. On a host-process
+	// node Image is the runner template directory and Binary the launcher.
+	RunnerUser string
 }
 
 type MacOSAdmissionPolicy string
@@ -636,6 +644,7 @@ type wireExecutor struct {
 	KVMProfiles      []string        `json:"kvmProfiles,omitempty"`
 	EmulatorSlotsDir string          `json:"emulatorSlotsDir,omitempty"`
 	HoldCommand      []string        `json:"holdCommand,omitempty"`
+	RunnerUser       string          `json:"runnerUser,omitempty"`
 }
 
 type wireConfig struct {
@@ -926,7 +935,7 @@ func Encode(w io.Writer, cfg Config) error {
 		wire.Executor = &wireExecutor{Backend: cfg.Executor.Backend, Image: cfg.Executor.Image,
 			Binary: cfg.Executor.Binary, KVMProfiles: append([]string(nil), cfg.Executor.KVMProfiles...),
 			EmulatorSlotsDir: cfg.Executor.EmulatorSlotsDir,
-			HoldCommand:      append([]string(nil), cfg.Executor.HoldCommand...)}
+			HoldCommand:      append([]string(nil), cfg.Executor.HoldCommand...), RunnerUser: cfg.Executor.RunnerUser}
 	}
 	wire.MacOSBurst.Enabled = cfg.MacOS.Enabled
 	if cfg.MacOS.AdmissionPolicy == MacOSAdmissionExclusive {
@@ -1167,7 +1176,7 @@ func decodeExecutor(w *wireExecutor) Executor {
 	}
 	return Executor{Backend: w.Backend, Image: w.Image, Binary: w.Binary, EmulatorSlotsDir: w.EmulatorSlotsDir,
 		KVMProfiles: append([]string(nil), w.KVMProfiles...),
-		HoldCommand: append([]string(nil), w.HoldCommand...)}
+		HoldCommand: append([]string(nil), w.HoldCommand...), RunnerUser: w.RunnerUser}
 }
 
 func Default() Config {
@@ -1498,17 +1507,23 @@ func (c Config) budgetedProfiles() []Profile {
 // the configuration that caused it.
 func (c Config) validateExecutor() error {
 	if c.Executor.Backend == ExecutorNone {
-		if c.Executor.Image != "" || c.Executor.Binary != "" ||
+		if c.Executor.Image != "" || c.Executor.Binary != "" || c.Executor.RunnerUser != "" ||
 			len(c.Executor.KVMProfiles) > 0 || len(c.Executor.HoldCommand) > 0 || c.Executor.EmulatorSlotsDir != "" {
 			return errors.New("executor settings require an executor backend")
 		}
 		return nil
+	}
+	if c.Executor.Backend == ExecutorHostProcess {
+		return c.validateHostProcess()
 	}
 	if c.Executor.Backend != ExecutorPodman {
 		return fmt.Errorf("unsupported executor backend %q", c.Executor.Backend)
 	}
 	if err := domain.ValidateImageReference(c.Executor.Image); err != nil {
 		return fmt.Errorf("executor image: %w", err)
+	}
+	if c.Executor.RunnerUser != "" {
+		return errors.New("executor runnerUser belongs to the hostprocess backend; a container runs as podman's rootless user")
 	}
 	if dir := c.Executor.EmulatorSlotsDir; dir != "" {
 		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir || dir == "/" || strings.ContainsAny(dir, ",\r\n\x00") {
