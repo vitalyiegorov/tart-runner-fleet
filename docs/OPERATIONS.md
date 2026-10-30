@@ -2203,3 +2203,15 @@ registered or running VMs still block inventory. Never delete state rows or
 fabricate a replacement VM. An older incumbent that cannot expose the row to
 recovery also cannot pass the updater's healthy-generation gate; preserve the
 failure evidence and use a separately validated operational recovery path.
+
+## Host-process node (ADR 0090)
+
+A host-process node runs jobs as `ci-runner` through
+`sudo -n -u ci-runner -- /usr/local/libexec/tart-runner-fleet-host-launcher`.
+To inspect it as the daemon user, run
+`sudo -n -u ci-runner -- /usr/local/libexec/tart-runner-fleet-host-launcher list`.
+Each instance is `~ci-runner/trf-instances/<name>`, with the runner's log in
+`control/runner.log`. Power `unknown` means the alive lock could not be read,
+and it is never permission to delete. Never remove an instance directory by
+hand; Reap goes through `fleet operations discharge` as on every other node.
+Setup and host gates: [deploy/macos-host-runner](../deploy/macos-host-runner/README.md).

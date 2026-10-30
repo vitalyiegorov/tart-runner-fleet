@@ -41,6 +41,10 @@ all changes as safety critical.
 - `internal/adapters`: GitHub, SQLite, Tart, container, and host-probe
   implementations. `macos` and `linux` are the two host probes; `noexecutor` is
   the backend of a node that has no execution technology yet (ADR 0034).
+- `internal/hostlauncher`, `cmd/tart-runner-fleet-host-launcher`: the
+  root-installed launcher a host-process node runs jobs through, as the runner
+  user behind sudo (ADR 0090). Only `internal/adapters/hostprocess` and the
+  command may import it.
 - `internal/hostpaths`: where a node keeps its releases, state, and service
   definitions, per platform. The one answer the daemon, the CLI, and the
   renderers all read.

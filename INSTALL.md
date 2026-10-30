@@ -162,3 +162,10 @@ last exit status is zero. If any proof fails, restore the previous immutable
 generation locally; do not delete uncertain VMs or start a second authority.
 For repeated monitoring and incident handoff, continue with
 [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md).
+
+## Host-process node (ADR 0090)
+
+The second daemon instance on a Mac that runs iOS e2e as host processes is set
+up with [deploy/macos-host-runner](deploy/macos-host-runner/README.md), not with
+this guide's launchd steps. It is not rolled out; see the gates in
+[ADR 0090](docs/adr/0090-ios-e2e-runs-as-host-processes-on-a-second-node-per-mac.md).

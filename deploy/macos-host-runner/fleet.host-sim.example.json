@@ -13,7 +13,7 @@
   "linuxProfiles": [],
   "executor": {
     "backend": "hostprocess",
-    "image": "/Users/ci-runner/actions-runner-template",
+    "image": "/usr/local/share/tart-runner-fleet/actions-runner-template",
     "binary": "/usr/local/libexec/tart-runner-fleet-host-launcher",
     "runnerUser": "ci-runner"
   },

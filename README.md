@@ -381,3 +381,5 @@ authority long enough to build and verify its successor.
 - [`docs/MULTI_NODE_PLAN.md`](docs/MULTI_NODE_PLAN.md) — three independent nodes, workload placement, phased delivery
 - [`docs/BASE_IMAGE.md`](docs/BASE_IMAGE.md) — macOS base image provenance, and building a Maestro-only image from a pinned public image
 - [`docs/adr/`](docs/adr) — 57 architecture decision records
+
+- **Host-process iOS e2e (proposed, ADR 0090):** a second node per Mac runs Maestro jobs as host processes under a non-admin runner user, leasing simulators from simlock; see [deploy/macos-host-runner](deploy/macos-host-runner/README.md) and [ADR 0090](docs/adr/0090-ios-e2e-runs-as-host-processes-on-a-second-node-per-mac.md).

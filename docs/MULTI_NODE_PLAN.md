@@ -901,3 +901,15 @@ For every agent implementing a chunk of this plan.
 Every chunk in Phase 2 and Phase 3 must end *validated and deployed*, not merged
 and waiting. A chunk that cannot be deployed on its own is too big and should be
 split.
+
+## Host-process node per Mac (ADR 0090, proposed, not rolled out)
+
+A Mac may run a second `fleet` daemon instance whose node technology is
+`executor.backend: hostprocess`: iOS Maestro jobs run as host processes under a
+non-admin `ci-runner` user and lease simulators from simlock, so they are no
+longer bound by Apple's two-guest limit. The two nodes split the Mac with static
+`hostBudget`s, and each node's pressure probe guards the remainder. mac-studio is
+first, with the target split in
+[ADR 0090](adr/0090-ios-e2e-runs-as-host-processes-on-a-second-node-per-mac.md) §3.
+Rollout is gated on G1 to G6 there and uses
+[deploy/macos-host-runner](../deploy/macos-host-runner/README.md).
