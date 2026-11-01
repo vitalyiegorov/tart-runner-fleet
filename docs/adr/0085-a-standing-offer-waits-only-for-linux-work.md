@@ -133,3 +133,20 @@ keep the standing offer. We accept it for the same reasons as ADR 0084:
   them to the node. That is ADR 0073's original intent for #388, which ADR 0082
   had given back for this shape.
 - Every #397, #422 and #428 simulation is unchanged and green.
+
+## Amendment (issue #461): a host tenant's memory is not Linux work
+
+This ADR left all host-tenant pressure to ADR 0084's gate. The gate closes only
+below the memory reserve, though, so a node whose tenant leaves between the
+reserve and reserve-plus-vector stays open and still offers every set a
+standing slot it cannot start. On 2026-11-01 Omarchy sat in that band (4160
+MiB available, a 1088 MiB envelope). Budgie's `Deploy production / EAS Update`
+(4x8) waited over 90 minutes on it while Ubuntu had room.
+
+`FitsOnceLinuxDrains` therefore keeps the measured **memory** residual charged,
+credited with what this node's own Linux guests hold, since only those drain.
+CPU and slots keep the unbounded drained envelope: vCPUs time-share and aging
+lifts the CPU clamp. An unusable host observation keeps the previous unbounded
+behaviour. `TestIssue461HostTenantMemoryIsNotReleasedByLinuxDrain` covers it.
+Every case of `TestFitsOnceLinuxDrainsAsksOnlyWhatLinuxWorkCannotRelease` is
+unchanged, including a zero measured residual behind draining Linux guests.
