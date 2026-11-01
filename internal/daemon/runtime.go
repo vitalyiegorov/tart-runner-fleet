@@ -942,7 +942,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
 					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
 					auditInterval: cfg.GitHub.ParkedScaleSetAuditInterval(),
-					observation:   telemetry.RESTInventoryObservationPrefix + scope, now: d.now})
+					observation:   telemetry.RESTInventoryObservationPrefix + scope, now: d.now, reporter: reporter})
 			}
 		}
 	}
@@ -1736,6 +1736,7 @@ type restQueueIngester struct {
 	now           func() time.Time
 	previous      *githubscaleset.Snapshot
 	next          time.Time
+	reporter      *failureReporter
 }
 
 type queueObserver interface {
@@ -1782,14 +1783,20 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	coordinator := r.coordinator
 	coordinator.ForeignSelectors = r.foreignSelectors(now)
 	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	// Classified before recording, so the observation detail and the loop
+	// failure reason are always the same closed reason (issue #458).
+	err = classifyReconcileFailure(err)
 	if r.health != nil && r.observation != "" {
 		freshness, detail := telemetry.ObservationFresh, ""
 		if err != nil {
-			freshness, detail = telemetry.ObservationUnavailable, githubscaleset.ReasonQueueReconcileFailed
+			freshness, detail = telemetry.ObservationUnavailable, app.FailureReasonOf(err)
 		}
 		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
-	return changed, classifyReconcileFailure(err)
+	if err != nil && r.reporter != nil {
+		r.reporter.reportReconcile(r.observation, app.FailureReasonOf(err), app.ReconcileStage(err))
+	}
+	return changed, err
 }
 
 // classifyReconcileFailure gives an unclassified reconcile error the same
@@ -1800,8 +1807,7 @@ func classifyReconcileFailure(err error) error {
 	if err == nil {
 		return nil
 	}
-	var reason interface{ FailureReason() string }
-	if errors.As(err, &reason) && reason.FailureReason() != "" {
+	if app.FailureReasonOf(err) != "" {
 		return err
 	}
 	return &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonQueueReconcileFailed, Cause: err}
@@ -2035,6 +2041,28 @@ func (r *failureReporter) report(component, reason string) {
 		return
 	}
 	r.logger.Warn("component loop failure", "component", component, "reason", reason)
+}
+
+// reportReconcile names the REST observation and the closed stage behind one
+// queue reconcile failure (issue #458). The loop failure line carries only the
+// reason, which every reconcile failure shares; the stage is what tells a store
+// commit fault from a routing or share-bound fault. Rate limiting keys on the
+// observation and stage, both bounded, and the concrete cause is never logged.
+func (r *failureReporter) reportReconcile(observation, reason, stage string) {
+	if !githubscaleset.ValidFailureReason(reason) {
+		return
+	}
+	if !app.ValidReconcileStage(stage) {
+		stage = ""
+	}
+	if !r.admit("reconcile\x00" + observation + "\x00" + reason + "\x00" + stage) {
+		return
+	}
+	attributes := []any{"observation", observation, "reason", reason}
+	if stage != "" {
+		attributes = append(attributes, "stage", stage)
+	}
+	r.logger.Warn("rest queue reconcile failure", attributes...)
 }
 
 // reportBinding names the scope, profile, and scale set behind one ingest

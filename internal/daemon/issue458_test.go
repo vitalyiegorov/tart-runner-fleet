@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
@@ -42,8 +44,10 @@ func TestIssue458ReconcileFailureCarriesTheObservationReason(t *testing.T) {
 	binding := app.Binding{Scope: "rnw-repo", ScaleSetID: 9, Targets: []string{"rnw-community/rnw-community"},
 		ScaleSetLabels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"},
 		Profile:        domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS}}
+	var logged bytes.Buffer
 	ingester := restQueueIngester{coordinator: app.DemandCoordinator{Store: store}, bindings: []app.Binding{binding},
-		observer: observer, health: health, observation: "rest", interval: time.Minute, now: func() time.Time { return now }}
+		observer: observer, health: health, observation: "rest", interval: time.Minute, now: func() time.Time { return now },
+		reporter: newFailureReporter(&logged, func() time.Time { return now })}
 
 	_, err = ingester.IngestChanged(ctx)
 	if err == nil {
@@ -58,6 +62,63 @@ func TestIssue458ReconcileFailureCarriesTheObservationReason(t *testing.T) {
 	}
 	if described := githubscaleset.DescribeIngestFailure(err); described.Phase != githubscaleset.PhaseObserve {
 		t.Fatalf("described failure = %+v, want the observe phase", described)
+	}
+	line := logged.String()
+	for _, want := range []string{`msg="rest queue reconcile failure"`, "observation=rest", "reason=queue_reconcile_failed", "stage=" + app.ReconcileStage(err)} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("reconcile log %q lacks %q", line, want)
+		}
+	}
+	if app.ReconcileStage(err) == "" || strings.Contains(line, "closed") {
+		t.Fatalf("reconcile log must name a stage and never the concrete cause: %q", line)
+	}
+}
+
+// TestIssue458ReconcileReportGuardsItsVocabulary drops an unclassified reason,
+// omits an unknown stage rather than logging it, and rate limits repeats.
+func TestIssue458ReconcileReportGuardsItsVocabulary(t *testing.T) {
+	now := time.Date(2026, 11, 1, 17, 16, 0, 0, time.UTC)
+	var logged bytes.Buffer
+	reporter := newFailureReporter(&logged, func() time.Time { return now })
+	reporter.reportReconcile("rest", "database is locked", app.ReconcileStageCommit)
+	if logged.Len() != 0 {
+		t.Fatalf("unclassified reason logged: %q", logged.String())
+	}
+	reporter.reportReconcile("rest", githubscaleset.ReasonQueueReconcileFailed, "database is locked")
+	reporter.reportReconcile("rest", githubscaleset.ReasonQueueReconcileFailed, "database is locked")
+	if line := logged.String(); strings.Count(line, "rest queue reconcile failure") != 1 || strings.Contains(line, "stage=") {
+		t.Fatalf("unknown stage must be omitted and repeats rate limited: %q", line)
+	}
+}
+
+// TestIssue458ObservationDetailMatchesAPreservedReason keeps the observation
+// detail equal to the loop failure reason when the reconcile error already
+// carries its own reason.
+func TestIssue458ObservationDetailMatchesAPreservedReason(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 1, 17, 16, 0, 0, time.UTC)
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{Profiles: []string{"maestro"}, CriticalObservations: []string{"rest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	conflict := &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonDemandCommitConflict}
+	binding := app.Binding{Scope: "rnw-repo", ScaleSetID: 9, Targets: []string{"rnw-community/rnw-community"},
+		ScaleSetLabels: []string{"self-hosted", "macOS", "ARM64", "macos-maestro"},
+		Profile:        domain.Profile{ID: "maestro", Route: "macos-maestro", Platform: domain.PlatformMacOS}}
+	observer := oneRunObserver(t, now, githubscaleset.Repository{Owner: "rnw-community", Name: "rnw-community"}, "2026-11-01T16:40:00Z", `[]`)
+	ingester := restQueueIngester{coordinator: app.DemandCoordinator{Store: conflictingJobStore{Store: store, err: conflict}}, bindings: []app.Binding{binding},
+		observer: observer, health: health, observation: "rest", interval: time.Minute, now: func() time.Time { return now }}
+	_, err = ingester.IngestChanged(ctx)
+	if reasonOf(err) != githubscaleset.ReasonDemandCommitConflict {
+		t.Fatalf("preserved reason = %q (err=%v)", reasonOf(err), err)
+	}
+	if observation := health.Snapshot().Observations["rest"]; observation.Detail != reasonOf(err) {
+		t.Fatalf("observation detail %q differs from loop reason %q", observation.Detail, reasonOf(err))
 	}
 }
 
@@ -80,4 +141,15 @@ func TestIssue458ReconcileFailureKeepsAnExistingReason(t *testing.T) {
 	if strings.Contains(wrapped.Error(), cause.Error()) {
 		t.Fatalf("rendered failure leaked the concrete cause: %q", wrapped.Error())
 	}
+}
+
+// conflictingJobStore refuses every REST snapshot with an already classified
+// error, the shape of a demand commit conflict reaching the reconcile path.
+type conflictingJobStore struct {
+	*sqlite.Store
+	err error
+}
+
+func (s conflictingJobStore) ReconcileGitHubJobSnapshot(context.Context, time.Time, map[int64][]operations.GitHubJobObservation) (bool, error) {
+	return false, s.err
 }
