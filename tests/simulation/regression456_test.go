@@ -55,6 +55,8 @@ func TestIssue456FairSharePromotionAcrossAnotherProfile(t *testing.T) {
 	waiting := oracleDemand(cfg, simControlPlaneRepo, 15, 34*time.Minute, "medium")
 	overtaker := oracleDemand(cfg, "b/repo", 20, 26*time.Minute+30*time.Second, "large")
 	peer := oracleDemand(cfg, "c/repo", 16, 34*time.Minute, "large")
+	otherTierPeer := peer
+	otherTierPeer.Priority.Rank = overtaker.Priority.Rank + 1
 	live := []domain.Instance{oracleInstance(cfg, "trf-large-a", "a/repo", "large"), oracleInstance(cfg, "trf-medium-b", "b/repo", "medium"), oracleInstance(cfg, "trf-small-ops", simControlPlaneRepo, "small")}
 	prefix := []domain.Demand{
 		oracleDemand(cfg, "c/repo", 7, 40*time.Minute, "xl"),
@@ -78,6 +80,7 @@ func TestIssue456FairSharePromotionAcrossAnotherProfile(t *testing.T) {
 		{"another profile cannot donate a position", oracleDemand(cfg, "c/repo", 16, 34*time.Minute, "small"), true, false, false, false, false},
 		{"a platform barrier forbids the promotion", peer, true, false, true, false, false},
 		{"a lower tier cannot borrow that position", peer, true, false, false, true, false},
+		{"a peer in another tier cannot donate a position", otherTierPeer, true, false, false, false, false},
 		{"equal-ranked peers keep their age order", peer, true, false, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
