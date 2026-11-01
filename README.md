@@ -67,6 +67,8 @@ flowchart LR
   holds none, so one scope's batch cannot own a two-slot Mac while another scope
   waits
   ([ADR 0057](docs/adr/0057-a-scope-that-holds-a-slot-yields-the-next-one.md)).
+  A fair-share winner inherits its profile peer's earlier position, including
+  across an intervening demand of another profile (issue #456).
 
 - **A node that stops taking work repairs itself, then steps aside.** On a node
   that declares `membership` (`stationary`, or `roaming` for a laptop), a scale

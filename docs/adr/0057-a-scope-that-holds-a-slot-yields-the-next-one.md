@@ -335,3 +335,22 @@ now pins the fleet's behaviour, and
 `TestIssue404AReservedHeadTakingItsVectorIsNotAPassOver` pins the oracle's.
 The second test includes a case where the same admission, made without a
 carried reservation, is still reported.
+
+
+### A promoted profile winner inherits its earlier position (issue #456)
+
+Property/oracle defect; production policy is unchanged. The 2026-11-01 nightly
+container arm, seed 143, reported bounded starvation of an aged `ops/fleet`
+`medium` by a younger `b/repo` `large`. Their scope ranks were equal. But an
+older `c/repo` `large` occupied a position before that medium and asked for a
+higher scope slot. Fair share exchanged the two large positions, as this ADR
+requires. The medium was between positions of a different profile; it did not
+compete for the exchanged slot.
+
+The starvation oracle now recognizes that earlier position only when an older
+peer of the overtaker's profile has a strictly higher rank, the tiers agree,
+and no other-platform barrier separates the peers. A missing or later peer,
+equal rank, lower tier, or platform barrier does not excuse the inversion.
+The reduced incident trace and adversarial oracle observations pin both sides.
+No scheduler change, new policy knob, authority promotion, or deployment is
+needed. The separate sweep timeout remains tracked by #444.
