@@ -25,37 +25,28 @@ func TestIssue458ReconcileSurvivesALeaseCommitBetweenItsReadAndWrite(t *testing.
 		t.Fatal(err)
 	}
 	defer store.Close()
-	renewed := false
-	leaseDone := make(chan error, 1)
+	attempts := 0
 	store.injectFault = func(point string) error {
-		if point != "githubjobs.replace" || renewed {
+		if point != "githubjobs.replace" {
 			return nil
 		}
-		renewed = true
-		// A concurrent lease renewal on the lease connection, racing the
-		// reconcile transaction between its reads and its first write. It is
-		// given a bounded moment to commit, which with a deferred begin it does
-		// at once, staling the reconcile snapshot.
-		go func() {
-			_, err := store.lease().ExecContext(ctx, `UPDATE scheduler_state SET updated_at=updated_at+1 WHERE singleton=1`)
-			leaseDone <- err
-		}()
-		select {
-		case err := <-leaseDone:
-			leaseDone <- err
-		case <-time.After(250 * time.Millisecond):
+		attempts++
+		if attempts > 1 {
+			return nil
 		}
-		return nil
+		// A lease renewal committed on the lease connection between the
+		// reconcile transaction's reads and its first write. The deferred
+		// reconcile holds no write lock yet, so the renewal commits at once and
+		// stales the reconcile's WAL snapshot.
+		_, err := store.lease().ExecContext(ctx, `UPDATE scheduler_state SET updated_at=updated_at+1 WHERE singleton=1`)
+		return err
 	}
 	observedAt := time.Date(2026, 11, 1, 18, 57, 30, 0, time.UTC)
 	if _, err := store.ReconcileGitHubJobSnapshot(ctx, observedAt, map[int64][]operations.GitHubJobObservation{9: nil}); err != nil {
 		t.Fatalf("reconcile failed after a concurrent lease commit: %v", err)
 	}
-	if !renewed {
-		t.Fatal("the replay never interleaved the lease commit")
-	}
-	if err := <-leaseDone; err != nil {
-		t.Fatalf("the concurrent lease renewal failed: %v", err)
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want the stale-snapshot attempt and one retry", attempts)
 	}
 }
 
