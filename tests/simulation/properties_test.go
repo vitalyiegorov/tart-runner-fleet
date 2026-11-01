@@ -1687,7 +1687,31 @@ func yieldsOnScopeShare(cfg worldConfig, observation tickObservation, overtaker,
 	ranks := scopeFairShareRanks(cfg, observation)
 	overtakerRank, overtakerRanked := ranks[overtaker.Key]
 	waitingRank, waitingRanked := ranks[waiting.Key]
-	return overtakerRanked && waitingRanked && overtakerRank < waitingRank
+	if !overtakerRanked || !waitingRanked {
+		return false
+	}
+	if overtakerRank < waitingRank {
+		return true
+	}
+	// ADR 0057 exchanges positions within a profile. Its winner can therefore
+	// inherit a position ahead of a different profile even when those two
+	// demands have equal ranks (issue #456). Judge the observed queue's donor
+	// position, not merely the two ranks after the permutation. A lower tier,
+	// later peer, or other-platform barrier cannot donate such a position.
+	if overtaker.Profile == waiting.Profile || simScopeOf(overtaker.Key.Repo) == simScopeOf(waiting.Key.Repo) ||
+		effectiveTierOf(cfg, observation.Now, overtaker) != effectiveTierOf(cfg, observation.Now, waiting) {
+		return false
+	}
+	band := scopeFairShareBand(cfg, observation)
+	for _, peer := range band {
+		if peer.Profile == overtaker.Profile && agedBandLess(peer, waiting) &&
+			ranks[peer.Key] > overtakerRank &&
+			effectiveTierOf(cfg, observation.Now, peer) == effectiveTierOf(cfg, observation.Now, overtaker) &&
+			!acrossThePlatformBarrier(band, peer, overtaker) {
+			return true
+		}
+	}
+	return false
 }
 
 // scopeFairShareRanks is ADR 0057's key as an oracle reads it: for every aged
