@@ -33,6 +33,12 @@ func TestIssue461HostTenantMemoryIsNotReleasedByLinuxDrain(t *testing.T) {
 			in: withAvailable(5_000), profile: "medium", want: true},
 		"what a running Linux guest holds is released by its drain": {
 			in: withAvailable(1_088, large), profile: "large", want: true},
+		"a cloning Linux instance holds no measured memory to release": {
+			in: withAvailable(1_088, inState(large, domain.InstanceCloning)), profile: "large", want: false},
+		"a planned Linux instance holds no measured memory to release": {
+			in: withAvailable(1_088, inState(large, domain.InstancePlanned)), profile: "large", want: false},
+		"a booting Linux guest already holds memory that drains": {
+			in: withAvailable(1_088, inState(large, domain.InstanceBooting)), profile: "large", want: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -41,4 +47,9 @@ func TestIssue461HostTenantMemoryIsNotReleasedByLinuxDrain(t *testing.T) {
 			}
 		})
 	}
+}
+
+func inState(instance domain.Instance, state domain.InstanceState) domain.Instance {
+	instance.State = state
+	return instance
 }

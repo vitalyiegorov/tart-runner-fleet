@@ -211,7 +211,9 @@ func FitsOnceLinuxDrains(in Input, profile domain.ProfileID) bool {
 }
 
 // drainedMemory is the memory residual once this node's own Linux guests have
-// drained: the measured residual plus what those guests hold. An unusable host
+// drained: the measured residual plus what those guests hold. Only a guest whose
+// VM has started is in the measurement; a planned or cloning instance holds no
+// memory yet, so it will take its vector before releasing it and is not credited. An unusable host
 // observation knows nothing about tenants, so it keeps the unbounded drained
 // envelope rather than inventing a hold (ADR 0085's prior behaviour).
 func drainedMemory(in Input) int {
@@ -220,9 +222,16 @@ func drainedMemory(in Input) int {
 	}
 	memory := max(0, in.Host.Value.Available.MemoryMB)
 	for _, instance := range in.Instances.Value {
-		if instance.Platform == domain.PlatformLinux && instance.ConsumesHostResources() {
+		if instance.Platform == domain.PlatformLinux && instance.ConsumesHostResources() && holdsMeasuredMemory(instance.State) {
 			memory += instance.Resources.MemoryMB
 		}
 	}
 	return memory
+}
+
+// holdsMeasuredMemory reports whether an instance in this lifecycle state can
+// already be holding memory the host probe measured. Planned and cloning
+// instances have no running VM yet; every later state may.
+func holdsMeasuredMemory(state domain.InstanceState) bool {
+	return state != domain.InstancePlanned && state != domain.InstanceCloning
 }
