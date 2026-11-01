@@ -74,6 +74,9 @@ type TransientFailure interface {
 	Transient() bool
 }
 
+// FailureReasonOf returns the closed-vocabulary reason err carries, or "".
+func FailureReasonOf(err error) string { return failureReason(err) }
+
 func failureReason(err error) string {
 	var reason FailureReason
 	if errors.As(err, &reason) {

@@ -387,10 +387,61 @@ func mergeTier(name string, delivered, observed *tierTally) QueueTier {
 // ReconcileQueuedJobs adds REST's complete queue view without granting it
 // lifecycle authority. Jobs are routed through the same scope and profile
 // predicates as scale-set demand.
+// Reconcile stages name, in a closed vocabulary, which step of reconciling one
+// REST queue snapshot failed (issue #458). They are the only part of a
+// reconcile failure that may reach a log line; the concrete cause stays
+// reachable through errors.Is and errors.As but is never rendered there.
+const (
+	ReconcileStageInput   = "input"
+	ReconcileStageRouting = "routing"
+	ReconcileStageShare   = "share"
+	ReconcileStageCommit  = "commit"
+	ReconcileStageExpiry  = "expiry"
+)
+
+// ValidReconcileStage guards the closed stage vocabulary at every recording site.
+func ValidReconcileStage(stage string) bool {
+	switch stage {
+	case ReconcileStageInput, ReconcileStageRouting, ReconcileStageShare, ReconcileStageCommit, ReconcileStageExpiry:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReconcileStageError tags a reconcile failure with the stage that produced it.
+type ReconcileStageError struct {
+	Stage string
+	Err   error
+}
+
+func (e *ReconcileStageError) Error() string {
+	return "queue reconcile " + e.Stage + ": " + e.Err.Error()
+}
+
+func (e *ReconcileStageError) Unwrap() error { return e.Err }
+
+// ReconcileStage returns the closed stage a reconcile failure carries, or ""
+// when err names none.
+func ReconcileStage(err error) string {
+	var staged *ReconcileStageError
+	if errors.As(err, &staged) && ValidReconcileStage(staged.Stage) {
+		return staged.Stage
+	}
+	return ""
+}
+
+func reconcileStage(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ReconcileStageError{Stage: stage, Err: err}
+}
+
 func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []Binding, snapshot GitHubQueueSnapshot) (bool, error) {
 	store, ok := c.Store.(GitHubJobStore)
 	if !ok || snapshot == nil || snapshot.ObservedAt().IsZero() {
-		return false, operations.ErrInvalid
+		return false, reconcileStage(ReconcileStageInput, operations.ErrInvalid)
 	}
 	observations := make(map[int64][]operations.GitHubJobObservation, len(bindings))
 	// shared collects the scale sets this snapshot proved are not alone on their
@@ -399,18 +450,19 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 	shared := make(map[int64]bool, len(bindings))
 	for _, binding := range bindings {
 		if !binding.valid() {
-			return false, operations.ErrInvalid
+			return false, reconcileStage(ReconcileStageInput, operations.ErrInvalid)
 		}
 		observations[binding.durableKey()] = nil
 	}
 	for _, job := range snapshot.QueuedJobs() {
 		matched, err := matchingBindings(bindings, job)
 		if err != nil {
-			return false, err
+			return false, reconcileStage(ReconcileStageRouting, err)
 		}
 		if len(matched) == 0 {
 			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedCapability(bindings, job) && !c.jobSelectsForeignSet(bindings, job) {
-				return false, fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain)
+				return false, reconcileStage(ReconcileStageRouting,
+					fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain))
 			}
 			continue
 		}
@@ -434,16 +486,16 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 		}
 		bounded, err := c.boundToOwnShare(ctx, binding, observations[key])
 		if err != nil {
-			return false, err
+			return false, reconcileStage(ReconcileStageShare, err)
 		}
 		observations[key] = bounded
 	}
 	changed, err := store.ReconcileGitHubJobSnapshot(ctx, snapshot.ObservedAt(), observations)
 	if err != nil {
-		return changed, err
+		return changed, reconcileStage(ReconcileStageCommit, err)
 	}
 	expired, err := c.expireGhostDemand(ctx, bindings, snapshot.ObservedAt())
-	return changed || expired, err
+	return changed || expired, reconcileStage(ReconcileStageExpiry, err)
 }
 
 // jobSelectsForeignSet requires an explicit selector for a freshly audited set
