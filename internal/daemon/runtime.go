@@ -1789,7 +1789,22 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}
 		_ = r.health.RecordObservationDetail(r.observation, freshness, detail)
 	}
-	return changed, err
+	return changed, classifyReconcileFailure(err)
+}
+
+// classifyReconcileFailure gives an unclassified reconcile error the same
+// closed reason its observation records, so the loop failure line and counter
+// name it instead of logging a reasonless failure (issue #458). An error that
+// already carries a valid reason, such as a demand commit conflict, keeps it.
+func classifyReconcileFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	var reason interface{ FailureReason() string }
+	if errors.As(err, &reason) && reason.FailureReason() != "" {
+		return err
+	}
+	return &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonQueueReconcileFailed, Cause: err}
 }
 
 // record marks the inventory not refreshed: stale over a prior snapshot, or
