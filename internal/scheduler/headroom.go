@@ -179,6 +179,14 @@ func cohortSize(in Input, profile domain.ProfileID, waiting []domain.Demand) int
 // not: it is net of the very Linux guests that drain, and a host tenant's
 // pressure is ADR 0084's gate, not this rule.
 //
+// Memory is the exception (issue #461). A host tenant's hold on memory is not
+// Linux work and no drain here releases it, so the measured memory residual
+// stays charged, credited only with what this node's own Linux guests hold.
+// Memory does not time-share: a node whose tenant leaves less than the vector
+// would attract a job it cannot start for as long as the tenant runs. CPU and
+// slots keep the drained envelope -- vCPUs time-share and aging lifts the CPU
+// clamp, so neither can strand a job the way memory does.
+//
 // A macOS profile, or one the scheduler cannot size, is always true: ADR 0082
 // is unchanged for it.
 func FitsOnceLinuxDrains(in Input, profile domain.ProfileID) bool {
@@ -193,11 +201,28 @@ func FitsOnceLinuxDrains(in Input, profile domain.ProfileID) bool {
 		}
 	}
 	drained := in
-	drained.Host.Value.Available = domain.Resources{CPU: math.MaxInt, MemoryMB: math.MaxInt, Slots: math.MaxInt}
+	drained.Host.Value.Available = domain.Resources{CPU: math.MaxInt, MemoryMB: drainedMemory(in), Slots: math.MaxInt}
 	free := freeCapacity(drained, outlasting, true)
 	_, macos := partition(normalizedDemands(in))
 	for _, vector := range queuedVectors(in.Config, in.Instances.Value, macos) {
 		free = exhaust(free, vector)
 	}
 	return free.CanFit(definition.Resources)
+}
+
+// drainedMemory is the memory residual once this node's own Linux guests have
+// drained: the measured residual plus what those guests hold. An unusable host
+// observation knows nothing about tenants, so it keeps the unbounded drained
+// envelope rather than inventing a hold (ADR 0085's prior behaviour).
+func drainedMemory(in Input) int {
+	if !in.Host.Usable() {
+		return math.MaxInt
+	}
+	memory := max(0, in.Host.Value.Available.MemoryMB)
+	for _, instance := range in.Instances.Value {
+		if instance.Platform == domain.PlatformLinux && instance.ConsumesHostResources() {
+			memory += instance.Resources.MemoryMB
+		}
+	}
+	return memory
 }
