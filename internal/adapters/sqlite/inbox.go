@@ -14,6 +14,7 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
+	driver "modernc.org/sqlite"
 )
 
 // ApplyDemandBatch commits one broker message's events and records the message
@@ -875,6 +876,42 @@ func (s *Store) ReconcileGitHubJobSnapshot(ctx context.Context, observedAt time.
 		keys = append(keys, scaleSetID)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	// A snapshot the lease connection staled mid-transaction is retried whole:
+	// the failed attempt rolled back, and the reconciliation is a pure function
+	// of this snapshot, so a second attempt is the same write (issue #458).
+	var (
+		changed bool
+		err     error
+	)
+	for attempt := 0; attempt < githubJobReconcileAttempts; attempt++ {
+		changed, err = s.reconcileGitHubJobSnapshotOnce(ctx, observedAt, snapshot, keys)
+		if !busySnapshot(err) {
+			break
+		}
+	}
+	return changed, err
+}
+
+// githubJobReconcileAttempts bounds the retries a stale WAL snapshot earns. Each
+// conflict means the other connection committed in this transaction's window,
+// which is rare and brief; a bound keeps a pathological interleaving from
+// looping inside one ingest tick.
+const githubJobReconcileAttempts = 3
+
+// sqliteBusySnapshotCode is SQLITE_BUSY_SNAPSHOT: a deferred transaction read
+// under a WAL snapshot that another connection's commit made stale, so SQLite
+// refused its lock upgrade at once. busy_timeout never applies to it, which is
+// why it surfaced as an immediate stage=commit reconcile failure.
+const sqliteBusySnapshotCode = 517
+
+func busySnapshot(err error) bool {
+	var refusal *driver.Error
+	return errors.As(err, &refusal) && refusal.Code() == sqliteBusySnapshotCode
+}
+
+func (s *Store) reconcileGitHubJobSnapshotOnce(ctx context.Context, observedAt time.Time,
+	snapshot map[int64][]operations.GitHubJobObservation, keys []int64,
+) (bool, error) {
 	tx, err := s.beginTx(ctx, "githubjobs.begin")
 	if err != nil {
 		return false, fmt.Errorf("begin GitHub job reconciliation: %w", err)
