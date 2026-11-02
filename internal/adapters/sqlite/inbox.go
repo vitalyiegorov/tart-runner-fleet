@@ -14,7 +14,6 @@ import (
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
-	driver "modernc.org/sqlite"
 )
 
 // ApplyDemandBatch commits one broker message's events and records the message
@@ -876,39 +875,14 @@ func (s *Store) ReconcileGitHubJobSnapshot(ctx context.Context, observedAt time.
 		keys = append(keys, scaleSetID)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	// A snapshot the lease connection staled mid-transaction is retried whole:
-	// the failed attempt rolled back, and the reconciliation is a pure function
-	// of this snapshot, so a second attempt is the same write (issue #458).
-	var (
-		changed bool
-		err     error
-	)
-	for attempt := 0; attempt < githubJobReconcileAttempts; attempt++ {
-		changed, err = s.reconcileGitHubJobSnapshotOnce(ctx, observedAt, snapshot, keys)
-		if !busySnapshot(err) {
-			break
-		}
-	}
-	return changed, err
+	return s.reconcileGitHubJobSnapshotOnce(ctx, observedAt, snapshot, keys)
 }
 
-// githubJobReconcileAttempts bounds the retries a stale WAL snapshot earns. Each
-// conflict means the other connection committed in this transaction's window,
-// which is rare and brief; a bound keeps a pathological interleaving from
-// looping inside one ingest tick.
-const githubJobReconcileAttempts = 3
-
-// sqliteBusySnapshotCode is SQLITE_BUSY_SNAPSHOT: a deferred transaction read
-// under a WAL snapshot that another connection's commit made stale, so SQLite
-// refused its lock upgrade at once. busy_timeout never applies to it, which is
-// why it surfaced as an immediate stage=commit reconcile failure.
-const sqliteBusySnapshotCode = 517
-
-func busySnapshot(err error) bool {
-	var refusal *driver.Error
-	return errors.As(err, &refusal) && refusal.Code() == sqliteBusySnapshotCode
-}
-
+// reconcileGitHubJobSnapshotOnce replaces every profile's snapshot in one
+// transaction. Its first statement is a write (issue #458), so the transaction
+// takes the write lock with no read snapshot held and waits on the lease
+// connection under busy_timeout instead of failing with SQLITE_BUSY or
+// SQLITE_BUSY_SNAPSHOT.
 func (s *Store) reconcileGitHubJobSnapshotOnce(ctx context.Context, observedAt time.Time,
 	snapshot map[int64][]operations.GitHubJobObservation, keys []int64,
 ) (bool, error) {
@@ -934,17 +908,23 @@ func (s *Store) reconcileGitHubJobSnapshotOnce(ctx context.Context, observedAt t
 func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetID int64, observedAt time.Time,
 	jobs []operations.GitHubJobObservation,
 ) (bool, error) {
-	var previousCount int
-	if err := s.txRow(ctx, tx, "githubjobs.count", `SELECT COUNT(*) FROM github_job_observations WHERE scale_set_id=?`, scaleSetID).Scan(&previousCount); err != nil {
-		return false, fmt.Errorf("count prior GitHub jobs: %w", err)
+	// The replace runs first (issue #458). A deferred transaction whose first
+	// statement is a read is already a read transaction when it tries to write,
+	// and if the lease connection is writing at that moment SQLite refuses the
+	// upgrade with SQLITE_BUSY at once, skipping busy_timeout. Writing first
+	// requests the write lock with no read snapshot held, where the busy handler
+	// waits for the lease's brief write. The rows it deletes are exactly the
+	// prior snapshot's, so its count is the previous count.
+	replaced, err := s.txExec(ctx, tx, "githubjobs.replace", `DELETE FROM github_job_observations WHERE scale_set_id=?`, scaleSetID)
+	if err != nil {
+		return false, fmt.Errorf("replace GitHub job snapshot: %w", err)
 	}
+	removed, _ := replaced.RowsAffected()
+	previousCount := int(removed)
 	var previousObserved int64
 	if err := s.txRow(ctx, tx, "githubjobs.mark.load", `SELECT observed_at FROM github_job_snapshots WHERE scale_set_id=?`,
 		scaleSetID).Scan(&previousObserved); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("load GitHub job snapshot mark: %w", err)
-	}
-	if _, err := s.txExec(ctx, tx, "githubjobs.replace", `DELETE FROM github_job_observations WHERE scale_set_id=?`, scaleSetID); err != nil {
-		return false, fmt.Errorf("replace GitHub job snapshot: %w", err)
 	}
 	type group struct {
 		first   time.Time
