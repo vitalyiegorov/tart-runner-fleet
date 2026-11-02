@@ -1422,7 +1422,8 @@ job-scoped alias whose complete consumers were validated. Prepare both nodes'
 candidate configurations using the existing provision/validate/audit tools,
 canonical inventory and truthful set capacity; do not change production files
 from an image setup script. Initial one-job activation and rollback require
-ADR 0015 evidence. Linux-only native/emulator/release jobs stay AMD64-pinned.
+ADR 0015 evidence. Linux-only native/emulator jobs and release builds stay
+AMD64-pinned; the architecture-neutral release publish jobs run on `linux-go-2x4`.
 
 ## Tooling layers for the site-A Tart guests (issue #414)
 
