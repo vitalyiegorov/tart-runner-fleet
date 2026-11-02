@@ -80,12 +80,16 @@ func TestIssue458ReconcileWaitsForALeaseWriterInsteadOfFailing(t *testing.T) {
 		held = true
 		// The lease connection holds an uncommitted write when the reconcile's
 		// first statement runs, then commits shortly after.
+		// A setup failure is delivered on released too, so the test reports it
+		// instead of blocking on a release that never comes.
 		leaseTx, err := store.lease().BeginTx(ctx, nil)
 		if err != nil {
+			released <- err
 			return err
 		}
 		if _, err := leaseTx.ExecContext(ctx, `UPDATE scheduler_state SET updated_at=updated_at+1 WHERE singleton=1`); err != nil {
 			_ = leaseTx.Rollback()
+			released <- err
 			return err
 		}
 		go func() {
