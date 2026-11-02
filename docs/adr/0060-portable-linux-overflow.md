@@ -71,11 +71,11 @@ aliases instead of AMD64-only labels. They execute the same checks and retain
 their deadlines. Go and lint caches remain disabled, so this change cannot
 restore binaries from the other architecture. Architecture-specific release
 builds and Android/KVM workflows retain their existing labels. The release
-publish jobs (`main-release.yml` and `release.yml` `publish`) download a
-verified artifact, check it with `shasum -a 256 -c` and call `gh release`
-(`main-release.yml` also lists the archives with `tar`), all
-architecture-neutral, so since 2026-11-02 they run on
-`linux-go-2x4`, which the amd64 nodes' fleet-repo sets also advertise.
+publish jobs (`main-release.yml` and `release.yml` `publish`) stay on
+`trf-linux-amd64-2x4`: their steps are architecture-neutral, but they call the
+`gh` CLI, which the Mac-hosted `linux-go` guest image does not ship. Moving them
+to `linux-go-2x4` on 2026-11-02 (#467) failed the next main release with
+`gh: command not found`, and was reverted.
 
 The MacBook's ARM64 guest passed full `make ci` and a controller-managed
 ephemeral GitHub canary before this routing change. Production configuration

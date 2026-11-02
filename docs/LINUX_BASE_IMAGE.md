@@ -1423,7 +1423,8 @@ candidate configurations using the existing provision/validate/audit tools,
 canonical inventory and truthful set capacity; do not change production files
 from an image setup script. Initial one-job activation and rollback require
 ADR 0015 evidence. Linux-only native/emulator jobs and release builds stay
-AMD64-pinned; the architecture-neutral release publish jobs run on `linux-go-2x4`.
+AMD64-pinned, as are the release publish jobs, which need the `gh` CLI the
+`linux-go` guest image lacks.
 
 ## Tooling layers for the site-A Tart guests (issue #414)
 
