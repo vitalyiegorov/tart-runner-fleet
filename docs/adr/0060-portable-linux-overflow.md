@@ -71,8 +71,9 @@ aliases instead of AMD64-only labels. They execute the same checks and retain
 their deadlines. Go and lint caches remain disabled, so this change cannot
 restore binaries from the other architecture. Architecture-specific release
 builds and Android/KVM workflows retain their existing labels. The release
-publish jobs (`main-release.yml` and `release.yml` `publish`) only download a
-verified artifact and call `gh release`, so since 2026-11-02 they run on
+publish jobs (`main-release.yml` and `release.yml` `publish`) download a
+verified artifact, check it with `shasum -a 256 -c`, handle the archives with
+`tar` and call `gh release`, all architecture-neutral, so since 2026-11-02 they run on
 `linux-go-2x4`, which the amd64 nodes' fleet-repo sets also advertise.
 
 The MacBook's ARM64 guest passed full `make ci` and a controller-managed
