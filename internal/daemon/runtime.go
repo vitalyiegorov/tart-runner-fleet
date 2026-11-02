@@ -2098,6 +2098,11 @@ func (r *failureReporter) reportBinding(binding app.Binding, failure githubscale
 	if failure.Poll != "" {
 		attributes = append(attributes, "pollReason", failure.Poll)
 	}
+	// The transport cause of a failure GitHub never answered (issue #468). It is
+	// closed vocabulary; anything else is withheld rather than rendered.
+	if githubscaleset.ValidPollCause(failure.Cause) {
+		attributes = append(attributes, "cause", failure.Cause)
+	}
 	r.logger.Warn("binding ingest failure", attributes...)
 }
 
