@@ -37,6 +37,14 @@ type officialRunners interface {
 	RemoveRunner(context.Context, int64) error
 }
 
+// brokerLongPollHold is how long GitHub's broker holds a message long poll
+// open before answering with no message. pollTransportMargin is the slack the
+// client adds for TLS, queueing and network jitter around that hold.
+const (
+	brokerLongPollHold  = 50 * time.Second
+	pollTransportMargin = 40 * time.Second
+)
+
 type ScaleSetConfig struct {
 	Messages    officialMessages
 	JIT         officialJIT
@@ -70,7 +78,10 @@ func NewScaleSet(c ScaleSetConfig) (*ScaleSet, error) {
 		return nil, errors.New("message client, JIT client, positive scale-set ID, and nonnegative capacity are required")
 	}
 	if c.PollTimeout <= 0 {
-		c.PollTimeout = 55 * time.Second
+		// 55 s left 5 s over the broker's hold: on 2026-11-02 every node logged
+		// a statusless message_poll_failed every few minutes, and #469's cause
+		// classification showed all of them were this deadline (issue #468).
+		c.PollTimeout = brokerLongPollHold + pollTransportMargin
 	}
 	if c.RequestTimeout <= 0 {
 		c.RequestTimeout = 15 * time.Second
@@ -80,7 +91,8 @@ func NewScaleSet(c ScaleSetConfig) (*ScaleSet, error) {
 
 func (s *ScaleSet) LastMessageID() int { s.mu.Lock(); defer s.mu.Unlock(); return s.cursor }
 
-// Next performs one official ~50 second long poll. The cursor advances only
+// Next performs one official long poll, which the broker holds for up to
+// brokerLongPollHold. The cursor advances only
 // after DeleteMessage succeeds, so a crash or handler failure is redelivered.
 func (s *ScaleSet) Next(ctx context.Context) (*PendingMessage, error) {
 	s.mu.Lock()
