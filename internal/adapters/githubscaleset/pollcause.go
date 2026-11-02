@@ -61,11 +61,9 @@ func statuslessReason(reason string) bool {
 // pollCause classifies a failure that never reached an HTTP response. The order
 // is deliberate: a store refusal and a cancellation are this process's own
 // doing and win over anything they wrap, and an HTTP/2 framing error is named
-// before the generic EOF it may also carry.
+// before the generic EOF it may also carry. err is never nil:
+// DescribeIngestFailure returns before classifying a success.
 func pollCause(err error) string {
-	if err == nil {
-		return ""
-	}
 	if storeBusy(err) {
 		return CauseStoreBusy
 	}

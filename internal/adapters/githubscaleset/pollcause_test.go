@@ -61,6 +61,7 @@ func TestIssue468AStatuslessPollFailureNamesItsTransportCause(t *testing.T) {
 		{"a TLS record error", tls.RecordHeaderError{Msg: "bad record"}, githubscaleset.CauseTLS},
 		{"a busy store", storeRefusal{code: 5}, githubscaleset.CauseStoreBusy},
 		{"a stale store snapshot", storeRefusal{code: 517}, githubscaleset.CauseStoreBusy},
+		{"a joined failure hiding an EOF", errors.Join(errors.New("release session"), io.EOF), githubscaleset.CauseEOF},
 		{"anything else", errors.New("decode broker message"), githubscaleset.CauseOther},
 	}
 	for _, tc := range cases {
