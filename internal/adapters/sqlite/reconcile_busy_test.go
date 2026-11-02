@@ -2,14 +2,11 @@ package sqlite
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
-	driver "modernc.org/sqlite"
 )
 
 // TestIssue458ReconcileSurvivesALeaseCommitBetweenItsReadAndWrite replays the
@@ -71,47 +68,12 @@ func TestIssue458ReconcileWaitsForALeaseWriterInsteadOfFailing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	held := false
-	released := make(chan error, 1)
-	store.injectFault = func(point string) error {
-		if held || point == "githubjobs.begin" || !strings.HasPrefix(point, "githubjobs.") {
-			return nil
-		}
-		held = true
-		// The lease connection holds an uncommitted write when the reconcile's
-		// first statement runs, then commits shortly after.
-		// A setup failure is delivered on released too, so the test reports it
-		// instead of blocking on a release that never comes.
-		leaseTx, err := store.lease().BeginTx(ctx, nil)
-		if err != nil {
-			released <- err
-			return err
-		}
-		if _, err := leaseTx.ExecContext(ctx, `UPDATE scheduler_state SET updated_at=updated_at+1 WHERE singleton=1`); err != nil {
-			_ = leaseTx.Rollback()
-			released <- err
-			return err
-		}
-		go func() {
-			time.Sleep(150 * time.Millisecond)
-			released <- leaseTx.Commit()
-		}()
-		return nil
-	}
 	observedAt := time.Date(2026, 11, 2, 6, 3, 55, 0, time.UTC)
-	_, err = store.ReconcileGitHubJobSnapshot(ctx, observedAt, map[int64][]operations.GitHubJobObservation{9: nil})
-	if !held {
-		t.Fatal("the replay never held the lease write")
-	}
-	if leaseErr := <-released; leaseErr != nil {
-		t.Fatalf("the lease write failed to commit: %v", leaseErr)
-	}
+	code, err := replayBriefLeaseWrite(t, store, "githubjobs.", func() error {
+		_, err := store.ReconcileGitHubJobSnapshot(ctx, observedAt, map[int64][]operations.GitHubJobObservation{9: nil})
+		return err
+	})
 	if err != nil {
-		var refusal *driver.Error
-		code := 0
-		if errors.As(err, &refusal) {
-			code = refusal.Code()
-		}
 		t.Fatalf("reconcile failed against a brief lease write (code %d): %v", code, err)
 	}
 }

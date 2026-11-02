@@ -68,6 +68,17 @@ func (s *Store) ApplyDemandBatch(ctx context.Context, scaleSetID, messageID int6
 		return result, fmt.Errorf("begin demand batch: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The first statement is a write, so the transaction takes the write lock
+	// from TRANS_NONE under busy_timeout. Reading the cursor first made it a read
+	// transaction, and SQLite refuses that upgrade with SQLITE_BUSY at once while
+	// the authority lease is writing on its own connection: the refusal reached
+	// the ingest loop as a statusless message_poll_failed on every node (the
+	// broker-path twin of #458, issue #465). The touch changes no row, and a cursor that does
+	// not exist yet still takes the lock. Not BEGIN IMMEDIATE store-wide: that
+	// would let a long read on the shared connection starve lease renewal (#295).
+	if _, err := s.txExec(ctx, tx, "inbox.claim", `UPDATE scale_set_cursors SET updated_at=updated_at WHERE scale_set_id=?`, scaleSetID); err != nil {
+		return result, fmt.Errorf("claim demand batch: %w", err)
+	}
 	generation, reset, duplicate, err := s.inboxGeneration(ctx, tx, scaleSetID, messageID, digest[:])
 	if err != nil {
 		return result, err
