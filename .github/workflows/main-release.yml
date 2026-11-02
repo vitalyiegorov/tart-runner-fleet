@@ -26,7 +26,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    runs-on: [self-hosted, trf-linux-amd64-2x4]
+    runs-on: [self-hosted, linux-go-2x4]
     permissions:
       actions: read
       contents: write

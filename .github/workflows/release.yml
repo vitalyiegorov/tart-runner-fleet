@@ -109,7 +109,7 @@ jobs:
     needs: build
     permissions:
       contents: write
-    runs-on: [self-hosted, trf-linux-amd64-2x4]
+    runs-on: [self-hosted, linux-go-2x4]
     timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
