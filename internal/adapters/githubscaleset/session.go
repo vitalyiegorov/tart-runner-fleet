@@ -114,6 +114,11 @@ type IngestFailure struct {
 	RequestID string
 	// RetryAfter is how long GitHub asked the fleet to wait, or 0.
 	RetryAfter time.Duration
+	// Cause is the closed transport classification of a failure GitHub never
+	// answered (Status 0) on a poll, release or create, and empty otherwise.
+	// It is what separates a timeout from a reset, an HTTP/2 stream error and a
+	// local store refusal in the statusless flood of issue #468.
+	Cause string
 }
 
 // phaseFor names the phase a reason belongs to. Every reason maps to exactly
@@ -151,6 +156,9 @@ func DescribeIngestFailure(err error) IngestFailure {
 		failure.Status = api.Status
 		failure.RequestID = api.RequestID
 		failure.RetryAfter = api.RetryAfter
+	}
+	if failure.Status == 0 && statuslessReason(reason) {
+		failure.Cause = pollCause(err)
 	}
 	return failure
 }
