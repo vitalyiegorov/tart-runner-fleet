@@ -103,6 +103,24 @@ experiment file kept outside `<root>/state` never saw its waiting candidate,
 never drained, and its updater refused "fleet is not quiescent" indefinitely
 (the Mini stayed on v0.1.695 while v0.1.701 sat in `releases/`).
 
+*Amendment 2026-11-03 (issue #481):* the wait is dated from when the candidate
+reached disk, not from the first tick of this process. The daemon kept the
+drain's phase in memory only, so a daemon restarted mid-drain waited the full
+`PendingFor` again and then drained from scratch. On the Mac mini every restart
+landed inside a drain, and v0.1.840 stayed off the node for over two hours. A
+release directory is staged elsewhere, renamed into place whole and never
+written again, so its modification time is when it materialised. The daemon
+takes the earliest such time among the generations newer than the one it runs.
+A newer release landing mid-wait therefore does not restart the wait. It is
+lost only when the updater prunes the superseded candidate first. From that
+date, the schedule a daemon that never restarted would follow is a fixed
+function: pending for `PendingFor`, then `MaxWait` of drain, then `Cooldown`,
+repeating. A restarted daemon resumes in that phase, dated from the phase's
+original start. So it resumes a drain at once, still ends the drain `MaxWait`
+after the drain's original start, and serves out the rest of a cooldown it was
+in. A materialisation time it cannot read, or one ahead of its own clock, dates
+the wait from its first tick, as before.
+
 Every unreadable input — an unreadable directory, an unparseable version, no
 configuration path — reports nothing pending. A node must never refuse
 admission on the strength of a fact it could not establish.

@@ -68,6 +68,10 @@ type DrainFacts struct {
 	// deliberately do not count: they are not interruptible work, and counting
 	// them makes the drain self-defeating, since draining is what grows a queue.
 	LiveInstances int
+	// PendingSince is when the waiting generation reached disk: a fact that
+	// outlives this process, unlike the first tick that saw it. Zero when it
+	// could not be established, which dates the wait from this tick instead.
+	PendingSince time.Time
 }
 
 // DrainState tracks the current phase. The zero value is a node serving normally
@@ -128,8 +132,9 @@ func (s *DrainState) Observe(facts DrainFacts) DrainAction {
 	}
 	if !s.observed || s.pendingAt.IsZero() || facts.At.Before(s.pendingAt) {
 		s.observed = true
-		s.pendingAt = facts.At
-		s.since = facts.At
+		if s.resume(facts) {
+			return DrainStart
+		}
 	}
 	if s.draining {
 		// Quiescence reached: hold the drain until the updater applies and this
@@ -159,6 +164,39 @@ func (s *DrainState) Observe(facts DrainFacts) DrainAction {
 	return DrainNone
 }
 
+// resume places a state that has just established its wait in the phase the
+// wait has reached, and reports whether that phase is a drain.
+//
+// A daemon restarted mid-drain used to begin again from nothing: it waited the
+// full PendingFor and then drained from scratch, so a busy node whose daemon
+// restarted inside every drain never updated (issue #481). The wait is dated
+// from when the candidate reached disk instead, and the schedule a process that
+// never restarted would have followed (pending, then MaxWait of drain, then
+// Cooldown, repeating) is a function of that date alone. Each phase is dated
+// no later than a live process would have dated it, so a resumed drain never
+// runs past MaxWait from its original start.
+func (s *DrainState) resume(facts DrainFacts) bool {
+	s.pendingAt = facts.At
+	if !facts.PendingSince.IsZero() && !facts.PendingSince.After(facts.At) {
+		s.pendingAt = facts.PendingSince
+	}
+	s.since = s.pendingAt
+	elapsed := facts.At.Sub(s.pendingAt) - s.policy.PendingFor
+	cycle := s.policy.MaxWait + s.policy.Cooldown
+	if elapsed < 0 || cycle <= 0 {
+		return false
+	}
+	offset := elapsed % cycle
+	if offset < s.policy.MaxWait {
+		s.draining = true
+		s.since = facts.At.Add(-offset)
+		return true
+	}
+	s.cooldown = true
+	s.since = facts.At.Add(s.policy.MaxWait - offset)
+	return false
+}
+
 func (s *DrainState) reset(at time.Time) {
 	s.draining = false
 	s.cooldown = false
@@ -177,22 +215,8 @@ func (s *DrainState) reset(at time.Time) {
 // version, or no releases at all reports nothing pending, because a node must
 // never refuse admission on the strength of a fact it could not establish.
 func PendingCandidate(rootDir, running string, readDir func(string) ([]string, error)) (bool, string) {
-	if rootDir == "" || running == "" || readDir == nil {
-		return false, ""
-	}
-	names, err := readDir(filepath.Join(rootDir, "releases"))
-	if err != nil {
-		return false, ""
-	}
 	newest := ""
-	for _, name := range names {
-		if name == running {
-			continue
-		}
-		order, err := compareVersions(name, running)
-		if err != nil || order <= 0 {
-			continue
-		}
+	for _, name := range newerReleases(rootDir, running, readDir) {
 		if newest == "" {
 			newest = name
 			continue
@@ -202,6 +226,60 @@ func PendingCandidate(rootDir, running string, readDir func(string) ([]string, e
 		}
 	}
 	return newest != "", newest
+}
+
+// PendingSince dates how long an update has been waiting on this node: the
+// earliest materialisation among the generations newer than running. The
+// earliest, not the newest's, because a newer release landing mid-wait does not
+// restart the wait for a node that is still running the old one. Zero means it
+// could not be established, and the caller dates the wait from its own tick.
+func PendingSince(rootDir, running string, readDir func(string) ([]string, error),
+	modTime func(string) (time.Time, error)) time.Time {
+	var earliest time.Time
+	if modTime == nil {
+		return earliest
+	}
+	for _, name := range newerReleases(rootDir, running, readDir) {
+		at, err := modTime(filepath.Join(rootDir, "releases", name))
+		if err == nil && (earliest.IsZero() || at.Before(earliest)) {
+			earliest = at
+		}
+	}
+	return earliest
+}
+
+// newerReleases names the release directories newer than running. Anything it
+// cannot read or parse is left out: a node must never refuse admission on the
+// strength of a fact it could not establish.
+func newerReleases(rootDir, running string, readDir func(string) ([]string, error)) []string {
+	if rootDir == "" || running == "" || readDir == nil {
+		return nil
+	}
+	names, err := readDir(filepath.Join(rootDir, "releases"))
+	if err != nil {
+		return nil
+	}
+	newer := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == running {
+			continue
+		}
+		if order, err := compareVersions(name, running); err == nil && order > 0 {
+			newer = append(newer, name)
+		}
+	}
+	return newer
+}
+
+// ReleaseModTime reports when a release directory was last changed. A release
+// is staged beside its destination and renamed into place whole, and is never
+// written again, so this is when it materialised.
+func ReleaseModTime(dir string) (time.Time, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
 }
 
 // ReleaseDirNames lists the release directories beneath root. It is the

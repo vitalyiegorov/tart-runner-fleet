@@ -289,3 +289,14 @@ func TestUpdateDrainSurvivesADaemonRestart(t *testing.T) {
 			after.Draining(), metric.Since, metric.PendingSince, drained, materialised)
 	}
 }
+
+// A materialisation time ahead of this daemon's clock is not a wait anyone
+// measured: the wait is dated from the tick that saw the candidate.
+func TestUpdateDrainDatesAFutureMaterialisationFromItsOwnTick(t *testing.T) {
+	controller, _ := drainController(t, []string{"v0.1.498+main.a", "v0.1.510+main.b"}, nil)
+	controller.modTime = func(string) (time.Time, error) { return drainAt.Add(time.Hour), nil }
+	controller.Observe(drainAt, 1)
+	if got := controller.Metric().PendingSince; !got.Equal(drainAt) || controller.Draining() {
+		t.Fatalf("pendingSince = %v draining=%v, want %v and not draining", got, controller.Draining(), drainAt)
+	}
+}

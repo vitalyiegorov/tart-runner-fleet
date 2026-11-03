@@ -1738,6 +1738,12 @@ replaced; the candidate disappears; or `updateDrainMaxWaitSeconds` (default
 7200) elapses, after which the node serves normally for
 `updateDrainCooldownSeconds` (default 3600) before trying again.
 
+A daemon restart does not reset the drain. The wait is dated from when the
+candidate's directory appeared under `releases/`. A restarted daemon resumes the
+drain or cooldown it was in, and that phase keeps its original start time
+(issue #481). The `pendingSince` field of `fleet status --output json` is
+therefore the candidate's arrival on disk, not the daemon's start.
+
 An operator who needs the capacity back immediately can set
 `updateDrainDisabled: true` and restart — a draining node resumes admission
 rather than staying stranded. `updateDrainPendingForSeconds` (default 1800)

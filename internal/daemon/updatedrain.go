@@ -23,15 +23,18 @@ type updateDrainController struct {
 	// could not establish.
 	root, running string
 	readDir       func(string) ([]string, error)
-	report        func(action, version string, instances int)
-	pendingSince  time.Time
-	candidate     string
+	// modTime dates a release directory, so the wait for a candidate survives
+	// a daemon restart (issue #481).
+	modTime      func(string) (time.Time, error)
+	report       func(action, version string, instances int)
+	pendingSince time.Time
+	candidate    string
 }
 
 func newUpdateDrainController(policy autoupdate.DrainPolicy, root, running string,
 	readDir func(string) ([]string, error), reporter *failureReporter) *updateDrainController {
 	controller := &updateDrainController{state: autoupdate.NewDrainState(policy),
-		root: root, running: running, readDir: readDir}
+		root: root, running: running, readDir: readDir, modTime: autoupdate.ReleaseModTime}
 	if reporter != nil {
 		controller.report = func(action, version string, instances int) {
 			reporter.reportUpdateDrain(action, version, instances)
@@ -64,12 +67,18 @@ func (c *updateDrainController) Observe(at time.Time, live int) {
 	}
 	pending, candidate := autoupdate.PendingCandidate(c.root, c.running, c.readDir)
 	c.candidate = candidate
+	var materialised time.Time
 	if !pending {
 		c.pendingSince = time.Time{}
 	} else if c.pendingSince.IsZero() {
+		materialised = autoupdate.PendingSince(c.root, c.running, c.readDir, c.modTime)
 		c.pendingSince = at
+		if !materialised.IsZero() && !materialised.After(at) {
+			c.pendingSince = materialised
+		}
 	}
-	action := c.state.Observe(autoupdate.DrainFacts{At: at, CandidatePending: pending, LiveInstances: live})
+	action := c.state.Observe(autoupdate.DrainFacts{At: at, CandidatePending: pending, LiveInstances: live,
+		PendingSince: materialised})
 	if action != autoupdate.DrainNone && c.report != nil {
 		c.report(action.String(), candidate, live)
 	}
