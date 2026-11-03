@@ -103,8 +103,8 @@ experiment file kept outside `<root>/state` never saw its waiting candidate,
 never drained, and its updater refused "fleet is not quiescent" indefinitely
 (the Mini stayed on v0.1.695 while v0.1.701 sat in `releases/`).
 
-*Amendment 2026-11-03 (issue #481):* the wait is dated from when the candidate
-reached disk, not from the first tick of this process. The daemon kept the
+*Amendment 2026-11-03 (issue #481):* the wait is dated from when the earliest
+newer release reached disk, not from the first tick of this process. The daemon kept the
 drain's phase in memory only, so a daemon restarted mid-drain waited the full
 `PendingFor` again and then drained from scratch. On the Mac mini every restart
 landed inside a drain, and v0.1.840 stayed off the node for over two hours. A
