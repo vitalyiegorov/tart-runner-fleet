@@ -419,9 +419,22 @@ production clones will be. It requires M3 or newer silicon.
 
 ### 3. Provision
 
-This is the legacy script's payload, unchanged except where noted.
+This is the legacy script's payload, unchanged except where noted. The
+command-line tools come first, from
+[`deploy/actions-cache/runner-tools.txt`](../deploy/actions-cache/runner-tools.txt),
+the one list the amd64 podman image installs too. Never name one of its
+packages in a step below: a second copy is how the two images drifted apart
+(issue #477).
 
 ```sh
+REPO=/path/to/a/clone/of/tart-runner-fleet
+TOOLS=/usr/local/libexec/trf-runner-tools
+for file in runner-tools.txt install-runner-tools.sh; do
+  "$TART" exec -i "$BUILD" sudo install -D -m 0644 /dev/stdin "$TOOLS/$file" \
+    <"$REPO/deploy/actions-cache/$file"
+done
+"$TART" exec "$BUILD" sudo sh -c "sh $TOOLS/install-runner-tools.sh <$TOOLS/runner-tools.txt"
+
 RUNNER_VERSION=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest |
   jq -r '.tag_name | ltrimstr("v")')
 
@@ -431,8 +444,7 @@ set -euxo pipefail
 
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  bash build-essential ca-certificates curl gh git gnupg jq libicu-dev \
-  openjdk-17-jre-headless tar unzip xz-utils wget zip
+  ca-certificates libicu-dev openjdk-17-jre-headless
 
 # Node 22 from NodeSource. It installs into /usr/bin, which is on the daemon
 # runner PATH; a version manager would not be.
@@ -912,10 +924,11 @@ for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 
   test "$active_state" = "inactive"
 done
 
-# Everything a job needs, on the daemon PATH and nothing else.
+# Everything a job needs, on the daemon PATH and nothing else. The shared tool
+# list is checked separately, below, against the repository's current copy.
 env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 sh -c '"'"'
-for tool in node npm npx yarn corepack git jq gh java python3 curl tar unzip zip make gcc sudo shutdown; do
+for tool in node npm npx yarn corepack java shutdown; do
   command -v "$tool" >/dev/null || { echo "MISSING $tool"; exit 1; }
 done
 # On a node that advertises linux-xl, add: docker adb
@@ -954,6 +967,15 @@ returns false on a rule that is present and working. Worse, written as
 `test -f … && echo present`, `set -e` will not stop on it — POSIX exempts every
 command in an `AND-OR` list but the last — so the check *prints nothing and the
 script continues*. Use `sudo test -f`, or trust the probe.
+
+Then check the shared tool list. Feed it from the repository, not from the copy
+in the image: an image built from an older list passes its own copy. This
+proves the commands are present, not which list the image was built from.
+
+```sh
+"$TART" exec -i "$BUILD" sh /usr/local/libexec/trf-runner-tools/install-runner-tools.sh --check \
+  <"$REPO/deploy/actions-cache/runner-tools.txt"
+```
 
 ### Verify the Redroid prewarm, on a node that advertises `linux-xl`
 
@@ -1437,7 +1459,8 @@ Each layer is its own dated candidate, so each one is also a rollback point.
 | --- | --- | --- |
 | `linux-runner-base-arm64-tools-20261024a` | Node tool cache | rollback target without the LAN cache |
 | `linux-runner-base-arm64-tools-20261024b` | `a` + the ADR 0078 runner patch and `.env` | superseded: cache saves and restores failed, see below |
-| `linux-runner-base-arm64-tools-20261024c` | `b` + `host.containers.internal` in `/etc/hosts` | promoted on both Macs (`baseVm`); `overflow-20261008`, `a` and `b` kept |
+| `linux-runner-base-arm64-tools-20261024c` | `b` + `host.containers.internal` in `/etc/hosts` | superseded by `d`; kept as its rollback target |
+| `linux-runner-base-arm64-tools-20261103d` | `c` + [`runner-tools.txt`](../deploy/actions-cache/runner-tools.txt) | promoted on both Macs (`baseVm`), see [Layer d](#layer-d-the-shared-tool-list-issue-477) |
 
 The MacBook is an M1-class machine, so its build and verification guests run
 without `--nested`. The production adapter decides `--nested` for itself.
@@ -1562,13 +1585,24 @@ payload and checks its digest, then downloads the artifact:
 | MacBook | 40111659640 | 22.x, 24.x `Found in cache` | 33.8 MB/s to omarchy | hit, `payload: OK` | round trip OK |
 | Mac mini | 40119266768 | 22.x, 24.x `Found in cache` | 70.2 MB/s to omarchy | hit, `payload: OK` | round trip OK |
 
+### Layer d: the shared tool list (issue #477)
+
+`linux-portable-2x4` job 125785846761 failed on `…-tools-20261024c` in
+`oven-sh/setup-bun` because the image had no `unzip`. A `--check` of `c`
+against [`runner-tools.txt`](../deploy/actions-cache/runner-tools.txt) printed
+`runner tools missing: gh(gh) unzip(unzip) zip(zip)`. Layer `d` is `c` plus the
+install from [step 3](#3-provision)'s first command, built under
+`linux-runner-base-arm64-tools-20261103d`. The amd64 image was rebuilt from the
+same list at the same time, because it lacked the arm64-only tools.
+
 ### When consumer pins change
 
 Inventory the `node-version` inputs in the consumer workflows that run on
 `trf-linux-arm64-*` / `linux-portable-*` / `linux-go-*`. A range resolves to
 the highest cached version that satisfies it, so one entry per major line covers the
 ranges. An exact pin needs its exact version. Add the version to layer `a`'s
-list on a new dated candidate, re-apply `b` and `c` on top, run the
-fresh-clone checks, and promote. Keep the podman image's list
+list on a new dated candidate, re-apply `b`, `c` and `d` on top, run the
+fresh-clone checks and the shared tool `--check` (it must name no missing
+command), and promote. Keep the podman image's list
 (`deploy/actions-cache/`) identical, so that shared labels behave the same on
 every node.

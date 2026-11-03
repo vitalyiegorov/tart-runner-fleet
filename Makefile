@@ -66,7 +66,7 @@ build:
 	CGO_ENABLED=0 $(GO) build -trimpath ./...
 
 tool-cache-test:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p tool_cache_test.py
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p '*_test.py'
 
 preflight: mod-check fmt-check workflow-lint self-host-check tool-cache-test
 quality: vet lint deadcode cpd vuln

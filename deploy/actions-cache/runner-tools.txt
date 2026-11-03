@@ -1,0 +1,38 @@
+# The commands every Linux runner image carries on the daemon runner PATH, and
+# the Ubuntu package that provides each. One file for both architectures: the
+# amd64 podman image (Containerfile.runner) and the arm64 Tart base
+# (docs/LINUX_BASE_IMAGE.md) install from it, and install-runner-tools.sh
+# refuses an image that lacks any line. A label shared by both is a promise
+# about the guest (ADR 0034), so a tool goes here, never into one build.
+#
+# command  package
+bash       bash
+bc         bc
+bzip2      bzip2
+cpio       cpio
+curl       curl
+file       file
+g++        build-essential
+gawk       gawk
+gcc        build-essential
+gh         gh
+git        git
+gpg        gnupg
+jq         jq
+make       build-essential
+openssl    openssl
+patch      patch
+python3    python3
+rsync      rsync
+scp        openssh-client
+ssh        openssh-client
+sudo       sudo
+tar        tar
+time       time
+unzip      unzip
+uuidgen    uuid-runtime
+wget       wget
+xxd        xxd
+xz         xz-utils
+zip        zip
+zstd       zstd
