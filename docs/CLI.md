@@ -222,7 +222,7 @@ When a scope's `configUrl` changes — typically a `repository` scope becoming a
 sets at the new URL, but the old sets stay registered at the old URL with the
 same labels and nothing listening. GitHub can assign jobs to them, and never
 reassigns a job. `scale-sets retire` removes one such set (issue #475,
-[ADR 0061](adr/0061-a-scope-kind-change-retires-its-old-scale-sets.md)):
+[ADR 0090](adr/0090-a-scope-kind-change-retires-its-old-scale-sets.md)):
 
 ```sh
 fleet scale-sets retire trf-rnw-linux-amd64-2x4 --config ./state/fleet.json \

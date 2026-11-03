@@ -129,7 +129,9 @@ func TestRetireDeletesTheIdleOldSetAtTheFormerScope(t *testing.T) {
 }
 
 // TestRetireReadsTheScopesRunnerGroup: an organization scope can name a runner
-// group, and the old set is looked up there; with none set it is the default.
+// group, and its replacement is looked up there. A repository-level --from has
+// only the default group, so the old set is always looked up there (PR #476
+// review): looking it up in the org's named group would never find it.
 func TestRetireReadsTheScopesRunnerGroup(t *testing.T) {
 	world := newRetireWorld()
 	request := world.request()
@@ -137,8 +139,8 @@ func TestRetireReadsTheScopesRunnerGroup(t *testing.T) {
 	if _, err := Retire(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	if len(world.from.groups) != 1 || world.from.groups[0] != "fleet" {
-		t.Fatalf("old set looked up in %v, want [fleet]", world.from.groups)
+	if len(world.from.groups) != 1 || world.from.groups[0] != "" {
+		t.Fatalf("old repo-level set looked up in %v, want the default group", world.from.groups)
 	}
 	if len(world.current.groups) != 1 || world.current.groups[0] != "fleet" {
 		t.Fatalf("replacement looked up in %v, want [fleet]", world.current.groups)
@@ -200,6 +202,45 @@ func TestRetireNeverTargetsTheBoundScope(t *testing.T) {
 		if !errors.Is(err, operations.ErrConflict) || len(world.opened) != 0 {
 			t.Fatalf("from %q: err = %v opened = %v, want conflict before any client", from, err, world.opened)
 		}
+	}
+}
+
+// TestRetireNeverTargetsAnotherConfiguredScope: --from equal to ANY scope this
+// node is configured for, not just the named one, names sets the node binds
+// (PR #476 review). It is refused before any client is opened.
+func TestRetireNeverTargetsAnotherConfiguredScope(t *testing.T) {
+	world := newRetireWorld()
+	request := world.request()
+	cfg := request.Config
+	cfg.Targets = append(cfg.Targets, config.Target{Type: "repo", Slug: "owner/other", MaxActive: 4})
+	other := cfg.GitHub.Scopes[0]
+	other.Name, other.Kind, other.ConfigURL, other.Targets = "other", config.ScopeRepository,
+		"https://github.com/owner/other", []string{"owner/other"}
+	other.ScaleSets = []config.ScaleSet{{Profile: "large", Name: "other-large", MaxCapacity: 1,
+		Labels: []string{"self-hosted", "linux-other"}}}
+	cfg.GitHub.Scopes = append(cfg.GitHub.Scopes, other)
+	request.Config = cfg
+	if err := cfg.ValidateAuthority(); err != nil {
+		t.Fatalf("fixture must be a valid configuration: %v", err)
+	}
+	for _, from := range []string{"https://github.com/owner/other", "https://github.com:443/Owner/Other/"} {
+		request.From = from
+		_, err := Retire(context.Background(), request)
+		if !errors.Is(err, operations.ErrConflict) || len(world.opened) != 0 {
+			t.Fatalf("from %q: err = %v opened = %v, want conflict before any client", from, err, world.opened)
+		}
+	}
+}
+
+// TestRetireNeverDeletesASetTheConfigurationBinds: whatever --from names, a set
+// whose id any configured scope carries is bound by this node and is refused.
+func TestRetireNeverDeletesASetTheConfigurationBinds(t *testing.T) {
+	world := newRetireWorld()
+	world.from.sets = []githubscaleset.ScaleSetSummary{{ID: 31, Name: "repo-large"}}
+	world.from.stats = map[int]githubscaleset.ScaleSetStatistics{31: {}}
+	_, err := Retire(context.Background(), world.request())
+	if !errors.Is(err, operations.ErrConflict) || len(world.from.deleted) != 0 {
+		t.Fatalf("err = %v deleted = %v, want conflict and nothing deleted", err, world.from.deleted)
 	}
 }
 

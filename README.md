@@ -168,7 +168,7 @@ fleet scale-sets provision --config PATH --apply --write \
 fleet scale-sets recreate NAME --config PATH \
   --confirm recreate-scale-set --reason "operator reason"
 
-# delete a set left at a scope's former configUrl after a kind change (ADR 0061)
+# delete a set left at a scope's former configUrl after a kind change (ADR 0090)
 fleet scale-sets retire NAME --config PATH --scope NAME --from OLD_CONFIG_URL \
   --confirm retire-scale-set --reason "operator reason"
 

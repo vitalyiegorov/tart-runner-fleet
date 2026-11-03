@@ -681,7 +681,7 @@ const retireUsage = "fleet scale-sets retire NAME --config path --scope name --f
 
 // runScaleSetRetire deletes one runner scale set still registered at a scope's
 // FORMER configUrl, after the scope moved -- for example from a repository to
-// an organization (issue #475, ADR 0061). Without it the old set keeps its
+// an organization (issue #475, ADR 0090). Without it the old set keeps its
 // labels and no listener, and GitHub can assign it jobs nobody will run.
 //
 // It is the third guarded mutation in this surface and mirrors recreate: an
@@ -1539,7 +1539,7 @@ GUARDED SCALE-SET RETIREMENT
   unless --from differs from the scope's current configUrl, the replacement is
   provisioned there with the configured id, and GitHub reports the old set with
   no assigned or running job and no busy or registered runner. It does not
-  change the configuration or restart anything (ADR 0061).
+  change the configuration or restart anything (ADR 0090).
 
 GUARDED DEAD-LETTER DISCHARGE
   fleet operations discharge --operation op-ID --instance trf-ID \

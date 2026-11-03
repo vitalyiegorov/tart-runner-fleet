@@ -12,6 +12,10 @@ func TestScopeURLKeyNamesOneScopeHoweverItIsSpelled(t *testing.T) {
 		"https://github.com//owner":      "https://github.com/owner",
 		"https://github.com/owner/repo":  "https://github.com/owner/repo",
 		"https://github.com/Owner/Repo/": "https://github.com/owner/repo",
+		// An explicit default port names the same host (PR #476 review).
+		"https://github.com:443/owner":      "https://github.com/owner",
+		"https://GitHub.com:443/Owner/Repo": "https://github.com/owner/repo",
+		"https://ghe.example:8443/owner":    "https://ghe.example:8443/owner",
 	} {
 		if got, err := ScopeURLKey(raw); err != nil || got != want {
 			t.Fatalf("ScopeURLKey(%q) = %q, %v; want %q", raw, got, err, want)

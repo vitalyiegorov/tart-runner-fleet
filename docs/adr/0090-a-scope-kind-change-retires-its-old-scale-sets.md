@@ -1,4 +1,4 @@
-# ADR 0061: A scope kind change retires its old scale sets under guard
+# ADR 0090: A scope kind change retires its old scale sets under guard
 
 ## Status
 
