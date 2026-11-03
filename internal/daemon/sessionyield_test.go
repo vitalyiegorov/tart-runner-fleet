@@ -43,6 +43,30 @@ func TestSessionYieldWithdrawsOnlyAfterSustainedBlockedIdleness(t *testing.T) {
 	}
 }
 
+// TestSessionYieldWithdrawsThroughBriefGateOpenings is issue #483. A gate that
+// refuses admission for a minute and opens for five seconds, over and over,
+// starts almost nothing, yet each opening restarted the blocked streak, so an
+// idle node never reached BlockedFor and kept the sessions GitHub binds work
+// through. A refusal ends only once admission has held for HealthyFor, the
+// bound the rejoin side already uses.
+func TestSessionYieldWithdrawsThroughBriefGateOpenings(t *testing.T) {
+	start := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	policy := yieldPolicy()
+	state := newSessionYieldState(policy)
+	for elapsed := time.Duration(0); elapsed <= 15*time.Minute; elapsed += 5 * time.Second {
+		allowed := elapsed%(65*time.Second) >= 60*time.Second
+		action := state.Observe(sessionYieldFacts{At: start.Add(elapsed), AdmissionAllowed: allowed})
+		if action != sessionYieldWithdraw {
+			continue
+		}
+		if elapsed != policy.BlockedFor {
+			t.Fatalf("withdrew at +%s, want at the blocked bound +%s", elapsed, policy.BlockedFor)
+		}
+		return
+	}
+	t.Fatal("a gate refusing 60 s of every 65 s for 15 minutes never withdrew an idle node's sessions")
+}
+
 func TestSessionYieldHoldsSessionsWhileWorkIsInFlight(t *testing.T) {
 	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

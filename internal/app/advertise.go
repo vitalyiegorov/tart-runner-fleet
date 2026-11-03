@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
@@ -94,6 +95,10 @@ func AdvertisedCapacity(configured int, headroom ScaleSetHeadroom, known bool) i
 // scale set, and every set must read the same conclusion the scheduler admitted
 // on. The zero value is ready to use and knows nothing.
 type ResidualAdvertisement struct {
+	// Reopen is how long the node's own guardrails must have admitted work,
+	// continuously, before a gated node is offered more than it holds again
+	// (issue #483).
+	Reopen   time.Duration
 	mu       sync.Mutex
 	headroom map[int64]ScaleSetHeadroom
 }
