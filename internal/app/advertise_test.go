@@ -43,6 +43,10 @@ func TestAdvertisedCapacityOnlyLowersAndNeverBelowWhatIsHeld(t *testing.T) {
 		{"a gated node's idle set offers nothing extra", 2, ScaleSetHeadroom{Gated: true}, true, 0},
 		{"a gated node's busy set offers what it holds", 4, ScaleSetHeadroom{Held: 1, Placed: 1, Gated: true}, true, 1},
 		{"a gated node still keeps work already assigned", 4, ScaleSetHeadroom{Held: 2, Placed: 1, Gated: true}, true, 2},
+		// Issue #483: a gate held through a brief reopening still offers only
+		// what the set holds, even though that reopening measured a residual.
+		{"a gated set offers none of a residual a brief opening measured", 8,
+			ScaleSetHeadroom{Held: 2, Placed: 2, Fit: 3, Gated: true}, true, 2},
 		// Issue #439: a set whose vector cannot start here even once every
 		// Linux guest drains -- macOS guests hold what it needs -- would make the
 		// job the free slot attracts wait for them. It too offers what it holds.
@@ -255,6 +259,51 @@ func TestResidualAdvertisementKeepsTheLastReadyView(t *testing.T) {
 	absent.Observe(ready, nil)
 	if absent.Capacity(18, 2) != 2 {
 		t.Fatal("no advertisement advertises the configured capacity")
+	}
+}
+
+// TestResidualAdvertisementHoldsTheGateThroughBriefOpenings is issue #483's
+// busy case. On 2026-11-03 ubuntu-vitalii ran guests while its admission gate
+// flapped between swap and CPU pressure, open for 1 to 23 s every minute or
+// two. Session yield rightly kept its sessions, because the running guests
+// report through them (#432). Each brief opening put the node's sets back on
+// the standing offer and the measured residual for a whole long poll, so jobs
+// kept binding to a node that could not start them, and waited up to an hour
+// while siblings were idle. A gate that reopens must stay open for Reopen
+// before the node is offered more than it holds.
+func TestResidualAdvertisementHoldsTheGateThroughBriefOpenings(t *testing.T) {
+	start := time.Date(2026, 11, 3, 14, 7, 5, 0, time.UTC)
+	advertisement := ResidualAdvertisement{Reopen: 2 * time.Minute}
+	// Two live guests hold the set's two assigned jobs. An open tick measures
+	// room for three more.
+	tick := func(at time.Duration, gated bool) {
+		fit := 3
+		if gated {
+			fit = 0
+		}
+		advertisement.Observe(TickResult{At: start.Add(at), Plan: scheduler.Plan{Status: scheduler.PlanReady},
+			Headroom: []ScaleSetHeadroom{{StoreKey: 7, Held: 2, Placed: 2, Fit: fit, Gated: gated}}}, nil)
+	}
+	steps := []struct {
+		at    time.Duration
+		gated bool
+		want  int
+		why   string
+	}{
+		{0, true, 2, "a gated busy set offers what it holds"},
+		{37 * time.Second, false, 2, "a gate open for one tick is not a node that can admit"},
+		{38 * time.Second, true, 2, "closed again"},
+		{129 * time.Second, false, 2, "a 7 s opening"},
+		{136 * time.Second, true, 2, "closed again"},
+		{200 * time.Second, false, 2, "open, but not yet for the reopen bound"},
+		{260 * time.Second, false, 2, "open for one minute"},
+		{320 * time.Second, false, 5, "open for the whole bound: held plus fit"},
+	}
+	for _, step := range steps {
+		tick(step.at, step.gated)
+		if got := advertisement.Capacity(7, 8); got != step.want {
+			t.Fatalf("at +%s (%s): advertised %d, want %d", step.at, step.why, got, step.want)
+		}
 	}
 }
 
