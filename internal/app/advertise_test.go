@@ -307,6 +307,38 @@ func TestResidualAdvertisementHoldsTheGateThroughBriefOpenings(t *testing.T) {
 	}
 }
 
+// TestRefusalEpisodeEndsOnlyAfterContinuousAdmission pins the hysteresis both
+// the advertisement and session yield read: a refusal outlives openings
+// shorter than Reopen, and a clock correction earns no elapsed time.
+func TestRefusalEpisodeEndsOnlyAfterContinuousAdmission(t *testing.T) {
+	start := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	episode := RefusalEpisode{Reopen: 2 * time.Minute}
+	if episode.Observe(start, false) || !episode.Since().IsZero() {
+		t.Fatal("admission outside a refusal started one")
+	}
+	if !episode.Observe(start.Add(time.Minute), true) || !episode.Since().Equal(start.Add(time.Minute)) {
+		t.Fatal("a refused tick did not start a refusal")
+	}
+	opened := start.Add(2 * time.Minute)
+	if !episode.Observe(opened, false) {
+		t.Fatal("the first allowed tick ended the refusal")
+	}
+	// The clock moves back a minute: the reopen bound restarts from there.
+	corrected := opened.Add(-time.Minute)
+	if !episode.Observe(corrected, false) || !episode.Observe(corrected.Add(time.Minute+59*time.Second), false) {
+		t.Fatal("a backward clock let the refusal end before the reopen bound")
+	}
+	if episode.Observe(corrected.Add(2*time.Minute), false) || !episode.Since().IsZero() {
+		t.Fatal("two minutes of continuous admission did not end the refusal")
+	}
+	// A refusal whose clock moves back is dated from the corrected instant.
+	episode.Observe(start.Add(time.Hour), true)
+	episode.Observe(start.Add(50*time.Minute), true)
+	if !episode.Since().Equal(start.Add(50 * time.Minute)) {
+		t.Fatalf("a refusal is dated %s after a backward clock, want the corrected instant", episode.Since())
+	}
+}
+
 // TestScaleSetHeadroomMarksANodeItsOwnGuardrailsRefuse is issue #428: a node
 // behind its memory, swap, CPU, disk or inode gate is gated, and loses the
 // standing offer of one. An update drain is not host pressure (hostHealthy): it
