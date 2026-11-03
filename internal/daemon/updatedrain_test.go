@@ -247,3 +247,56 @@ func TestExecutablePathResolvesOrReportsNothing(t *testing.T) {
 		t.Fatalf("executablePath() = %q, want empty when the platform cannot say", got)
 	}
 }
+
+// Issue #481: a daemon restarted mid-drain began again from nothing. It waited
+// the full PendingFor before draining, and then drained from scratch, so a busy
+// node whose daemon restarted inside every drain never updated at all. The
+// candidate's materialisation under `releases/` is a fact on disk that outlives
+// the process, so a restarted daemon resumes the drain it was in, dated from
+// its original start.
+func TestUpdateDrainSurvivesADaemonRestart(t *testing.T) {
+	root := t.TempDir()
+	candidate := filepath.Join(root, "releases", "v0.1.510+main.b")
+	for _, dir := range []string{filepath.Join(root, "releases", "v0.1.498+main.a"), candidate} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	materialised := drainAt
+	if err := os.Chtimes(candidate, materialised, materialised); err != nil {
+		t.Fatal(err)
+	}
+	policy := autoupdate.DrainPolicy{Enabled: true, PendingFor: 30 * time.Minute,
+		MaxWait: 2 * time.Hour, Cooldown: time.Hour}
+	start := func() *updateDrainController {
+		return newUpdateDrainController(policy, root, "v0.1.498+main.a", autoupdate.ReleaseDirNames, nil)
+	}
+
+	before := start()
+	before.Observe(materialised, 2)
+	drained := materialised.Add(30 * time.Minute)
+	before.Observe(drained, 2)
+	if !before.Draining() {
+		t.Fatal("setup did not drain")
+	}
+
+	// The daemon restarts at drained+20m and ticks a minute later.
+	after := start()
+	after.Observe(drained.Add(21*time.Minute), 2)
+	metric := after.Metric()
+	if !after.Draining() || !metric.Since.Equal(drained) || !metric.PendingSince.Equal(materialised) {
+		t.Fatalf("restarted daemon: draining=%v since=%v pendingSince=%v, want draining since %v, pending since %v",
+			after.Draining(), metric.Since, metric.PendingSince, drained, materialised)
+	}
+}
+
+// A materialisation time ahead of this daemon's clock is not a wait anyone
+// measured: the wait is dated from the tick that saw the candidate.
+func TestUpdateDrainDatesAFutureMaterialisationFromItsOwnTick(t *testing.T) {
+	controller, _ := drainController(t, []string{"v0.1.498+main.a", "v0.1.510+main.b"}, nil)
+	controller.modTime = func(string) (time.Time, error) { return drainAt.Add(time.Hour), nil }
+	controller.Observe(drainAt, 1)
+	if got := controller.Metric().PendingSince; !got.Equal(drainAt) || controller.Draining() {
+		t.Fatalf("pendingSince = %v draining=%v, want %v and not draining", got, controller.Draining(), drainAt)
+	}
+}

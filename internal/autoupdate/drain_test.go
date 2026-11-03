@@ -268,3 +268,111 @@ func TestDrainCooldownClearsWithTheCandidate(t *testing.T) {
 		t.Fatalf("a new candidate was held behind a stale cooldown: %s", action)
 	}
 }
+
+// Issue #481: a fresh state (a restarted daemon) given the candidate's
+// materialisation time resumes the phase a process that never restarted would
+// be in, dated from that phase's original start.
+func TestDrainResumesItsScheduleFromWhenTheCandidateReachedDisk(t *testing.T) {
+	materialised := drainStart
+	drained := materialised.Add(30 * time.Minute)
+	abandoned := drained.Add(2 * time.Hour)
+	for _, test := range []struct {
+		name     string
+		at       time.Time
+		action   DrainAction
+		draining bool
+		since    time.Time
+	}{
+		{"still pending", materialised.Add(29 * time.Minute), DrainNone, false, materialised},
+		{"mid-drain", drained.Add(21 * time.Minute), DrainStart, true, drained},
+		// A restart never extends a drain past MaxWait from its original start.
+		{"past MaxWait", abandoned, DrainNone, false, abandoned},
+		// Cooldown survives a restart.
+		{"mid-cooldown", abandoned.Add(59 * time.Minute), DrainNone, false, abandoned},
+		{"second drain", abandoned.Add(70 * time.Minute), DrainStart, true, abandoned.Add(time.Hour)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := NewDrainState(drainPolicy())
+			facts := DrainFacts{At: test.at, CandidatePending: true, LiveInstances: 1, PendingSince: materialised}
+			if action := state.Observe(facts); action != test.action {
+				t.Fatalf("resumed with %s, want %s", action, test.action)
+			}
+			if state.Draining() != test.draining || !state.Since().Equal(test.since) {
+				t.Fatalf("resumed draining=%v since=%v, want draining=%v since=%v",
+					state.Draining(), state.Since(), test.draining, test.since)
+			}
+		})
+	}
+}
+
+// The resumed cooldown is served out, not restarted, and a resumed drain still
+// ends the moment its candidate goes away.
+func TestDrainResumedPhasesEndAsLiveOnesDo(t *testing.T) {
+	materialised := drainStart
+	abandoned := materialised.Add(150 * time.Minute)
+	cooling := NewDrainState(drainPolicy())
+	cooling.Observe(DrainFacts{At: abandoned.Add(30 * time.Minute), CandidatePending: true, PendingSince: materialised})
+	cooling.Observe(DrainFacts{At: abandoned.Add(time.Hour), CandidatePending: true, PendingSince: materialised})
+	if action := cooling.Observe(DrainFacts{At: abandoned.Add(time.Hour + time.Minute), CandidatePending: true}); action != DrainStart {
+		t.Fatalf("a resumed cooldown was not served out on time: %s", action)
+	}
+
+	draining := NewDrainState(drainPolicy())
+	draining.Observe(DrainFacts{At: materialised.Add(time.Hour), CandidatePending: true, PendingSince: materialised})
+	if action := draining.Observe(DrainFacts{At: materialised.Add(61 * time.Minute)}); action != DrainStop || draining.Draining() {
+		t.Fatalf("a resumed drain outlived its candidate: %s", action)
+	}
+}
+
+// A materialisation time this node cannot trust dates the wait from this tick,
+// exactly as before: a clock ahead of the tick is not a wait anyone measured.
+// A policy with no drain window has no schedule to resume either; it behaves
+// as a live process would, draining from this tick.
+func TestDrainResumeIgnoresAnUntrustworthyOrigin(t *testing.T) {
+	future := NewDrainState(drainPolicy())
+	if action := future.Observe(DrainFacts{At: drainStart, CandidatePending: true,
+		PendingSince: drainStart.Add(time.Hour)}); action != DrainNone || !future.Since().Equal(drainStart) {
+		t.Fatalf("a future origin acted (%s) or dated the wait %v", action, future.Since())
+	}
+	degenerate := NewDrainState(DrainPolicy{Enabled: true})
+	if action := degenerate.Observe(DrainFacts{At: drainStart, CandidatePending: true,
+		PendingSince: drainStart.Add(-time.Hour)}); action != DrainStart || !degenerate.Since().Equal(drainStart) {
+		t.Fatalf("a policy with no drain window resumed (%s) a schedule dated %v", action, degenerate.Since())
+	}
+}
+
+func TestPendingSinceIsTheEarliestNewerMaterialisation(t *testing.T) {
+	dir := func(string) ([]string, error) {
+		return []string{"v0.1.461+main.old", "v0.1.498+main.a", "v0.1.510+main.b", "v0.1.520+main.c", "v0.1.530+main.d"}, nil
+	}
+	times := map[string]time.Time{
+		"/root/releases/v0.1.461+main.old": drainStart.Add(-48 * time.Hour),
+		"/root/releases/v0.1.510+main.b":   drainStart.Add(time.Hour),
+		"/root/releases/v0.1.520+main.c":   drainStart,
+	}
+	modTime := func(path string) (time.Time, error) {
+		if at, ok := times[path]; ok {
+			return at, nil
+		}
+		return time.Time{}, errors.New("unreadable")
+	}
+	if got := PendingSince("/root", "v0.1.498+main.a", dir, modTime); !got.Equal(drainStart) {
+		t.Fatalf("PendingSince = %v, want the earliest newer generation's %v", got, drainStart)
+	}
+	if got := PendingSince("/root", "v0.1.498+main.a", dir, nil); !got.IsZero() {
+		t.Fatalf("PendingSince with no clock for directories = %v, want zero", got)
+	}
+}
+
+func TestReleaseModTimeDatesTheDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chtimes(root, drainStart, drainStart); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReleaseModTime(root); err != nil || !got.Equal(drainStart) {
+		t.Fatalf("ReleaseModTime = (%v, %v), want %v", got, err, drainStart)
+	}
+	if _, err := ReleaseModTime(filepath.Join(root, "absent")); err == nil {
+		t.Fatal("an absent release was dated")
+	}
+}

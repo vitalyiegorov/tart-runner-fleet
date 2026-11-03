@@ -16,7 +16,8 @@ type UpdateDrainMetric struct {
 	Draining bool
 	// Candidate is the newest generation on disk that is not the running one.
 	Candidate string
-	// PendingSince is when that candidate was first observed unapplied, and
+	// PendingSince is when the earliest newer generation reached disk unapplied
+	// (#481), so it can predate Candidate when several are present, and
 	// Since is when the current phase began. Together they separate "waiting to
 	// start draining" from "draining", which is the difference between a node
 	// that is fine and a node an operator may want to look at.
