@@ -109,9 +109,16 @@ type scaleSetAuditAdmin interface {
 }
 
 func NewAuditor(c GitHubAppAdminConfig) (*Auditor, error) {
+	auditor, _, err := newAuditor(c)
+	return auditor, err
+}
+
+// newAuditor also returns the official client it built, so the retire port can
+// reach its one delete through the same credential path and the same client.
+func newAuditor(c GitHubAppAdminConfig) (*Auditor, *scaleset.Client, error) {
 	if c.PrivateKey == nil || c.PrivateKey.reveal() == "" || strings.TrimSpace(c.GitHubConfigURL) == "" ||
 		strings.TrimSpace(c.ClientID) == "" || c.InstallationID <= 0 {
-		return nil, operations.ErrInvalid
+		return nil, nil, operations.ErrInvalid
 	}
 	tap := &listTap{}
 	retryable := retryablehttp.NewClient()
@@ -125,9 +132,9 @@ func NewAuditor(c GitHubAppAdminConfig) (*Auditor, error) {
 		SystemInfo: scaleset.SystemInfo{System: c.System, Version: c.Version, CommitSHA: c.CommitSHA, Subsystem: c.Subsystem},
 	}, scaleset.WithRetryableHTTPClint(retryable))
 	if err != nil {
-		return nil, fmt.Errorf("create official GitHub App admin client: %w", err)
+		return nil, nil, fmt.Errorf("create official GitHub App admin client: %w", err)
 	}
-	return &Auditor{client: client, tap: tap}, nil
+	return &Auditor{client: client, tap: tap}, client, nil
 }
 
 // List reports every scale set GitHub holds in the scope's runner group. It is

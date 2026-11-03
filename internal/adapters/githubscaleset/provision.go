@@ -141,9 +141,11 @@ func (p Provisioner) Ensure(ctx context.Context, spec ScaleSetSpec) (scaleset.Ru
 //
 // It is the fleet's only destructive call against the scale-set admin API and
 // it is deliberately narrow: an id, no name resolution, no listing, no "delete
-// what does not match". The one caller is `fleet scale-sets recreate`, which
-// repairs a set GitHub has stale counters for (issue #336, ADR 0056) and which
-// reaches this method through a port the provisioning path does not hold.
+// what does not match". Its callers are `fleet scale-sets recreate`, which
+// repairs a set GitHub has stale counters for (issue #336, ADR 0056), and
+// `fleet scale-sets retire`, which removes a set left at a scope's former
+// configUrl (issue #475). Both reach it through ports the provisioning path
+// does not hold.
 func (p Provisioner) Delete(ctx context.Context, id int) error {
 	if p.Client == nil || id <= 0 {
 		return operations.ErrInvalid

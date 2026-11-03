@@ -39,8 +39,10 @@ const (
 	// names the mutation, as every other guarded confirmation in this surface
 	// does, so no confirmation can be copied from one command to another.
 	recreateConfirmation = "recreate-scale-set"
-	updateReadyAttempts  = 150
-	updateReadyDelay     = 2 * time.Second
+	// retireConfirmation is the exact token `scale-sets retire` requires.
+	retireConfirmation  = "retire-scale-set"
+	updateReadyAttempts = 150
+	updateReadyDelay    = 2 * time.Second
 )
 
 // defaultVersion is reported when no build identity was injected, which is the
@@ -67,9 +69,12 @@ type dependencies struct {
 	// object. It is separate from openProvision so `provision` holds a client
 	// that cannot delete a scale set at all (ADR 0056).
 	openRecreate func(githubscaleset.GitHubAppAdminConfig) (provision.Recreater, error)
-	writeConfig  func(string, config.Config) error
-	command      autoupdate.Command
-	version      string
+	// openRetire reaches a scope's FORMER configUrl only; it can list, count
+	// and delete, never create (issue #475).
+	openRetire  func(githubscaleset.GitHubAppAdminConfig) (provision.Retirer, error)
+	writeConfig func(string, config.Config) error
+	command     autoupdate.Command
+	version     string
 }
 
 // buildVersion reports the injected build identity, falling back to the
@@ -134,6 +139,9 @@ func defaultDependencies() dependencies {
 		},
 		openRecreate: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Recreater, error) {
 			return githubscaleset.NewRecreater(cfg)
+		},
+		openRetire: func(cfg githubscaleset.GitHubAppAdminConfig) (provision.Retirer, error) {
+			return githubscaleset.NewRetirer(cfg)
 		},
 		writeConfig: atomicWriteConfig,
 		command:     execCommand{},
@@ -402,11 +410,15 @@ func runScaleSets(ctx context.Context, args []string, stdout, stderr io.Writer, 
 	if len(args) > 0 && args[0] == "recreate" {
 		return runScaleSetRecreate(ctx, args[1:], stdout, stderr, deps)
 	}
+	if len(args) > 0 && args[0] == "retire" {
+		return runScaleSetRetire(ctx, args[1:], stdout, stderr, deps)
+	}
 	if len(args) == 0 || args[0] != "provision" {
 		fmt.Fprintln(stderr, "usage: fleet scale-sets provision --config path [--output table|json] [--apply --write --confirm provision-scale-sets --reason text] [--reconcile-drift]")
 		fmt.Fprintln(stderr, "       fleet scale-sets audit --config path [--output table|json] [--strict]")
 		fmt.Fprintln(stderr, "       fleet scale-sets recreate NAME --config path [--scope name] "+
 			"--confirm recreate-scale-set --reason text")
+		fmt.Fprintln(stderr, "       "+retireUsage)
 		return exitUsage
 	}
 	flags := flag.NewFlagSet("fleet scale-sets provision", flag.ContinueOnError)
@@ -645,15 +657,7 @@ func runScaleSetRecreate(ctx context.Context, args []string, stdout, stderr io.W
 		LoadKey: deps.loadPrivateKey, Open: deps.openRecreate, Version: deps.buildVersion()})
 	if err != nil {
 		fmt.Fprintf(stderr, "recreate scale set: %v\n", err)
-		switch {
-		case errors.Is(err, operations.ErrNotFound):
-			return exitNotFound
-		case errors.Is(err, operations.ErrConflict), errors.Is(err, operations.ErrUncertain):
-			return exitUnsafe
-		case errors.Is(err, operations.ErrInvalid):
-			return exitUsage
-		}
-		return exitFailure
+		return scaleSetMutationExit(err)
 	}
 	// The substitution is reported BEFORE the write is attempted. The GitHub
 	// object already exists at this point, and an operator whose disk refused
@@ -670,6 +674,66 @@ func runScaleSetRecreate(ctx context.Context, args []string, stdout, stderr io.W
 	}
 	fmt.Fprintf(stdout, "restart the daemon so it binds scale set %d; this command does not restart it\n", result.NewID)
 	return exitSuccess
+}
+
+const retireUsage = "fleet scale-sets retire NAME --config path --scope name --from configUrl " +
+	"--confirm retire-scale-set --reason text"
+
+// runScaleSetRetire deletes one runner scale set still registered at a scope's
+// FORMER configUrl, after the scope moved -- for example from a repository to
+// an organization (issue #475, ADR 0061). Without it the old set keeps its
+// labels and no listener, and GitHub can assign it jobs nobody will run.
+//
+// It is the third guarded mutation in this surface and mirrors recreate: an
+// exact --confirm token, a non-empty --reason, and fail-closed refusals. It
+// never touches the configuration and never restarts anything.
+func runScaleSetRetire(ctx context.Context, args []string, stdout, stderr io.Writer, deps dependencies) int {
+	flags := flag.NewFlagSet("fleet scale-sets retire", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	path := flags.String("config", "", "fleet configuration path")
+	scope := flags.String("scope", "", "the scope that used to register the set at --from")
+	from := flags.String("from", "", "the scope's former GitHub configUrl, where the old set is registered")
+	confirm := flags.String("confirm", "", "exact mutation confirmation")
+	reason := flags.String("reason", "", "operator reason recorded outside secret material")
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintln(stderr, "usage: "+retireUsage)
+		return exitUsage
+	}
+	name := args[0]
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *path == "" || *scope == "" || *from == "" {
+		fmt.Fprintln(stderr, "usage: "+retireUsage)
+		return exitUsage
+	}
+	if *confirm != retireConfirmation || strings.TrimSpace(*reason) == "" {
+		fmt.Fprintf(stderr, "unsafe retire: require --confirm %s and a non-empty --reason\n", retireConfirmation)
+		return exitUnsafe
+	}
+	cfg, code := readConfig(*path, stderr, deps)
+	if code != exitSuccess {
+		return code
+	}
+	result, err := provision.Retire(ctx, provision.RetireRequest{Config: cfg, Scope: *scope, Name: name, From: *from,
+		LoadKey: deps.loadPrivateKey, OpenAudit: deps.openAudit, Open: deps.openRetire, Version: deps.buildVersion()})
+	if err != nil {
+		fmt.Fprintf(stderr, "retire scale set: %v\n", err)
+		return scaleSetMutationExit(err)
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%d retired\n", result.Scope, result.Name, result.From, result.ID)
+	return exitSuccess
+}
+
+// scaleSetMutationExit is the one mapping from a guarded scale-set mutation's
+// refusal to its exit code.
+func scaleSetMutationExit(err error) int {
+	switch {
+	case errors.Is(err, operations.ErrNotFound):
+		return exitNotFound
+	case errors.Is(err, operations.ErrConflict), errors.Is(err, operations.ErrUncertain):
+		return exitUnsafe
+	case errors.Is(err, operations.ErrInvalid):
+		return exitUsage
+	}
+	return exitFailure
 }
 
 // readConfig is the one way this surface opens a configuration: open, decode,
@@ -1465,6 +1529,17 @@ GUARDED SCALE-SET RECREATION
   same name and labels, then writes the new id into the configuration. It is
   the remedy for a set GitHub holds stale counters for (ADR 0056) and it does
   not restart the daemon: restart it yourself so the node binds the new id.
+
+GUARDED SCALE-SET RETIREMENT
+  fleet scale-sets retire NAME --config path --scope name \
+    --from https://github.com/OLD/SCOPE \
+    --confirm retire-scale-set --reason "operator reason"
+  Deletes the set NAME still registered at a scope's FORMER configUrl, after
+  the scope moved (for example from a repository to an organization). Refused
+  unless --from differs from the scope's current configUrl, the replacement is
+  provisioned there with the configured id, and GitHub reports the old set with
+  no assigned or running job and no busy or registered runner. It does not
+  change the configuration or restart anything (ADR 0061).
 
 GUARDED DEAD-LETTER DISCHARGE
   fleet operations discharge --operation op-ID --instance trf-ID \

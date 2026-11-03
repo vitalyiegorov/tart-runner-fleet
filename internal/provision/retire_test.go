@@ -240,12 +240,9 @@ func TestRetireRequiresTheReplacementToBeProvisioned(t *testing.T) {
 			request := world.request()
 			mutate(world, &request)
 			_, err := Retire(context.Background(), request)
-			want := operations.ErrConflict
-			if name == "unknown scope" {
-				want = operations.ErrNotFound
-			}
-			if !errors.Is(err, want) || errors.Is(err, operations.ErrNotFound) && want != operations.ErrNotFound {
-				t.Fatalf("err = %v, want %v", err, want)
+			notFound := name == "unknown scope"
+			if errors.Is(err, operations.ErrNotFound) != notFound || !notFound && !errors.Is(err, operations.ErrConflict) {
+				t.Fatalf("err = %v, want not found=%v, else conflict", err, notFound)
 			}
 			if len(world.from.deleted) != 0 {
 				t.Fatalf("nothing may be deleted: %v", world.from.deleted)
