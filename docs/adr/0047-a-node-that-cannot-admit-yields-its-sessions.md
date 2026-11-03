@@ -31,6 +31,14 @@ containers held the node over the ceilings that made it yield. A binding with
 no client at all — closed, or never opened — reports
 `runner_admin_unavailable`.
 
+Amended 2026-11-03 by [ADR 0091](0091-a-gate-reopens-only-once-it-has-held-open.md)
+(issue #483): the blocked bound is no longer restarted by a brief opening. A
+refusal ends only after `sessionYieldHealthyForSeconds` of continuous
+admission, the bound the rejoin side already used, so a gate that opens for a
+few seconds every minute still withdraws an idle node. Live work still holds
+the sessions; a busy pressured node stops attracting work through its
+advertisement instead (ADR 0084).
+
 ## Context
 
 GitHub binds a queued job to exactly one runner scale set at queue time, and

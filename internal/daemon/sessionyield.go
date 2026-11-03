@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 )
 
 // sessionYieldAction is what the policy asks the daemon to do with the scale-set
@@ -44,12 +46,15 @@ func (a sessionYieldAction) String() string {
 // which is why the blocked bound is minutes rather than hours.
 type sessionYieldPolicy struct {
 	Enabled bool
-	// BlockedFor is how long admission must have been continuously refused,
-	// with the node otherwise idle, before withdrawing.
+	// BlockedFor is how long admission must have been refused, with the node
+	// otherwise idle, before withdrawing. Brief reopenings shorter than
+	// HealthyFor do not interrupt the refusal (issue #483): a gate that opens
+	// for a few seconds every minute starts almost nothing.
 	BlockedFor time.Duration
 	// HealthyFor is how long admission must have been continuously allowed
-	// before rejoining. Both bounds exist so a node sitting on the edge of its
-	// disk reserve cannot flap sessions.
+	// before the refusal ends: before rejoining, and before a refusal that has
+	// not yet withdrawn starts over. Both bounds exist so a node sitting on the
+	// edge of its disk reserve can flap neither its sessions nor its clock.
 	HealthyFor time.Duration
 }
 
@@ -66,22 +71,42 @@ type sessionYieldFacts struct {
 	BusyOperations int
 }
 
-// sessionYieldState tracks the current streak and whether this node has already
+// sessionYieldState tracks the current refusal and whether this node has already
 // withdrawn. Zero value is a node that has never observed anything and holds its
 // sessions, which is what a fresh daemon should be.
 type sessionYieldState struct {
 	policy sessionYieldPolicy
 	// yielded is the node's own admission that it is not currently serving.
 	yielded bool
-	// streakSince is when the current blocked/allowed condition began, and
-	// streakBlocked is which condition that is. Together they are the hysteresis.
-	streakSince   time.Time
-	streakBlocked bool
-	observed      bool
+	// refusal is the hysteresis: it begins on the first refused tick and ends
+	// only after HealthyFor of continuous admission. It is the same episode the
+	// residual advertisement holds its gate through (app.RefusalEpisode).
+	refusal app.RefusalEpisode
+	// idleSince is when the node last had work in flight during the current
+	// refusal, or when the refusal began if it had none: the start of the
+	// withdrawal clock. Zero outside a refusal.
+	idleSince time.Time
+	// withdrawnAt dates a withdrawal, and healthySince the end of the last
+	// refusal (the first tick, on a node never refused), so an operator can
+	// age either posture.
+	withdrawnAt, healthySince time.Time
 }
 
 func newSessionYieldState(policy sessionYieldPolicy) *sessionYieldState {
-	return &sessionYieldState{policy: policy}
+	return &sessionYieldState{policy: policy, refusal: app.RefusalEpisode{Reopen: policy.HealthyFor}}
+}
+
+// since is when the node's current posture began: withdrawn, refused, or
+// admitting. A refusal is dated from its first refused tick, so a gate that
+// flaps does not restart it (issue #436).
+func (s *sessionYieldState) since() time.Time {
+	if s.yielded {
+		return s.withdrawnAt
+	}
+	if start := s.refusal.Since(); !start.IsZero() {
+		return start
+	}
+	return s.healthySince
 }
 
 // Yielded reports whether this node has withdrawn its sessions. It exists so the
@@ -101,40 +126,38 @@ func (s *sessionYieldState) Observe(facts sessionYieldFacts) sessionYieldAction 
 		// Disabling the policy while withdrawn must not strand the node outside
 		// the fleet: it rejoins on the next tick and stays.
 		if s.yielded {
-			s.yielded = false
-			s.observed = false
+			*s = *newSessionYieldState(s.policy)
 			return sessionYieldRejoin
 		}
 		return sessionYieldNone
 	}
-	blocked := !facts.AdmissionAllowed
-	// A clock that moved backwards is not a longer streak. Restart rather than
-	// let a correction satisfy a bound no elapsed time earned.
-	if !s.observed || s.streakBlocked != blocked || facts.At.Before(s.streakSince) {
-		s.observed = true
-		s.streakBlocked = blocked
-		s.streakSince = facts.At
+	refused := s.refusal.Observe(facts.At, !facts.AdmissionAllowed)
+	if !refused {
+		s.idleSince = time.Time{}
+		if s.healthySince.IsZero() {
+			s.healthySince = facts.At
+		}
+		if s.yielded {
+			s.yielded = false
+			return sessionYieldRejoin
+		}
+		return sessionYieldNone
 	}
+	s.healthySince = time.Time{}
 	if s.yielded {
-		if !blocked && facts.At.Sub(s.streakSince) >= s.policy.HealthyFor {
-			s.yielded = false
-			s.streakSince = facts.At
-			return sessionYieldRejoin
-		}
-		return sessionYieldNone
-	}
-	if !blocked {
 		return sessionYieldNone
 	}
 	// Work in flight is not idleness. Hold the sessions and restart the clock,
-	// so the node cannot withdraw the instant the last instance retires.
-	if facts.LiveInstances > 0 || facts.BusyOperations > 0 {
-		s.streakSince = facts.At
-		return sessionYieldNone
+	// so the node cannot withdraw the instant the last instance retires. A
+	// clock that moved backwards restarts it too, rather than let a correction
+	// satisfy a bound no elapsed time earned.
+	busy := facts.LiveInstances > 0 || facts.BusyOperations > 0
+	if busy || s.idleSince.IsZero() || facts.At.Before(s.idleSince) {
+		s.idleSince = facts.At
 	}
-	if facts.At.Sub(s.streakSince) >= s.policy.BlockedFor {
+	if !busy && facts.At.Sub(s.idleSince) >= s.policy.BlockedFor {
 		s.yielded = true
-		s.streakSince = facts.At
+		s.withdrawnAt = facts.At
 		return sessionYieldWithdraw
 	}
 	return sessionYieldNone
@@ -228,7 +251,7 @@ func (c *sessionYieldController) Since() time.Time {
 	if c == nil || c.state == nil {
 		return time.Time{}
 	}
-	return c.state.streakSince
+	return c.state.since()
 }
 
 // newSessionYieldController binds the policy to the sessions this node opened.
