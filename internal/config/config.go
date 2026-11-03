@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -1799,10 +1800,51 @@ func (c Config) budgetedCapacity(limit int, raw Profile) int {
 	return min(limit, c.HostBudget.CPU/profile.Resources.CPU, c.HostBudget.MemoryMiB/profile.Resources.MemoryMiB)
 }
 
-func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {
-	parsed, err := url.Parse(scope.ConfigURL)
+// ScopeURLKey is the one spelling-insensitive identity of a GitHub configUrl:
+// two URLs with the same key name the same GitHub scope. It refuses anything
+// that is not an absolute HTTPS URL naming one organization or one
+// owner/repository, which is every configUrl a scope may carry.
+func ScopeURLKey(raw string) (string, error) {
+	parsed, err := parseConfigURL(raw)
+	if err != nil {
+		return "", err
+	}
+	parts := pathParts(parsed.Path)
+	if len(parts) != 1 && len(parts) != 2 || slices.Contains(parts, "") {
+		return "", errors.New("configUrl must identify one organization or one owner/repository")
+	}
+	return scopeURLKey(parsed, parts), nil
+}
+
+func parseConfigURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, "", errors.New("configUrl must be an absolute HTTPS URL without credentials, query, or fragment")
+		return nil, errors.New("configUrl must be an absolute HTTPS URL without credentials, query, or fragment")
+	}
+	return parsed, nil
+}
+
+func scopeURLKey(parsed *url.URL, parts []string) string {
+	host := parsed.Host
+	// An explicit default port names the same host: https://github.com:443/x is
+	// https://github.com/x.
+	if parsed.Port() == "443" {
+		host = parsed.Hostname()
+	}
+	return strings.ToLower(parsed.Scheme + "://" + host + "/" + strings.Join(parts, "/"))
+}
+
+// ScopeURLIsRepository reports whether a key from ScopeURLKey names one
+// owner/repository rather than an organization.
+func ScopeURLIsRepository(key string) bool {
+	parsed, err := url.Parse(key)
+	return err == nil && len(pathParts(parsed.Path)) == 2
+}
+
+func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {
+	parsed, err := parseConfigURL(scope.ConfigURL)
+	if err != nil {
+		return nil, "", err
 	}
 	parts := pathParts(parsed.Path)
 	switch scope.Kind {
@@ -1820,8 +1862,7 @@ func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {
 	default:
 		return nil, "", fmt.Errorf("unsupported scope kind %q", scope.Kind)
 	}
-	key := strings.ToLower(parsed.Scheme + "://" + parsed.Host + "/" + strings.Join(parts, "/"))
-	return parsed, key, nil
+	return parsed, scopeURLKey(parsed, parts), nil
 }
 
 func validateScopeTargets(scope GitHubScope, parsed *url.URL, targets, assigned map[string]string) error {

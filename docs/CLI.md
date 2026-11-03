@@ -215,6 +215,47 @@ restart the daemon so it binds scale set 19; this command does not restart it
 It does not restart the daemon: binding the new id is a service action with its
 own evidence. The jobs assigned to the deleted set are lost with it.
 
+### Retiring a scale set left at a scope's former configUrl
+
+When a scope's `configUrl` changes — typically a `repository` scope becoming an
+`organization` scope — `scale-sets provision --apply --write` creates the new
+sets at the new URL, but the old sets stay registered at the old URL with the
+same labels and nothing listening. GitHub can assign jobs to them, and never
+reassigns a job. `scale-sets retire` removes one such set (issue #475,
+[ADR 0090](adr/0090-a-scope-kind-change-retires-its-old-scale-sets.md)):
+
+```sh
+fleet scale-sets retire trf-rnw-linux-amd64-2x4 --config ./state/fleet.json \
+  --scope rnw-community --from https://github.com/rnw-community/rnw-community \
+  --confirm retire-scale-set --reason "repo scope moved to org, #475"
+```
+
+```
+rnw-community	trf-rnw-linux-amd64-2x4	https://github.com/rnw-community/rnw-community	23 retired
+```
+
+Every guard fails closed and nothing is deleted on a refusal:
+
+- the exact token and a non-empty reason, otherwise exit 6;
+- `--scope` and `--from` are required (exit 2), and `--from` must be an HTTPS
+  GitHub configUrl naming one organization or one owner/repository (exit 2);
+- `--from` must differ from every configured scope's current `configUrl`,
+  however it is spelled (case, trailing slash, an explicit `:443`), so no set
+  this node binds can ever be named (exit 6);
+- the scope must exist (exit 3), must still carry `NAME` with an id, and its
+  current `configUrl` must hold that exact id — the replacement is provisioned
+  and written (exit 6);
+- the set must exist at `--from`, otherwise exit 3. A repository `--from` has
+  only the default runner group, so it is looked up there; an organization
+  `--from` is looked up in the scope's `runnerGroup` (default when unset);
+- its id must not be carried by any scope in this configuration (exit 6);
+- GitHub's live counters for it must read zero assigned jobs, running jobs, busy
+  runners and registered runners (exit 6); counters that cannot be read are
+  uncertain, never zero (exit 6).
+
+The configuration is never written and nothing is restarted. Run it from the
+node that owned the old set, after that node has restarted onto the new scope.
+
 ```
 suuudokuuu	1	trf-sudoku-builder	bound	assigned=0	busy=0	registered=0	idle=0
 suuudokuuu	7	trf-sudoku-builder-studio	parked	assigned=2	busy=2	registered=0	idle=0
