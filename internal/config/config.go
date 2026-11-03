@@ -1825,7 +1825,20 @@ func parseConfigURL(raw string) (*url.URL, error) {
 }
 
 func scopeURLKey(parsed *url.URL, parts []string) string {
-	return strings.ToLower(parsed.Scheme + "://" + parsed.Host + "/" + strings.Join(parts, "/"))
+	host := parsed.Host
+	// An explicit default port names the same host: https://github.com:443/x is
+	// https://github.com/x.
+	if parsed.Port() == "443" {
+		host = parsed.Hostname()
+	}
+	return strings.ToLower(parsed.Scheme + "://" + host + "/" + strings.Join(parts, "/"))
+}
+
+// ScopeURLIsRepository reports whether a key from ScopeURLKey names one
+// owner/repository rather than an organization.
+func ScopeURLIsRepository(key string) bool {
+	parsed, err := url.Parse(key)
+	return err == nil && len(pathParts(parsed.Path)) == 2
 }
 
 func parseScopeURL(scope GitHubScope) (*url.URL, string, error) {

@@ -216,8 +216,9 @@ func TestRetireNeverTargetsAnotherConfiguredScope(t *testing.T) {
 	other := cfg.GitHub.Scopes[0]
 	other.Name, other.Kind, other.ConfigURL, other.Targets = "other", config.ScopeRepository,
 		"https://github.com/owner/other", []string{"owner/other"}
-	other.ScaleSets = []config.ScaleSet{{Profile: "large", Name: "other-large", MaxCapacity: 1,
-		Labels: []string{"self-hosted", "linux-other"}}}
+	large := other.ScaleSets[2]
+	large.Name, large.ID = "other-large", 0
+	other.ScaleSets = []config.ScaleSet{large}
 	cfg.GitHub.Scopes = append(cfg.GitHub.Scopes, other)
 	request.Config = cfg
 	if err := cfg.ValidateAuthority(); err != nil {

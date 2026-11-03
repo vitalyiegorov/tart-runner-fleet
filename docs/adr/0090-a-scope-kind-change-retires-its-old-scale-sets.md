@@ -28,8 +28,10 @@ configUrl, and only when that is provably safe.** It is implemented once, in
 
 1. **The bound set can never be named.** `--from` must be a valid configUrl and
    its `config.ScopeURLKey` — the same spelling-insensitive identity the config
-   validator uses to reject duplicate scopes — must differ from the scope's
-   current one.
+   validator uses to reject duplicate scopes, with an explicit `:443` folded
+   away — must differ from EVERY configured scope's current one. A set whose
+   id any configured scope carries is refused as well: ids are global on
+   GitHub, so that set is bound by this node whatever URL reached it.
 2. **The replacement exists and is bound.** The scope must still carry `NAME`
    with an id, and the scope's CURRENT configUrl must hold that exact id. That
    check uses the read-only audit port (`scalesetaudit.Client`), so the bound

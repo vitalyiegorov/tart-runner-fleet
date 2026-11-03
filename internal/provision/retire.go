@@ -81,10 +81,13 @@ func Retire(ctx context.Context, request RetireRequest) (RetireResult, error) {
 	if err != nil {
 		return RetireResult{}, err
 	}
-	// The configuration validated, so its current configUrl has a key.
-	if currentKey, _ := config.ScopeURLKey(scope.ConfigURL); currentKey == fromKey {
-		return RetireResult{}, fmt.Errorf("--from is scope %q's current configUrl, whose set this node binds: %w",
-			scope.Name, operations.ErrConflict)
+	// The configuration validated, so every configured configUrl has a key. A
+	// --from naming ANY configured scope names sets this node binds.
+	for _, configured := range cfg.GitHub.Scopes {
+		if configuredKey, _ := config.ScopeURLKey(configured.ConfigURL); configuredKey == fromKey {
+			return RetireResult{}, fmt.Errorf("--from is scope %q's current configUrl, whose sets this node binds: %w",
+				configured.Name, operations.ErrConflict)
+		}
 	}
 	key, err := request.LoadKey(ctx, cfg.GitHub.App.KeychainService, cfg.GitHub.App.KeychainAccount,
 		cfg.GitHub.App.PrivateKeyFile)
@@ -122,7 +125,13 @@ func Retire(ctx context.Context, request RetireRequest) (RetireResult, error) {
 	if err != nil {
 		return RetireResult{}, fmt.Errorf("open %s: %w", request.From, err)
 	}
-	old, found, err := findScaleSet(ctx, client, scope.RunnerGroup, set.Name)
+	// A repository has only the default runner group, so a repo-level set is
+	// looked up there whatever group the organization scope now names.
+	oldGroup := scope.RunnerGroup
+	if config.ScopeURLIsRepository(fromKey) {
+		oldGroup = ""
+	}
+	old, found, err := findScaleSet(ctx, client, oldGroup, set.Name)
 	if err != nil {
 		return RetireResult{}, fmt.Errorf("list %s at %s: %w", set.Name, request.From, err)
 	}
@@ -131,6 +140,10 @@ func Retire(ctx context.Context, request RetireRequest) (RetireResult, error) {
 	}
 	if old.ID <= 0 {
 		return RetireResult{}, operations.ErrUncertain
+	}
+	if owner, bound := boundScaleSet(cfg, old.ID); bound {
+		return RetireResult{}, fmt.Errorf("scale set %d at %s is bound by scope %q in this configuration: %w",
+			old.ID, request.From, owner, operations.ErrConflict)
 	}
 	stats, err := client.Statistics(ctx, old.ID)
 	if err != nil {
@@ -166,6 +179,19 @@ func retiredScope(cfg config.Config, scopeName, setName string) (config.GitHubSc
 	}
 	return config.GitHubScope{}, config.ScaleSet{}, fmt.Errorf("scope %q is not in this configuration: %w",
 		scopeName, operations.ErrNotFound)
+}
+
+// boundScaleSet names the scope that carries id, if any does. Scale-set ids are
+// global on GitHub, so an id this configuration binds is never retired.
+func boundScaleSet(cfg config.Config, id int) (string, bool) {
+	for _, scope := range cfg.GitHub.Scopes {
+		for _, set := range scope.ScaleSets {
+			if set.ID == id {
+				return scope.Name, true
+			}
+		}
+	}
+	return "", false
 }
 
 func findScaleSet(ctx context.Context, client scalesetaudit.Client, group, name string) (githubscaleset.ScaleSetSummary, bool, error) {

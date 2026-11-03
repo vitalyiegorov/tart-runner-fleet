@@ -239,13 +239,16 @@ Every guard fails closed and nothing is deleted on a refusal:
 - the exact token and a non-empty reason, otherwise exit 6;
 - `--scope` and `--from` are required (exit 2), and `--from` must be an HTTPS
   GitHub configUrl naming one organization or one owner/repository (exit 2);
-- `--from` must differ from the scope's current `configUrl`, however it is
-  spelled, so the set this node binds can never be named (exit 6);
+- `--from` must differ from every configured scope's current `configUrl`,
+  however it is spelled (case, trailing slash, an explicit `:443`), so no set
+  this node binds can ever be named (exit 6);
 - the scope must exist (exit 3), must still carry `NAME` with an id, and its
   current `configUrl` must hold that exact id — the replacement is provisioned
   and written (exit 6);
-- the set must exist at `--from`, in the scope's `runnerGroup` (default group
-  when unset), otherwise exit 3;
+- the set must exist at `--from`, otherwise exit 3. A repository `--from` has
+  only the default runner group, so it is looked up there; an organization
+  `--from` is looked up in the scope's `runnerGroup` (default when unset);
+- its id must not be carried by any scope in this configuration (exit 6);
 - GitHub's live counters for it must read zero assigned jobs, running jobs, busy
   runners and registered runners (exit 6); counters that cannot be read are
   uncertain, never zero (exit 6).
