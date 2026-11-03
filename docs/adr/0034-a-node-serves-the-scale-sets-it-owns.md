@@ -892,3 +892,30 @@ executor-effect correction: deterministic scheduling still charges exactly the
 same memory vector, and no simulation oracle or world state is changed. Kernel
 resource enforcement is verified at the integration boundary rather than
 inferred from simulation. Observe/shadow authority limits remain unchanged.
+
+## Amendment 2026-11-03: both Linux images install their tools from one list (issue #477)
+
+`linux-portable-2x4` is served by amd64 podman guests and arm64 Tart guests.
+rnw-community job 125785846761 landed on an arm64 guest and failed in
+`oven-sh/setup-bun` with `Unable to locate executable file: unzip`. The amd64
+image has `unzip`. Capability parity (amendment 2026-08-04c) could not catch
+this, because a plain command is not a capability, and each image was built
+from its own package list. The audit found the drift in both directions: arm64
+lacked `unzip`, `zip` and `gh`, and amd64 lacked `rsync`, `ssh`, `file`,
+`gawk`, `time`, `xxd`, `bc`, `cpio` and `uuidgen`.
+
+The command-line tools a Linux guest carries are now one file,
+`deploy/actions-cache/runner-tools.txt`. It lists each command with the Ubuntu
+package that provides it. `Containerfile.runner` (amd64) and the Tart recipe in
+`docs/LINUX_BASE_IMAGE.md` (arm64) install it with `install-runner-tools.sh`,
+which fails the build unless every listed command resolves on the daemon runner
+PATH. Both images keep the two files at `/usr/local/libexec/trf-runner-tools/`,
+so `--check` audits either image in place. `tests/runner_tools_test.py` fails
+when a build stops installing from the list, or names one of its packages on
+its own, since a second copy is how the lists drifted apart.
+
+This adds no configuration key, no capability name and no scheduler state. A
+missing tool is an image build failure, not a fleet observation, and the
+check runs in `make ci`. It does not prove that an image already in production
+was built from the current list. `--check` in the guest is what proves that,
+and the recipe's verification step runs it.

@@ -2,7 +2,8 @@
 # from the node's LAN cache server instead of GitHub (ADR 0078).
 #
 # It is the node's existing runner image plus three things, and nothing else:
-#   * zstd, which @actions/cache prefers over single-threaded gzip;
+#   * runner-tools.txt, the tool set the arm64 Tart base installs too (zstd
+#     among them, which @actions/cache prefers over single-threaded gzip);
 #   * Runner.Worker.dll patched so the job message's ACTIONS_RESULTS_URL is
 #     written to an unused name (ACTIONS_RESULTS_ORL) and the value below
 #     survives into every step;
@@ -21,8 +22,9 @@ ARG BASE
 FROM ${BASE}
 
 USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends zstd xz-utils \
+COPY runner-tools.txt install-runner-tools.sh /usr/local/libexec/trf-runner-tools/
+RUN sh /usr/local/libexec/trf-runner-tools/install-runner-tools.sh \
+    < /usr/local/libexec/trf-runner-tools/runner-tools.txt \
     && rm -rf /var/lib/apt/lists/*
 
 # The build fails unless the stock name occurs and the patch removes every

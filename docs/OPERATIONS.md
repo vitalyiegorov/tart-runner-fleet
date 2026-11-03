@@ -2018,7 +2018,7 @@ every save and restore over the WAN. It is three pieces, all in
 | --- | --- | --- |
 | `tart-runner-fleet-actions-cache.service` | falcondev-oss/github-actions-cache-server v9.8.0, a rootless quadlet | `127.0.0.1:3018` only |
 | `tart-runner-fleet-cache-gate.service` | `fleet cache-gate`: refuses pull-request saves, routes cache calls to the server and everything else to GitHub | `0.0.0.0:3017` (guests use `host.containers.internal:3017`) |
-| `localhost/trf-runner-amd64:<base>-actions-cache.N` | the node's runner image plus `zstd`, the results-URL patch and `ACTIONS_RESULTS_URL` | — |
+| `localhost/trf-runner-amd64:<base>-actions-cache.N` | the node's runner image plus `runner-tools.txt` (the tool list the arm64 Tart base shares, `zstd` included), the results-URL patch and `ACTIONS_RESULTS_URL` | — |
 
 Nothing changes for a node until `executor.image` names the patched image. The
 two services can run for days beforehand without any guest using them.
