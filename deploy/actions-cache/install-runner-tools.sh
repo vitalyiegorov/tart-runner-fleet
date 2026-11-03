@@ -9,10 +9,10 @@ tools=$(sed 's/#.*//' | awk 'NF == 0 { next }
   NF != 2 || $1 !~ /^[a-z0-9][a-z0-9.+-]*$/ || $2 !~ /^[a-z0-9][a-z0-9.+-]*$/ { bad = 1 }
   { n++; print } END { exit bad || n == 0 }')
 if [ "$mode" = install ]; then
+    apt-get update
     # shellcheck disable=SC2046 # package names are validated above and split on purpose
-    apt-get update &&
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            $(printf '%s\n' "$tools" | awk '{ print $2 }' | sort -u)
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        $(printf '%s\n' "$tools" | awk '{ print $2 }' | sort -u)
 fi
 missing=$(printf '%s\n' "$tools" | while read -r command package; do
     (PATH=${RUNNER_PATH:-/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin} && command -v "$command") >/dev/null ||

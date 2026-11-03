@@ -23,18 +23,21 @@ def manifest():
 
 def apt_installs(text):
     """Every package named by an `apt-get install` in a build, continuations joined."""
-    joined = re.sub(r"\\\n", " ", text)
-    for match in re.finditer(r"apt-get install([^\n&;|']*)", joined):
-        yield from (word for word in match.group(1).split() if not word.startswith("-"))
+    for match in re.finditer(r"apt-get install([^\n&;|]*)", joined(text)):
+        words = (word.strip("'\"") for word in match.group(1).split())
+        yield from (word for word in words if word and not word.startswith("-"))
+
+
+def joined(text):
+    return re.sub(r"\\\n", " ", text)
 
 
 class OneManifestTest(unittest.TestCase):
     def test_every_build_installs_from_the_manifest(self):
         for name, build in BUILDS.items():
             with self.subTest(name):
-                text = build.read_text()
-                self.assertIn("runner-tools.txt", text)
-                self.assertIn("install-runner-tools.sh", text)
+                self.assertRegex(joined(build.read_text()),
+                                 r"\bsh \S*install-runner-tools\.sh\s*<\s*\S*runner-tools\.txt")
 
     def test_no_build_installs_a_manifest_package_on_its_own(self):
         packages = {package for _, package in manifest()}
@@ -47,6 +50,11 @@ class OneManifestTest(unittest.TestCase):
         # gh: #467's release publish on the arm64 linux-go guest.
         commands = {command for command, _ in manifest()}
         self.assertLessEqual({"unzip", "gh"}, commands)
+
+
+    def test_quoted_and_continued_packages_are_seen(self):
+        text = "RUN apt-get install -y \\\n    'unzip' \"zip\" jq && echo done\n"
+        self.assertEqual(list(apt_installs(text)), ["unzip", "zip", "jq"])
 
 
 class InstallerTest(unittest.TestCase):

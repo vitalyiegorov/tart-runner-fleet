@@ -924,9 +924,8 @@ for unit in unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer 
   test "$active_state" = "inactive"
 done
 
-# Everything a job needs, on the daemon PATH and nothing else.
-sh /usr/local/libexec/trf-runner-tools/install-runner-tools.sh --check \
-  </usr/local/libexec/trf-runner-tools/runner-tools.txt
+# Everything a job needs, on the daemon PATH and nothing else. The shared tool
+# list is checked separately, below, against the repository's current copy.
 env -i HOME="$HOME" PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 sh -c '"'"'
 for tool in node npm npx yarn corepack java shutdown; do
@@ -968,6 +967,15 @@ returns false on a rule that is present and working. Worse, written as
 `test -f … && echo present`, `set -e` will not stop on it — POSIX exempts every
 command in an `AND-OR` list but the last — so the check *prints nothing and the
 script continues*. Use `sudo test -f`, or trust the probe.
+
+Then check the shared tool list. Feed it from the repository, not from the copy
+in the image: an image built from an older list passes its own copy. This
+proves the commands are present, not which list the image was built from.
+
+```sh
+"$TART" exec -i "$BUILD" sh /usr/local/libexec/trf-runner-tools/install-runner-tools.sh --check \
+  <"$REPO/deploy/actions-cache/runner-tools.txt"
+```
 
 ### Verify the Redroid prewarm, on a node that advertises `linux-xl`
 
@@ -1593,7 +1601,8 @@ Inventory the `node-version` inputs in the consumer workflows that run on
 `trf-linux-arm64-*` / `linux-portable-*` / `linux-go-*`. A range resolves to
 the highest cached version that satisfies it, so one entry per major line covers the
 ranges. An exact pin needs its exact version. Add the version to layer `a`'s
-list on a new dated candidate, re-apply `b` and `c` on top, run the
-fresh-clone checks, and promote. Keep the podman image's list
+list on a new dated candidate, re-apply `b`, `c` and `d` on top, run the
+fresh-clone checks and the shared tool `--check` (it must name no missing
+command), and promote. Keep the podman image's list
 (`deploy/actions-cache/`) identical, so that shared labels behave the same on
 every node.

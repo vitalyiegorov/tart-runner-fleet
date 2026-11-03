@@ -910,12 +910,15 @@ package that provides it. `Containerfile.runner` (amd64) and the Tart recipe in
 `docs/LINUX_BASE_IMAGE.md` (arm64) install it with `install-runner-tools.sh`,
 which fails the build unless every listed command resolves on the daemon runner
 PATH. Both images keep the two files at `/usr/local/libexec/trf-runner-tools/`,
-so `--check` audits either image in place. `tests/runner_tools_test.py` fails
+so `--check` audits either image in place. The audit takes the repository's
+current list on stdin, not the image's own copy, which an image built from an
+older list would pass. `tests/runner_tools_test.py` fails
 when a build stops installing from the list, or names one of its packages on
 its own, since a second copy is how the lists drifted apart.
 
 This adds no configuration key, no capability name and no scheduler state. A
 missing tool is an image build failure, not a fleet observation, and the
 check runs in `make ci`. It does not prove that an image already in production
-was built from the current list. `--check` in the guest is what proves that,
-and the recipe's verification step runs it.
+was built from the current list. `--check` in the guest, fed the current list,
+proves that every listed command is present, which is the property a job
+depends on. The recipe's verification step runs it.
