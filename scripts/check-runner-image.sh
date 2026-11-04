@@ -15,5 +15,10 @@ podman run --rm --network=none --entrypoint sh "$image" -eu -c '
     test -f "$tool.complete"
     test "$("$tool/bin/node" --version)" = "v$version"
   done
-  printf "Runner user, temporary directory, endpoint and requested Node caches verified offline.\n"
+  for complete in "$work"/_tool/CodeQL/*/x64.complete; do
+    version=${complete%/x64.complete}
+    version=${version##*/}
+    test "$("${complete%.complete}/codeql/codeql" version --format=terse)" = "$version"
+  done
+  printf "Runner user, temporary directory, endpoint, requested Node caches and baked CodeQL verified offline.\n"
 ' sh "$@"

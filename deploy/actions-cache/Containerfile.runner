@@ -52,7 +52,7 @@ RUN set -eu; \
 
 # codeql-action takes its default bundle version from GitHub at run time, not
 # from its pinned SHA; bake the version jobs actually request.
-ARG CODEQL_VERSIONS="2.27.3"
+ARG CODEQL_VERSIONS="2.27.4"
 COPY install-codeql-cache.sh /usr/local/libexec/trf-install-codeql-cache.sh
 RUN set -eu; \
     test "$(uname -m)" = x86_64 || exit 0; \

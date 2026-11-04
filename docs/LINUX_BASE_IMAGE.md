@@ -1606,3 +1606,35 @@ fresh-clone checks and the shared tool `--check` (it must name no missing
 command), and promote. Keep the podman image's list
 (`deploy/actions-cache/`) identical, so that shared labels behave the same on
 every node.
+
+### The amd64 image's local layer (issue #414)
+
+`codeql-action` asks GitHub at run time which bundle to use, not its pinned SHA:
+at `9b32540` its `defaults.json` says 2.27.3 and jobs requested 2.27.4 two days
+after that bundle's release. It accepts only that exact version from the tool
+cache, or it streams the 559 MB archive into `tar`. Every new bundle therefore
+restores the download on every Analyze job until the image catches up. Nothing
+alerts on this yet; the signal is `Did not find CodeQL tools version` in a job
+log, and the job's bytes in `fleet traffic`.
+
+Catch up without the WAN. A bundle the running jobs already downloaded is on the
+node, so add it with
+[`Containerfile.local`](../deploy/actions-cache/Containerfile.local), which holds
+only `COPY`:
+
+1. Copy `_tool/CodeQL/<version>/x64` out of two running runners with
+   `podman cp`, each after that version's `x64.complete` exists. On podman 6 this
+   does not pause the container. Never exec into or stop a runner to do it.
+2. Compare the two trees' SHA-256 manifests. They must be identical. The archive
+   is streamed, so no copy can be checked against the release digest, and a
+   guest ran the job's code: two independent copies are the available evidence.
+3. Lay out `<context>/tool/CodeQL/<version>/x64` and an empty `x64.complete`, then
+   build as the file's header says, with `--network=none --pull=never`.
+4. Run `scripts/check-runner-image.sh`, which runs each baked `codeql` offline.
+5. Update `CODEQL_VERSIONS` in `Containerfile.runner` so a full rebuild agrees.
+
+**Edit the file the daemon actually reads.** On Linux that is the `--config=` in
+`systemctl --user cat tart-runner-fleet-authority.service`, not necessarily
+`state/fleet.json`. The #479 rollout edited `state/fleet.json` on omarchy and
+ubuntu-vitalii; both kept running `actions-cache.5`, which `podman ps` shows.
+Confirm a swap the same way, from the image of a guest started after it.
