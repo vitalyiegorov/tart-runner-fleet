@@ -8,7 +8,9 @@ Tart guests (macOS and the arm64 Linux overflow) were out of scope here; see
 "Not decided here". **Amended 2026-10-24 (issue #414):** the site-A arm64
 Linux Tart guests (Mac mini, MacBook) read omarchy's cache through its gate;
 see [Amendment 2026-10-24](#amendment-2026-10-24-site-a-arm64-tart-guests-share-omarchys-cache).
-macOS guests remain out of scope.
+macOS guests remain out of scope. **Amended 2026-11-04 (issue #446):** a node
+proves the gate is ours before each guest launch; see
+[Amendment 2026-11-04](#amendment-2026-11-04-a-node-proves-the-gate-before-a-guest-trusts-it).
 
 ## Context
 
@@ -191,3 +193,67 @@ Consequences:
 - The pull-request write refusal, the token checks and the per-repository
   scoping are omarchy's, unchanged. No new write path exists.
 - A runner bump means rebuilding this layer, as with the Containerfile.
+
+## Amendment 2026-11-04: a node proves the gate before a guest trusts it
+
+Issue #446. The site-A arm64 Tart guests carry
+`ACTIONS_RESULTS_URL=http://192.168.1.64:3017/` in their image. The MacBook is a
+laptop. Away from home, every cache and artifact call timed out and `main` CI
+lost two attempts in a row. On a foreign `192.168.1.0/24` it is worse: bearer
+runtime tokens go over plain HTTP to whoever holds that address, and poisoned
+tarballs can come back. `/health` proves nothing, because anything can answer it.
+
+Decision:
+
+- **The gate signs a challenge.** `fleet cache-gate --identity-key PATH` keeps an
+  ed25519 key it creates itself (mode 0600, never logged) and signs a fresh host
+  nonce at `/.trf/gate-identity`, under a domain-separating prefix, because any
+  guest can ask it to sign. The check bypasses proxies and refuses redirects.
+- **A node pins the public key.** `cacheGate: {url, publicKey}` in its config.
+- **Before each guest launch** the host asks, within 2 s. Only a valid signature
+  leaves the guest alone. Anything else (a timeout, a wrong key, an old gate) is
+  off-LAN, and the host rewrites the guest's `.env` over `tart exec` to
+  `https://results-receiver.actions.githubusercontent.com/`. It rewrites rather
+  than deletes: the patched `Runner.Worker.dll` ignores the job message's value,
+  so a deleted override leaves the variable unset and breaks artifacts. If the
+  rewrite fails, the runner does not start.
+- **`fleet doctor` has a `cache gate` row.** It fails with `cache gate
+  unreachable`, and no health or readiness check does, because a roaming node
+  serving jobs is working as designed.
+
+Why a signature and not an HMAC or a pinned gateway MAC. A MAC check is the
+smallest, but it never speaks to the gate: a gate that is down still passes, and
+a foreign network can present a copied MAC. An HMAC proves the gate, but every
+node then holds a secret that can impersonate it, so a lost laptop means rotating
+it everywhere, and the key needs a home and a delivery path on three hosts. A
+signature costs the same code and verifies with a public value a node config can
+hold in plain sight. Nothing is added to Infisical.
+
+**Rollout order. It exists so that no step sends the home MacBook to the WAN:**
+
+1. Release the binary. With no `cacheGate` in a node's config nothing changes:
+   no probe, no rewrite. An older binary refuses a config that has the key, so
+   the release comes first.
+2. On omarchy, install the new gate unit and restart the gate only. Its first
+   start creates the key and logs `identity public key`. Confirm the endpoint
+   answers before going on, because a node pinned to a gate that cannot answer
+   sends every guest to GitHub.
+3. Add `cacheGate` to the Mac mini, which never roams, and restart its daemon.
+   `fleet doctor` must read `verified` at once, since the daemon probes at start.
+4. Only then do the same on the MacBook, while it is on the home network, and
+   read the same row.
+
+A failed row is never silent, and rollback is removing the key and restarting.
+
+Consequences:
+
+- Roaming saves use the WAN and count against GitHub's per-repository cache
+  limit. budgie is at 9.97 GiB of 10, so a roaming save can evict other entries.
+- The decision is made at launch. A job running when the network changes still
+  fails, which is accepted.
+- A verified gate is still spoken to over plain HTTP. The check says the node is
+  on the LAN the gate is on; it does not encrypt that LAN.
+- Rotating the key means repinning every node. Deleting it fails every check,
+  which sends those guests to GitHub until they are repinned.
+- `--metrics-listen 127.0.0.1:3019` now ships in the gate unit too (ADR 0080).
+

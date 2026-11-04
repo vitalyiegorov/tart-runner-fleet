@@ -236,8 +236,9 @@ once at the end of its job ([ADR 0080](adr/0080-a-guest-reports-the-bytes-its-jo
 
 How to read the output:
 
-- Bytes include the LAN Actions cache. On a podman node whose gate runs with
-  `--metrics-listen 127.0.0.1:3019`, the WAN share over a window is guest
+- Bytes include the LAN Actions cache. The shipped gate unit serves its counters
+  on `127.0.0.1:3019`, so on a podman node with that unit installed the WAN share
+  over a window is guest
   receive minus the increase of
   `fleet_cache_gate_bytes_total{upstream="cache",direction="to_guest"}`
   (`curl -fsS http://127.0.0.1:3019/metrics`). That is a node-wide estimate,

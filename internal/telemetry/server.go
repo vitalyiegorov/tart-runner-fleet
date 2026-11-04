@@ -259,6 +259,13 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	if tools := imageToolsResult(snapshot); tools != nil {
 		imageToolCheck = &adminapi.Check{OK: tools.OK, Reasons: nonNilStrings(tools.Reasons)}
 	}
+	var cacheGateCheck *adminapi.Check
+	var cacheGateRow *adminapi.CacheGate
+	if gate := cacheGateResult(snapshot); gate != nil {
+		cacheGateCheck = &adminapi.Check{OK: gate.OK, Reasons: nonNilStrings(gate.Reasons)}
+		cacheGateRow = &adminapi.CacheGate{URL: snapshot.CacheGate.URL, Verified: snapshot.CacheGate.Verified,
+			ProbedAt: snapshot.CacheGate.ProbedAt}
+	}
 	yield := sessionYieldResult(snapshot.SessionYield)
 	drain := updateDrainResult(snapshot.UpdateDrain)
 	sessionYieldCheck := adminapi.Check{OK: yield.OK, Reasons: nonNilStrings(yield.Reasons)}
@@ -289,6 +296,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			GuestSilences: guestSilenceRows(snapshot), GuestLivenessCheck: &guestLivenessCheck,
 			RunnerImages: runnerImageRows(snapshot), RunnerVersionCheck: &runnerVersionCheck,
 			ImageTools: imageToolRows(snapshot), ImageToolCheck: imageToolCheck,
+			CacheGate: cacheGateRow, CacheGateCheck: cacheGateCheck,
 			GuestConsole: guestConsoleRow(snapshot), GuestConsoleCheck: &guestConsoleCheck,
 			Policy:       policyRow(snapshot),
 			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,

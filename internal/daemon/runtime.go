@@ -978,7 +978,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			Store: store, Owner: controllerLeaseOwner, MaxConcurrent: workerConcurrency(opts.Mode, cfg),
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
-					Registration: control, Bootstrap: d.bootstrap(cfg), Bases: map[domain.Platform]string{
+					Registration: control, Bootstrap: withCacheGate(d.bootstrap(cfg), newCacheGate(ctx, cfg, health, d.now)), Bases: map[domain.Platform]string{
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,

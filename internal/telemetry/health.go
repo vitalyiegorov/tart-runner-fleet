@@ -363,15 +363,19 @@ type Snapshot struct {
 	// published", which ImageTools alone cannot (AGENTS.md rule 4).
 	ImageTools          []ImageToolsMetric
 	ImageToolsPublished bool
-	GuestTraffic        []GuestTrafficSeries
-	GuestConsole        *GuestConsoleMetric
-	Policy              *PolicyMetric
-	SessionYield        *SessionYieldMetric
-	Membership          *MembershipMetric
-	UpdateDrain         *UpdateDrainMetric
-	Reservation         *ReservationMetric
-	Envelope            EnvelopeMetric
-	AdmissionFloors     AdmissionFloors
+	// CacheGate is the latest verification of the LAN cache gate (ADR 0078), and
+	// CacheGatePublished separates "no gate configured" from "never looked".
+	CacheGate          CacheGateMetric
+	CacheGatePublished bool
+	GuestTraffic       []GuestTrafficSeries
+	GuestConsole       *GuestConsoleMetric
+	Policy             *PolicyMetric
+	SessionYield       *SessionYieldMetric
+	Membership         *MembershipMetric
+	UpdateDrain        *UpdateDrainMetric
+	Reservation        *ReservationMetric
+	Envelope           EnvelopeMetric
+	AdmissionFloors    AdmissionFloors
 	// ParkedScaleSets is what the last completed parked-scale-set audit found,
 	// and ParkedScaleSetsAuditedAt is when it completed. A zero time means no
 	// audit has ever run on this node -- an observe-mode daemon never runs one --
@@ -444,6 +448,8 @@ type Health struct {
 	runnerImages        []RunnerImageMetric
 	imageTools          []ImageToolsMetric
 	imageToolsPublished bool
+	cacheGate           CacheGateMetric
+	cacheGatePublished  bool
 	guestTraffic        map[guestTrafficKey]*GuestTrafficSeries
 	guestConsole        *GuestConsoleMetric
 	policy              *PolicyMetric
@@ -1220,6 +1226,8 @@ func (h *Health) Snapshot() Snapshot {
 		GuestTraffic:             h.guestTrafficSeries(),
 		ImageTools:               append([]ImageToolsMetric(nil), h.imageTools...),
 		ImageToolsPublished:      h.imageToolsPublished,
+		CacheGate:                h.cacheGate,
+		CacheGatePublished:       h.cacheGatePublished,
 		GuestConsole:             h.guestConsole,
 		Policy:                   h.policy,
 		SessionYield:             h.sessionYield,

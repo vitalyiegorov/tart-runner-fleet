@@ -1,0 +1,9 @@
+# Exact sdkmanager package ids the Linux runner image carries, so a native
+# Android build downloads none of them. Each was installed by real builds; the
+# evidence is on issue #414. Add one only when a build's log shows it installing.
+ndk;27.1.12297006        # Gradle: NDK (Side by side)
+cmake;3.22.1             # Gradle: built by the NDK's React Native projects
+build-tools;36.0.0       # Gradle
+build-tools;37.0.0       # Gradle
+platforms;android-37.0   # Gradle: compileSdk 37
+cmdline-tools;16.0       # android-actions/setup-android, for mobile-ci's cmdline-tools-version 12266719

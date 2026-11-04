@@ -1,0 +1,17 @@
+# Adds tools to a built runner image from files already on the node. Only COPY,
+# so it cannot reach the WAN; build it with no network and no pull to enforce it:
+#
+#   podman build --network=none --pull=never --build-arg BASE=<local image> \
+#     -t localhost/trf-runner-amd64:<base tag>-actions-cache.<n> \
+#     -f deploy/actions-cache/Containerfile.local <context>
+#
+# <context>/tool/ mirrors RUNNER_TOOL_CACHE and <context>/android-sdk/ holds the
+# packages in android-sdk-packages.txt plus licenses/. docs/LINUX_BASE_IMAGE.md
+# says where a node's copies come from. The context also holds this directory's
+# android-sdk-packages.txt and check-android-sdk.sh.
+ARG BASE
+FROM ${BASE}
+
+COPY --chown=runner:runner tool/ /home/runner/actions-runner/_work/_tool/
+COPY --chown=runner:runner android-sdk/ /opt/android-sdk/
+COPY android-sdk-packages.txt check-android-sdk.sh /usr/local/libexec/trf-android-sdk/

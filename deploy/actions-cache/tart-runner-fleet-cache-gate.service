@@ -12,7 +12,7 @@ Wants=tart-runner-fleet-actions-cache.service
 After=tart-runner-fleet-actions-cache.service
 
 [Service]
-ExecStart=%h/.local/share/tart-runner-fleet/current/fleet cache-gate --listen 0.0.0.0:3017 --upstream http://127.0.0.1:3018
+ExecStart=%h/.local/share/tart-runner-fleet/current/fleet cache-gate --listen 0.0.0.0:3017 --upstream http://127.0.0.1:3018 --metrics-listen 127.0.0.1:3019 --identity-key %h/.local/share/tart-runner-fleet/state/cache-gate-identity.key
 Restart=always
 RestartSec=5
 UMask=0077

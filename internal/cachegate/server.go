@@ -2,6 +2,7 @@ package cachegate
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -148,6 +149,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	cacheRaw := flags.String("upstream", "", "absolute URL of the cache server, normally on loopback")
 	resultsRaw := flags.String("results-upstream", defaultResults, "absolute URL of GitHub's results service")
 	metricsListen := flags.String("metrics-listen", "", "optional loopback host:port serving /metrics byte counters")
+	identityKey := flags.String("identity-key", "", "optional file holding the key the gate proves itself with, created if absent")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -155,8 +157,19 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	results, resultsOK := absoluteURL(*resultsRaw)
 	if flags.NArg() != 0 || *listen == "" || !cacheOK || !resultsOK || (*metricsListen != "" && !loopbackAddress(*metricsListen)) {
 		_, _ = fmt.Fprintln(stderr, "usage: fleet cache-gate --listen host:port --upstream http://127.0.0.1:port "+
-			"[--results-upstream url] [--metrics-listen 127.0.0.1:port]")
+			"[--results-upstream url] [--metrics-listen 127.0.0.1:port] [--identity-key path]")
 		return 2
+	}
+	var identity ed25519.PrivateKey
+	if *identityKey != "" {
+		key, err := LoadOrCreateIdentity(*identityKey)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "cache-gate: identity key: %v\n", err)
+			return 1
+		}
+		identity = key
+		public, _ := key.Public().(ed25519.PublicKey)
+		_, _ = fmt.Fprintf(stdout, "cache-gate: identity public key %s\n", PublicKeyString(public))
 	}
 	listener, err := listenTCP("tcp", *listen)
 	if err != nil {
@@ -164,7 +177,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	counters := &Counters{}
-	server := newServer(countingHandler(cache, results, stdout, counters))
+	server := newServer(identityHandler(identity, countingHandler(cache, results, stdout, counters)))
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
 	if *metricsListen != "" {

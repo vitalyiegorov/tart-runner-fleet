@@ -993,6 +993,20 @@ func runnerVersionDetail(status adminapi.Status, check adminapi.Check) string {
 	return fmt.Sprintf("%s (floor %s)", strings.Join(carried, ", "), status.RunnerImages[0].Floor)
 }
 
+// cacheGateDetail renders the gate verdict: the reasons when it fails, the
+// posture when it passes, and "not reported" when the daemon published no check.
+func cacheGateDetail(status adminapi.Status, check adminapi.Check) string {
+	switch {
+	case status.CacheGateCheck == nil || status.CacheGate == nil:
+		return "not reported by this daemon"
+	case !check.OK:
+		return joinReasons(check)
+	case status.CacheGate.URL == "":
+		return "no gate configured; guests use what their image says"
+	}
+	return "verified " + status.CacheGate.URL
+}
+
 // imageToolsDetail renders the tool-drift verdict on the runner-version row's
 // terms: the reasons when it fails, what each image carries when it passes, and
 // "not reported" — never a pass — when the daemon published no check.
@@ -1225,6 +1239,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	guests := status.Data.EffectiveGuestLiveness()
 	runners := status.Data.EffectiveRunnerVersionCheck()
 	tools := status.Data.EffectiveImageToolCheck()
+	gate := status.Data.EffectiveCacheGateCheck()
 	console := status.Data.EffectiveGuestConsoleCheck()
 	yield := status.Data.EffectiveSessionYieldCheck()
 	member := status.Data.EffectiveMembershipCheck()
@@ -1295,6 +1310,10 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// per Maestro shard in issue #414 while every other row read healthy. It
 		// prints what each image carries even when it passes (ADR 0079).
 		{Name: "image tools", OK: tools.OK, Detail: imageToolsDetail(status.Data, tools)},
+		// The cache-gate row says where this node's Tart guests send cache and
+		// artifact calls. A roaming node fails it and still works: its guests use
+		// GitHub, which spends the uplink and the repository's cache quota.
+		{Name: "cache gate", OK: gate.OK, Detail: cacheGateDetail(status.Data, gate)},
 		// The guest-console check says whether a Linux guest's kernel can leave
 		// evidence when it dies mid-job. Three incidents (#236, #258, #259) ended
 		// at *trigger unidentified* because the serial sink was off on every node,
