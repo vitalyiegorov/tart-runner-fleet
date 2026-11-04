@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -93,8 +94,17 @@ func identityHandler(key ed25519.PrivateKey, next http.Handler) http.Handler {
 			http.Error(w, "bad challenge", http.StatusBadRequest)
 			return
 		}
-		_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString(ed25519.Sign(key, challenge(nonce))))
+		answer, _ := json.Marshal(identityAnswer{Signature: ed25519.Sign(key, challenge(nonce))})
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write(answer)
 	})
+}
+
+// identityAnswer is the only thing the endpoint returns. encoding/json carries the
+// signature as base64, and no byte of the request appears in it.
+type identityAnswer struct {
+	Signature []byte `json:"signature"`
 }
 
 func challenge(nonce []byte) []byte { return append([]byte(identityMessage), nonce...) }
@@ -144,6 +154,7 @@ func (v Verifier) Verified(ctx context.Context) bool {
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-	signature, err := base64.StdEncoding.DecodeString(string(body))
-	return err == nil && response.StatusCode == http.StatusOK && ed25519.Verify(v.Public, challenge(nonce), signature)
+	var answer identityAnswer
+	return json.Unmarshal(body, &answer) == nil && response.StatusCode == http.StatusOK &&
+		ed25519.Verify(v.Public, challenge(nonce), answer.Signature)
 }

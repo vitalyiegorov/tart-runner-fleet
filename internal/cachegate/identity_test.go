@@ -90,7 +90,8 @@ func TestVerificationFailsClosed(t *testing.T) {
 		"redirect": func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/elsewhere", http.StatusFound) },
 		"error":    func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) },
 		"garbage":  func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "not base64 !") },
-		"short":    func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "c2hvcnQ=") },
+		"short":    func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"signature":"c2hvcnQ="}`) },
+		"empty":    func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) },
 		"hung":     func(http.ResponseWriter, *http.Request) { <-hung },
 	}
 	for name, handler := range servers {
@@ -323,4 +324,28 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// TestTheIdentityAnswerIsTypedAndEchoesNothing keeps a request-controlled value
+// out of a body a browser could render: the answer is declared JSON, is never
+// sniffed, and holds a signature rather than any byte of the challenge.
+func TestTheIdentityAnswerIsTypedAndEchoesNothing(t *testing.T) {
+	server := httptest.NewServer(identityHandler(testKey(t), http.NotFoundHandler()))
+	defer server.Close()
+	nonce := strings.Repeat("ab", nonceBytes)
+	response, err := server.Client().Get(server.URL + IdentityPath + "?nonce=" + nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, _ := io.ReadAll(response.Body)
+	if got := response.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := response.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q", got)
+	}
+	if strings.Contains(string(body), nonce) || !strings.HasPrefix(string(body), `{"signature":"`) {
+		t.Fatalf("body = %q", body)
+	}
 }
