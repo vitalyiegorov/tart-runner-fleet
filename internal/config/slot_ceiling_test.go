@@ -113,7 +113,7 @@ func TestValidateKeepsEveryFourSlotConfiguration(t *testing.T) {
 func TestOnlyLinuxGuestsBackExtraSlots(t *testing.T) {
 	cfg := wideLinuxNode(4)
 	cfg.MacOS = Default().MacOS
-	cfg.MacOS.Maestro.Resources = Resources{CPU: 1, MemoryMiB: 1024}
+	cfg.MacOS.Compact.Resources = Resources{CPU: 1, MemoryMiB: 1024}
 	cfg.Linux.Profiles = cfg.Linux.Profiles[1:]
 	cfg.Linux.MaxInstances = 6
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "6 slots exceed the 5 the envelope can fill") {

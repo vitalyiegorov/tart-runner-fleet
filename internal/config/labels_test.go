@@ -104,7 +104,7 @@ func TestTwoProfilesCannotAnswerToTheSameRunnerLabel(t *testing.T) {
 
 func TestAnEnabledMacOSProfileCannotNameAShapeItDoesNotProvision(t *testing.T) {
 	cfg := Default()
-	cfg.MacOS.Maestro.Label = "trf-macos-arm64-1x1"
+	cfg.MacOS.Compact.Label = "trf-macos-arm64-1x1"
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "describes a vector it does not have") {
 		t.Fatalf("Validate() error = %v, want a macOS label-vector rejection", err)
@@ -174,9 +174,9 @@ func TestAliasesSurviveDecodeEncodeAndClone(t *testing.T) {
 	clone := round.Clone()
 	clone.Linux.Profiles[0].Aliases[0] = "mutated"
 	clone.MacOS.Builder.Aliases[0] = "mutated"
-	clone.MacOS.Maestro.Aliases[0] = "mutated"
+	clone.MacOS.Compact.Aliases[0] = "mutated"
 	if round.Linux.Profiles[0].Aliases[0] == "mutated" || round.MacOS.Builder.Aliases[0] == "mutated" ||
-		round.MacOS.Maestro.Aliases[0] == "mutated" {
+		round.MacOS.Compact.Aliases[0] == "mutated" {
 		t.Fatal("Clone() shares alias storage with its source")
 	}
 }

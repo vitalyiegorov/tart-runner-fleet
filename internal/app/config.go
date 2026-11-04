@@ -22,7 +22,7 @@ func BuildSchedulerConfig(cfg config.Config) scheduler.Config {
 			OccupancyBudget: profile.OccupancyBudget(domain.PlatformLinux)}
 	}
 	if cfg.MacOS.Enabled {
-		for _, profile := range []config.Profile{cfg.MacOS.Builder, cfg.MacOS.Maestro} {
+		for _, profile := range []config.Profile{cfg.MacOS.Builder, cfg.MacOS.Compact} {
 			id := domain.ProfileID(profile.ID)
 			profiles[id] = domain.Profile{ID: id, Platform: domain.PlatformMacOS, Route: domain.Route(profile.Label),
 				Resources:       domain.Resources{CPU: profile.Resources.CPU, MemoryMB: profile.Resources.MemoryMiB, Slots: 1},

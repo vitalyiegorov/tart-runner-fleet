@@ -142,7 +142,7 @@ func (c Config) capabilityPlatform(profile string) (string, bool) {
 			return capabilityPlatformLinux, true
 		}
 	}
-	if c.MacOS.Enabled && (profile == c.MacOS.Builder.ID || profile == c.MacOS.Maestro.ID) {
+	if c.MacOS.Enabled && (profile == c.MacOS.Builder.ID || profile == c.MacOS.Compact.ID) {
 		return capabilityPlatformMacOS, true
 	}
 	return "", false

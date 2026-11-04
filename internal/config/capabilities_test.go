@@ -20,7 +20,7 @@ func capabilityNode() Config {
 	cfg.Linux.MaxInstances = 1
 	cfg.MacOS.Builder = Profile{ID: "macos-6x12", Label: "trf-macos-arm64-6x12", Aliases: []string{"macos-builder"},
 		Resources: Resources{CPU: 6, MemoryMiB: 12288}, MaxActive: 1}
-	cfg.MacOS.Maestro = Profile{ID: "macos-4x7", Label: "trf-macos-arm64-4x7", Aliases: []string{"macos-maestro"},
+	cfg.MacOS.Compact = Profile{ID: "macos-4x7", Label: "trf-macos-arm64-4x7", Aliases: []string{"macos-maestro"},
 		Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 1}
 	return cfg
 }

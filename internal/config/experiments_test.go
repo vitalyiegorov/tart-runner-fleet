@@ -17,14 +17,14 @@ func TestFourLaneMaestroExperimentConfigIsValid(t *testing.T) {
 		t.Fatalf("experiment config must decode and validate: %v", err)
 	}
 
-	if cfg.MacOS.Maestro.MemoryMiB != 9216 {
-		t.Fatalf("maestro guests must be 9216 MiB, got %d", cfg.MacOS.Maestro.MemoryMiB)
+	if cfg.MacOS.Compact.MemoryMiB != 9216 {
+		t.Fatalf("maestro guests must be 9216 MiB, got %d", cfg.MacOS.Compact.MemoryMiB)
 	}
-	if cfg.MacOS.Maestro.CPU != 4 {
-		t.Fatalf("maestro guests must be 4 vCPU, got %d", cfg.MacOS.Maestro.CPU)
+	if cfg.MacOS.Compact.CPU != 4 {
+		t.Fatalf("maestro guests must be 4 vCPU, got %d", cfg.MacOS.Compact.CPU)
 	}
-	if cfg.MacOS.Maestro.MaxActive != 2 {
-		t.Fatalf("exactly 2 macOS Maestro VMs (Apple kernel quota), got %d", cfg.MacOS.Maestro.MaxActive)
+	if cfg.MacOS.Compact.MaxActive != 2 {
+		t.Fatalf("exactly 2 macOS Maestro VMs (Apple kernel quota), got %d", cfg.MacOS.Compact.MaxActive)
 	}
 	if cfg.MacOS.AdmissionPolicy != MacOSAdmissionExclusive {
 		t.Fatalf("experiment runs macos-exclusive admission, got %q", cfg.MacOS.AdmissionPolicy)

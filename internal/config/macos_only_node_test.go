@@ -151,7 +151,7 @@ func TestAMacOSOnlyNodeRefusesAScaleSetItCannotServe(t *testing.T) {
 func TestAMacOSOnlyNodeServesItsMacOSScaleSets(t *testing.T) {
 	cfg := macOSOnlyNode()
 	cfg.GitHub.Scopes = []GitHubScope{{Name: "suuudokuuu", ScaleSets: []ScaleSet{
-		{Profile: cfg.MacOS.Maestro.ID, Name: "trf-sudoku-maestro-mini", ID: 102, MaxCapacity: 2},
+		{Profile: cfg.MacOS.Compact.ID, Name: "trf-sudoku-maestro-mini", ID: 102, MaxCapacity: 2},
 		{Profile: cfg.MacOS.Builder.ID, Name: "trf-sudoku-builder-mini", ID: 103, MaxCapacity: 1},
 	}}}
 	if err := cfg.Validate(); err != nil {

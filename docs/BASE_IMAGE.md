@@ -1,15 +1,20 @@
 # macOS base image: provenance and reproduction
 
+> **Amended by [ADR 0091](adr/0091-the-macos-4x7-profile-is-compact.md).** mobile-ci v5
+> removed Maestro, so this recipe no longer installs it. Measurements below that
+> name Maestro record the image as it was when they were taken. Bases already built
+> still carry it until a rebuild; this document changes no live image.
+
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) makes each node
 responsible for its own guests, and [`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md)
 has mac-studio — a remote Mac Studio — share mac-mini's labels rather than
-own one scope's scale set alone: both advertise `maestro`, and, per ADR
+own one scope's scale set alone: both advertise the `compact` profile (`macosBurst.maestro` in an older file), and, per ADR
 0034's shared-label amendment, `builder` and the Linux tiers too. Neither
 record says where a macOS base image comes from. This document closes that
 gap: it reconstructs how mac-mini's image was actually built, and gives a
-mac-studio operator a recipe that produces an equivalent Maestro-only image
+mac-studio operator a recipe that produces an equivalent lean image
 locally instead of copying mac-mini's 91 GB disk across a residential uplink.
-It predates the shared-label amendment and still only covers `maestro`; see
+It predates the shared-label amendment and still only covers the `compact` profile; see
 [Known unknowns](#known-unknowns) for what that leaves open now that
 mac-studio also declares `builder`.
 
@@ -20,7 +25,7 @@ operator activity, performed once per node and repeated only for maintenance.
 ## Contents
 
 - [Provenance of mac-mini's image](#provenance-of-mac-minis-image)
-- [What a Maestro job actually needs](#what-a-maestro-job-actually-needs)
+- [What a `compact` job actually needs](#what-a-compact-job-actually-needs)
 - [What mac-studio does not need](#what-mac-studio-does-not-need)
 - [Build the mac-studio image](#build-the-mac-studio-image)
 - [Seal and verify](#seal-and-verify)
@@ -96,28 +101,21 @@ Tart state, and the 07-19 and 07-20 layers were applied by hand instead. The
 recipe below is derived from that script's logic plus what the hand-applied
 layers actually did, not from either alone.
 
-## What a Maestro job actually needs
+## What a `compact` job actually needs
 
-Audited from `vitalyiegorov/suuudokuuu` — the scope
-[`MULTI_NODE_PLAN.md`](MULTI_NODE_PLAN.md) assigns to mac-studio.
-
-`mobile-e2e.yml` builds both embedded apps on `macos-builder` first, then
-`ios-maestro.yml` runs two shards on `macos-maestro`. The Maestro guest
-**downloads a prebuilt `.app` artifact**; it never compiles the application.
-That is what makes a lean mac-studio image possible.
-
-The job supplies for itself: the Maestro CLI (installs pinned `2.6.1` if absent
-or mismatched), the app under test, and its own flows.
+Since mobile-ci v5 e2e suites run from Linux against a simlock farm. The `compact`
+guest takes iOS native builds, warm-ups and publishes, and the native Swift lane's
+simulators.
 
 The job assumes preinstalled, and will fail without:
 
 | Requirement | Evidence |
 | --- | --- |
 | `/Applications/Xcode_26.4.1.app` | `test -d "$xcode_app"` in the "Select Xcode" step — a hard failure |
-| A settled, available `iPhone 17 Pro` simulator | the step selects one by exact name and exits non-zero if none is available |
+| A settled, available `iPhone 17 Pro` simulator | `swift-ios.yml`'s `simulator-lease` selects one by exact name and exits non-zero if none is available |
 | `python3` | inline heredoc that picks the simulator UDID |
-| `node` **on `PATH`** | `run-maestro-suite.sh` merges shard reports with `node - "$output_path" …`; `ios-maestro.yml` has no `setup-node` step |
-| A JVM | Maestro is JVM-based; the workflow sets `JAVA_TOOL_OPTIONS` for it |
+| `node` **on `PATH`** | build and publish steps call bare `node` |
+| A JVM | the `android-build-sdk` capability's Gradle builds |
 | `$HOME/actions-runner/run.sh` | `cmd/tart-runner-fleet-bootstrap/main.go:25-27` — the fleet's only runner entry point |
 | `/usr/local/libexec/tart-runner-fleet-bootstrap` | `internal/lifecycle/executor.go:25` |
 
@@ -212,7 +210,7 @@ Run these on the Mac Studio. Nothing here contacts mac-mini.
 
 ```sh
 IMAGE=ghcr.io/cirruslabs/macos-sequoia-xcode@sha256:31413f28df83c37b94e76f8feea8046fb1950b3ed42195523408477189a3f76d
-BASE=macos-maestro-base
+BASE=macos-compact-base
 
 tart pull "$IMAGE"
 tart clone "$IMAGE" "$BASE"
@@ -257,10 +255,10 @@ provisioning ran:
 | `~/actions-runner` | replaced by the step below |
 | `~/android-sdk` | removed by [step 4b](#4b-slim-the-simulators-and-drop-the-runtimes-nobody-boots) |
 
-Only Maestro was actually missing. Everything else below is idempotent.
+Everything below is idempotent.
 
 ```sh
-tart exec "$BASE" env MAESTRO_VERSION=2.6.1 SIMULATOR_DEVICE_TYPE='iPhone 17 Pro' \
+tart exec "$BASE" env SIMULATOR_DEVICE_TYPE='iPhone 17 Pro' \
   SIMULATOR_DEVICE_COUNT=2 SIMULATOR_PREWARM_SETTLE_SECONDS=180 bash -lc '
 set -euo pipefail
 
@@ -274,7 +272,7 @@ xcrun swift -e "import Metal; precondition(MTLCreateSystemDefaultDevice() != nil
 xcrun simctl runtime dyld_shared_cache update --all
 
 # --- Node on PATH, and in the runner tool cache ------------------------------
-# run-maestro-suite.sh calls bare `node`; ios-maestro.yml has no setup-node step.
+# Build and publish steps call bare `node`.
 # Measured on 26.4.1: the image already ships node@24 (v24.15.0) — running
 # `brew install node@22` here installs a second, conflicting Node instead of
 # satisfying the requirement. Symlink the shipped binary instead; v24.15.0 was
@@ -291,30 +289,16 @@ node --version
 brew list --versions ccache >/dev/null 2>&1 || brew install ccache
 ccache --version
 
-# --- A JVM for the Maestro CLI ------------------------------------------------
-# Settled by measurement, not inferred: ~/.maestro/lib holds 195 jars and no
-# bundled JRE, and the maestro launcher is a Gradle start script that fails
-# outright (JAVA_HOME is not set and no java command could be found) without
-# one. A JDK is required. openjdk@17 is already in the image and already
-# registers at /Library/Java/JavaVirtualMachines/openjdk-17.jdk, so the steps
-# below are idempotent rather than load-bearing on a stock image.
+# --- A JVM for Gradle builds ---------------------------------------------------
+# openjdk@17 is already in the image and already registers at
+# /Library/Java/JavaVirtualMachines/openjdk-17.jdk, so the steps below are
+# idempotent rather than load-bearing on a stock image.
 brew list --versions openjdk@17 >/dev/null 2>&1 || brew install openjdk@17
 sudo mkdir -p /Library/Java/JavaVirtualMachines
 sudo ln -sfn /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk \
   /Library/Java/JavaVirtualMachines/openjdk-17.jdk
 java -version
 
-# --- Maestro, pinned to what the workflow asserts ----------------------------
-curl -fsSL https://get.maestro.mobile.dev | env MAESTRO_VERSION="$MAESTRO_VERSION" bash
-test "$(MAESTRO_CLI_NO_ANALYTICS=true "$HOME/.maestro/bin/maestro" --version \
-  2>&1 | tail -n 1 | tr -d "\r")" = "$MAESTRO_VERSION"
-# ~/.maestro/bin is not on the daemon runner PATH above, so a bare `maestro`
-# invocation on this image alone would fail. ios-maestro.yml already accounts
-# for this itself, adding the directory via GITHUB_PATH before it calls
-# maestro — no symlink is required here for the job to find it. If one is
-# ever added anyway, /usr/local/bin/maestro -> ~/.maestro/bin/maestro is
-# safe: the launcher resolves symlinks before locating its jars relative to
-# its own path.
 '
 ```
 
@@ -638,15 +622,9 @@ own install steps. A binary that is merely "somewhere" does not count.
 
 | tool | mobile-ci reuses, in order | otherwise |
 | --- | --- | --- |
-| Maestro (`run-maestro-ios`, `capture-screenshots-ios`) | `maestro` on `PATH` whose `--version` is exactly the pin, then `~/.maestro-pinned/<ver>/maestro/bin/maestro` whose `--version` is exactly the pin | downloads `cli-<ver>/maestro.zip` (~315 MB) |
-| simslim (`run-maestro-ios`, `capture-screenshots-ios`, `simulator-lease`) | `simslim` on `PATH` whose `simslim version` is exactly the pin, then `~/.simslim-pinned/simslim-v<ver>-macos-arm64.tar.gz` whose SHA-256 is `simslim-sha256`, extracted into a job-private directory | downloads the tarball |
-| Node (`actions/setup-node` in the build, publish and seed jobs on `macos-maestro`) | `$RUNNER_TOOL_CACHE/node/<ver>/arm64` plus `arm64.complete` (`~/actions-runner/_work/_tool`), matched by semver | downloads from nodejs.org |
+| simslim (`simulator-lease`) | `simslim` on `PATH` whose `simslim version` is exactly the pin, then `~/.simslim-pinned/simslim-v<ver>-macos-arm64.tar.gz` whose SHA-256 is `simslim-sha256`, extracted into a job-private directory | downloads the tarball |
+| Node (`actions/setup-node` in the build, publish and seed jobs on `trf-macos-arm64-4x7`) | `$RUNNER_TOOL_CACHE/node/<ver>/arm64` plus `arm64.complete` (`~/actions-runner/_work/_tool`), matched by semver | downloads from nodejs.org |
 
-`~/.maestro/bin` is **not** on the daemon's runner `PATH` (see
-[The daemon replaces PATH](#the-daemon-replaces-path-and-the-android-environment-outright)).
-So the image's `~/.maestro` 2.6.1 was never a hit. Even 2.6.1 needs its own
-`~/.maestro-pinned/2.6.1`. `~/.maestro` is left in place, because
-`BASE_IMAGE.md`'s verification and older workflows call it by absolute path.
 `simslim` 0.10.0 stays on `PATH` from Homebrew. Its version does not match,
 so the step falls through to the verified tarball, which costs no download.
 Replacing a Homebrew keg's binary by hand would leave `brew` lying about it.
@@ -657,11 +635,8 @@ defaults):**
 
 | tool | versions | who asks |
 | --- | --- | --- |
-| Maestro | 2.10.0 | `ios-maestro.yml` default: budgie `pr.yml`, suuudokuuu `mobile-e2e.yml` |
-| Maestro | 2.8.0 | `store-screenshots.yml` default, and budgie `ios-e2e-ai-build`/`media-smoke`/`store-screenshots` plus rnw-community `ios-maestro`/`pr.yml` explicitly |
-| Maestro | 2.6.1 | suuudokuuu `MAESTRO_VERSION` (its Android lane runs on Linux, so this one is cheap insurance on macOS) |
 | simslim | 0.12.2, sha256 `b47302da…70887` | every mobile-ci action default |
-| Node | 22.22.2 | satisfies `22`, `22.x` (the `ios-maestro`, `native-publish`, `native-dev-release`, `seed-native-cache`, `store-screenshots` defaults) and budgie's exact `22.22.2` |
+| Node | 22.22.2 | satisfies `22`, `22.x` (the `native-publish`, `native-dev-release`, `seed-native-cache`, `store-screenshots` defaults) and budgie's exact `22.22.2` |
 
 The archives are fetched once on the host and checked twice: against the
 release's own `checksums_sha256.txt` (Maestro) or `SHASUMS256.txt` (Node), and
@@ -670,19 +645,11 @@ no checksum file, so its tarball is checked against the digest mobile-ci pins.
 They reach the guest through a read-only `--dir` share, not the network:
 
 ```sh
-D=$HOME/trf414/cache   # host: maestro-<ver>.zip, simslim-v0.12.2-macos-arm64.tar.gz, node-v22.22.2-darwin-arm64.tar.gz, each verified
+D=$HOME/trf414/cache   # host: simslim-v0.12.2-macos-arm64.tar.gz, node-v22.22.2-darwin-arm64.tar.gz, each verified
 tart run "$BASE" --no-graphics --no-audio --no-clipboard --dir=tools:$D:ro &
 tart exec "$BASE" bash -lc '
 set -euo pipefail
 SRC="/Volumes/My Shared Files/tools"
-export MAESTRO_CLI_NO_ANALYTICS=true
-for v in 2.6.1 2.8.0 2.10.0; do      # re-check each archive sha256 in the guest first
-  mkdir -p "$HOME/.maestro-pinned"; st=$(mktemp -d "$HOME/.maestro-pinned/.staging-XXXXXX")
-  unzip -q "$SRC/maestro-$v.zip" -d "$st"
-  test "$("$st/maestro/bin/maestro" --version | tail -n 1)" = "$v"
-  rm -rf "$HOME/.maestro-pinned/$v"; mkdir -p "$HOME/.maestro-pinned/$v"
-  mv "$st/maestro" "$HOME/.maestro-pinned/$v/maestro"; rmdir "$st"
-done
 mkdir -p "$HOME/.simslim-pinned"
 cp "$SRC/simslim-v0.12.2-macos-arm64.tar.gz" "$HOME/.simslim-pinned/"
 tc=$HOME/actions-runner/_work/_tool/node/22.22.2
@@ -742,10 +709,10 @@ must stay truthful.
 
 #### When a consumer pin changes
 
-A new Maestro or simslim version in mobile-ci's defaults, or a new
-`maestro-version` / `node-version` in a consumer, is a new download per
+A new simslim version in mobile-ci's defaults, or a new
+`node-version` in a consumer, is a new download per
 disposable guest until the image carries it. Re-run the inventory above
-(`grep -rn "maestro-version\|simslim-version\|node-version"` across the
+(`grep -rn "simslim-version\|node-version"` across the
 consumers' `.github/` and the mobile-ci SHAs they pin). Then add the version to
 a new dated candidate cloned from the promoted base, verify two fresh clones
 with the network blocked, and promote. Keep the old version until no consumer
@@ -798,7 +765,7 @@ set -euo pipefail
 sudo install -d -o root -g wheel -m 0755 /usr/local/share/tart-runner-fleet
 sudo tee /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null <<JSON
 {"schemaVersion": 1, "image": "macos-tartelet-base", "sealedAt": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",
- "capabilities": ["android-build-sdk", "ios-simulator-prewarmed", "ios-simulator-templates", "jvm", "maestro-cli", "node-runtime"]}
+ "capabilities": ["android-build-sdk", "ios-simulator-prewarmed", "ios-simulator-templates", "jvm", "node-runtime"]}
 JSON
 sudo chmod 0644 /usr/local/share/tart-runner-fleet/image-capabilities.json
 python3 -m json.tool /usr/local/share/tart-runner-fleet/image-capabilities.json >/dev/null
@@ -848,8 +815,7 @@ audited for.
 | `ios-simulator-prewarmed` | the simulator runtimes of [step 4](#4-prewarm-the-simulators) already booted once |
 | `ios-simulator-templates` | the mobile-ci `mobile-ci-template-*` simulator devices of [step 4c](#4c-bake-mobile-ci-simulator-templates) are shut down and present for `simulator-lease`'s `template-strategy: auto` to clone |
 | `android-build-sdk` | an Android SDK and NDK a job can build an APK against |
-| `jvm` | a JDK registered where the Maestro launcher finds it |
-| `maestro-cli` | the pinned `maestro` CLI of [step 3](#3-provision), with its jars |
+| `jvm` | a JDK registered at `/Library/Java/JavaVirtualMachines` |
 | `node-runtime` | `node` resolvable on the exact daemon runner PATH |
 | `cocoapods` | a working `pod` for a workflow that installs pods in the job |
 
@@ -928,7 +894,6 @@ command -v node && node --version
 command -v ccache && ccache --version
 command -v python3
 java -version
-"$HOME/.maestro/bin/maestro" --version
 xcrun swift -e "import Metal; precondition(MTLCreateSystemDefaultDevice() != nil)"
 udids=$(xcrun simctl list devices -j | python3 -c "
 import sys, json
@@ -992,8 +957,8 @@ every layer was renamed rather than overwritten.
   "hostBudget": { "cpu": 6, "memoryMb": 16384 },
   "macosBurst": {
     "enabled": true,
-    "baseVm": "macos-maestro-base",
-    "baseImageCapabilities": ["cocoapods", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
+    "baseVm": "macos-compact-base",
+    "baseImageCapabilities": ["cocoapods", "ios-simulator-prewarmed", "jvm", "node-runtime", "xcode"],
     "vmPrefix": "trf-macos",
     "maestro": { "id": "maestro", "label": "trf-macos-arm64-4x7",
                  "cpu": 4, "memoryMb": 7168, "maxActive": 2,

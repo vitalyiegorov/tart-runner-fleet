@@ -1030,7 +1030,7 @@ func profileDiskFloors(cfg config.Config) map[domain.ProfileID]int {
 	}
 	if cfg.MacOS.Enabled {
 		floors[domain.ProfileID(cfg.MacOS.Builder.ID)] = cfg.MacOS.Builder.DiskGiB
-		floors[domain.ProfileID(cfg.MacOS.Maestro.ID)] = cfg.MacOS.Maestro.DiskGiB
+		floors[domain.ProfileID(cfg.MacOS.Compact.ID)] = cfg.MacOS.Compact.DiskGiB
 	}
 	return floors
 }

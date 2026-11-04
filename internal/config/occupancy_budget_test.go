@@ -82,7 +82,7 @@ func TestCloneCopiesTheOccupancyBudgetByValue(t *testing.T) {
 	original := Default()
 	original.Linux.Profiles[0].OccupancyBudgetSeconds = budget(1_800)
 	original.MacOS.Builder.OccupancyBudgetSeconds = budget(3_600)
-	original.MacOS.Maestro.OccupancyBudgetSeconds = nil
+	original.MacOS.Compact.OccupancyBudgetSeconds = nil
 
 	clone := original.Clone()
 	*clone.Linux.Profiles[0].OccupancyBudgetSeconds = 900
@@ -91,7 +91,7 @@ func TestCloneCopiesTheOccupancyBudgetByValue(t *testing.T) {
 	if *original.Linux.Profiles[0].OccupancyBudgetSeconds != 1_800 || *original.MacOS.Builder.OccupancyBudgetSeconds != 3_600 {
 		t.Fatal("a clone must not alias the original's occupancy ceiling")
 	}
-	if clone.MacOS.Maestro.OccupancyBudgetSeconds != nil {
+	if clone.MacOS.Compact.OccupancyBudgetSeconds != nil {
 		t.Fatal("an unstated ceiling must stay unstated through a clone")
 	}
 }

@@ -2167,7 +2167,7 @@ func TestCanaryWorkerConcurrencyIsOne(t *testing.T) {
 func TestProfileDiskFloorsPreserveProfileIdentity(t *testing.T) {
 	cfg := config.Default()
 	cfg.MacOS.Builder.DiskGiB = 160
-	cfg.MacOS.Maestro.DiskGiB = 150
+	cfg.MacOS.Compact.DiskGiB = 150
 	got := profileDiskFloors(cfg)
 	want := map[domain.ProfileID]int{"small": 50, "medium": 50, "large": 50, "builder": 160, "maestro": 150}
 	if !reflect.DeepEqual(got, want) {
