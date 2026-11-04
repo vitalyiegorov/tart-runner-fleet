@@ -45,7 +45,7 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 	if cfg.Linux.Profiles[0].DiskGiB != 0 || cfg.Linux.Profiles[1].DiskGiB != 40 {
 		t.Fatalf("profile disk floors = %d, %d", cfg.Linux.Profiles[0].DiskGiB, cfg.Linux.Profiles[1].DiskGiB)
 	}
-	if cfg.MacOS.Maestro.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
+	if cfg.MacOS.Compact.MaxActive != 2 || cfg.Targets[0].Slug != "owner/repo" {
 		t.Fatalf("mac/target decode = %+v %+v", cfg.MacOS, cfg.Targets)
 	}
 	if cfg.MacOS.RootDiskOptions != "sync=none" || cfg.MacOS.SharedDirectoryPath != "/private/tmp/ci-shared" || !cfg.Linux.NestedVirtualization {

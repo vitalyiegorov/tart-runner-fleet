@@ -99,7 +99,7 @@ configuration exposes this variant matrix:
 | `trf-linux-arm64-6x12` | 6 | 12 GiB | constrained by the 8-vCPU/16-GiB Linux envelope | `linux-xl` |
 | `trf-linux-arm64-8x16` | 8 | 16 GiB | 1 — it is the whole Linux envelope | — |
 | `trf-macos-arm64-6x12` | 6 | 12 GiB | 1 | `macos-builder` |
-| `trf-macos-arm64-4x7` | 4 | 7 GiB | 2 | `macos-maestro` |
+| `trf-macos-arm64-4x7` | 4 | 7 GiB | 2 | `macos-maestro` (retiring, ADR 0091) |
 
 Aliases are the retired role and tier names. They resolve to the same profile
 and are advertised on the same scale set, so a workflow that still asks for
@@ -255,7 +255,7 @@ Two configuration rules follow, and both are checked rather than documented:
   `fleet config validate` rejects it. A profile that is configured but named by
   no `scaleSets` entry is not exposed, receives no jobs, and is not checked —
   which is how a budgeted node keeps the mandatory `macosBurst.builder` in its
-  file while serving `maestro` alone.
+  file while serving `compact` alone.
 - **A budget must fit the machine.** `fleet config validate` does not probe host
   CPU or memory, so this one is checked at the host probe: a budget above
   the physical cores, or above physical memory less `minAvailableMemoryMb`,
@@ -322,12 +322,12 @@ setting is exact as far as reconciliation is concerned.
 ### Mixed macOS profile cohorts
 
 By default the fleet runs one macOS profile cohort at a time: spawning a builder
-drains idle maestros first, and a busy maestro blocks the builder entirely. On a
+drains idle `compact` guests first, and a busy one blocks the builder entirely. On a
 build-and-test topology that serializes every build against every test wave.
 
 Set `"mixedProfileCohorts": true` inside `macosBurst` to let macOS profiles
 coexist whenever their exact vectors fit -- the same law ADR 0012 applied to
-platforms. A 6-vCPU builder and a 4-vCPU maestro share a 10-core machine instead
+platforms. A 6-vCPU builder and a 4-vCPU `compact` guest share a 10-core machine instead
 of taking turns. Every hard bound is unchanged: the physical total, profile
 `maxActive`, repository caps, the elastic envelope, and drain safety (a busy
 instance is never touched; the idle drain-and-switch fallback remains for
@@ -374,7 +374,7 @@ recipe in [`docs/AGENT_RUNBOOK.md`](docs/AGENT_RUNBOOK.md#analyze-ci-traffic).
 
 `baseImageTools` (top level for Linux, inside `macosBurst` for macOS) declares
 the exact tool versions an image carries, as `tool@version` (`node@22.22.2`,
-`maestro@2.10.0`). A scale set's `requiresTools` declares the versions its
+`simslim@0.12.2`). A scale set's `requiresTools` declares the versions its
 consumers pin. `fleet doctor` prints what each image carries. It degrades its
 `image tools` row when a booted image lacks a pinned version, because every job
 on that set then downloads the tool over the node's uplink. Matching is exact,

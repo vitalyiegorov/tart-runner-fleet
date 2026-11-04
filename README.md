@@ -210,7 +210,7 @@ priority — the scheduler reads the vector, never the name.
 | `trf-linux-arm64-6x12` | 6 vCPU / 12 GiB | `linux-xl` |
 | `trf-linux-arm64-8x16` | 8 vCPU / 16 GiB — takes the Linux envelope alone | — |
 | `trf-macos-arm64-6x12` | 6 vCPU / 12 GiB, `maxActive: 1` | `macos-builder` |
-| `trf-macos-arm64-4x7` | 4 vCPU / 7 GiB, `maxActive: 2` | `macos-maestro` |
+| `trf-macos-arm64-4x7` | 4 vCPU / 7 GiB, `maxActive: 2` | `macos-maestro` (retiring, ADR 0091) |
 
 The `arch` component is the node's own: it is `arm64` unless the node declares
 `"guestArch": "amd64"`, so an x86_64 node serves the same vectors under
@@ -273,8 +273,8 @@ jobs:
   build-ios-e2e-app:
     runs-on: [self-hosted, macOS, ARM64, trf-macos-arm64-6x12]
 
-# Maestro UI tests need a real macOS GUI VM with a booted simulator, and two
-# fit side by side — so shards map 1:1 onto that profile's two slots.
+# UI tests need a real macOS GUI VM with a booted simulator, and two fit side
+# by side — so shards map 1:1 onto that profile's two slots.
   e2e-ios:
     runs-on: [self-hosted, macOS, ARM64, trf-macos-arm64-4x7]
     strategy: { fail-fast: false, max-parallel: 2, matrix: { shard: [1, 2] } }
@@ -385,5 +385,5 @@ authority long enough to build and verify its successor.
 - [`docs/TESTING.md`](docs/TESTING.md) · [`docs/RELEASING.md`](docs/RELEASING.md) — verification layers, release process
 - [`docs/FLEET_ARCHITECTURE_PLAN.md`](docs/FLEET_ARCHITECTURE_PLAN.md) — target architecture, SLOs, sequencing
 - [`docs/MULTI_NODE_PLAN.md`](docs/MULTI_NODE_PLAN.md) — three independent nodes, workload placement, phased delivery
-- [`docs/BASE_IMAGE.md`](docs/BASE_IMAGE.md) — macOS base image provenance, and building a Maestro-only image from a pinned public image
+- [`docs/BASE_IMAGE.md`](docs/BASE_IMAGE.md) — macOS base image provenance, and building a lean image from a pinned public image
 - [`docs/adr/`](docs/adr) — 57 architecture decision records

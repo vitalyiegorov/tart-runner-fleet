@@ -236,7 +236,7 @@ type MacOS struct {
 	BaseVM               string
 	VMPrefix             string
 	Builder              Profile
-	Maestro              Profile
+	Compact              Profile
 	RootDiskOptions      string
 	SharedDirectoryPath  string
 	NestedVirtualization bool
@@ -736,10 +736,14 @@ type wireConfig struct {
 		BaseImageTools         []string             `json:"baseImageTools,omitempty"`
 		VMPrefix               string               `json:"vmPrefix"`
 		Builder                Profile              `json:"builder"`
-		Maestro                Profile              `json:"maestro"`
-		RootDiskOptions        string               `json:"rootDiskOptions,omitempty"`
-		SharedDirectoryPath    string               `json:"sharedDirectoryPath,omitempty"`
-		NestedVirtualization   bool                 `json:"nestedVirtualization,omitempty"`
+		// Compact is the 4 vCPU profile. A file spells it `compact` or, for a
+		// release older than ADR 0091, `maestro`; Encode writes `maestro` until no
+		// release in rollback reach refuses `compact`.
+		Compact              *Profile `json:"compact,omitempty"`
+		Maestro              *Profile `json:"maestro"`
+		RootDiskOptions      string   `json:"rootDiskOptions,omitempty"`
+		SharedDirectoryPath  string   `json:"sharedDirectoryPath,omitempty"`
+		NestedVirtualization bool     `json:"nestedVirtualization,omitempty"`
 	} `json:"macosBurst"`
 	GitHub  GitHub   `json:"github"`
 	Targets []Target `json:"targets"`
@@ -747,6 +751,20 @@ type wireConfig struct {
 	// all: a release older than issue #224 decodes with DisallowUnknownFields
 	// and would refuse the block outright.
 	Priority *wirePriority `json:"priority,omitempty"`
+}
+
+// decodeCompact reads the one profile a file may spell two ways. Naming both
+// fails closed: they could disagree, and neither may silently win.
+func decodeCompact(compact, maestro *Profile) (Profile, error) {
+	switch {
+	case compact != nil && maestro != nil:
+		return Profile{}, errors.New("macosBurst names both compact and maestro: they are one profile, keep compact")
+	case compact != nil:
+		return *compact, nil
+	case maestro != nil:
+		return *maestro, nil
+	}
+	return Profile{}, nil
 }
 
 func Decode(r io.Reader) (Config, error) {
@@ -757,6 +775,10 @@ func Decode(r io.Reader) (Config, error) {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
 	if err := ensureEOF(dec); err != nil {
+		return Config{}, err
+	}
+	compact, err := decodeCompact(w.MacOSBurst.Compact, w.MacOSBurst.Maestro)
+	if err != nil {
 		return Config{}, err
 	}
 	mode, err := membership.ParseMode(w.Membership)
@@ -782,7 +804,7 @@ func Decode(r io.Reader) (Config, error) {
 		MacOS: MacOS{Enabled: w.MacOSBurst.Enabled, AdmissionPolicy: normalizeMacOSAdmissionPolicy(w.MacOSBurst.AdmissionPolicy),
 			MixedPlatformAdmission: w.MacOSBurst.MixedPlatformAdmission, MixedProfileCohorts: w.MacOSBurst.MixedProfileCohorts,
 			BaseVM: w.MacOSBurst.BaseVM, VMPrefix: w.MacOSBurst.VMPrefix,
-			Builder: w.MacOSBurst.Builder.normalized(), Maestro: w.MacOSBurst.Maestro.normalized(),
+			Builder: w.MacOSBurst.Builder.normalized(), Compact: compact.normalized(),
 			RootDiskOptions: w.MacOSBurst.RootDiskOptions, SharedDirectoryPath: w.MacOSBurst.SharedDirectoryPath,
 			NestedVirtualization:   w.MacOSBurst.NestedVirtualization,
 			BaseImageCapabilities:  append([]string(nil), w.MacOSBurst.BaseImageCapabilities...),
@@ -949,7 +971,8 @@ func Encode(w io.Writer, cfg Config) error {
 	wire.MacOSBurst.BaseImageTools = append([]string(nil), cfg.MacOS.BaseImageTools...)
 	wire.MacOSBurst.VMPrefix = cfg.MacOS.VMPrefix
 	wire.MacOSBurst.Builder = encodeProfile(cfg.MacOS.Builder)
-	wire.MacOSBurst.Maestro = encodeProfile(cfg.MacOS.Maestro)
+	maestro := encodeProfile(cfg.MacOS.Compact)
+	wire.MacOSBurst.Maestro = &maestro
 	wire.MacOSBurst.RootDiskOptions = cfg.MacOS.RootDiskOptions
 	wire.MacOSBurst.SharedDirectoryPath = cfg.MacOS.SharedDirectoryPath
 	wire.LinuxNestedVirtualization = cfg.Linux.NestedVirtualization
@@ -1190,7 +1213,7 @@ func Default() Config {
 			}},
 		MacOS: MacOS{Enabled: true, AdmissionPolicy: MacOSAdmissionShared, BaseVM: "macos-tartelet-base", VMPrefix: "gha-macos",
 			Builder: Profile{ID: "builder", Label: "macos-builder", Resources: Resources{CPU: 8, MemoryMiB: 12288}, MaxActive: 1},
-			Maestro: Profile{ID: "maestro", Label: "macos-maestro", Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 2}},
+			Compact: Profile{ID: "maestro", Label: "macos-maestro", Resources: Resources{CPU: 4, MemoryMiB: 7168}, MaxActive: 2}},
 		Timeouts: Timeouts{GitHub: 15 * time.Second, Tart: 45 * time.Second, Boot: 3 * time.Minute, Assigned: 15 * time.Minute},
 		Guards: Guards{MinFreeDiskGiB: 60, MinFreeInodePercent: defaultMinFreeInodePercent,
 			MinAvailableMemoryMiB: defaultMinAvailableMemoryMiB,
@@ -1223,9 +1246,9 @@ func (c Config) Clone() Config {
 	out.Linux.BaseImageTools = append([]string(nil), c.Linux.BaseImageTools...)
 	out.MacOS.BaseImageTools = append([]string(nil), c.MacOS.BaseImageTools...)
 	out.MacOS.Builder.Aliases = append([]string(nil), c.MacOS.Builder.Aliases...)
-	out.MacOS.Maestro.Aliases = append([]string(nil), c.MacOS.Maestro.Aliases...)
+	out.MacOS.Compact.Aliases = append([]string(nil), c.MacOS.Compact.Aliases...)
 	out.MacOS.Builder.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Builder.OccupancyBudgetSeconds)
-	out.MacOS.Maestro.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Maestro.OccupancyBudgetSeconds)
+	out.MacOS.Compact.OccupancyBudgetSeconds = cloneBudget(c.MacOS.Compact.OccupancyBudgetSeconds)
 	out.GitHub.ParkedScaleSetAuditMinutes = cloneBudget(c.GitHub.ParkedScaleSetAuditMinutes)
 	out.GitHub.ScaleSets = append([]ScaleSet(nil), c.GitHub.ScaleSets...)
 	for i := range out.GitHub.ScaleSets {
@@ -1412,7 +1435,7 @@ func (c Config) Validate() error {
 		if c.MacOS.BaseVM == "" || c.MacOS.VMPrefix == "" {
 			return errors.New("macOS base VM and prefix are required")
 		}
-		for _, p := range []Profile{c.MacOS.Builder.normalized(), c.MacOS.Maestro.normalized()} {
+		for _, p := range []Profile{c.MacOS.Builder.normalized(), c.MacOS.Compact.normalized()} {
 			if p.Label == "" || p.Resources.CPU <= 0 || p.Resources.MemoryMiB <= 0 || p.MaxActive <= 0 {
 				return errors.New("invalid macOS profile")
 			}
@@ -1492,7 +1515,7 @@ func (c Config) validateHostBudget() error {
 func (c Config) budgetedProfiles() []Profile {
 	profiles := append([]Profile(nil), c.Linux.Profiles...)
 	if c.MacOS.Enabled {
-		profiles = append(profiles, c.MacOS.Builder, c.MacOS.Maestro)
+		profiles = append(profiles, c.MacOS.Builder, c.MacOS.Compact)
 	}
 	return profiles
 }
@@ -1596,7 +1619,7 @@ func (c Config) validateLegacyAuthority() error {
 	}
 	if c.MacOS.Enabled {
 		profiles[c.MacOS.Builder.ID] = struct{}{}
-		profiles[c.MacOS.Maestro.ID] = struct{}{}
+		profiles[c.MacOS.Compact.ID] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(c.GitHub.ScaleSets))
 	for _, scaleSet := range c.GitHub.ScaleSets {
@@ -1794,7 +1817,7 @@ func (c Config) authorityProfileCapacities() map[string]int {
 	}
 	if c.MacOS.Enabled {
 		capacities[c.MacOS.Builder.ID] = c.budgetedCapacity(c.MacOS.Builder.MaxActive, c.MacOS.Builder)
-		capacities[c.MacOS.Maestro.ID] = c.budgetedCapacity(c.MacOS.Maestro.MaxActive, c.MacOS.Maestro)
+		capacities[c.MacOS.Compact.ID] = c.budgetedCapacity(c.MacOS.Compact.MaxActive, c.MacOS.Compact)
 	}
 	return capacities
 }

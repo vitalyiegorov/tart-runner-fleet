@@ -167,7 +167,9 @@ type PolicyMacOSBurst struct {
 	MixedProfileCohorts    bool          `json:"mixedProfileCohorts"`
 	NestedVirtualization   bool          `json:"nestedVirtualization"`
 	Builder                PolicyProfile `json:"builder"`
-	Maestro                PolicyProfile `json:"maestro"`
+	// Compact keeps its fleet.v1 key: the contract preserves field names, and the
+	// digest is taken over these bytes (ADR 0091).
+	Compact PolicyProfile `json:"maestro"`
 }
 
 // PolicyProfile is one profile's charged vector and its own cap.
@@ -237,7 +239,7 @@ func ProjectPolicy(cfg Config) Policy {
 			MixedPlatformAdmission: cfg.MacOS.MixedPlatformAdmission,
 			MixedProfileCohorts:    cfg.MacOS.MixedProfileCohorts,
 			NestedVirtualization:   cfg.MacOS.NestedVirtualization,
-			Builder:                projectProfile(cfg.MacOS.Builder), Maestro: projectProfile(cfg.MacOS.Maestro)},
+			Builder:                projectProfile(cfg.MacOS.Builder), Compact: projectProfile(cfg.MacOS.Compact)},
 		PollSeconds:           int(cfg.PollInterval.Seconds()),
 		ReservationAgeSeconds: int(cfg.ReservationAge.Seconds()),
 		SessionYield: PolicySessionYield{Enabled: cfg.SessionYield.Enabled,

@@ -47,7 +47,7 @@ commit with no edit to the test.
 ## The three files here today
 
 `mac-mini.json` and `mac-studio.json` are hand-written examples that model the
-real topology: two nodes that both advertise `linux-xl` and `macos-maestro`,
+real topology: two nodes that both advertise `linux-xl` and `trf-macos-arm64-4x7`,
 which *Amendment 2026-08-04b* of ADR 0034 permits and which the parity rule then
 qualifies. Their `baseImageCapabilities` are equal on both nodes, per platform,
 which is the whole point — make one of them leaner and the contract test fails.

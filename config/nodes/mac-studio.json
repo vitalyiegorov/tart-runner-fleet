@@ -21,7 +21,7 @@
     "enabled": true,
     "admissionPolicy": "shared",
     "baseVm": "macos-tartelet-base",
-    "baseImageCapabilities": ["android-build-sdk", "cocoapods", "ios-simulator-prewarmed", "jvm", "maestro-cli", "node-runtime", "xcode"],
+    "baseImageCapabilities": ["android-build-sdk", "cocoapods", "ios-simulator-prewarmed", "jvm", "node-runtime", "xcode"],
     "baseImageRunnerVersion": "2.336.0",
     "vmPrefix": "gha-macos",
     "builder": { "id": "macos-6x12", "label": "trf-macos-arm64-6x12", "aliases": ["macos-builder"], "cpu": 6, "memoryMb": 12288, "maxActive": 1 },
@@ -56,7 +56,7 @@
             "maxCapacity": 2,
             "labels": ["self-hosted", "macos-maestro"],
             "sharedLabels": true,
-            "requiresCapabilities": ["android-build-sdk", "jvm", "maestro-cli"]
+            "requiresCapabilities": ["android-build-sdk", "jvm"]
           }
         ]
       }

@@ -214,7 +214,7 @@ func (c Config) profileLabelSets() (map[string]LabelSet, error) {
 	if !c.MacOS.Enabled {
 		return sets, nil
 	}
-	for _, profile := range []Profile{c.MacOS.Builder, c.MacOS.Maestro} {
+	for _, profile := range []Profile{c.MacOS.Builder, c.MacOS.Compact} {
 		if err := addLabelSet(sets, claimed, canonicalMacOS, arch, profile); err != nil {
 			return sets, err
 		}
