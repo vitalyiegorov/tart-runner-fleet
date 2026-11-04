@@ -27,8 +27,12 @@ class LocalLayerTest(unittest.TestCase):
         # budgie job 126702403160: "Did not find CodeQL tools version 2.27.4 in the toolcache."
         self.assertRegex(RUNNER.read_text(), r'ARG CODEQL_VERSIONS="[^"]*\b2\.27\.4\b')
 
-    def test_the_offline_smoke_runs_each_baked_codeql(self):
-        self.assertRegex(SMOKE.read_text(), r"_tool/CodeQL/\*/x64\.complete")
+    def test_the_offline_smoke_requires_the_version_the_recipe_requests(self):
+        # A glob over what is baked would pass on an image holding only an old bundle.
+        smoke = SMOKE.read_text()
+        self.assertIn("ARG CODEQL_VERSIONS=", smoke)
+        self.assertIn("for version in $CODEQL_VERSIONS", smoke)
+        self.assertNotIn("CodeQL/*", smoke)
 
 
 if __name__ == "__main__":

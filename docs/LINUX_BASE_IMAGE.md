@@ -1524,6 +1524,10 @@ test "$(curl -fsS http://192.168.1.64:3017/health)" = healthy
 '
 ```
 
+The host may rewrite this line before a runner starts, when the gate does not
+prove itself ([ADR 0078's 2026-11-04 amendment](adr/0078-a-node-serves-its-guests-actions-cache-pull-requests-only-read-it.md)).
+Keep the line in the image: the rewrite leaves an image with no such line alone.
+
 On runner 2.338.0 the stock name occurs once. `Runner.Worker.dll` changes from
 `61247b8e…a8d9c` to `2b962413…bed28`, and both Macs produced the same bytes.
 
@@ -1622,19 +1626,52 @@ node, so add it with
 [`Containerfile.local`](../deploy/actions-cache/Containerfile.local), which holds
 only `COPY`:
 
-1. Copy `_tool/CodeQL/<version>/x64` out of two running runners with
-   `podman cp`, each after that version's `x64.complete` exists. On podman 6 this
-   does not pause the container. Never exec into or stop a runner to do it.
-2. Compare the two trees' SHA-256 manifests. They must be identical. The archive
-   is streamed, so no copy can be checked against the release digest, and a
-   guest ran the job's code: two independent copies are the available evidence.
-3. Lay out `<context>/tool/CodeQL/<version>/x64` and an empty `x64.complete`, then
+1. Copy `_tool/CodeQL/<version>/x64` out of running runners with `podman cp`,
+   each after that version's `x64.complete` exists. On podman 6 this does not
+   pause the container. Never exec into or stop a runner to do it.
+2. **Keep only copies from trusted runs.** `_tool` is writable by the job, and a
+   baked file runs in every later job. Accept a copy only when `fleet traffic`
+   names its run and `gh api repos/<repo>/actions/runs/<id>` says it ran on the
+   default branch of that repository, from a push, a schedule or `dynamic`: the
+   boundary [ADR 0078](adr/0078-a-node-serves-its-guests-actions-cache-pull-requests-only-read-it.md)
+   already draws for cache writers. Delete every other copy.
+3. **Compare the trees.** Two trusted copies, from different repositories or
+   nodes, must have identical SHA-256 manifests. **This shows no job changed the
+   bundle. It does not show the bundle is the release**: the archive is streamed
+   into `tar`, so no local file can be checked against the release digest. The
+   only proof of that is one fetch of the archive (`curl --limit-rate 2M`,
+   off-peak, 559 MB for 2.27.4), checked against the release's digest and compared
+   as a manifest. That needs the operator's approval while the uplink is saturated.
+   The fetch is once per version, because every node can then compare against the
+   manifest. [ADR 0079](adr/0079-a-pinned-tool-the-image-lacks-is-a-red-flag.md)
+   records this rule.
+4. Lay out `<context>/tool/CodeQL/<version>/x64` and an empty `x64.complete`, then
    build as the file's header says, with `--network=none --pull=never`.
-4. Run `scripts/check-runner-image.sh`, which runs each baked `codeql` offline.
 5. Update `CODEQL_VERSIONS` in `Containerfile.runner` so a full rebuild agrees.
+6. Run `scripts/check-runner-image.sh`, which fails unless each requested version
+   is baked and runs offline.
 
 **Edit the file the daemon actually reads.** On Linux that is the `--config=` in
 `systemctl --user cat tart-runner-fleet-authority.service`, not necessarily
 `state/fleet.json`. The #479 rollout edited `state/fleet.json` on omarchy and
 ubuntu-vitalii; both kept running `actions-cache.5`, which `podman ps` shows.
 Confirm a swap the same way, from the image of a guest started after it.
+
+The Android SDK comes from the same place. `android-sdk-packages.txt` lists the
+exact packages real builds installed, and the evidence is on #414. Do not run
+`sdkmanager --install` for an image. A trusted job's `android-sdk-v1-*` entry in
+the node's LAN cache already holds them:
+
+1. Find the newest default-branch entry in the cache server's `sqlite.db`, opened
+   read-only, and unpack its `storage/filesystem/<folder>/merged` archive on that
+   node.
+2. Lay out `<context>/android-sdk/` with the listed packages and `licenses/`, and
+   copy `android-sdk-packages.txt` and `check-android-sdk.sh` beside it. Copy no
+   other package: `cmdline-tools/latest` and the rest are in the base.
+3. Compare SHA-256 manifests with another node's unpacked copy. The zips are
+   gone, so Google's SHA-1s cannot be checked; sdkmanager checked them when each
+   job installed the package. omarchy's and ubuntu-vitalii's 34,643 files
+   matched on 2026-11-04.
+4. Build and smoke as above. A package a build starts needing reaches the cache
+   the same way, so add it to the list and rebuild.
+

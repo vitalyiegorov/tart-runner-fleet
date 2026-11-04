@@ -1437,6 +1437,25 @@ A daemon older than this check publishes no `imageToolCheck`. The row then
 reads `not reported by this daemon`, which is a statement about the daemon and
 not a pass.
 
+### `cache gate unreachable`
+
+`fleet doctor` reports `FAIL  cache gate` (exit 5) when the LAN gate a node's Tart
+guests are baked to use did not sign this node's challenge. Nothing is unhealthy:
+the guests launched since use GitHub's results service. Off the home network that
+is correct. At home it is a fault, because every cache and artifact call is on the
+WAN, saves count against GitHub's per-repository limit, and the row is the only
+signal.
+
+Check omarchy's gate, then the pinned key against the gate's log line:
+
+```sh
+systemctl --user status tart-runner-fleet-cache-gate.service
+grep 'identity public key' ~/.local/share/tart-runner-fleet/state/cache-gate.log | tail -n 1
+```
+
+ADR 0078's 2026-11-04 amendment gives the rollout order. To turn the check off,
+remove `cacheGate` from the node's config and restart its daemon.
+
 ### A dead guest with no console to leave behind
 
 `fleet doctor` reports `FAIL  guest console` when a node boots Linux guests and
@@ -2088,9 +2107,9 @@ podman build --build-arg BASE="$BASE" \
 `fleet cache-gate --metrics-listen 127.0.0.1:3019` serves
 `fleet_cache_gate_bytes_total{upstream,direction}` on loopback only. It is
 refused on any non-loopback address, and the guest-facing `:3017` never serves
-it. The shipped unit does not pass the flag. Add it to `ExecStart` once the
-installed `fleet` release contains it; an older release exits with its usage
-text and systemd restarts it in a loop.
+it. The shipped unit passes the flag, and `--identity-key` beside it. Install
+that unit only once the node's `fleet` release understands both; an older release
+exits with its usage text and systemd restarts it in a loop.
 `cache/to_guest` is what guests read from the LAN cache. Subtract its increase
 from `fleet traffic`'s receive bytes for the WAN estimate (see
 [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md#analyze-ci-traffic)).

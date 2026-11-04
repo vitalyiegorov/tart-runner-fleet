@@ -109,9 +109,9 @@ workflow and profile.**
   guest. Attribution would need a per-guest token or port. The gate totals are
   node-wide, so WAN = receive − cache is a node-level estimate per window, not
   per job.
-- The deploy unit for the gate is unchanged. Adding
-  `--metrics-listen 127.0.0.1:3019` is an operator step that needs a release
-  containing this change.
+- The deploy unit for the gate passes `--metrics-listen 127.0.0.1:3019`. A node
+  installs that unit only after its `fleet` release understands every flag in it,
+  or the gate exits with its usage text and systemd restarts it in a loop.
 
 ## Testability
 

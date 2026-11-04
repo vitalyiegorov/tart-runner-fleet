@@ -146,3 +146,20 @@ versions there, for example `macosBurst.baseImageTools: ["maestro@2.6.1", ...]`
 against `requiresTools: ["maestro@2.10.0"]` on the maestro sets, will turn the
 row red on those nodes. That is an operational choice to make with the image
 refresh.
+
+## Amendment 2026-11-04: a tool may be baked from a copy already on the node
+
+Issue #414. `codeql-action` asks GitHub at run time which bundle to use, so a bake
+goes stale with no change in any repository: 2.27.3 was baked, jobs asked for
+2.27.4 two days after its release, and every Analyze job streamed 559 MB again.
+Rebuilding the image by downloading would add to the traffic it exists to remove.
+
+`deploy/actions-cache/Containerfile.local` adds tools with `COPY` alone, built with
+`--network=none --pull=never`. Its source is a copy the node already holds. A job
+can write to `_tool` and a baked file runs in every later job, so a copy counts only
+if a trusted default-branch run produced it, the boundary ADR 0078 draws for cache
+writers, and only if two such copies match. That shows no job changed the bundle,
+not that it is the release. Only a checked fetch of the archive shows that, so a
+bake without one says so where it is recorded. A package a job installed comes from
+the same trusted boundary, in the LAN cache archive that job saved.
+

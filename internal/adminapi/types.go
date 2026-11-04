@@ -86,6 +86,13 @@ type Status struct {
 	// passing, when the daemon has not published (EffectiveImageToolCheck).
 	ImageTools     []ImageTools `json:"imageTools,omitempty"`
 	ImageToolCheck *Check       `json:"imageToolCheck,omitempty"`
+	// CacheGate is an additive fleet.v1 field: the latest answer to whether the
+	// LAN cache gate this node's Tart guests are baked to use proved it is ours
+	// (ADR 0078). A failed proof is a roaming node working as designed, so it
+	// fails this doctor row and no health check. CacheGateCheck is absent, not
+	// passing, when the daemon has not published (EffectiveCacheGateCheck).
+	CacheGate      *CacheGate `json:"cacheGate,omitempty"`
+	CacheGateCheck *Check     `json:"cacheGateCheck,omitempty"`
 	// GuestConsole is an additive fleet.v1 field: whether this node boots Linux
 	// guests and whether their serial consoles are written somewhere durable.
 	// It exists because #236, #258 and #259 each ended at *trigger unidentified*
@@ -367,6 +374,23 @@ func (s Status) EffectiveImageToolCheck() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.ImageToolCheck
+}
+
+// EffectiveCacheGateCheck is the handoff accessor for the cache gate judgement.
+// Its absence means the daemon predates it; the CLI says "not reported".
+func (s Status) EffectiveCacheGateCheck() Check {
+	if s.CacheGateCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.CacheGateCheck
+}
+
+// CacheGate is the latest verification of a node's LAN cache gate. An empty URL
+// means the node configures none.
+type CacheGate struct {
+	URL      string    `json:"url,omitempty"`
+	Verified bool      `json:"verified"`
+	ProbedAt time.Time `json:"probedAt,omitzero"`
 }
 
 // ImageTools is one guest image's declared tool versions and the required ones

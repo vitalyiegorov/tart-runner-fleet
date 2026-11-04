@@ -595,6 +595,9 @@ type Config struct {
 	// capabilities beside it are: `fleet config validate` decodes a file and
 	// never touches a host, and a node's configuration is written, rendered, and
 	// checked on machines other than the one that will run it.
+	// CacheGate is the LAN cache gate this node's Tart guests are baked to use
+	// (ADR 0078). Empty on a node that checks none.
+	CacheGate       CacheGate
 	GuestArch       string
 	Linux           Linux
 	Executor        Executor
@@ -654,12 +657,15 @@ type wireConfig struct {
 	BaseImageTools []string `json:"baseImageTools,omitempty"`
 	// GuestArch is omitted when empty for the same reason: an Apple-silicon node
 	// declares nothing and encodes the file it encoded before issue #269.
-	GuestArch             string `json:"guestArch,omitempty"`
-	VMPrefix              string `json:"vmPrefix"`
-	PollSeconds           int    `json:"pollSeconds"`
-	MaxLinuxWhenMacOSIdle int    `json:"maxLinuxWhenMacosIdle"`
-	MaxLinuxCPU           int    `json:"maxLinuxCpu"`
-	MaxLinuxMemoryMiB     int    `json:"maxLinuxMemoryMb"`
+	GuestArch string `json:"guestArch,omitempty"`
+	// CacheGate is omitted when empty so a node with no gate encodes the file it
+	// encoded before (ADR 0078).
+	CacheGate             *CacheGate `json:"cacheGate,omitempty"`
+	VMPrefix              string     `json:"vmPrefix"`
+	PollSeconds           int        `json:"pollSeconds"`
+	MaxLinuxWhenMacOSIdle int        `json:"maxLinuxWhenMacosIdle"`
+	MaxLinuxCPU           int        `json:"maxLinuxCpu"`
+	MaxLinuxMemoryMiB     int        `json:"maxLinuxMemoryMb"`
 	// HostBudget is a pointer so an unset budget is absent from the encoded file
 	// rather than present as a zero object: a release older than this setting
 	// decodes with DisallowUnknownFields and would refuse the key outright.
@@ -782,7 +788,8 @@ func Decode(r io.Reader) (Config, error) {
 			BaseImageCapabilities:  append([]string(nil), w.MacOSBurst.BaseImageCapabilities...),
 			BaseImageRunnerVersion: w.MacOSBurst.BaseImageRunnerVersion,
 			BaseImageTools:         append([]string(nil), w.MacOSBurst.BaseImageTools...)},
-		GitHub: w.GitHub,
+		CacheGate: decodeCacheGate(w.CacheGate),
+		GitHub:    w.GitHub,
 		Timeouts: Timeouts{GitHub: secondsOr(w.GitHubTimeoutSeconds, 15), Tart: secondsOr(w.TartControlTimeoutSeconds, 45),
 			Boot: secondsOr(w.BootTimeoutSeconds, 180), Assigned: secondsOr(w.AssignedTimeoutSeconds, 900)},
 		Guards: normalizeGuards(w), SessionRecovery: normalizeSessionRecovery(w), SessionYield: normalizeSessionYield(w), UpdateDrain: normalizeUpdateDrain(w),
@@ -871,6 +878,7 @@ func Encode(w io.Writer, cfg Config) error {
 		BaseImageTools:          append([]string(nil), cfg.Linux.BaseImageTools...),
 		RunnerVersionFloor:      cfg.RunnerVersionFloor,
 		GuestArch:               cfg.GuestArch,
+		CacheGate:               encodeCacheGate(cfg.CacheGate),
 		LinuxReservationAgeSecs: reservationSeconds, LinuxProfiles: encodeProfiles(cfg.Linux.Profiles),
 		MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB, MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB, MaxLoadAverage: cfg.Guards.MaxLoadAverage,
@@ -1429,6 +1437,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := c.validateTools(); err != nil {
+		return err
+	}
+	if err := c.validateCacheGate(); err != nil {
 		return err
 	}
 	if err := c.validateGuestArch(); err != nil {
