@@ -484,7 +484,7 @@ Two things this step does **not** do, and why:
 - **Do not delete `/Library/Java`.** mac-mini's hand-written trim removed it
   because the Android layer had installed a Temurin JDK there. On an image
   built by this recipe that directory holds the `openjdk-17.jdk` symlink
-  [step 3](#3-provision) creates, and the Maestro launcher is a Gradle start
+  [step 3](#3-provision) creates, and the Gradle launcher is a start
   script that fails outright without a JDK. Remove a Temurin bundle by name if
   one is there; never the directory.
 - **`xcrun simctl list runtimes` lies inside the session that deleted them.**
