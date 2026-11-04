@@ -20,5 +20,6 @@ podman run --rm --network=none --entrypoint sh "$image" -eu -c '
     version=${version##*/}
     test "$("${complete%.complete}/codeql/codeql" version --format=terse)" = "$version"
   done
-  printf "Runner user, temporary directory, endpoint, requested Node caches and baked CodeQL verified offline.\n"
+  sh /usr/local/libexec/trf-android-sdk/check-android-sdk.sh < /usr/local/libexec/trf-android-sdk/android-sdk-packages.txt
+  printf "Runner user, temporary directory, endpoint, requested Node caches, baked CodeQL and Android SDK verified offline.\n"
 ' sh "$@"
