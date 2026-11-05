@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 )
@@ -93,22 +94,31 @@ func TestDoctorPassesWhenTheDaemonPredatesTheCheck(t *testing.T) {
 	}
 }
 
-// A refused image and a held demand are each named in doctor and above the queues
-// in status, because the queue alone looks like a node that is merely busy (ADR 0094).
-func TestDoctorAndStatusNameARefusedImageAndAHeldDemand(t *testing.T) {
-	const refused = `runner_version_refused: linux base image "base": GitHub refuses actions/runner 2.336.0 as deprecated`
+// A held demand fails its check and a signal fails nothing, and each is named in doctor
+// and above the queues in status, because the queue alone looks merely busy (ADR 0094).
+func TestDoctorAndStatusNameAHeldDemandAndADisplayOnlySignal(t *testing.T) {
 	const held = "demand_empty_exit_backoff: o/r/1/1/7 (s/maestro): 3 instances exited without a job"
+	const signal = "image_generation_not_receiving_jobs: base@2.336.0: 4 instances. This changes no launch decisions."
 	status := healthyStatus()
-	status.Data.RunnerImages = []adminapi.RunnerImage{{Platform: "linux", VM: "base", Version: "2.336.0", Floor: "2.336.0",
-		BelowFloor: true, Reason: refused, RefusedVersion: "2.336.0"}}
-	status.Data.RunnerVersionCheck = &adminapi.Check{Reasons: []string{refused}}
 	status.Data.EmptyExitCheck = &adminapi.Check{Reasons: []string{held}}
-	assertDoctorNames(t, status, "runner version", "runner_version_refused")
 	assertDoctorNames(t, status, "empty exits", "demand_empty_exit_backoff")
 
+	status = healthyStatus()
+	status.Data.ImageSignals = []adminapi.ImageSignal{{Name: "image_generation_not_receiving_jobs", Image: "base@2.336.0", Detail: signal}}
+	deps := dependencies{newClient: func(string, time.Duration) (apiClient, error) {
+		return fakeClient{status: status, live: status.Data.Live, ready: status.Data.Ready, metrics: "fleet_mode 1\n"}, nil
+	}}
+	var doctor, stderr bytes.Buffer
+	if code := executeWith(context.Background(), []string{"doctor"}, &doctor, &stderr, deps); code != 0 {
+		t.Fatalf("a display-only signal failed doctor, exit %d:\n%s", code, doctor.String())
+	}
+	if !strings.Contains(doctor.String(), "image_generation_not_receiving_jobs") {
+		t.Fatalf("doctor must name it:\n%s", doctor.String())
+	}
+	status.Data.EmptyExitCheck = &adminapi.Check{Reasons: []string{held}}
 	var output strings.Builder
 	renderStatus(&output, status)
-	for _, want := range []string{"WITHHELD", "runner_version_refused", "demand_empty_exit_backoff"} {
+	for _, want := range []string{"WITHHELD", "demand_empty_exit_backoff", "IMAGE SIGNALS (display only)", "image_generation_not_receiving_jobs"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("status lacks %q:\n%s", want, output.String())
 		}

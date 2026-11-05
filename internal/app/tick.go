@@ -36,7 +36,8 @@ type Engine struct {
 	// Refusals is what this node's guests' logs say about their images. It is display
 	// only: a job can write that log, so nothing here reaches a plan (ADR 0094).
 	Refusals *RunnerRefusals
-	// Images names the image generation each platform launches from (ADR 0094).
+	// Images names the image generation each platform launches from, which scopes empty
+	// exits so a rebuilt image owes nothing for its predecessor's (ADR 0094).
 	Images map[domain.Platform]string
 }
 
@@ -79,6 +80,9 @@ type TickResult struct {
 	// without its job (issue #493). The demand stays in Queues and ScopeQueues,
 	// and is absent from Demands only while its hold lasts.
 	EmptyExitBackoffs []EmptyExitBackoff
+	// ImageSignals is what an operator should read about this node's images. Display
+	// only: nothing here reaches a plan (ADR 0094).
+	ImageSignals []ImageSignal
 	// RunnerRefusals is the latest advisory reading of each platform's guests (ADR 0094).
 	RunnerRefusals map[domain.Platform]domain.RunnerRefusal
 }
@@ -132,8 +136,8 @@ func commitFailureReason(status scheduler.PlanStatus, err error) string {
 // A demand on an empty-exit hold (issue #493, ADR 0094) leaves by the same door
 // and for the same reason: it must not be counted against anything while it costs
 // nothing, so the slot, the reservation and the repository cap all go to whatever
-// is next. An image generation on hold withholds its queue the same way. Each queue
-// summary is read from the unfiltered queue, so withheld work stays visible.
+// is next, and every other demand is untouched. Its queue summary is read from the
+// unfiltered queue, so it stays visible.
 func plannableDemands(queued []domain.Demand, withheld map[domain.DemandKey]bool) []domain.Demand {
 	plannable := make([]domain.Demand, 0, len(queued))
 	for _, demand := range queued {
@@ -222,6 +226,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			withheld[instance.Demand] = true
 		}
 	}
+	readings := e.Refusals.Observe(instances.Value)
 	// Before demand is read: a row GitHub has already failed must not spend one
 	// more tick as plannable work or as queue-SLO age. This is the path that
 	// needs neither a session nor a REST observer, so it works on the first
@@ -241,29 +246,16 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
 	}
 	var backoffs []EmptyExitBackoff
-	var retries []domain.Demand
-	readings := e.Refusals.Observe(instances.Value)
-	// The whole queue first, because an image's bound is judged across every binding
-	// that launches from it.
-	read := make([]bindingQueue, 0, len(e.Bindings))
+	var allQueued []domain.Demand
 	for _, binding := range e.Bindings {
-		queued, queuedErr := coordinator.QueuedDemands(ctx, binding)
-		read = append(read, bindingQueue{binding: binding, queued: queued, err: queuedErr})
-	}
-	imageHolds := judgeImages(read, emptyExits, e.Images)
-	for _, hold := range imageHolds {
-		backoffs = append(backoffs, hold)
-	}
-	sort.Slice(backoffs, func(i, j int) bool { return backoffs[i].Platform < backoffs[j].Platform })
-	for _, entry := range read {
-		binding, queued, err := entry.binding, entry.queued, entry.err
-		for _, backoff := range emptyExitBackoffs(binding, queued, emptyExits, e.Images) {
+		queued, err := coordinator.QueuedDemands(ctx, binding)
+		allQueued = append(allQueued, queued...)
+		for _, backoff := range emptyExitBackoffs(binding, queued, emptyExits, e.Images, now) {
 			backoffs = append(backoffs, backoff)
-			if now.Before(backoff.RetryAt) {
+			if domain.EmptyExitBackoff.Holds(domain.EmptyExits{Count: backoff.Exits, Last: backoff.LastAt}, now) {
 				withheld[backoff.Demand] = true
 			}
 		}
-		retries = append(retries, withholdHeldImages(queued, imageHolds, withheld, now)...)
 		// One filter for every path: a demand whose VM is already cloning,
 		// booting, registering, assigned, running, or tearing down is not
 		// re-planned, and a terminal incarnation releases it again.
@@ -314,8 +306,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		}
 		return scopeQueues[i].ScaleSetID < scopeQueues[j].ScaleSetID
 	})
-	plan, demands := planWithRetries(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior},
-		retries, emptyExits, e.Images)
+	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
 	headroom := coordinator.scaleSetHeadroom(ctx, e.Bindings, scheduler.Input{Now: now, Config: e.Config,
 		Demands: domain.Fresh(waiting, now), Instances: instances, Host: host, Prior: prior}, held, undelivered)
 	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles, Images: e.Images}).Commit(ctx, plan, "", now)
@@ -325,6 +316,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			Instances:      append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
 			HostHealthy:    hostHealthy(host),
 			ExpiredOverdue: expiredOverdue, CompletedDrains: completedDrains, Headroom: headroom,
-			EmptyExitBackoffs: backoffs, RunnerRefusals: readings},
+			EmptyExitBackoffs: backoffs, RunnerRefusals: readings,
+			ImageSignals: imageSignals(allQueued, emptyExits, readings, e.Images, now)},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }

@@ -163,10 +163,10 @@ func TestRunnerImagesAreAbsentUntilPublished(t *testing.T) {
 	}
 }
 
-// A refused or past-window image the floor still clears fails the check by its
-// reason, and must not publish that it is below the floor, in status or as a metric.
+// A past-window image the floor still clears fails the check by its reason, and must
+// not publish that it is below the floor, in status or as a metric.
 func TestAReasonOtherThanTheFloorDoesNotClaimBelowFloor(t *testing.T) {
-	const reason = "runner_version_refused: linux base image"
+	const reason = "linux base image past its install window"
 	images := []RunnerImageMetric{
 		{Platform: "linux", VM: "base", Version: "2.336.0", Floor: "2.336.0", Reason: reason},
 		{Platform: "macOS", VM: "mac", Version: "2.335.1", Floor: "2.336.0", BelowFloor: true, Reason: "below"},

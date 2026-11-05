@@ -1,7 +1,5 @@
 package telemetry
 
-import "time"
-
 // RunnerImageMetric is one guest image's `actions/runner` version as the node
 // declared it, together with the floor it was judged against and the verdict.
 //
@@ -22,17 +20,12 @@ type RunnerImageMetric struct {
 	Version string
 	// Floor is the version Version was judged against, always populated.
 	Floor string
-	// BelowFloor is the floor verdict alone. Reason fails for more than that: a
-	// refusal, or a calendar window, on an image the floor still clears.
+	// BelowFloor is the floor verdict alone. Reason fails for more than that: a closed
+	// install window on an image the floor still clears.
 	BelowFloor bool
 	// Reason is empty when the image is compliant, and is the operator-facing
 	// explanation otherwise.
 	Reason string
-	// RefusedVersion is non-empty when launches from this image are held and a guest's
-	// log names its runner as refused, with when that was read. It is advisory, because
-	// a job can write that log (ADR 0094).
-	RefusedVersion string
-	RefusedAt      time.Time
 }
 
 // runnerVersionPlatforms is the closed vocabulary of image platforms. It is
@@ -66,9 +59,6 @@ func (h *Health) SetRunnerImages(images []RunnerImageMetric) error {
 			return errInvalidMetric
 		}
 		if metric.Version != "" && !boundedResourceID.MatchString(metric.Version) {
-			return errInvalidMetric
-		}
-		if metric.RefusedVersion != "" && !boundedResourceID.MatchString(metric.RefusedVersion) {
 			return errInvalidMetric
 		}
 		seen[metric.Platform] = struct{}{}

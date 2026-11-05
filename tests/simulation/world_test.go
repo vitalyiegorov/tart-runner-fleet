@@ -1142,7 +1142,7 @@ func (w *world) reconcile() tickObservation {
 	}
 	return tickObservation{
 		Tick: w.tick, Now: w.now, Plan: result.Plan, Applied: result.Applied, Err: err,
-		Demands: result.Demands, EmptyExitBackoffs: result.EmptyExitBackoffs, RunnerRefusals: result.RunnerRefusals, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
+		Demands: result.Demands, EmptyExitBackoffs: result.EmptyExitBackoffs, RunnerRefusals: result.RunnerRefusals, ImageSignals: result.ImageSignals, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
 		Host: host.Value, HostUsable: host.Usable(), Headroom: result.Headroom,
 	}
 }
@@ -1400,8 +1400,10 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 	case operations.StateDeregistering:
 		// The read production performs beside the first stop (lifecycle.stopGuest).
 		// A guest that never logged a refusal reports nothing.
-		if version, refused := domain.ParseRunnerRefusal(w.readRunnerLog(instance.ID)); refused {
-			w.engine.Refusals.Record(instance.Platform, version, instance.ID)
+		if took, err := w.store.InstanceTookJob(w.ctx, instance.ID); err == nil && !took {
+			if version, refused := domain.ParseRunnerRefusal(w.readRunnerLog(instance.ID)); refused {
+				w.engine.Refusals.Record(instance.Platform, version, instance.ID)
+			}
 		}
 		// executor.go's deregistering arm: the runner is gone and its deletion is
 		// confirmed, so all that remains is to make the guest stop holding the

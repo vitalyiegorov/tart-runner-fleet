@@ -126,10 +126,8 @@ const (
 	// kernel's background trickle from closing the gate must still close it on
 	// a thrashing host. Like (u) it reads the world's fault state.
 	findingSwapAdmission findingKind = "swap_admission"
-	// findingLaunchHold is property (w): a demand over the empty-exit bound, or an
-	// image generation over its own, does not launch inside its hold (ADR 0094), and a
-	// held image starts at most one retry per tick. It counts a demand's empty exits
-	// from the world rather than from the durable
+	// findingLaunchHold is property (w): a demand over the empty-exit bound does not
+	// launch inside its hold (ADR 0094). It counts empty exits from the world rather than from the durable
 	// rows the fleet counts, so a query that lost rows would be caught, not agreed with.
 	findingLaunchHold findingKind = "launch_hold"
 	// findingStoreError is the harness's own fail-closed channel: the durable
@@ -252,7 +250,9 @@ type tickObservation struct {
 	// EmptyExitBackoffs is the queued work over the empty-exit bound this tick
 	// (issue #493).
 	EmptyExitBackoffs []app.EmptyExitBackoff
-	// RunnerRefusals is the advisory reading of each platform's guests (ADR 0094).
+	// RunnerRefusals is the advisory reading of each platform's guests, and ImageSignals
+	// the display-only findings built from it (ADR 0094).
+	ImageSignals   []app.ImageSignal
 	RunnerRefusals map[domain.Platform]domain.RunnerRefusal
 	// Queued is the DURABLE queue depth across every binding -- the number the
 	// SLO monitor reads. It answers a different question ("what does the fleet
@@ -307,7 +307,6 @@ func launchHoldChecker() checker {
 		if !observation.Applied {
 			return nil
 		}
-		retries := map[domain.Platform]int{}
 		for _, key := range observation.spawns() {
 			job := w.jobByRequest(key.JobID)
 			if job == nil {
@@ -317,17 +316,6 @@ func launchHoldChecker() checker {
 			if domain.EmptyExitBackoff.Exceeded(exits) && observation.Now.Before(domain.EmptyExitBackoff.RetryAt(exits)) {
 				return []finding{{Kind: findingLaunchHold, Tick: observation.Tick,
 					Detail: fmt.Sprintf("%s spawned with %d empty exits, inside its hold\n%s", key, job.exitedEmpty, w.dumpPlan(observation))}}
-			}
-			platform := w.platformOfJob(key.JobID)
-			for _, hold := range observation.EmptyExitBackoffs {
-				if hold.Demand != (domain.DemandKey{}) || hold.Platform != platform {
-					continue
-				}
-				retries[platform]++
-				if observation.Now.Before(hold.RetryAt) || retries[platform] > 1 {
-					return []finding{{Kind: findingLaunchHold, Tick: observation.Tick,
-						Detail: fmt.Sprintf("%s spawned from an image held until %s\n%s", key, hold.RetryAt, w.dumpPlan(observation))}}
-				}
 			}
 		}
 		return nil

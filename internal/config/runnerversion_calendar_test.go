@@ -4,8 +4,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
 
 // runnerCalendar is GitHub's actual calendar when v2.336.0 was refused on 2026-11-05.
@@ -61,31 +59,16 @@ func TestTheNewestReleasePassesTheCalendar(t *testing.T) {
 	}
 }
 
-func TestARefusalOutranksEveryOtherReasonAndIsNamed(t *testing.T) {
-	refusal := domain.RunnerRefusal{Version: "2.336.0", Instance: "trf-linux-2x4-abc",
-		At: time.Date(2026, 11, 5, 8, 54, 0, 0, time.UTC)}
-	reason := RunnerImage{Platform: "linux", VM: "base", Floor: "2.336.0", Refusal: &refusal}.Reason()
-	for _, want := range []string{"runner_version_refused", "advisory", "a job can write", "2.336.0", "trf-linux-2x4-abc", "2026-11-05T08:54:00Z"} {
-		if !strings.Contains(reason, want) {
-			t.Fatalf("reason %q lacks %q", reason, want)
-		}
-	}
-	if len(reason) > 512 {
-		t.Fatalf("reason exceeds what telemetry will carry: %d bytes", len(reason))
-	}
-}
-
-// The floor verdict is about the floor. A refusal or a closed window fails the check
-// through Reason without claiming the image is below a floor it clears.
+// The floor verdict is about the floor. A closed window fails the check through Reason
+// without claiming the image is below a floor it clears.
 func TestTheFloorVerdictIsAboutTheFloorAlone(t *testing.T) {
-	refusal := domain.RunnerRefusal{Version: "2.336.0", Instance: "trf-a", At: time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)}
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
 	for name, test := range map[string]struct {
 		image RunnerImage
 		below bool
 	}{
 		"clears it":   {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0"}},
-		"refused":     {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0", Refusal: &refusal}},
-		"past window": {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0", Releases: runnerCalendar(), Now: refusal.At}},
+		"past window": {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0", Releases: runnerCalendar(), Now: now}},
 		"below it":    {image: RunnerImage{Version: "2.335.1", Floor: "2.336.0"}, below: true},
 		"undeclared":  {image: RunnerImage{Floor: "2.336.0"}, below: true},
 	} {

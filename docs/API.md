@@ -256,16 +256,15 @@ vocabulary. The measurement is exported as
 `fleet_instance_guest_unresponsive`, each labelled by profile and instance. Both
 fields are additive and absent on daemons that probed no guest at all (ADR 0040).
 
-`emptyExitBackoffs` names what the fleet stopped launching back to back, and `emptyExitCheck`
-is the judgement `fleet doctor` renders as `empty exits`. A row for one queued job has `demand`,
-`scope`, `profile`, `exits`, `lastExitAt` and `retryAt`, and its reason starts
-`demand_empty_exit_backoff`. A row for a whole image generation has `image`, `demands`, `exits`,
-`lastExitAt` and `retryAt`, no `demand`, and its reason starts `image_empty_exit_backoff`.
-`runnerImages[]` gains `refusedVersion` and `refusedAt`, and its `reason` starts
-`runner_version_refused (advisory: ...)`, only while launches from that image are held and a
-guest's log names the refusal. That text is advisory, because a job can write that log, and it
-affects no launch. All are additive, and absent on an older daemon. Neither affects `ready` or
-`healthy` (ADR 0094).
+`emptyExitBackoffs` names queued jobs the fleet stopped launching for back to back, and `emptyExitCheck` is
+the judgement `fleet doctor` renders as `empty exits`. Each row has `demand`, `scope`, `profile`, `exits`,
+`lastExitAt` and `retryAt`, and each reason starts `demand_empty_exit_backoff`. It affects that job alone.
+
+`imageSignals` is display-only findings about an image generation, each with `name`, `image` and `detail`.
+`name` is `image_generation_not_receiving_jobs`, where dispatch elsewhere can also be the cause, or
+`runner_version_refused`, which is advisory because a job can write the log it is read from. `fleet doctor`
+renders them as `image signals`, which never fails. All of these are additive and absent on an older daemon.
+None affects `ready`, `healthy` or a launch decision beyond the one held job (ADR 0094).
 
 `reservation` names the aged global-FIFO head the scheduler is standing capacity
 by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:

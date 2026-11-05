@@ -36,6 +36,7 @@ import (
 )
 
 type runtimeStore interface {
+	runnerJobEvidence
 	operations.Store
 	app.EngineStore
 	app.LiveInstanceStore
@@ -993,7 +994,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, refusals)},
+					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, store, refusals)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -2801,6 +2802,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordEnvelope(result)
 	e.recordOverdueExpiry(result)
 	e.recordRunnerImages(result)
+	e.recordImageSignals(result)
 	e.recordEmptyExitBackoffs(result)
 	e.recordCompletedDrains(result)
 	pressure := result.Host.Pressure

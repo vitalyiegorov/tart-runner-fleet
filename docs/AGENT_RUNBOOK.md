@@ -221,12 +221,12 @@ re-run.
 
 ## Jobs queue, slots are busy, and nothing binds
 
-Read `fleet doctor`'s `empty exits` and `runner version` rows first (ADR 0094).
-`image_empty_exit_backoff` is one image costing instances and binding nothing.
-`demand_empty_exit_backoff` is one job costing instances that leave without it.
-`runner_version_refused` may name why, but it is advisory: a job can write that log. On a Tart
-node the holds and, when present, a calendar finding are the most the fleet can say, because it
-does not read its guests: never poll a live Tart guest with `tart exec` to find out (#478). On a container node, read one guest's log, printing
+Read `fleet doctor`'s `empty exits`, `image signals` and `runner version` rows first (ADR 0094).
+`demand_empty_exit_backoff` is one job costing instances that leave without it, and it holds that job alone.
+`image_generation_not_receiving_jobs` says an image's guests are getting no jobs, which a refused runner or
+dispatch elsewhere can cause. `runner_version_refused` may name why, but it is advisory: a job can write that
+log. Signals change no launch decisions, so a refused image keeps launching until it is rebuilt. Never poll a
+live Tart guest with `tart exec` to find out (#478). On a container node, read one guest's log, printing
 only the runner's status lines:
 
 ```sh

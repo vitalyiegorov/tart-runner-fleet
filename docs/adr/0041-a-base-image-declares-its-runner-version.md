@@ -12,9 +12,9 @@ capabilities of
 [ADR 0034's amendment 2026-08-04b](0034-a-node-serves-the-scale-sets-it-owns.md),
 and it is declared for the same reason: the daemon never opens the image.
 
-**Amended by [ADR 0094](0094-a-refused-runner-is-a-named-condition-of-its-image.md):**
+**Amended by [ADR 0094](0094-a-refused-runner-is-named-and-only-its-own-job-backs-off.md):**
 the check also reads GitHub's release calendar, which closes the "recurring-staleness
-half" this ADR left open below, and can carry a guest's log as an advisory reason.
+half" this ADR left open below.
 
 ## Context
 

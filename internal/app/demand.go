@@ -61,20 +61,22 @@ type EmptyExitStore interface {
 	EmptyExits(context.Context, time.Time) (map[domain.EmptyExitKey]domain.EmptyExits, error)
 }
 
-// EmptyExitBackoff is one queued demand whose instances keep exiting without its
-// job, or, with a zero Demand and Demands set, one whole image generation. It is
-// reported for as long as it stays over the bound, including while an attempt is
-// running, so the reason does not flicker with the attempts.
+// EmptyExitBackoff is one queued demand whose instances keep exiting without its job.
+// It is reported for as long as the demand stays over the bound, including while an
+// attempt is running, so the reason does not flicker with the attempts.
 type EmptyExitBackoff struct {
-	Demand   domain.DemandKey
-	Image    string
-	Platform domain.Platform
-	Demands  int
-	Scope    string
-	Profile  domain.ProfileID
-	Exits    int
-	LastAt   time.Time
-	RetryAt  time.Time
+	Demand  domain.DemandKey
+	Scope   string
+	Profile domain.ProfileID
+	Exits   int
+	LastAt  time.Time
+	RetryAt time.Time
+}
+
+// ImageSignal is one display-only finding about an image generation. Nothing reads it to
+// decide anything (ADR 0094).
+type ImageSignal struct {
+	Name, Image, Detail string
 }
 
 type GitHubQueueSnapshot interface {
@@ -885,18 +887,19 @@ func (c DemandCoordinator) EmptyExits(ctx context.Context, now time.Time) (map[d
 	return store.EmptyExits(ctx, now.Add(-overdueDemandTTL))
 }
 
-// emptyExitBackoffs judges one binding's queue against the policy. It reads the
-// whole queue rather than the plannable one, because a demand on its next attempt
-// is still over the bound. It decides only whether the demand is planned: the row,
-// the job at GitHub, the queue SLO and its age are all left exactly as they were.
+// emptyExitBackoffs judges one binding's queue against the policy. It reads the whole
+// queue rather than the plannable one, because a demand on its next attempt is still over
+// the bound. It decides only whether that demand is planned: the row, the job at GitHub,
+// the queue SLO and its age, and every other demand are left exactly as they were. An exit
+// dated ahead of the clock is not judged at all.
 func emptyExitBackoffs(binding Binding, queued []domain.Demand, exits map[domain.EmptyExitKey]domain.EmptyExits,
-	images map[domain.Platform]string,
+	images map[domain.Platform]string, now time.Time,
 ) []EmptyExitBackoff {
 	var backoffs []EmptyExitBackoff
 	for _, demand := range queued {
 		spent := exits[domain.EmptyExitKey{Demand: demand.Key, Image: images[demand.Platform]}]
-		if domain.EmptyExitBackoff.Exceeded(spent) {
-			backoffs = append(backoffs, EmptyExitBackoff{Demand: demand.Key, Platform: demand.Platform, Scope: binding.Scope, Profile: binding.Profile.ID,
+		if domain.EmptyExitBackoff.Exceeded(spent) && !spent.Last.After(now) {
+			backoffs = append(backoffs, EmptyExitBackoff{Demand: demand.Key, Scope: binding.Scope, Profile: binding.Profile.ID,
 				Exits: spent.Count, LastAt: spent.Last, RetryAt: domain.EmptyExitBackoff.RetryAt(spent)})
 		}
 	}

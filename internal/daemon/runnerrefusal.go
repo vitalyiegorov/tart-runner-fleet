@@ -25,17 +25,29 @@ import (
 // it finds, and a guest that cannot answer in time has established nothing.
 const runnerRefusalTimeout = 5 * time.Second
 
-// guestRunnerRefusalReader reads a container guest's runner log at teardown, for
-// display only (ADR 0094). The command is fixed and its output passes the domain's
-// grammar, so no other guest text reaches a log line or a status document.
+// runnerJobEvidence answers whether the broker ever gave an instance a job.
+type runnerJobEvidence interface {
+	InstanceTookJob(context.Context, string) (bool, error)
+}
+
+// guestRunnerRefusalReader reads a container guest's runner log at teardown, for display
+// only (ADR 0094). A guest that took a job is not asked, because a real refusal never gets
+// one, which keeps the sentence honest and spends no exec on every finished job. That is
+// all this guard is for: a job can still get past it, and nothing decides on the answer.
+// The command is fixed and its output passes the domain's grammar, so no other guest text
+// reaches a log line or a status document.
 type guestRunnerRefusalReader struct {
 	Runner   executor.CommandRunner
+	Evidence runnerJobEvidence
 	Refusals *app.RunnerRefusals
 }
 
 // ReadRunnerRefusal is lifecycle.RunnerRefusalReader. A failed read is no reading.
 func (r guestRunnerRefusalReader) ReadRunnerRefusal(ctx context.Context, instance operations.Instance) {
 	if domain.ValidateInstanceName(instance.ID) != nil {
+		return
+	}
+	if took, err := r.Evidence.InstanceTookJob(ctx, instance.ID); err != nil || took {
 		return
 	}
 	attempt, cancel := context.WithTimeout(ctx, runnerRefusalTimeout)
@@ -52,8 +64,8 @@ func (r guestRunnerRefusalReader) ReadRunnerRefusal(ctx context.Context, instanc
 // runnerRefusalReader is nil on a node that must not read its guests: a Tart node,
 // where each `tart exec` is vsock traffic (issue #478) and the guest has usually
 // powered itself off by the time a drain could ask (ADR 0080). Such a node has the same
-// holds, and the release calendar, and no sentence naming the reason.
-func (d dependencies) runnerRefusalReader(cfg config.Config, refusals *app.RunnerRefusals) lifecycle.RunnerRefusalReader {
+// backoff, signal and release calendar, and no sentence naming the reason.
+func (d dependencies) runnerRefusalReader(cfg config.Config, evidence runnerJobEvidence, refusals *app.RunnerRefusals) lifecycle.RunnerRefusalReader {
 	if d.guestExec == nil || (d.hostTraffic != nil && d.hostTraffic(cfg) != nil) {
 		return nil
 	}
@@ -61,7 +73,7 @@ func (d dependencies) runnerRefusalReader(cfg config.Config, refusals *app.Runne
 	if runner == nil {
 		return nil
 	}
-	return guestRunnerRefusalReader{Runner: runner, Refusals: refusals}
+	return guestRunnerRefusalReader{Runner: runner, Evidence: evidence, Refusals: refusals}
 }
 
 // imageGenerations is what each platform launches from, as this process was configured
@@ -192,44 +204,36 @@ func parseRunnerReleases(body io.Reader) ([]config.RunnerRelease, error) {
 	return releases, nil
 }
 
-// recordRunnerImages re-judges each image every tick, because the calendar and a hold
-// are live facts where the declared version is not. A guest's log only names the reason
-// for a hold the fleet already has, so on its own, forged or not, it reaches no check.
-// The verdict is still config.RunnerImage.Reason's alone.
+// recordRunnerImages re-judges each image every tick, because the calendar is a live fact
+// where the declared version is not. The verdict is still config.RunnerImage.Reason's
+// alone.
 func (e engineTicker) recordRunnerImages(result app.TickResult) {
 	images := e.runnerImages.RunnerImages()
 	metrics := make([]telemetry.RunnerImageMetric, 0, len(images))
 	releases := e.releases.load()
-	held := map[domain.Platform]bool{}
-	for _, backoff := range result.EmptyExitBackoffs {
-		held[backoff.Platform] = true
-	}
 	for _, image := range images {
 		image.Releases, image.Now = releases, result.At
-		metric := telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM, Version: image.Version,
-			Floor: image.Floor, BelowFloor: image.BelowFloor()}
-		platform := runnerImagePlatform(image.Platform)
-		if refusal, read := result.RunnerRefusals[platform]; read {
-			if e.reporter != nil {
-				e.reporter.reportRunnerRefusal(image.Platform, image.VM, refusal)
-			}
-			if held[platform] {
-				image.Refusal = &refusal
-				metric.RefusedVersion, metric.RefusedAt = refusal.Version, refusal.At
-			}
-		}
-		metric.Reason = image.Reason()
-		metrics = append(metrics, metric)
+		metrics = append(metrics, telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM, Version: image.Version,
+			Floor: image.Floor, BelowFloor: image.BelowFloor(), Reason: image.Reason()})
 	}
 	if err := e.health.SetRunnerImages(metrics); err != nil && e.reporter != nil && e.reporter.logger != nil {
 		e.reporter.logger.Warn("runner image verdicts were refused", "error", err)
 	}
 }
 
-// runnerImagePlatform maps the config vocabulary onto the domain's. They differ in
-// one letter's case, and a miss here would hide a refusal.
-func runnerImagePlatform(platform string) domain.Platform {
-	return domain.Platform(strings.ToLower(platform))
+// recordImageSignals publishes the display-only findings and says each reading once.
+func (e engineTicker) recordImageSignals(result app.TickResult) {
+	metrics := make([]telemetry.ImageSignalMetric, 0, len(result.ImageSignals))
+	for _, signal := range result.ImageSignals {
+		metrics = append(metrics, telemetry.ImageSignalMetric{Name: signal.Name, Image: signal.Image, Detail: signal.Detail})
+	}
+	e.health.SetImageSignals(metrics)
+	if e.reporter == nil {
+		return
+	}
+	for platform, refusal := range result.RunnerRefusals {
+		e.reporter.reportRunnerRefusal(string(platform), refusal)
+	}
 }
 
 // recordEmptyExitBackoffs publishes the demand the fleet stopped spending instances
@@ -237,12 +241,8 @@ func runnerImagePlatform(platform string) domain.Platform {
 func (e engineTicker) recordEmptyExitBackoffs(result app.TickResult) {
 	metrics := make([]telemetry.EmptyExitBackoffMetric, 0, len(result.EmptyExitBackoffs))
 	for _, backoff := range result.EmptyExitBackoffs {
-		metric := telemetry.EmptyExitBackoffMetric{Scope: backoff.Scope, Profile: string(backoff.Profile), Image: backoff.Image,
-			Demands: backoff.Demands, Exits: backoff.Exits, LastExitAt: backoff.LastAt, RetryAt: backoff.RetryAt}
-		if backoff.Demand != (domain.DemandKey{}) {
-			metric.Demand = backoff.Demand.String()
-		}
-		metrics = append(metrics, metric)
+		metrics = append(metrics, telemetry.EmptyExitBackoffMetric{Demand: backoff.Demand.String(), Scope: backoff.Scope,
+			Profile: string(backoff.Profile), Exits: backoff.Exits, LastExitAt: backoff.LastAt, RetryAt: backoff.RetryAt})
 	}
 	if e.reporter != nil {
 		e.reporter.reportEmptyExitBackoffs(result.EmptyExitBackoffs)
@@ -252,7 +252,7 @@ func (e engineTicker) recordEmptyExitBackoffs(result app.TickResult) {
 
 // reportRunnerRefusal says a reading once. It is advisory and says so: launches are
 // unaffected by it, and a job can write the line.
-func (r *failureReporter) reportRunnerRefusal(platform, vm string, refusal domain.RunnerRefusal) {
+func (r *failureReporter) reportRunnerRefusal(platform string, refusal domain.RunnerRefusal) {
 	if r.logger == nil {
 		return
 	}
@@ -269,7 +269,7 @@ func (r *failureReporter) reportRunnerRefusal(platform, vm string, refusal domai
 		return
 	}
 	r.logger.Warn("guest log says GitHub refuses its runner (advisory: a job can write this log; launches are unaffected)",
-		"reason", "runner_version_refused", "platform", platform, "image", vm, "version", refusal.Version, "instance", refusal.Instance)
+		"reason", domain.SignalRunnerVersionRefused, "platform", platform, "version", refusal.Version, "instance", refusal.Instance)
 }
 
 // reportEmptyExitBackoffs says each hold once per exit that dates it. A hold outlasts
@@ -283,16 +283,11 @@ func (r *failureReporter) reportEmptyExitBackoffs(backoffs []app.EmptyExitBackof
 	previous := r.emptyExits
 	r.emptyExits = make(map[string]time.Time, len(backoffs))
 	for _, backoff := range backoffs {
-		r.emptyExits[backoff.Demand.String()+"\x00"+backoff.Image] = backoff.LastAt
+		r.emptyExits[backoff.Demand.String()] = backoff.LastAt
 	}
 	r.mu.Unlock()
 	for _, backoff := range backoffs {
-		if previous[backoff.Demand.String()+"\x00"+backoff.Image].Equal(backoff.LastAt) {
-			continue
-		}
-		if backoff.Demand == (domain.DemandKey{}) {
-			r.logger.Warn("instances from this image keep exiting without a job, holding its launches", "reason", "image_empty_exit_backoff",
-				"image", backoff.Image, "exits", backoff.Exits, "demands", backoff.Demands, "retryAt", backoff.RetryAt.UTC().Format(time.RFC3339))
+		if previous[backoff.Demand.String()].Equal(backoff.LastAt) {
 			continue
 		}
 		r.logger.Warn("demand instances keep exiting without a job, holding it", "reason", "demand_empty_exit_backoff",

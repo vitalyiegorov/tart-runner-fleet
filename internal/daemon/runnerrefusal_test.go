@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/podman"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -28,17 +29,33 @@ func (r *refusalRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 	return r.output, r.err
 }
 
-func TestATeardownReadRecordsAReadingAndNothingElse(t *testing.T) {
+type jobEvidenceFake struct {
+	took bool
+	err  error
+}
+
+func (f jobEvidenceFake) InstanceTookJob(context.Context, string) (bool, error) { return f.took, f.err }
+
+func TestATeardownReadRecordsAReadingFromAGuestThatTookNoJob(t *testing.T) {
+	const line = "An error occurred: Runner version v2.336.0 is deprecated and cannot receive messages.\n"
+	instance := operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux}
 	refusals := &app.RunnerRefusals{}
-	runner := &refusalRunner{output: []byte("An error occurred: Runner version v2.336.0 is deprecated and cannot receive messages.\n")}
+	runner := &refusalRunner{output: []byte(line)}
 	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return runner }}
-	reader := node.runnerRefusalReader(config.Default(), refusals)
-	reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux})
-	if refusal := refusals.Observe(nil)[domain.PlatformLinux]; refusal.Version != "2.336.0" || refusal.Instance != "trf-linux-2x4-abc" {
+	reader := node.runnerRefusalReader(config.Default(), jobEvidenceFake{}, refusals)
+	reader.ReadRunnerRefusal(context.Background(), instance)
+	if refusal := refusals.Observe(nil)[domain.PlatformLinux]; refusal.Version != "2.336.0" || refusal.Instance != instance.ID {
 		t.Fatalf("got %+v", refusal)
 	}
-	if runner.args[0] != "exec" || runner.args[1] != "trf-linux-2x4-abc" {
+	if runner.args[0] != "exec" || runner.args[1] != instance.ID {
 		t.Fatalf("got %v", runner.args[:2])
+	}
+	for name, evidence := range map[string]jobEvidenceFake{"took a job": {took: true}, "evidence unread": {err: errors.New("locked")}} {
+		quiet, fresh := &refusalRunner{output: []byte(line)}, &app.RunnerRefusals{}
+		guestRunnerRefusalReader{Runner: quiet, Evidence: evidence, Refusals: fresh}.ReadRunnerRefusal(context.Background(), instance)
+		if quiet.args != nil || len(fresh.Observe(nil)) != 0 {
+			t.Fatalf("%s: asked %v", name, quiet.args)
+		}
 	}
 	runner.args = nil
 	reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: "bad name; rm -rf", Platform: domain.PlatformLinux})
@@ -48,8 +65,7 @@ func TestATeardownReadRecordsAReadingAndNothingElse(t *testing.T) {
 	for name, other := range map[string]*refusalRunner{"no such line": {err: errors.New("exit status 1")},
 		"other text": {output: []byte("An error occurred: something else\n")}} {
 		fresh := &app.RunnerRefusals{}
-		guestRunnerRefusalReader{Runner: other, Refusals: fresh}.ReadRunnerRefusal(context.Background(),
-			operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux})
+		guestRunnerRefusalReader{Runner: other, Evidence: jobEvidenceFake{}, Refusals: fresh}.ReadRunnerRefusal(context.Background(), instance)
 		if len(fresh.Observe(nil)) != 0 {
 			t.Fatalf("%s produced a reading", name)
 		}
@@ -81,14 +97,14 @@ func TestAnImageGenerationMovesWithTheReferenceAndTheDeclaredVersion(t *testing.
 func TestATartNodeHasNoRefusalReader(t *testing.T) {
 	cfg := config.Default()
 	tartNode := dependencies{guestExec: applePlatform().guestExec, hostTraffic: applePlatform().hostTraffic}
-	if reader := tartNode.runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader != nil {
+	if reader := tartNode.runnerRefusalReader(cfg, jobEvidenceFake{}, &app.RunnerRefusals{}); reader != nil {
 		t.Fatal("a Tart node must not exec into a guest for this")
 	}
 	containerNode := dependencies{guestExec: func(config.Config) executor.CommandRunner { return &refusalRunner{} }}
-	if reader := containerNode.runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader == nil {
+	if reader := containerNode.runnerRefusalReader(cfg, jobEvidenceFake{}, &app.RunnerRefusals{}); reader == nil {
 		t.Fatal("a container node reads its guest")
 	}
-	if reader := (dependencies{}).runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader != nil {
+	if reader := (dependencies{}).runnerRefusalReader(cfg, jobEvidenceFake{}, &app.RunnerRefusals{}); reader != nil {
 		t.Fatal("a node with no way to exec has no reader")
 	}
 }
@@ -149,26 +165,18 @@ func TestTheTickRejudgesEachImage(t *testing.T) {
 	ticker := engineTicker{health: health, runnerImages: cfg, releases: releases}
 	reading := map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: {Version: "2.336.0", Instance: "trf-linux-2x4-abc", At: now}}
 
-	ticker.recordRunnerImages(app.TickResult{At: now})
-	if result := health.RunnerVersions(); !result.OK {
-		t.Fatalf("an unread calendar and no reading must pass: %v", result.Reasons)
-	}
-	// A log line alone reaches no check: a job could have written it.
 	ticker.recordRunnerImages(app.TickResult{At: now, RunnerRefusals: reading})
 	if result := health.RunnerVersions(); !result.OK {
-		t.Fatalf("a log line with no hold behind it failed a check: %v", result.Reasons)
+		t.Fatalf("a reading fails no check: %v", result.Reasons)
 	}
-	// Behind a hold from evidence a job cannot produce, it names the reason.
 	calendar := []config.RunnerRelease{{Version: "2.337.0", PublishedAt: now.AddDate(0, -2, 0)}}
 	releases.current.Store(&calendar)
-	ticker.recordRunnerImages(app.TickResult{At: now, RunnerRefusals: reading,
-		EmptyExitBackoffs: []app.EmptyExitBackoff{{Platform: domain.PlatformLinux, Image: "base@2.336.0", Exits: 4, Demands: 2}}})
-	reasons := strings.Join(health.RunnerVersions().Reasons, "\n")
-	if !strings.Contains(reasons, "runner_version_refused (advisory") || !strings.Contains(reasons, "macOS base image") {
-		t.Fatalf("the Linux image names its advisory reason and the macOS one its window: %s", reasons)
+	ticker.recordRunnerImages(app.TickResult{At: now})
+	if result := health.RunnerVersions(); result.OK || len(result.Reasons) != 2 {
+		t.Fatalf("both images are past their window: %v", result.Reasons)
 	}
-	if rows := health.Snapshot().RunnerImages; rows[0].RefusedVersion != "2.336.0" || rows[0].BelowFloor {
-		t.Fatalf("got %+v", rows[0])
+	if rows := health.Snapshot().RunnerImages; rows[0].BelowFloor {
+		t.Fatalf("a closed window is not below the floor: %+v", rows[0])
 	}
 }
 
@@ -212,6 +220,16 @@ func TestReleasesAreFetchedAndAFailedAnswerIsAnError(t *testing.T) {
 	}
 }
 
+// The runner that reads inside a guest keeps a bounded answer, whatever the guest sends.
+func TestAContainerNodesGuestRunnerIsBounded(t *testing.T) {
+	cfg := config.Default()
+	cfg.Executor.Backend = config.ExecutorPodman
+	runner, ok := linuxPlatform().guestExec(cfg).(podman.ExecRunner)
+	if !ok || runner.OutputLimit != podman.GuestOutputLimit {
+		t.Fatalf("got %#v", runner)
+	}
+}
+
 func TestANilReleaseStoreIsAnUnreadCalendar(t *testing.T) {
 	var releases *runnerReleases
 	if releases.load() != nil {
@@ -221,26 +239,26 @@ func TestANilReleaseStoreIsAnUnreadCalendar(t *testing.T) {
 
 func TestAContainerNodeWhoseConfigRunsNoContainersHasNoReader(t *testing.T) {
 	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return nil }}
-	if node.runnerRefusalReader(config.Default(), &app.RunnerRefusals{}) != nil {
+	if node.runnerRefusalReader(config.Default(), jobEvidenceFake{}, &app.RunnerRefusals{}) != nil {
 		t.Fatal("no runner, no reader")
 	}
 }
 
 // The verdicts are said once per read and once per attempt, and a tick that cannot
 // publish says so rather than leaving the last answer standing silently.
-func TestAnImageHoldIsPublishedWithoutADemand(t *testing.T) {
-	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
-	var logged strings.Builder
+func TestTheTickPublishesSignalsAndNothingFromThemFails(t *testing.T) {
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
-	ticker := engineTicker{health: health, reporter: newFailureReporter(&logged, func() time.Time { return now })}
-	ticker.recordEmptyExitBackoffs(app.TickResult{EmptyExitBackoffs: []app.EmptyExitBackoff{
-		{Image: "base@2.336.0", Platform: domain.PlatformLinux, Exits: 4, Demands: 2, LastAt: now, RetryAt: now.Add(5 * time.Minute)}}})
-	rows := health.Snapshot().EmptyExitBackoffs
-	if len(rows) != 1 || rows[0].Demand != "" || rows[0].Image != "base@2.336.0" || rows[0].Demands != 2 {
+	ticker := engineTicker{health: health}
+	ticker.recordImageSignals(app.TickResult{ImageSignals: []app.ImageSignal{{Name: domain.SignalImageNotReceivingJobs, Image: "base@1", Detail: "d"}}})
+	if rows := health.Snapshot().ImageSignals; len(rows) != 1 || rows[0].Detail != "d" {
 		t.Fatalf("got %+v", rows)
 	}
-	if !strings.Contains(logged.String(), "image_empty_exit_backoff") {
-		t.Fatalf("got %q", logged.String())
+	if result := health.RunnerVersions(); !result.OK {
+		t.Fatalf("a signal failed a check: %v", result.Reasons)
+	}
+	ticker.recordImageSignals(app.TickResult{})
+	if rows := health.Snapshot().ImageSignals; len(rows) != 0 {
+		t.Fatalf("got %+v", rows)
 	}
 }
 
@@ -258,7 +276,7 @@ func TestTheTickSaysEachVerdictOnce(t *testing.T) {
 	result := app.TickResult{At: now, RunnerRefusals: map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: refusal},
 		EmptyExitBackoffs: []app.EmptyExitBackoff{{Demand: key, Exits: 3, LastAt: now, RetryAt: now.Add(5 * time.Minute)}}}
 	for range 2 {
-		ticker.recordRunnerImages(result)
+		ticker.recordImageSignals(result)
 		ticker.recordEmptyExitBackoffs(result)
 	}
 	output := logged.String()
@@ -274,7 +292,7 @@ func TestTheTickSaysEachVerdictOnce(t *testing.T) {
 }
 
 func TestAReporterWithNoLoggerStaysSilent(t *testing.T) {
-	(&failureReporter{}).reportRunnerRefusal("linux", "base", domain.RunnerRefusal{})
+	(&failureReporter{}).reportRunnerRefusal("linux", domain.RunnerRefusal{})
 	(&failureReporter{}).reportEmptyExitBackoffs([]app.EmptyExitBackoff{{}})
 }
 
@@ -297,7 +315,7 @@ func TestAStandingVerdictAndHoldAreSaidOnceHoweverLongTheyLast(t *testing.T) {
 		result := app.TickResult{At: clock,
 			RunnerRefusals:    map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: {Version: "2.336.0", Instance: "trf-a", At: refusedAt}},
 			EmptyExitBackoffs: []app.EmptyExitBackoff{{Demand: key, Exits: 3, LastAt: exitAt, RetryAt: exitAt.Add(30 * time.Minute)}}}
-		ticker.recordRunnerImages(result)
+		ticker.recordImageSignals(result)
 		ticker.recordEmptyExitBackoffs(result)
 	}
 	count := func(want string) int { return strings.Count(logged.String(), want) }

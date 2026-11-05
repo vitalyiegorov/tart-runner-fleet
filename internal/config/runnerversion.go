@@ -6,8 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
 
 // RunnerInstallWindow is GitHub's stated rule: "the runner must stay up to date by
@@ -57,10 +55,6 @@ type RunnerImage struct {
 	Version string
 	// Floor is the version Version is judged against, always populated.
 	Floor string
-	// Refusal is a guest's log naming this image's runner as refused, set only while
-	// launches from the image are held on other evidence. It is advisory, because a
-	// job can write that log (ADR 0094). A Tart node never has one.
-	Refusal *domain.RunnerRefusal
 	// Releases and Now are the release calendar as measured. Without them the
 	// install window is not judged, because an unread calendar establishes nothing.
 	Releases []RunnerRelease
@@ -79,12 +73,6 @@ func (i RunnerImage) Compliant() bool { return i.Reason() == "" }
 // image is compliant. It names the image, what it carries, and the bar, because
 // those are the three facts needed to decide whether to rebuild.
 func (i RunnerImage) Reason() string {
-	if i.Refusal != nil {
-		return fmt.Sprintf("runner_version_refused (advisory: a job can write the log this is read from): launches from "+
-			"%s base image %q are being held, and guest %s logged at %s that GitHub refuses actions/runner %s as deprecated; "+
-			"if that holds up, rebuild the image", i.Platform, i.VM, i.Refusal.Instance,
-			i.Refusal.At.UTC().Format(time.RFC3339), i.Refusal.Version)
-	}
 	if i.Version == "" {
 		return fmt.Sprintf("%s base image %q declares no runner version, so its brownout compliance "+
 			"cannot be judged", i.Platform, i.VM)
@@ -208,7 +196,7 @@ func compareRunnerVersions(left, right string) int {
 }
 
 // BelowFloor is the floor verdict alone, separate from Reason, which also fails for a
-// refusal or a closed install window on an image the floor clears. An undeclared
+// closed install window on an image the floor clears. An undeclared
 // version is below it, because it cannot be shown to clear it (ADR 0041).
 func (i RunnerImage) BelowFloor() bool {
 	return i.Version == "" || compareRunnerVersions(i.Version, i.Floor) < 0

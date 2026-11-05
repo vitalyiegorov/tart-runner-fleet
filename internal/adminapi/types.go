@@ -157,6 +157,9 @@ type Status struct {
 	// An older daemon publishes neither, hence EffectiveEmptyExitCheck.
 	EmptyExitBackoffs []EmptyExitBackoff `json:"emptyExitBackoffs,omitempty"`
 	EmptyExitCheck    *Check             `json:"emptyExitCheck,omitempty"`
+	// ImageSignals is an additive fleet.v1 field of display-only findings. It is
+	// absent both on an older daemon and when there is nothing to say.
+	ImageSignals []ImageSignal `json:"imageSignals,omitempty"`
 	// Policy is an additive fleet.v1 field: the load-bearing subset of the
 	// configuration this node is actually running with, plus a digest of it, so
 	// "what is this node configured with" is answerable from the same document
@@ -368,27 +371,27 @@ type RunnerImage struct {
 	BelowFloor bool `json:"belowFloor"`
 	// Reason is empty when the image is compliant.
 	Reason string `json:"reason,omitempty"`
-	// RefusedVersion is non-empty when launches from this image are held and a guest's
-	// log names its runner as refused, and RefusedAt is when that was read. It is
-	// advisory, because a job can write that log, and it never affects a launch or
-	// readiness (ADR 0094). A node that cannot read its guests never sets it.
-	RefusedVersion string    `json:"refusedVersion,omitempty"`
-	RefusedAt      time.Time `json:"refusedAt,omitzero"`
 }
 
-// EmptyExitBackoff is one queued demand whose instances keep exiting without its job,
-// or, with no Demand and Image and Demands set, a whole image generation (issue #493,
-// ADR 0094). Exits is how many; RetryAt is when it may next launch, which has already
-// passed while an attempt is running.
+// EmptyExitBackoff is one queued demand whose instances keep exiting without its job
+// (issue #493, ADR 0094). Exits is how many; RetryAt is when it may next launch, which has
+// already passed while an attempt is running. No other demand is affected.
 type EmptyExitBackoff struct {
-	Demand     string    `json:"demand,omitempty"`
-	Scope      string    `json:"scope,omitempty"`
-	Profile    string    `json:"profile,omitempty"`
-	Image      string    `json:"image,omitempty"`
-	Demands    int       `json:"demands,omitempty"`
+	Demand     string    `json:"demand"`
+	Scope      string    `json:"scope"`
+	Profile    string    `json:"profile"`
 	Exits      int       `json:"exits"`
 	LastExitAt time.Time `json:"lastExitAt"`
 	RetryAt    time.Time `json:"retryAt"`
+}
+
+// ImageSignal is one display-only finding about an image generation: Name is
+// `runner_version_refused` or `image_generation_not_receiving_jobs`. It fails no check
+// and changes no launch decision (ADR 0094).
+type ImageSignal struct {
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Detail string `json:"detail"`
 }
 
 // EffectiveImageToolCheck is the handoff accessor for the tool-drift judgement

@@ -27,11 +27,19 @@ func TestAnEmptyExitBackoffIsNamedInTheStatusAndLeavesHealthAlone(t *testing.T) 
 	}
 }
 
-func TestAnImageHoldIsNamedAsSuch(t *testing.T) {
-	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
-	result := emptyExitResult([]EmptyExitBackoffMetric{{Image: "base@2.336.0", Demands: 3, Exits: 4, LastExitAt: now, RetryAt: now.Add(5 * time.Minute)}})
-	if result.OK || !strings.HasPrefix(result.Reasons[0], "image_empty_exit_backoff: base@2.336.0: 4 instances across 3 queued demands") {
-		t.Fatalf("got %+v", result)
+func TestASignalIsPublishedWholeAndReachesTheStatus(t *testing.T) {
+	health, err := NewHealth(emptyExitClock{}, HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.SetImageSignals([]ImageSignalMetric{{Name: "image_generation_not_receiving_jobs", Image: "base@1", Detail: "d"}})
+	rows := imageSignalRows(health.Snapshot())
+	if len(rows) != 1 || rows[0].Name != "image_generation_not_receiving_jobs" || rows[0].Image != "base@1" || rows[0].Detail != "d" {
+		t.Fatalf("got %+v", rows)
+	}
+	health.SetImageSignals(nil)
+	if rows := imageSignalRows(health.Snapshot()); rows != nil {
+		t.Fatalf("a finding that stopped being true goes: %+v", rows)
 	}
 }
 
@@ -53,13 +61,3 @@ func TestAPublishedBackoffReachesTheSnapshotAndIsReplacedWhole(t *testing.T) {
 type emptyExitClock struct{}
 
 func (emptyExitClock) Now() time.Time { return time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC) }
-
-func TestARefusedVersionTheGrammarCannotCarryIsRefused(t *testing.T) {
-	health, err := NewHealth(emptyExitClock{}, HealthConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := health.SetRunnerImages([]RunnerImageMetric{{Platform: "linux", VM: "base", Floor: "2.336.0", RefusedVersion: "not a version"}}); err == nil {
-		t.Fatal("a mangled version must not be published")
-	}
-}

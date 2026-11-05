@@ -933,35 +933,31 @@ func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (i
 	return generation, nil
 }
 
-// EmptyExits reports, per demand and image generation, the deleted instances still
-// bound to it since the given instant, how many of them came after that generation last
-// had a job assigned, and when that generation last launched anything. A failed row is
-// not counted, because a provisioning failure never reached a runner and has its own
-// retry path, and neither is one an operator later reaped: Failed leaves only through
-// reapInstance, which keeps its failure code, while every autonomous step to Deleted
-// clears it. A row older than the image field reads as the empty generation, which no
-// node launching from a named one will ask about, so upgrading can only forget a hold.
-// Nothing here is new state: these are the same terminal rows SpawnGeneration already
-// counts, so the answer survives a restart and cannot drift from what happened (issue
-// #493). An assignment is GitHub naming a runner on a job's own row, which a job cannot
-// write; a bare JobAssigned names none, so it waits for the JobStarted that does.
+// EmptyExits reports, per demand and image generation, the deleted instances still bound
+// to it since the given instant, how many of them came after that generation last had a
+// job assigned, and when that was. A failed row is not counted, because a provisioning
+// failure never reached a runner and has its own retry path, and neither is one an
+// operator later reaped: Failed leaves only through reapInstance, which keeps its failure
+// code, while every autonomous step to Deleted clears it. A row older than the image field
+// reads as the empty generation, which no node launching from a named one will ask about,
+// so upgrading can only forget a hold. Nothing here is new state: these are the same
+// terminal rows SpawnGeneration already counts, so the answer survives a restart and
+// cannot drift from what happened (issue #493). An assignment is GitHub naming a runner on
+// a job's own row; a bare JobAssigned names none, so it waits for the JobStarted that does.
 func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.EmptyExitKey]domain.EmptyExits, error) {
 	cutoff := since.UTC().UnixNano()
 	rows, err := s.dbQuery(ctx, "inbox.empty_exits", `WITH assigned(image,at) AS (
 			SELECT COALESCE(json_extract(i.scheduling_metadata,'$.image'),''),MAX(d.updated_at)
 			FROM runner_demands d JOIN instances i ON i.id=d.runner_name
 			WHERE d.runner_name<>'' AND d.status_rank>=? AND d.updated_at>=? GROUP BY 1),
-		launched(image,at) AS (
-			SELECT COALESCE(json_extract(scheduling_metadata,'$.image'),''),MAX(created_at)
-			FROM instances WHERE created_at>=? GROUP BY 1),
 		exits(repo,run,attempt,job,image,at) AS (
 			SELECT json_extract(scheduling_metadata,'$.demand.Repo'),json_extract(scheduling_metadata,'$.demand.RunID'),
 				json_extract(scheduling_metadata,'$.demand.Attempt'),json_extract(scheduling_metadata,'$.demand.JobID'),
 				COALESCE(json_extract(scheduling_metadata,'$.image'),''),updated_at
 			FROM instances WHERE state=? AND last_error='' AND updated_at>=? AND json_extract(scheduling_metadata,'$.demand.JobID')>0)
-		SELECT e.repo,e.run,e.attempt,e.job,e.image,COUNT(*),MAX(e.at),SUM(e.at>COALESCE(a.at,0)),COALESCE(l.at,0)
-		FROM exits e LEFT JOIN assigned a ON a.image=e.image LEFT JOIN launched l ON l.image=e.image
-		GROUP BY 1,2,3,4,5`, demandRank(operations.DemandJobAssigned), cutoff, cutoff, operations.StateDeleted, cutoff)
+		SELECT e.repo,e.run,e.attempt,e.job,e.image,COUNT(*),MAX(e.at),SUM(e.at>COALESCE(a.at,0)),COALESCE(a.at,0)
+		FROM exits e LEFT JOIN assigned a ON a.image=e.image
+		GROUP BY 1,2,3,4,5`, demandRank(operations.DemandJobAssigned), cutoff, operations.StateDeleted, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("list empty exits: %w", err)
 	}
@@ -971,7 +967,7 @@ func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.Emp
 		var key domain.EmptyExitKey
 		var exits domain.EmptyExits
 		if err := rows.Scan(&key.Demand.Repo, &key.Demand.RunID, &key.Demand.Attempt, &key.Demand.JobID, &key.Image,
-			&exits.Count, (*nanosTime)(&exits.Last), &exits.Unassigned, (*nanosTime)(&exits.Launched)); err != nil {
+			&exits.Count, (*nanosTime)(&exits.Last), &exits.Unassigned, (*nanosTime)(&exits.Assigned)); err != nil {
 			return nil, fmt.Errorf("scan empty exits: %w", err)
 		}
 		result[key] = exits
@@ -980,6 +976,21 @@ func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.Emp
 		return nil, fmt.Errorf("iterate empty exits: %w", err)
 	}
 	return result, nil
+}
+
+// InstanceTookJob reports whether any durable fact says this instance was given a job: it
+// entered Running, or GitHub named it as the runner on a job's own row. It decides only
+// which guests' logs are worth displaying. It reads every scale set and the unindexed
+// history, so this is for a teardown and never for a tick.
+func (s *Store) InstanceTookJob(ctx context.Context, instanceID string) (bool, error) {
+	var took bool
+	err := s.dbRow(ctx, "instances.took_job", `SELECT EXISTS(SELECT 1 FROM transition_history WHERE instance_id=? AND to_state=?)
+		OR EXISTS(SELECT 1 FROM runner_demands WHERE runner_name=? AND status_rank>=?)`,
+		instanceID, operations.StateRunning, instanceID, demandRank(operations.DemandJobAssigned)).Scan(&took)
+	if err != nil {
+		return false, fmt.Errorf("read instance job evidence: %w", err)
+	}
+	return took, nil
 }
 
 // DrainGeneration counts the instance's prior drain attempts that can no longer

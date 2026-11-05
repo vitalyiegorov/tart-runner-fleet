@@ -34,17 +34,6 @@ func renderCommand(output io.Writer, command string, status adminapi.StatusEnvel
 	}
 }
 
-// refusedImages is the reason of every image a guest's log says GitHub refuses.
-func refusedImages(status adminapi.Status) []string {
-	var refused []string
-	for _, image := range status.RunnerImages {
-		if image.RefusedVersion != "" {
-			refused = append(refused, image.Reason)
-		}
-	}
-	return refused
-}
-
 func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 	queueSLO := status.Data.EffectiveQueueSLO()
 	occupancy := status.Data.EffectiveOccupancy()
@@ -120,11 +109,17 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 		}
 	}
 	// Withheld work prints above the queues too: the queue is what keeps showing it
-	// while the node spends nothing on it (ADR 0094).
-	if refused, emptyExits := refusedImages(status.Data), status.Data.EffectiveEmptyExitCheck(); len(refused) > 0 || !emptyExits.OK {
+	// while the node spends nothing on it. Signals decide nothing and are said as such.
+	if emptyExits := status.Data.EffectiveEmptyExitCheck(); !emptyExits.OK {
 		fmt.Fprintln(output, "\nWITHHELD")
-		for _, line := range append(refused, emptyExits.Reasons...) {
+		for _, line := range emptyExits.Reasons {
 			fmt.Fprintln(output, line)
+		}
+	}
+	if len(status.Data.ImageSignals) > 0 {
+		fmt.Fprintln(output, "\nIMAGE SIGNALS (display only)")
+		for _, signal := range status.Data.ImageSignals {
+			fmt.Fprintln(output, signal.Detail)
 		}
 	}
 	fmt.Fprintln(output, "\nQUEUES")

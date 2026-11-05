@@ -2,6 +2,7 @@ package simulation_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 )
@@ -62,7 +63,8 @@ func TestARunnerlessJobDoesNotBootVMsInALoop(t *testing.T) {
 	if job.exitedEmpty < domain.EmptyExitBackoff.Tolerated {
 		t.Fatalf("the harness never reproduced the loop: %d empty exits", job.exitedEmpty)
 	}
-	if boots := w.admissionsOf(job); boots > 7 {
+	t.Logf("one runnerless job booted %d VMs in two simulated hours", w.admissionsOf(job))
+	if boots := w.admissionsOf(job); boots > 10 {
 		t.Fatalf("one runnerless job booted %d VMs in two hours (%d exited empty): the loop has no bound", boots, job.exitedEmpty)
 	}
 	final := w.observations[len(w.observations)-1]
@@ -188,4 +190,61 @@ func TestARebuiltImageIsNotChargedForTheOldOnesExits(t *testing.T) {
 		}
 	}
 	t.Fatalf("the rebuilt image waited out the old image's hold: job status %s", job.status)
+}
+
+// TestAJobThatWasOnlyWaitingIsNotDelayedLongOnceItCanRun is the case to decide the cap
+// from. A job can collect exits through no fault of its image or its own: GitHub is
+// dispatching elsewhere, or holding it behind something, and each guest idles out. When
+// it can finally run, whatever is left of its hold stands between it and a runner. This
+// measures that on the longest hold there is.
+func TestAJobThatWasOnlyWaitingIsNotDelayedLongOnceItCanRun(t *testing.T) {
+	t.Parallel()
+	cfg := emptyExitWorld()
+	const exits = 7
+	w := newWorld(t, cfg, emptyExitTrace(cfg, 400, exits))
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("violated a property: %s", findings[0])
+	}
+	job := w.jobs[0]
+	if job.status != jobDone || job.exitedEmpty != exits {
+		t.Fatalf("status=%s exited=%d", job.status, job.exitedEmpty)
+	}
+	// A cycle of its own takes a dozen ticks with no hold at all, so anything past
+	// that is the hold. From the moment it could run, which is its last exit.
+	waited := job.startedAt.Sub(job.lastEmptyExit)
+	t.Logf("after %d exits the job started %s after it could have", exits, waited)
+	if limit := domain.EmptyExitBackoff.Cap + 12*simTick; waited > limit {
+		t.Fatalf("a job waited %s after it could run, past the %s the cap promises", waited, limit)
+	}
+	if waited > 21*time.Minute {
+		t.Fatalf("a job that was only waiting lost %s to a backoff: longer than the job a slot was free for", waited)
+	}
+}
+
+// TestAJobOutCompetedForARunnerCollectsNoExits: the other half of the case. A guest
+// spawned for one job and handed a sibling is rebound to the sibling, so a job only
+// out-competed for runners is never charged, however long the queue.
+func TestAJobOutCompetedForARunnerCollectsNoExits(t *testing.T) {
+	t.Parallel()
+	cfg := emptyExitWorld()
+	events := []simEvent{{Tick: 1, Kind: eventSiblingSubstitute}}
+	for index := range 8 {
+		events = append(events, simEvent{Tick: 1 + index, Kind: eventArrive, Repo: "a/repo", Profile: "maestro", Event: "push"})
+	}
+	w := newWorld(t, cfg, simTrace{Seed: 20_261_105, Ticks: 120, Config: cfg.Name, Events: events})
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("violated a property: %s", findings[0])
+	}
+	for _, observation := range w.observations {
+		if len(observation.EmptyExitBackoffs) != 0 {
+			t.Fatalf("t%03d: a job out-competed for a runner was backed off: %+v", observation.Tick, observation.EmptyExitBackoffs)
+		}
+	}
+	for _, job := range w.jobs {
+		if job.status != jobDone {
+			t.Fatalf("job %d: %s", job.requestID, job.status)
+		}
+	}
 }

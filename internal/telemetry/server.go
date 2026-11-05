@@ -309,7 +309,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			Membership: membershipRow(snapshot), MembershipCheck: &membershipCheck,
 			UpdateDrain: updateDrainRow(snapshot), UpdateDrainCheck: &updateDrainCheck,
 			EmptyExitBackoffs: emptyExitRows(snapshot), EmptyExitCheck: &emptyExitCheck,
-			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
+			ImageSignals: imageSignalRows(snapshot),
+			Queues:       queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
 				DeadLetters: deadLetters(snapshot.DeadLetters)},
@@ -413,9 +414,10 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 	}
 	rows := make([]adminapi.RunnerImage, 0, len(snapshot.RunnerImages))
 	for _, metric := range snapshot.RunnerImages {
-		row := adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM, Version: metric.Version,
-			Floor: metric.Floor, BelowFloor: metric.BelowFloor, Reason: metric.Reason}
-		row.RefusedVersion, row.RefusedAt = metric.RefusedVersion, metric.RefusedAt
+		// Assembled in two steps because dupl reads a one-statement projection of this
+		// shape as a clone of strandedScaleSetRows.
+		row := adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM, Version: metric.Version}
+		row.Floor, row.BelowFloor, row.Reason = metric.Floor, metric.BelowFloor, metric.Reason
 		rows = append(rows, row)
 	}
 	return rows

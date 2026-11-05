@@ -15,10 +15,10 @@ type EmptyExits struct {
 	Count int
 	Last  time.Time
 	// Unassigned is the part of Count since this generation last had a job assigned,
-	// and Launched when it last launched any instance at all. Both are the image-wide
-	// bound's, not this demand's.
+	// and Assigned when that was. Neither ever affects a launch: they feed one
+	// display-only signal (ADR 0094).
 	Unassigned int
-	Launched   time.Time
+	Assigned   time.Time
 }
 
 // EmptyExitKey is what exits are counted against: one demand on one image generation.
@@ -46,28 +46,34 @@ type EmptyExitPolicy struct {
 }
 
 // EmptyExitBackoff is the fleet's policy. It is deliberately not configurable, as
-// PowerCorroboration is not: nothing about a node changes the right answer. Against
-// the 2026-11-05 incident's roughly forty VMs an hour this settles to a retry cadence of
-// two an hour per job. It slows a failing demand and does not cap its total.
-var EmptyExitBackoff = EmptyExitPolicy{Tolerated: 2, Base: 5 * time.Minute, Cap: 30 * time.Minute}
+// PowerCorroboration is not: nothing about a node changes the right answer. It holds one
+// demand and no other, because a job can collect exits through no fault of its own while
+// GitHub dispatches elsewhere. Cap is set by that case: whatever is left of the hold
+// stands between such a job and a runner once it can run, which measured 34 minutes at a
+// cap of 30 and 19 at 15. Against the 2026-11-05 incident's roughly forty VMs an hour on
+// one job this settles to a retry cadence of about four an hour. It slows a failing
+// demand and does not cap its total.
+var EmptyExitBackoff = EmptyExitPolicy{Tolerated: 2, Base: 5 * time.Minute, Cap: 15 * time.Minute}
 
-// ImageEmptyExitBackoff bounds one image generation across its whole queue. A demand's
-// own bound cannot: a refused image charges each of many demands one exit at a time, so
-// it runs through every slot long before any one demand earns a hold.
-//
-// It reads only what a job cannot produce. Running a job means being assigned, so a job
-// cannot manufacture an exit that counts. A broker event that went missing can at worst
-// slow launches a little, and the next job to bind clears the hold at once. It tolerates
-// more than a demand's bound does, and needs ImageHoldMinDemands behind it, so that a
-// host restart or one job no runner will take never holds back the rest of the queue.
-//
-// Its first hold is the assignment deadline's default, because a retry on a guest that
-// idles until reclaimed cannot report back any sooner, and a shorter hold would launch
-// the next one before the last had answered.
-var ImageEmptyExitBackoff = EmptyExitPolicy{Tolerated: 3, Base: 15 * time.Minute, Cap: 30 * time.Minute}
+// Display-only findings about an image generation (ADR 0094). Nothing that reads these
+// may reach a plan. Empty exits cannot tell a bad image from normal dispatch elsewhere,
+// and a job can write the log the other is read from, so a signal is all either earns.
+const (
+	SignalRunnerVersionRefused  = "runner_version_refused"
+	SignalImageNotReceivingJobs = "image_generation_not_receiving_jobs"
+	// ImageSignalWindow is how recent a reading or exit must be to be shown, and how
+	// long a generation must have gone without an assignment to be named.
+	ImageSignalWindow = 30 * time.Minute
+	// ImageSignalMinExits is how many never-assigned exits on queued jobs "many" means.
+	ImageSignalMinExits = 4
+)
 
-// ImageHoldMinDemands is how many queued demands must share those exits.
-const ImageHoldMinDemands = 2
+// Holds reports that a demand must wait at this instant. An exit dated ahead of the clock
+// establishes nothing, as after a clock correction across a restart, so it holds nothing
+// and can never put a retry beyond the bound.
+func (p EmptyExitPolicy) Holds(exits EmptyExits, now time.Time) bool {
+	return p.Exceeded(exits) && !exits.Last.After(now) && now.Before(p.RetryAt(exits))
+}
 
 // Exceeded reports that these exits are no longer ordinary.
 func (p EmptyExitPolicy) Exceeded(exits EmptyExits) bool {

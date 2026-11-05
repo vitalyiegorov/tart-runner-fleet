@@ -1353,7 +1353,6 @@ fleet status --endpoint "$ENDPOINT" --output json | jq '.data.runnerImages'
 | `version` | The `actions/runner` release the image carries, as declared. Empty means nobody has vouched for it. |
 | `floor` | The version it is judged against: `runnerVersionFloor`, or 2.329.0. |
 | `belowFloor` | The floor verdict alone. `reason` can also fail on a refusal or a closed install window while this stays false. |
-| `refusedVersion`, `refusedAt` | Launches from this image are held and a guest's log names its runner as refused, read then. Advisory: a job can write that log (ADR 0094). Only a container node can read it. |
 
 The check passes loudly as well as failing loudly: a passing `runner version`
 check still prints what each image carries, because the point is that the version
@@ -1388,28 +1387,27 @@ publishes no cutoff date, so the finding means "may be refused at any time", and
 does not date the refusal. An unread list judges nothing. The check makes staleness
 visible, it does not make it self-correcting.
 
-**`image_empty_exit_backoff` means one image keeps costing instances and binding nothing**
-(ADR 0094). At least four instances across at least two queued jobs left without a job since
-that image generation last had one. The node holds every launch from it, for 15 then 30
-minutes after the last exit or launch, then retries one guest. Running work is left alone,
-jobs stay visible in the queue, and nothing is cancelled at GitHub. Any job a runner of that
-generation takes clears the hold at once, and a swap to a new generation starts clean: a
-generation is the image reference plus `baseImageRunnerVersion`, so update both.
+**`demand_empty_exit_backoff` means one queued job keeps costing instances** that leave without taking
+it (ADR 0094). The first two are ordinary. From the third the fleet waits 5, 10, then 15 minutes after
+each exit before trying again, for that job alone: every other job launches as it always did. Exits count
+per image generation, so a rebuilt image owes nothing for the old one's. The job, its queue age and the
+queue SLO are untouched, and nothing is cancelled at GitHub. See `fleet doctor`'s `empty exits` row and
+`.data.emptyExitBackoffs`.
 
-**`runner_version_refused` is advisory and only explains that hold.** A guest's log said `Runner
-version vX is deprecated and cannot receive messages`. A job can write that line, so it never
-holds, delays or suppresses a launch and never affects readiness, and it is shown only while
-launches from that image are already held. Treat it as a strong hint, and check it against the
-calendar finding before rebuilding. A Tart node cannot read it, because `tart exec` is vsock
-traffic (#478): there the symptom is the holds and, when present, the calendar finding.
-Restarting the daemon does not help, and the remedy for a refused image is a rebuild.
+**The `image signals` row is display-only.** It never fails, never changes `doctor`'s exit, and changes no
+launch decisions, and neither finding reaches anything else.
 
-**`demand_empty_exit_backoff` means one queued job keeps costing instances** that leave without
-taking it. The first two are ordinary. From the third the fleet waits 5, 10, 20, then 30 minutes
-after each exit before trying again, and other work has the slot in between. Exits count per
-image generation, so a rebuilt image owes nothing for the old one's. The job, its queue age and
-the queue SLO are untouched, and nothing is cancelled at GitHub. See `fleet doctor`'s `empty
-exits` row and `.data.emptyExitBackoffs`.
+- `image_generation_not_receiving_jobs`: at least four never-assigned exits on queued jobs, the last within
+  30 minutes, and no job assigned on this generation for 30 minutes. A refused runner is one cause, and
+  dispatch elsewhere can also cause it, so check before acting.
+- `runner_version_refused`: a guest with no record of taking a job logged `Runner version vX is deprecated
+  and cannot receive messages` in the last 30 minutes. It is advisory, because a job can write that log.
+  Only a container node can read it, because `tart exec` is vsock traffic (#478).
+
+**A refused image still launches.** Nothing holds it back as such: it goes on launching at each job's retry
+rate, which is the accepted cost of never throttling a healthy node on evidence that cannot tell the two
+apart. The remedy is a rebuild. Update the image reference and `baseImageRunnerVersion` together, because
+that pair is the generation exits are counted against.
 
 **A daemon older than this check publishes no `runnerVersionCheck` at all**, and
 that renders as a pass with the detail `not reported by this daemon`. That is a
