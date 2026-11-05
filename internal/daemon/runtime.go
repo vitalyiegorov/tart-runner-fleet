@@ -821,9 +821,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// Only truthful capacity is lowered to the residual (issue #388). Without
 	// canonical inventory the configured capacity is deliberately inflated for
 	// queue lookahead (ADR 0009), and that mechanism needs it advertised as is.
+	// A gate reopens for the advertisement after the same continuous admission
+	// session yield rejoins after (issue #483), whether or not yield is enabled.
 	var advertiser *app.ResidualAdvertisement
 	if canonicalRESTInventory {
-		advertiser = &app.ResidualAdvertisement{}
+		advertiser = &app.ResidualAdvertisement{Reopen: cfg.SessionYield.HealthyFor}
 	}
 	// memberSources keys each binding's session by the scale set it polls, which
 	// is the key the scale-set audit's verdict arrives under (ADR 0063).

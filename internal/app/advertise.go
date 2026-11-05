@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scheduler"
@@ -62,8 +63,11 @@ type ScaleSetHeadroom struct {
 //
 // A gated node keeps no standing offer (issue #428, ADR 0084). It cannot start
 // what the free slot attracts, and a job assigned to it waits there while a
-// sibling serving the same labels may be idle. It still advertises what it
-// holds, so nothing GitHub already gave it is taken away.
+// sibling serving the same labels may be idle. It advertises exactly what it
+// holds, so nothing GitHub already gave it is taken away and nothing more is
+// invited. On a tick the gate itself refuses, Fit is already zero; on a tick
+// the gate is held through a brief opening (issue #483), the residual that
+// opening measured is not offered either.
 //
 // Nor does a set whose vector this node could not start even once all its
 // Linux work has drained (issue #439, ADR 0085). The standing offer promises a
@@ -78,9 +82,12 @@ func AdvertisedCapacity(configured int, headroom ScaleSetHeadroom, known bool) i
 	if !known {
 		return configured
 	}
-	offered := max(0, headroom.Held) + max(0, headroom.Fit)
-	if !headroom.Gated && !headroom.Stranded {
-		offered = max(offered, max(0, headroom.Placed)+1)
+	offered := max(0, headroom.Held)
+	if !headroom.Gated {
+		offered += max(0, headroom.Fit)
+		if !headroom.Stranded {
+			offered = max(offered, max(0, headroom.Placed)+1)
+		}
 	}
 	return max(0, min(configured, offered))
 }
@@ -93,26 +100,93 @@ func AdvertisedCapacity(configured int, headroom ScaleSetHeadroom, known bool) i
 // binding's poll: the envelope is a property of the machine, not of any one
 // scale set, and every set must read the same conclusion the scheduler admitted
 // on. The zero value is ready to use and knows nothing.
+//
+// A gate stays closed here until it has stayed open for Reopen (issue #483).
+// A host that refuses admission most of the time and reopens for a few seconds
+// between refusals cannot start what it is offered, yet each opening used to
+// put every set back on the standing offer and the residual that opening
+// measured, and a long poll carries the figure it began with for up to a
+// minute. Zero follows the gate tick by tick.
 type ResidualAdvertisement struct {
+	// Reopen is how long the node's own guardrails must have admitted work,
+	// continuously, before a gated node is offered more than it holds again.
+	// The daemon passes sessionYieldHealthyForSeconds: one bound for "this
+	// node can serve again", whether the question is rejoining or advertising.
+	Reopen   time.Duration
 	mu       sync.Mutex
 	headroom map[int64]ScaleSetHeadroom
+	gate     RefusalEpisode
 }
 
+// RefusalEpisode is a host's refusal to admit with its brief reopenings folded
+// in (issue #483). It begins on the first refused tick and ends only once
+// admission has been allowed continuously for Reopen, so a gate that opens for
+// a few seconds between refusals neither restarts the episode nor ends it.
+//
+// It is the one definition of "this node can admit again" that the residual
+// advertisement and session yield (ADR 0047) both read. The zero value is a
+// host in no episode, which is what a fresh daemon assumes.
+type RefusalEpisode struct {
+	// Reopen is how long admission must be allowed, continuously, before the
+	// episode ends. Zero ends it on the first allowed tick.
+	Reopen time.Duration
+	// since is when the episode began, zero outside one; allowedSince is when
+	// the current run of allowed ticks inside it began, zero while refused.
+	since, allowedSince time.Time
+}
+
+// Observe folds one tick into the episode and reports whether it is still on.
+// A clock that moved backwards re-anchors the bound it is measuring rather
+// than let a correction satisfy a bound no elapsed time earned.
+func (e *RefusalEpisode) Observe(at time.Time, refused bool) bool {
+	if refused {
+		e.allowedSince = time.Time{}
+		if e.since.IsZero() || at.Before(e.since) {
+			e.since = at
+		}
+		return true
+	}
+	if e.since.IsZero() {
+		return false
+	}
+	if e.allowedSince.IsZero() || at.Before(e.allowedSince) {
+		e.allowedSince = at
+	}
+	if at.Sub(e.allowedSince) < e.Reopen {
+		return true
+	}
+	e.since, e.allowedSince = time.Time{}, time.Time{}
+	return false
+}
+
+// Since is when the current episode began; zero when the host is in none.
+func (e *RefusalEpisode) Since() time.Time { return e.since }
+
 // Observe records one tick. Only a tick that produced a ready plan and a
-// headroom replaces the view. Any other tick keeps the last one: a node that
-// cannot plan cannot start what it is offered either, and dropping the view
-// used to advertise every set's configured maximum exactly when the node was
-// least able to run it (issue #397).
+// headroom replaces the view, and only such a tick moves the gate. Any other
+// tick keeps the last view: a node that cannot plan cannot start what it is
+// offered either, and dropping the view used to advertise every set's
+// configured maximum exactly when the node was least able to run it (issue
+// #397).
 func (a *ResidualAdvertisement) Observe(result TickResult, err error) {
 	if a == nil || err != nil || result.Plan.Status != scheduler.PlanReady || result.Headroom == nil {
 		return
 	}
-	view := make(map[int64]ScaleSetHeadroom, len(result.Headroom))
+	// Every row carries the same node-wide gate (hostHealthy), so any one of
+	// them says whether this tick's guardrails refused.
+	refused := false
 	for _, row := range result.Headroom {
-		view[row.StoreKey] = row
+		refused = refused || row.Gated
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.gate.Reopen = a.Reopen
+	held := a.gate.Observe(result.At, refused)
+	view := make(map[int64]ScaleSetHeadroom, len(result.Headroom))
+	for _, row := range result.Headroom {
+		row.Gated = held
+		view[row.StoreKey] = row
+	}
 	a.headroom = view
 }
 

@@ -43,6 +43,96 @@ func TestSessionYieldWithdrawsOnlyAfterSustainedBlockedIdleness(t *testing.T) {
 	}
 }
 
+// TestSessionYieldWithdrawsThroughBriefGateOpenings is issue #483. A gate that
+// refuses admission for a minute and opens for five seconds, over and over,
+// starts almost nothing, yet each opening restarted the blocked streak, so an
+// idle node never reached BlockedFor and kept the sessions GitHub binds work
+// through. A refusal ends only once admission has held for HealthyFor, the
+// bound the rejoin side already uses.
+func TestSessionYieldWithdrawsThroughBriefGateOpenings(t *testing.T) {
+	start := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	policy := yieldPolicy()
+	state := newSessionYieldState(policy)
+	for elapsed := time.Duration(0); elapsed <= 15*time.Minute; elapsed += 5 * time.Second {
+		allowed := elapsed%(65*time.Second) >= 60*time.Second
+		action := state.Observe(sessionYieldFacts{At: start.Add(elapsed), AdmissionAllowed: allowed})
+		if action != sessionYieldWithdraw {
+			continue
+		}
+		if elapsed != policy.BlockedFor {
+			t.Fatalf("withdrew at +%s, want at the blocked bound +%s", elapsed, policy.BlockedFor)
+		}
+		return
+	}
+	t.Fatal("a gate refusing 60 s of every 65 s for 15 minutes never withdrew an idle node's sessions")
+}
+
+// TestSessionYieldKeepsABusyFlappingNodesSessions is #483's other half. The
+// same flapping gate on a node with live guests must not cut the sessions they
+// report completion and deregistration through (#432); the residual
+// advertisement is what stops that node attracting work (ADR 0084). The refusal
+// it publishes is dated from its first refused tick, not from the last flap.
+func TestSessionYieldKeepsABusyFlappingNodesSessions(t *testing.T) {
+	start := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	state := newSessionYieldState(yieldPolicy())
+	controller := &sessionYieldController{state: state}
+	for elapsed := time.Duration(0); elapsed <= time.Hour; elapsed += 5 * time.Second {
+		allowed := elapsed%(65*time.Second) >= 60*time.Second
+		facts := sessionYieldFacts{At: start.Add(elapsed), AdmissionAllowed: allowed, LiveInstances: 2}
+		if action := state.Observe(facts); action != sessionYieldNone {
+			t.Fatalf("at +%s a busy node acted on its sessions: %s", elapsed, action)
+		}
+		if since := controller.Since(); !since.Equal(start) {
+			t.Fatalf("at +%s the refusal is dated %s, want its first refused tick %s", elapsed, since, start)
+		}
+	}
+	// Its guests finish while the gate keeps flapping: the clock starts at the
+	// last busy tick, and the node withdraws a full bound later.
+	idle := start.Add(time.Hour + 5*time.Second)
+	for elapsed := time.Duration(0); elapsed <= 15*time.Minute; elapsed += 5 * time.Second {
+		at := idle.Add(elapsed)
+		allowed := at.Sub(start)%(65*time.Second) >= 60*time.Second
+		if state.Observe(sessionYieldFacts{At: at, AdmissionAllowed: allowed}) == sessionYieldWithdraw {
+			if elapsed < 10*time.Minute-5*time.Second {
+				t.Fatalf("withdrew %s after the last guest finished, before the blocked bound", elapsed)
+			}
+			if !controller.Since().Equal(at) {
+				t.Fatalf("a withdrawal is dated %s, want %s", controller.Since(), at)
+			}
+			return
+		}
+	}
+	t.Fatal("never withdrew once the guests had finished")
+}
+
+// TestSessionYieldAHealthyNodeStartsNoRefusal: admission that holds dates the
+// node's healthy posture once, and a refusal shorter than HealthyFor that ends
+// is forgotten, so the next refusal is measured from its own start.
+func TestSessionYieldAHealthyNodeStartsNoRefusal(t *testing.T) {
+	start := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	state := newSessionYieldState(yieldPolicy())
+	controller := &sessionYieldController{state: state}
+	state.Observe(sessionYieldFacts{At: start, AdmissionAllowed: true})
+	state.Observe(sessionYieldFacts{At: start.Add(time.Minute), AdmissionAllowed: true})
+	if !controller.Since().Equal(start) {
+		t.Fatalf("healthy since %s, want %s", controller.Since(), start)
+	}
+	refused := start.Add(2 * time.Minute)
+	state.Observe(sessionYieldFacts{At: refused, AdmissionAllowed: false})
+	recovered := refused.Add(time.Minute)
+	state.Observe(sessionYieldFacts{At: recovered, AdmissionAllowed: true})
+	if action := state.Observe(sessionYieldFacts{At: recovered.Add(2 * time.Minute), AdmissionAllowed: true}); action != sessionYieldNone {
+		t.Fatalf("a node that never withdrew acted on recovering: %s", action)
+	}
+	if ended := recovered.Add(2 * time.Minute); !controller.Since().Equal(ended) {
+		t.Fatalf("healthy since %s, want the end of the refusal, %s", controller.Since(), ended)
+	}
+	again := recovered.Add(3 * time.Minute)
+	if action := state.Observe(sessionYieldFacts{At: again.Add(9 * time.Minute), AdmissionAllowed: false}); action != sessionYieldNone {
+		t.Fatalf("carried an ended refusal into a new one: %s", action)
+	}
+}
+
 func TestSessionYieldHoldsSessionsWhileWorkIsInFlight(t *testing.T) {
 	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {
