@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,21 +183,227 @@ func TestGuestTrafficReaderTruncatesAndNeverZeroesUnmeasuredJobs(t *testing.T) {
 
 func TestGuestTrafficIsWiredOnlyWhereAGuestCanBeExecuted(t *testing.T) {
 	cfg := config.Default()
-	if recorder := (dependencies{}).guestTraffic(&trafficStoreFake{}, &trafficMetricsFake{}, cfg, nil); recorder != nil {
-		t.Fatalf("no exec runner must wire no recorder, got %#v", recorder)
+	if _, ok := (dependencies{}).guestTraffic(&trafficStoreFake{}, &trafficMetricsFake{}, cfg, nil); ok {
+		t.Fatal("no exec runner must wire no recorder")
 	}
 	podmanless := linuxPlatform()
-	if recorder := (dependencies{guestExec: podmanless.guestExec}).guestTraffic(&trafficStoreFake{},
-		&trafficMetricsFake{}, cfg, nil); recorder != nil {
-		t.Fatalf("a Linux node with no container backend has no guest: %#v", recorder)
+	if _, ok := (dependencies{guestExec: podmanless.guestExec}).guestTraffic(&trafficStoreFake{},
+		&trafficMetricsFake{}, cfg, nil); ok {
+		t.Fatal("a Linux node with no container backend has no guest")
 	}
 	cfg.Executor.Backend = config.ExecutorPodman
-	if recorder := (dependencies{guestExec: podmanless.guestExec, now: time.Now}).guestTraffic(&trafficStoreFake{},
-		&trafficMetricsFake{}, cfg, nil); recorder == nil {
+	if _, ok := (dependencies{guestExec: podmanless.guestExec, now: time.Now}).guestTraffic(&trafficStoreFake{},
+		&trafficMetricsFake{}, cfg, nil); !ok {
 		t.Fatal("a podman node samples its containers")
 	}
-	if recorder := (dependencies{guestExec: applePlatform().guestExec, now: time.Now}).guestTraffic(&trafficStoreFake{},
-		&trafficMetricsFake{}, cfg, nil); recorder == nil {
+	if _, ok := (dependencies{guestExec: applePlatform().guestExec, now: time.Now}).guestTraffic(&trafficStoreFake{},
+		&trafficMetricsFake{}, cfg, nil); !ok {
 		t.Fatal("a Tart node samples its VMs")
 	}
+}
+
+// poweringGuest is a Tart guest as ADR 0010 makes it: it answers while its
+// runner is alive, and the moment the ephemeral runner exits it powers itself
+// off, after which an exec hangs (mid-shutdown) or is refused (stopped).
+type poweringGuest struct {
+	output string
+	off    bool
+	hang   bool
+}
+
+func (g *poweringGuest) Run(ctx context.Context, _ ...string) ([]byte, error) {
+	switch {
+	case !g.off:
+		return []byte(g.output), nil
+	case g.hang:
+		<-ctx.Done()
+		return nil, ctx.Err()
+	default:
+		return nil, errors.New(`VM is not running`)
+	}
+}
+
+func countersOf(received, transmitted int) string {
+	return fmt.Sprintf("Inter-|\n face |\n lo: 9 0 0 0 0 0 0 0 9 0 0 0 0 0 0 0\n eth0: %d 0 0 0 0 0 0 0 %d 0 0 0 0 0 0 0\n",
+		received, transmitted)
+}
+
+// TestGuestTrafficSurvivesTheGuestPoweringOffBeforeTheDrainSamples reproduces
+// the 2026-11-05 finding: Tart nodes measured ~3% of jobs because the guest has
+// already powered itself off when the drain reaches its first stop, so the one
+// end-of-job read times out or is refused. A reading taken while the job ran
+// must stand in for it.
+func TestGuestTrafficSurvivesTheGuestPoweringOffBeforeTheDrainSamples(t *testing.T) {
+	for name, hang := range map[string]bool{"mid-shutdown exec hangs": true, "stopped guest refuses": false} {
+		t.Run(name, func(t *testing.T) {
+			guest := &poweringGuest{output: countersOf(100, 10), hang: hang}
+			store := &trafficStoreFake{changed: true}
+			metrics := &trafficMetricsFake{}
+			clock := time.Unix(1000, 0).UTC()
+			recorder := guestTrafficRecorder{Runner: guest, Timeout: time.Millisecond, Store: store, Metrics: metrics,
+				Now: func() time.Time { return clock }, Last: newGuestReadings()}
+			instance := trafficInstance(domain.PlatformLinux)
+			instance.State = operations.StateRunning
+			recorder.Sweep(context.Background(), []operations.Instance{instance})
+			guest.output, clock = countersOf(500, 50), clock.Add(15*time.Second)
+			recorder.Sweep(context.Background(), []operations.Instance{instance})
+			guest.off, clock = true, clock.Add(10*time.Second)
+			recorder.RecordGuestTraffic(context.Background(), instance)
+			if len(store.samples) != 1 {
+				t.Fatalf("samples = %+v", store.samples)
+			}
+			sample := store.samples[0]
+			if !sample.Measured || sample.ReceiveBytes != 500 || sample.TransmitBytes != 50 ||
+				!sample.SampledAt.Equal(time.Unix(1015, 0)) {
+				t.Fatalf("sample = %+v; want the last reading taken while the guest was alive", sample)
+			}
+			if len(metrics.metrics) != 1 || !metrics.metrics[0].Measured || metrics.metrics[0].ReceiveBytes != 500 {
+				t.Fatalf("metrics = %+v", metrics.metrics)
+			}
+		})
+	}
+}
+
+func TestTrafficOrNilKeepsTheDrainsNilCheckHonest(t *testing.T) {
+	if trafficOrNil(guestTrafficRecorder{}, false) != nil {
+		t.Fatal("a node with no guest must hand the drain an untyped nil")
+	}
+	if trafficOrNil(guestTrafficRecorder{}, true) == nil {
+		t.Fatal("a node with a guest hands the drain its recorder")
+	}
+}
+
+// TestGuestTrafficEndOfJobReadingWinsOverAnEarlierOne keeps the sweep a fallback:
+// when the guest still answers at the end, that reading is the job's.
+func TestGuestTrafficEndOfJobReadingWinsOverAnEarlierOne(t *testing.T) {
+	guest := &poweringGuest{output: countersOf(100, 10)}
+	store := &trafficStoreFake{changed: true}
+	recorder := guestTrafficRecorder{Runner: guest, Timeout: time.Second, Store: store, Metrics: &trafficMetricsFake{},
+		Now: func() time.Time { return time.Unix(2000, 0) }, Last: newGuestReadings()}
+	instance := trafficInstance(domain.PlatformLinux)
+	instance.State = operations.StateRunning
+	recorder.Sweep(context.Background(), []operations.Instance{instance})
+	guest.output = countersOf(900, 90)
+	recorder.RecordGuestTraffic(context.Background(), instance)
+	if got := store.samples[0]; !got.Measured || got.ReceiveBytes != 900 {
+		t.Fatalf("sample = %+v; want the end-of-job reading", got)
+	}
+	if _, kept := recorder.Last.get(instance.ID); kept {
+		t.Fatal("a recorded instance's reading must be forgotten")
+	}
+}
+
+// TestGuestTrafficSweepIsBoundedAndBestEffort covers what a sweep reads, what it
+// keeps, and that a failed read never replaces a good one nor blocks past its
+// deadline.
+func TestGuestTrafficSweepIsBoundedAndBestEffort(t *testing.T) {
+	guest := &poweringGuest{output: countersOf(100, 10)}
+	reads := &readCounter{inner: guest}
+	recorder := guestTrafficRecorder{Runner: reads, Timeout: time.Millisecond, Store: &trafficStoreFake{},
+		Metrics: &trafficMetricsFake{}, Now: func() time.Time { return time.Unix(3000, 0) }, Last: newGuestReadings()}
+	instances := map[operations.State]operations.Instance{}
+	for index, state := range []operations.State{operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning,
+		operations.StateDraining, operations.StateStopping, operations.StateBooting} {
+		instance := trafficInstance(domain.PlatformLinux)
+		instance.ID, instance.State = fmt.Sprintf("trf-linux-4x8-%04x", index), state
+		instances[state] = instance
+	}
+	live := make([]operations.Instance, 0, len(instances))
+	for _, instance := range instances {
+		live = append(live, instance)
+	}
+	recorder.Sweep(context.Background(), live)
+	if reads.count() != 3 {
+		t.Fatalf("only guests that may still be running are read, got %d reads", reads.count())
+	}
+	for _, state := range []operations.State{operations.StateOnlineIdle, operations.StateAssigned, operations.StateRunning} {
+		if _, ok := recorder.Last.get(instances[state].ID); !ok {
+			t.Fatalf("no reading kept for %s", state)
+		}
+	}
+	guest.off, guest.hang = true, true
+	recorder.Sweep(context.Background(), live)
+	if last, ok := recorder.Last.get(instances[operations.StateRunning].ID); !ok || last.receive != 100 {
+		t.Fatalf("a failed read must keep the previous reading, got %+v %t", last, ok)
+	}
+	recorder.Sweep(context.Background(), live[:0])
+	if _, ok := recorder.Last.get(instances[operations.StateRunning].ID); ok {
+		t.Fatal("a reading of an instance that is no longer live must be dropped")
+	}
+	(guestTrafficRecorder{Runner: guest}).Sweep(context.Background(), live)
+}
+
+type readCounter struct {
+	inner *poweringGuest
+	mu    sync.Mutex
+	n     int
+}
+
+func (r *readCounter) Run(ctx context.Context, args ...string) ([]byte, error) {
+	r.mu.Lock()
+	r.n++
+	r.mu.Unlock()
+	return r.inner.Run(ctx, args...)
+}
+
+func (r *readCounter) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.n
+}
+
+type liveSource struct {
+	live []operations.Instance
+	err  error
+}
+
+func (s liveSource) LiveInstances(context.Context) ([]operations.Instance, error) {
+	return s.live, s.err
+}
+
+func TestGuestTrafficSweeperSweepsOnEachTickAndStopsWithItsContext(t *testing.T) {
+	guest := &poweringGuest{output: countersOf(7, 1)}
+	var warned []string
+	recorder := guestTrafficRecorder{Runner: guest, Timeout: time.Second, Store: &trafficStoreFake{},
+		Metrics: &trafficMetricsFake{}, Now: time.Now, Last: newGuestReadings(),
+		Warn: func(message string, _ ...any) { warned = append(warned, message) }}
+	instance := trafficInstance(domain.PlatformLinux)
+	instance.State = operations.StateRunning
+	ticks := make(chan time.Time)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	source := &swappableSource{source: liveSource{live: []operations.Instance{instance}}}
+	go func() {
+		guestTrafficSweeper{Source: source, Recorder: recorder, Tick: ticks}.Run(ctx)
+		close(done)
+	}()
+	ticks <- time.Now()
+	source.set(liveSource{err: errors.New("locked")})
+	ticks <- time.Now()
+	ticks <- time.Now() // received only once the previous tick's sweep has finished
+	cancel()
+	<-done
+	if last, ok := recorder.Last.get(instance.ID); !ok || last.receive != 7 {
+		t.Fatalf("the first tick must have kept a reading, got %+v %t", last, ok)
+	}
+	if len(warned) != 2 {
+		t.Fatalf("an unlistable inventory is warned and skipped, got %v", warned)
+	}
+}
+
+type swappableSource struct {
+	mu     sync.Mutex
+	source liveSource
+}
+
+func (s *swappableSource) set(source liveSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.source = source
+}
+
+func (s *swappableSource) LiveInstances(ctx context.Context) ([]operations.Instance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.source.LiveInstances(ctx)
 }

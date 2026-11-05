@@ -971,6 +971,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		}
 	}
 	var worker app.WorkRunner
+	traffic, hasTraffic := d.guestTraffic(store, health, cfg, reporter.logger.Warn)
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
 		diskGiB := profileDiskFloors(cfg)
@@ -983,7 +984,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: d.guestTraffic(store, health, cfg, reporter.logger.Warn)},
+					OnAbort: reporter.reportDrainAbort, Traffic: trafficOrNil(traffic, hasTraffic)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -996,6 +997,17 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
 	go func() {
+		if worker != nil && hasTraffic {
+			// Sampling is best-effort and independent of the drain (ADR 0080).
+			sweepCtx, stopSweep := context.WithCancel(runCtx)
+			sweepDone := make(chan struct{})
+			ticks := time.NewTicker(guestTrafficInterval)
+			go func() {
+				defer close(sweepDone)
+				guestTrafficSweeper{Source: store, Recorder: traffic, Tick: ticks.C}.Run(sweepCtx)
+			}()
+			defer func() { stopSweep(); ticks.Stop(); <-sweepDone }()
+		}
 		serviceDone <- (app.Service{Ticker: ticker, Ingesters: ingesters, Worker: worker,
 			TickInterval: cfg.PollInterval, WorkInterval: 250 * time.Millisecond,
 			OnFailure: reporter.report}).Run(runCtx)

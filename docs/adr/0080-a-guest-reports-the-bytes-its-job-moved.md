@@ -51,8 +51,9 @@ workflow and profile.**
    - It is skipped on an escalated stop (a guest that would not power down is
      not asked again) and on a guest the fleet has already proved
      unresponsive.
-   - There is no periodic sampling. Each guest boots for exactly one job, so its
-     counters since boot are that job's traffic.
+   - Each guest boots for exactly one job, so its counters since boot are that
+     job's traffic. See the amendment below for why this read alone is not enough
+     on Tart.
 3. **What is recorded.** Migration 14 adds `guest_traffic`, with at most one
    row per instance. An instance that was never sampled has no row: its guest
    died first, its drain only escalated, or it was reclaimed as unresponsive
@@ -124,9 +125,42 @@ CLI in both modes, and the gate's counters and loopback-only listener all have
 unit tests. The simulation is not extended. This change adds no admission rule,
 state or axis to `internal/scheduler`, so the corpus digests must not move.
 
+## Amendment 2026-11-05: a live guest is read while its job runs (issue #414)
+
+The first week measured about 3% of Tart jobs (macmini 17 of 672, macbook 19
+of 523 in 24 hours; podman about 99%), nearly all `exec_timeout` and
+`exec_failed`.
+
+**Cause.** It is not the 5-second deadline. A read-only `tart exec` against a
+healthy trf- guest answered in 0.8 s, and against a stopped VM it fails in
+20 ms. ADR 0010 makes a Tart guest power itself off the moment its ephemeral
+runner exits, which is before the drain has deregistered the runner and
+confirmed its deletion, so the first-stop read finds a guest that is shutting
+down (the exec hangs: `exec_timeout`) or stopped (`exec_failed`). Observed on
+macmini: one guest's sample began at 04:36:56.5Z and timed out, and `tart
+list` showed that guest `stopped` at about 04:36:58Z. A podman container stays
+up until the daemon removes it, which is why those nodes measure.
+
+**Decision.** Keep the end-of-job read and its 5-second deadline, and add a
+best-effort sweep while the job runs.
+
+- Every 15 seconds the daemon reads each live guest in `online_idle`,
+  `assigned` or `running` through the same `exec` path and keeps the latest
+  successful reading per instance in memory. Draining guests are not read.
+- At the end of the job, a successful read is the job's. If it fails, the last
+  kept reading is recorded as measured, with `sampledAt` the time of that
+  reading. Counters only grow, so it is a lower bound that misses at most the
+  traffic of the final interval, such as a closing cache upload.
+- The sweep runs in its own goroutine, bounded by the same deadline per read,
+  and touches neither the store nor the metrics. It cannot fail or hold a drain.
+- Readings are not persisted: a daemon restart forgets them, and those jobs are
+  recorded as before. They are dropped when the instance is recorded or is no
+  longer live.
+- Not done: lengthening the deadline (the guest is gone, so a longer wait only
+  holds teardown), and changing the guest image to delay its power-off.
+
 ## Not built
 
-- Periodic sampling.
 - Host-side eBPF or nftables accounting.
 - Per-instance gate attribution.
 - Retention pruning of `guest_traffic`. It is one small row per job, like the
