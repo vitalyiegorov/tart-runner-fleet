@@ -152,6 +152,14 @@ type Status struct {
 	// older daemon publishes none of it, hence EffectiveUpdateDrainCheck.
 	UpdateDrain      *UpdateDrain `json:"updateDrain,omitempty"`
 	UpdateDrainCheck *Check       `json:"updateDrainCheck,omitempty"`
+	// EmptyExitBackoffs and EmptyExitCheck are additive fleet.v1 fields naming the
+	// queued work the fleet stopped spending instances on back to back (ADR 0094).
+	// An older daemon publishes neither, hence EffectiveEmptyExitCheck.
+	EmptyExitBackoffs []EmptyExitBackoff `json:"emptyExitBackoffs,omitempty"`
+	EmptyExitCheck    *Check             `json:"emptyExitCheck,omitempty"`
+	// ImageSignals is an additive fleet.v1 field of display-only findings. It is
+	// absent both on an older daemon and when there is nothing to say.
+	ImageSignals []ImageSignal `json:"imageSignals,omitempty"`
 	// Policy is an additive fleet.v1 field: the load-bearing subset of the
 	// configuration this node is actually running with, plus a digest of it, so
 	// "what is this node configured with" is answerable from the same document
@@ -357,12 +365,33 @@ type RunnerImage struct {
 	// failing state and carries a Reason.
 	Version string `json:"version,omitempty"`
 	Floor   string `json:"floor"`
-	// BelowFloor is the verdict, published beside the two versions because a
+	// BelowFloor is the floor verdict, published beside the two versions because a
 	// reader comparing them by eye is a reader who will eventually compare 2.9.0
 	// against 2.10.0 and be wrong.
 	BelowFloor bool `json:"belowFloor"`
 	// Reason is empty when the image is compliant.
 	Reason string `json:"reason,omitempty"`
+}
+
+// EmptyExitBackoff is one queued demand whose instances keep exiting without its job
+// (issue #493, ADR 0094). Exits is how many; RetryAt is when it may next launch, which has
+// already passed while an attempt is running. No other demand is affected.
+type EmptyExitBackoff struct {
+	Demand     string    `json:"demand"`
+	Scope      string    `json:"scope"`
+	Profile    string    `json:"profile"`
+	Exits      int       `json:"exits"`
+	LastExitAt time.Time `json:"lastExitAt"`
+	RetryAt    time.Time `json:"retryAt"`
+}
+
+// ImageSignal is one display-only finding about an image generation: Name is
+// `runner_version_refused` or `image_generation_not_receiving_jobs`. It fails no check
+// and changes no launch decision (ADR 0094).
+type ImageSignal struct {
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Detail string `json:"detail"`
 }
 
 // EffectiveImageToolCheck is the handoff accessor for the tool-drift judgement
@@ -490,6 +519,15 @@ func (s Status) EffectiveMembershipCheck() Check {
 		return Check{OK: true, Reasons: []string{}}
 	}
 	return *s.MembershipCheck
+}
+
+// EffectiveEmptyExitCheck is the handoff accessor for the empty-exit judgement, on
+// the same terms as every Effective accessor: an older daemon judged nothing.
+func (s Status) EffectiveEmptyExitCheck() Check {
+	if s.EmptyExitCheck == nil {
+		return Check{OK: true, Reasons: []string{}}
+	}
+	return *s.EmptyExitCheck
 }
 
 // EffectiveUpdateDrainCheck reads the drain check an older daemon does not

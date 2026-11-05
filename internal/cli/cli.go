@@ -1226,6 +1226,18 @@ func axisOrUnjudged(axis string) string {
 	return axis
 }
 
+// imageSignalDetail renders the display-only findings, or says there are none.
+func imageSignalDetail(status adminapi.Status) string {
+	if len(status.ImageSignals) == 0 {
+		return "none"
+	}
+	details := make([]string, 0, len(status.ImageSignals))
+	for _, signal := range status.ImageSignals {
+		details = append(details, signal.Detail)
+	}
+	return strings.Join(details, "; ")
+}
+
 func runDoctor(ctx context.Context, client apiClient, output string, stdout, stderr io.Writer) int {
 	status, err := client.Status(ctx)
 	if err != nil {
@@ -1250,6 +1262,7 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 	ingest := status.Data.EffectiveIngestCheck()
 	parked := status.Data.EffectiveParkedScaleSetCheck()
 	drain := status.Data.EffectiveUpdateDrainCheck()
+	emptyExits := status.Data.EffectiveEmptyExitCheck()
 	checks := []doctorCheck{
 		{Name: "admin API", OK: status.APIVersion == adminapi.APIVersion, Detail: status.APIVersion},
 		{Name: "daemon live", OK: status.Data.Live.OK, Detail: joinReasons(status.Data.Live)},
@@ -1334,6 +1347,12 @@ func runDoctor(ctx context.Context, client apiClient, output string, stdout, std
 		// Said plainly here, because an empty queue on a healthy host is exactly
 		// what a fault looks like (#230).
 		{Name: "update drain", OK: drain.OK, Detail: updateDrainDetail(status.Data, drain)},
+		// Queued work whose instances keep exiting without a job. The queue SLO names
+		// the symptom and this names the loop behind it (ADR 0094).
+		{Name: "empty exits", OK: emptyExits.OK, Detail: joinReasons(emptyExits)},
+		// Display-only, so it never fails: naming these is all they earn, because a job
+		// can write the log one is read from and dispatch elsewhere can cause the other.
+		{Name: "image signals", OK: true, Detail: imageSignalDetail(status.Data)},
 		// The policy row never fails. It states WHICH configuration this node is
 		// running — the digest of the load-bearing subset of it — because the drift
 		// of issue #304 was invisible for weeks to every check either node ran, and

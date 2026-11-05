@@ -256,6 +256,16 @@ vocabulary. The measurement is exported as
 `fleet_instance_guest_unresponsive`, each labelled by profile and instance. Both
 fields are additive and absent on daemons that probed no guest at all (ADR 0040).
 
+`emptyExitBackoffs` names queued jobs the fleet stopped launching for back to back, and `emptyExitCheck` is
+the judgement `fleet doctor` renders as `empty exits`. Each row has `demand`, `scope`, `profile`, `exits`,
+`lastExitAt` and `retryAt`, and each reason starts `demand_empty_exit_backoff`. It affects that job alone.
+
+`imageSignals` is display-only findings about an image generation, each with `name`, `image` and `detail`.
+`name` is `image_generation_not_receiving_jobs`, where dispatch elsewhere can also be the cause, or
+`runner_version_refused`, which is advisory because a job can write the log it is read from. `fleet doctor`
+renders them as `image signals`, which never fails. All of these are additive and absent on an older daemon.
+None affects `ready`, `healthy` or a launch decision beyond the one held job (ADR 0094).
+
 `reservation` names the aged global-FIFO head the scheduler is standing capacity
 by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:
 

@@ -1352,7 +1352,7 @@ fleet status --endpoint "$ENDPOINT" --output json | jq '.data.runnerImages'
 | `vm` | The base image that platform boots. |
 | `version` | The `actions/runner` release the image carries, as declared. Empty means nobody has vouched for it. |
 | `floor` | The version it is judged against: `runnerVersionFloor`, or 2.329.0. |
-| `belowFloor` | The verdict. |
+| `belowFloor` | The floor verdict alone. `reason` can also fail on a refusal or a closed install window while this stays false. |
 
 The check passes loudly as well as failing loudly: a passing `runner version`
 check still prints what each image carries, because the point is that the version
@@ -1380,10 +1380,34 @@ configuration to what was actually sealed. There is no runtime fix and no
 restart that helps.
 
 **Raising the floor is an operator action, not an automatic one.** When a new
-`actions/runner` release ships, a 30-day clock starts; set `runnerVersionFloor`
-to the new release on every node so the check goes red *before* GitHub does.
-Nothing in the fleet watches GitHub's release feed — the check makes staleness
+`actions/runner` release ships, a 30-day clock starts. The daemon reads GitHub's
+public release list every six hours, so the check fails on its own once the oldest
+release newer than an image is past that window, whatever the floor says. GitHub
+publishes no cutoff date, so the finding means "may be refused at any time", and it
+does not date the refusal. An unread list judges nothing. The check makes staleness
 visible, it does not make it self-correcting.
+
+**`demand_empty_exit_backoff` means one queued job keeps costing instances** that leave without taking
+it (ADR 0094). The first two are ordinary. From the third the fleet waits 5, 10, then 15 minutes after
+each exit before trying again, for that job alone: every other job launches as it always did. Exits count
+per image generation, so a rebuilt image owes nothing for the old one's. The job, its queue age and the
+queue SLO are untouched, and nothing is cancelled at GitHub. See `fleet doctor`'s `empty exits` row and
+`.data.emptyExitBackoffs`.
+
+**The `image signals` row is display-only.** It never fails, never changes `doctor`'s exit, and changes no
+launch decisions, and neither finding reaches anything else.
+
+- `image_generation_not_receiving_jobs`: at least four never-assigned exits on queued jobs, the last within
+  30 minutes, and no job assigned on this generation for 30 minutes. A refused runner is one cause, and
+  dispatch elsewhere can also cause it, so check before acting.
+- `runner_version_refused`: a guest with no record of taking a job logged `Runner version vX is deprecated
+  and cannot receive messages` in the last 30 minutes. It is advisory, because a job can write that log.
+  Only a container node can read it, because `tart exec` is vsock traffic (#478).
+
+**A refused image still launches.** Nothing holds it back as such: it goes on launching at each job's retry
+rate, which is the accepted cost of never throttling a healthy node on evidence that cannot tell the two
+apart. The remedy is a rebuild. Update the image reference and `baseImageRunnerVersion` together, because
+that pair is the generation exits are counted against.
 
 **A daemon older than this check publishes no `runnerVersionCheck` at all**, and
 that renders as a pass with the detail `not reported by this daemon`. That is a

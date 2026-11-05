@@ -105,6 +105,28 @@ func failure(op string, kind ErrorKind, err error) *Error {
 // running instead of blocking for the guest's lifetime.
 type ExecRunner struct {
 	Binary string
+	// OutputLimit bounds what is kept of a command's output. Zero keeps all of it, which
+	// is right for podman's own answers and wrong for anything run inside a guest.
+	OutputLimit int
+}
+
+// GuestOutputLimit is what a host keeps of a command run inside a guest. A job with sudo
+// can replace the guest's tools, so what they print is the job's to choose, and no answer
+// the fleet reads from a guest is anywhere near this long.
+const GuestOutputLimit = 64 << 10
+
+// boundedOutput keeps the first limit bytes it is sent and discards the rest, so the
+// command still runs to its own end or its deadline.
+type boundedOutput struct {
+	limit int
+	data  []byte
+}
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	if remaining := b.limit - len(b.data); remaining > 0 {
+		b.data = append(b.data, p[:min(remaining, len(p))]...)
+	}
+	return len(p), nil
 }
 
 // DefaultBinary is the podman executable an unconfigured adapter shells. It is
@@ -119,7 +141,17 @@ func (r ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	// #nosec G204 -- Binary is a trusted adapter dependency; every external name
 	// in args is validated before it gets here and nothing passes through a shell.
-	output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, binary, args...)
+	var output []byte
+	var err error
+	if r.OutputLimit > 0 {
+		captured := &boundedOutput{limit: r.OutputLimit}
+		command.Stdout, command.Stderr = captured, captured
+		err = command.Run()
+		output = captured.data
+	} else {
+		output, err = command.CombinedOutput()
+	}
 	if err != nil {
 		return output, classify(args, output, err, ctx.Err())
 	}

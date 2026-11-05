@@ -126,6 +126,10 @@ const (
 	// kernel's background trickle from closing the gate must still close it on
 	// a thrashing host. Like (u) it reads the world's fault state.
 	findingSwapAdmission findingKind = "swap_admission"
+	// findingLaunchHold is property (w): a demand over the empty-exit bound does not
+	// launch inside its hold (ADR 0094). It counts empty exits from the world rather than from the durable
+	// rows the fleet counts, so a query that lost rows would be caught, not agreed with.
+	findingLaunchHold findingKind = "launch_hold"
 	// findingStoreError is the harness's own fail-closed channel: the durable
 	// store refused something the simulation had no right to be refused.
 	findingStoreError findingKind = "store_error"
@@ -243,6 +247,13 @@ type tickObservation struct {
 	// this tick. app.plannableDemands has already dropped every demand a live
 	// instance incarnates, so it answers "what work is still unserved".
 	Demands []domain.Demand
+	// EmptyExitBackoffs is the queued work over the empty-exit bound this tick
+	// (issue #493).
+	EmptyExitBackoffs []app.EmptyExitBackoff
+	// RunnerRefusals is the advisory reading of each platform's guests, and ImageSignals
+	// the display-only findings built from it (ADR 0094).
+	ImageSignals   []app.ImageSignal
+	RunnerRefusals map[domain.Platform]domain.RunnerRefusal
 	// Queued is the DURABLE queue depth across every binding -- the number the
 	// SLO monitor reads. It answers a different question ("what does the fleet
 	// still believe it has to do"), and a demand whose runner is already booting
@@ -288,6 +299,29 @@ func instanceState(observation tickObservation, id string) domain.InstanceState 
 
 type checker func(*world, tickObservation) []finding
 
+// launchHoldChecker is property (w). The world's clock on an empty exit is the
+// power-off, which precedes the row the fleet dates its hold from, so this can only
+// under-state a hold and never convict one the fleet honoured.
+func launchHoldChecker() checker {
+	return func(w *world, observation tickObservation) []finding {
+		if !observation.Applied {
+			return nil
+		}
+		for _, key := range observation.spawns() {
+			job := w.jobByRequest(key.JobID)
+			if job == nil {
+				continue
+			}
+			exits := domain.EmptyExits{Count: job.exitedEmpty, Last: job.lastEmptyExit}
+			if domain.EmptyExitBackoff.Exceeded(exits) && observation.Now.Before(domain.EmptyExitBackoff.RetryAt(exits)) {
+				return []finding{{Kind: findingLaunchHold, Tick: observation.Tick,
+					Detail: fmt.Sprintf("%s spawned with %d empty exits, inside its hold\n%s", key, job.exitedEmpty, w.dumpPlan(observation))}}
+			}
+		}
+		return nil
+	}
+}
+
 // defaultCheckers is the property set of ADR 0031, evaluated in a fixed order so
 // a failing run always reports the same first violation.
 //
@@ -306,6 +340,7 @@ func defaultCheckers(cfg worldConfig) []checker {
 		// by (a) as a wedge whose cause is somewhere else entirely.
 		reservationIsJudgedChecker(),
 		conservationChecker(cfg),
+		launchHoldChecker(),
 		// (u) sits with (g) because it is conservation of the one host resource
 		// the envelope does not count: an admission onto a filesystem out of
 		// inodes is a guest that cannot create a file.

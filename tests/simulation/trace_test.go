@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
@@ -205,7 +206,25 @@ const (
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
 	eventSiblingSubstitute eventKind = "sibling_substitute"
-	eventStopArrivals      eventKind = "stop_arrivals"
+	// eventEmptyExit is issue #493: GitHub keeps the next job to arrive queued and
+	// corroborated by REST, while every runner the fleet provisions for it
+	// registers, takes nothing, and exits, so its guest powers itself off. Count is
+	// how many runners it wastes before GitHub finally hands it to one, which is
+	// what separates an empty exit that bounces from a job that was never lost.
+	eventEmptyExit eventKind = "empty_exit"
+	// eventRunnerRefused is the 2026-11-05 cutoff (ADR 0094): for Count ticks the
+	// broker refuses every Linux runner as deprecated. A registered runner logs it,
+	// never receives a job, and idles until the assignment deadline reclaims it.
+	// macOS is left alone, because one image going stale says nothing about another.
+	eventRunnerRefused eventKind = "runner_refused"
+	// eventForgedRefusal is the next job to start writing the refusal line into its
+	// own guest's runner.log, which it can: the job runs as the user that owns it.
+	eventForgedRefusal eventKind = "forged_refusal"
+	// eventImageSwap is an operator rolling a rebuilt image out (a config change and
+	// a restart in production): new launches come from a new generation, and the
+	// jobs the old image could not take now run.
+	eventImageSwap    eventKind = "image_swap"
+	eventStopArrivals eventKind = "stop_arrivals"
 )
 
 func (t simTrace) String() string {
@@ -271,7 +290,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel, eventInodeExhausted,
-		eventSwapResidue, eventSwapThrash}
+		eventSwapResidue, eventSwapThrash, eventEmptyExit, eventRunnerRefused}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
@@ -373,6 +392,24 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:
 		w.substituteSiblings = true
+	case eventEmptyExit:
+		w.emptyExitNext = event.Count
+	case eventRunnerRefused:
+		// Scaled to the assignment deadline, so the generator reaches a refusal that
+		// outlasts a guest's own teardown, which is the only way the fleet learns of it.
+		w.linuxRefused = event.Count * 10
+	case eventForgedRefusal:
+		w.forgeRefusalNext = true
+	case eventImageSwap:
+		w.engine.Images = simImages("rebuilt")
+		for _, job := range w.jobs {
+			// The world's count is per generation too, as property (w) judges it.
+			job.emptyExits, job.exitedEmpty, job.lastEmptyExit = 0, 0, time.Time{}
+		}
+		w.linuxRefused = 0
+		for id := range w.refusedRunners {
+			delete(w.refusedRunners, id)
+		}
 	}
 }
 

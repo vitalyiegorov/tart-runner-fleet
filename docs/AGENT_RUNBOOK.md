@@ -219,6 +219,20 @@ sibling node may be serving the set, and deleting it takes its assigned jobs
 with it (ADR 0054). The jobs on the recreated set are lost too and must be
 re-run.
 
+## Jobs queue, slots are busy, and nothing binds
+
+Read `fleet doctor`'s `empty exits`, `image signals` and `runner version` rows first (ADR 0094).
+`demand_empty_exit_backoff` is one job costing instances that leave without it, and it holds that job alone.
+`image_generation_not_receiving_jobs` says an image's guests are getting no jobs, which a refused runner or
+dispatch elsewhere can cause. `runner_version_refused` may name why, but it is advisory: a job can write that
+log. Signals change no launch decisions, so a refused image keeps launching until it is rebuilt. Never poll a
+live Tart guest with `tart exec` to find out (#478). On a container node, read one guest's log, printing
+only the runner's status lines:
+
+```sh
+podman exec "$INSTANCE" sh -c 'grep -E "Listening for Jobs|An error occurred" "$HOME/actions-runner/.tart-runner-fleet/runner.log"'
+```
+
 ## Analyze CI traffic
 
 To answer "which repo or workflow pulled the most bytes in the last 24 hours",

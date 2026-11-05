@@ -114,7 +114,7 @@ func TestRunnerImagesReachTheStatusDocumentAndTheMetrics(t *testing.T) {
 	const reason = `linux base image "linux-runner-base-go" carries actions/runner 2.335.1, below the 2.336.0 floor`
 	health := runnerVersionHealth(t)
 	if err := health.SetRunnerImages([]RunnerImageMetric{
-		{Platform: "linux", VM: "linux-runner-base-go", Version: "2.335.1", Floor: "2.336.0", Reason: reason},
+		{Platform: "linux", VM: "linux-runner-base-go", Version: "2.335.1", Floor: "2.336.0", BelowFloor: true, Reason: reason},
 		{Platform: "macOS", VM: "macos-tartelet-base-go", Version: "2.336.0", Floor: "2.336.0"},
 	}); err != nil {
 		t.Fatalf("set: %v", err)
@@ -160,5 +160,32 @@ func TestRunnerImagesAreAbsentUntilPublished(t *testing.T) {
 	}
 	if strings.Contains(renderTestMetrics(t, health), "fleet_runner_image_below_floor") {
 		t.Fatal("a daemon with nothing recorded must emit no runner-image series")
+	}
+}
+
+// A past-window image the floor still clears fails the check by its reason, and must
+// not publish that it is below the floor, in status or as a metric.
+func TestAReasonOtherThanTheFloorDoesNotClaimBelowFloor(t *testing.T) {
+	const reason = "linux base image past its install window"
+	images := []RunnerImageMetric{
+		{Platform: "linux", VM: "base", Version: "2.336.0", Floor: "2.336.0", Reason: reason},
+		{Platform: "macOS", VM: "mac", Version: "2.335.1", Floor: "2.336.0", BelowFloor: true, Reason: "below"},
+	}
+	rows := runnerImageRows(Snapshot{RunnerImages: images})
+	if rows[0].BelowFloor || rows[0].Reason != reason || !rows[1].BelowFloor {
+		t.Fatalf("got %+v", rows)
+	}
+	health, err := NewHealth(emptyExitClock{}, HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := health.SetRunnerImages(images); err != nil {
+		t.Fatal(err)
+	}
+	metrics := renderTestMetrics(t, health)
+	for _, want := range []string{`fleet_runner_image_below_floor{platform="linux"} 0`, `fleet_runner_image_below_floor{platform="macOS"} 1`} {
+		if !strings.Contains(metrics, want) {
+			t.Fatalf("metrics lack %q:\n%s", want, metrics)
+		}
 	}
 }

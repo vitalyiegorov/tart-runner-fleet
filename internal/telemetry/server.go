@@ -282,6 +282,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	parkedCheck := adminapi.Check{OK: parked.OK, Reasons: nonNilStrings(parked.Reasons)}
 	admissionCheck := adminapi.Check{OK: admission.OK, Reasons: nonNilStrings(admission.Reasons)}
 	updateDrainCheck := adminapi.Check{OK: drain.OK, Reasons: nonNilStrings(drain.Reasons)}
+	emptyExits := emptyExitResult(snapshot.EmptyExitBackoffs)
+	emptyExitCheck := adminapi.Check{OK: emptyExits.OK, Reasons: nonNilStrings(emptyExits.Reasons)}
 	return adminapi.StatusEnvelope{APIVersion: adminapi.APIVersion, Kind: "Status", GeneratedAt: snapshot.Now,
 		Revision: snapshot.Revision, Warnings: []adminapi.Warning{}, Data: adminapi.Status{
 			ControllerVersion: controllerVersion, ControllerMode: controllerMode, HostMode: string(snapshot.Mode),
@@ -306,7 +308,9 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			SessionYield: sessionYieldRow(snapshot), SessionYieldCheck: &sessionYieldCheck,
 			Membership: membershipRow(snapshot), MembershipCheck: &membershipCheck,
 			UpdateDrain: updateDrainRow(snapshot), UpdateDrainCheck: &updateDrainCheck,
-			Queues: queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
+			EmptyExitBackoffs: emptyExitRows(snapshot), EmptyExitCheck: &emptyExitCheck,
+			ImageSignals: imageSignalRows(snapshot),
+			Queues:       queues, ScopeQueues: scopeQueues, Instances: instances, Observations: observations,
 			Operations: adminapi.OperationSummary{Retrying: snapshot.OperationRetries, Dead: snapshot.DeadOperations,
 				Failures:    operationFailures(snapshot.OperationFailures),
 				DeadLetters: deadLetters(snapshot.DeadLetters)},
@@ -410,8 +414,11 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 	}
 	rows := make([]adminapi.RunnerImage, 0, len(snapshot.RunnerImages))
 	for _, metric := range snapshot.RunnerImages {
-		rows = append(rows, adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM,
-			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason})
+		// Assembled in two steps because dupl reads a one-statement projection of this
+		// shape as a clone of strandedScaleSetRows.
+		row := adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM, Version: metric.Version}
+		row.Floor, row.BelowFloor, row.Reason = metric.Floor, metric.BelowFloor, metric.Reason
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -751,7 +758,7 @@ func renderMetrics(snapshot Snapshot) string {
 			"1 when a base image's actions/runner version is below the enforcement floor, or is not declared at all.", "gauge")
 		for _, metric := range snapshot.RunnerImages {
 			fmt.Fprintf(&output, "fleet_runner_image_below_floor{platform=%s} %d\n",
-				prometheusLabel(metric.Platform), boolGauge(metric.Reason != ""))
+				prometheusLabel(metric.Platform), boolGauge(metric.BelowFloor))
 		}
 	}
 	renderGuestTraffic(&output, snapshot.GuestTraffic)

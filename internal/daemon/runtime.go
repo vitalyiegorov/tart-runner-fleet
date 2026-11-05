@@ -36,6 +36,7 @@ import (
 )
 
 type runtimeStore interface {
+	runnerJobEvidence
 	operations.Store
 	app.EngineStore
 	app.LiveInstanceStore
@@ -954,7 +955,13 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	if opts.Mode != reconcile.Observe {
 		recovery = control
 	}
-	engine := app.Engine{Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
+	refusals := &app.RunnerRefusals{Now: d.now}
+	releases := &runnerReleases{}
+	if opts.Mode == reconcile.Authority {
+		ingesters = append(ingesters, &runnerReleaseObserver{releases: releases, fetch: fetchRunnerReleases,
+			now: d.now, warn: reporter.logger.Warn})
+	}
+	engine := app.Engine{Refusals: refusals, Images: d.imageGenerations(cfg), Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	yield := newSessionYieldController(yieldState, closers, reporter)
 	member := newMembershipController(membershipMode(opts.Mode, cfg), cfg.GitHub.ParkedScaleSetAuditInterval(),
@@ -965,7 +972,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	ticker := engineTicker{engine: engine, health: health, profiles: profiles, operationCounts: store.OperationCounts,
 		operationFailures: store.OperationFailures, deadLetters: store.DeadLetters,
 		stalledOperations: store.StalledOperations, now: d.now, reporter: reporter, yield: yield, drain: updateDrain,
-		membership: member, advertiser: advertiser, gate: &admissionGate{}}
+		membership: member, advertiser: advertiser, gate: &admissionGate{}, runnerImages: cfg, releases: releases}
 	if opts.Mode == reconcile.Authority {
 		cleanup := discharge.Service{Store: store, VM: d.newReaper(store, cfg), Authority: true, Now: d.now,
 			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))}
@@ -987,7 +994,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: traffic},
+					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, store, refusals)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -1066,7 +1073,7 @@ func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
 	images := make([]telemetry.RunnerImageMetric, 0, len(declared))
 	for _, image := range declared {
 		images = append(images, telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM,
-			Version: image.Version, Floor: image.Floor, Reason: image.Reason()})
+			Version: image.Version, Floor: image.Floor, BelowFloor: image.BelowFloor(), Reason: image.Reason()})
 	}
 	return images
 }
@@ -2024,12 +2031,16 @@ type failureCounter interface {
 }
 
 type failureReporter struct {
-	mu      sync.Mutex
-	last    map[string]time.Time
-	now     func() time.Time
-	window  time.Duration
-	logger  *slog.Logger
-	counter failureCounter
+	mu   sync.Mutex
+	last map[string]time.Time
+	// refusals and emptyExits date what was last said about a hold that outlasts
+	// admit's window (ADR 0094).
+	refusals   map[string]time.Time
+	emptyExits map[string]time.Time
+	now        func() time.Time
+	window     time.Duration
+	logger     *slog.Logger
+	counter    failureCounter
 }
 
 func newFailureReporter(w io.Writer, now func() time.Time) *failureReporter {
@@ -2467,6 +2478,9 @@ func (r *failureReporter) admit(key string) bool {
 }
 
 type engineTicker struct {
+	// runnerImages and releases are what recordRunnerImages judges each tick.
+	runnerImages      config.Config
+	releases          *runnerReleases
 	engine            app.Engine
 	health            *telemetry.Health
 	profiles          []string
@@ -2787,6 +2801,9 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordReservation(result)
 	e.recordEnvelope(result)
 	e.recordOverdueExpiry(result)
+	e.recordRunnerImages(result)
+	e.recordImageSignals(result)
+	e.recordEmptyExitBackoffs(result)
 	e.recordCompletedDrains(result)
 	pressure := result.Host.Pressure
 	if edge, changed := e.gate.Observe(result.At, pressure.AdmissionAllowed, pressure.AdmissionReason); changed {

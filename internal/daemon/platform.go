@@ -155,7 +155,7 @@ func linuxPlatform() platform {
 			// `podman exec <name> true` is the same argument vector `tart exec` takes,
 			// which is why issue #137 typed the probe on executor.CommandRunner and
 			// why a container node needs no second copy of the poll loop.
-			return execReadiness{Runner: podman.ExecRunner{Binary: cfg.Executor.Binary}, Timeout: cfg.Timeouts.Boot,
+			return execReadiness{Runner: podman.ExecRunner{Binary: cfg.Executor.Binary, OutputLimit: podman.GuestOutputLimit}, Timeout: cfg.Timeouts.Boot,
 				AttemptTimeout: cfg.Timeouts.Tart, RetryInterval: 250 * time.Millisecond, After: time.After}
 		},
 		bootstrap: func(cfg config.Config) lifecycle.Bootstrapper {
@@ -189,14 +189,14 @@ func linuxPlatform() platform {
 			if !runsContainers(cfg) {
 				return nil
 			}
-			return execGuestProbe{Runner: podman.ExecRunner{Binary: cfg.Executor.Binary},
+			return execGuestProbe{Runner: podman.ExecRunner{Binary: cfg.Executor.Binary, OutputLimit: podman.GuestOutputLimit},
 				Timeout: cfg.GuestLiveness.ProbeTimeout}
 		},
 		guestExec: func(cfg config.Config) executor.CommandRunner {
 			if !runsContainers(cfg) {
 				return nil
 			}
-			return podman.ExecRunner{Binary: cfg.Executor.Binary}
+			return podman.ExecRunner{Binary: cfg.Executor.Binary, OutputLimit: podman.GuestOutputLimit}
 		},
 	}
 }

@@ -5,7 +5,18 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// RunnerInstallWindow is GitHub's stated rule: "the runner must stay up to date by
+// installing each new runner release within 30 days of its publication" (ADR 0041).
+const RunnerInstallWindow = 30 * 24 * time.Hour
+
+// RunnerRelease is one stable `actions/runner` release as GitHub published it.
+type RunnerRelease struct {
+	Version     string
+	PublishedAt time.Time
+}
 
 // DefaultRunnerVersionFloor is the `actions/runner` version GitHub's minimum
 // version enforcement makes the hard bar for a self-hosted runner to register at
@@ -44,6 +55,10 @@ type RunnerImage struct {
 	Version string
 	// Floor is the version Version is judged against, always populated.
 	Floor string
+	// Releases and Now are the release calendar as measured. Without them the
+	// install window is not judged, because an unread calendar establishes nothing.
+	Releases []RunnerRelease
+	Now      time.Time
 }
 
 // Compliant reports whether this image may still register runners with GitHub.
@@ -62,11 +77,31 @@ func (i RunnerImage) Reason() string {
 		return fmt.Sprintf("%s base image %q declares no runner version, so its brownout compliance "+
 			"cannot be judged", i.Platform, i.VM)
 	}
-	if compareRunnerVersions(i.Version, i.Floor) >= 0 {
-		return ""
+	if !i.BelowFloor() {
+		return i.pastInstallWindow()
 	}
 	return fmt.Sprintf("%s base image %q carries actions/runner %s, below the %s floor; GitHub refuses "+
 		"registration below it, so every job routed to this image fails", i.Platform, i.VM, i.Version, i.Floor)
+}
+
+// pastInstallWindow is the warning the static floor cannot give: the oldest release
+// newer than this image, once GitHub's window to install it has closed. It claims
+// no cutoff date, because GitHub publishes none. It says only what the calendar shows.
+func (i RunnerImage) pastInstallWindow() string {
+	var next RunnerRelease
+	for _, release := range i.Releases {
+		if compareRunnerVersions(release.Version, i.Version) > 0 &&
+			(next.Version == "" || release.PublishedAt.Before(next.PublishedAt)) {
+			next = release
+		}
+	}
+	closed := next.PublishedAt.Add(RunnerInstallWindow)
+	if next.Version == "" || i.Now.IsZero() || i.Now.Before(closed) {
+		return ""
+	}
+	return fmt.Sprintf("%s base image %q carries actions/runner %s; %s was published %s and GitHub's 30-day window to "+
+		"install it closed %s, so GitHub may refuse this runner at any time", i.Platform, i.VM, i.Version, next.Version,
+		next.PublishedAt.UTC().Format(time.DateOnly), closed.UTC().Format(time.DateOnly))
 }
 
 // RunnerVersionFloorOrDefault is the floor this node judges its images against:
@@ -158,4 +193,11 @@ func compareRunnerVersions(left, right string) int {
 		}
 	}
 	return len(leftParts) - len(rightParts)
+}
+
+// BelowFloor is the floor verdict alone, separate from Reason, which also fails for a
+// closed install window on an image the floor clears. An undeclared
+// version is below it, because it cannot be shown to clear it (ADR 0041).
+func (i RunnerImage) BelowFloor() bool {
+	return i.Version == "" || compareRunnerVersions(i.Version, i.Floor) < 0
 }

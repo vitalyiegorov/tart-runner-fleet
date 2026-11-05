@@ -450,8 +450,18 @@ type DrainExecutor struct {
 	// its first stop, which is the end of its one job (ADR 0080). Nil records
 	// nothing. It cannot fail the drain: it returns nothing.
 	Traffic GuestTrafficRecorder
+	// Refusal reads the guest's own account of a refused runner (ADR 0094).
+	Refusal RunnerRefusalReader
 	Now     func() time.Time
 	After   func(time.Duration) <-chan time.Time
+}
+
+// RunnerRefusalReader reads whether a guest's runner was refused by the broker. It
+// runs once beside the first stop, while the guest can still answer, on a node where
+// asking cannot harm one: a container. A Tart node has none, because `tart exec`
+// rides the vsock device (ADR 0080, ADR 0094). Nil reads nothing.
+type RunnerRefusalReader interface {
+	ReadRunnerRefusal(context.Context, operations.Instance)
 }
 
 // GuestTrafficRecorder samples and stores one guest's network counters. An
@@ -765,8 +775,13 @@ func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instan
 	// Sample on the first stop only: an escalated stop is a guest that would not
 	// power down, and asking it again only delays the vector. A guest proved
 	// unresponsive cannot answer an exec, so it is not asked at all.
-	if e.Traffic != nil && StopAttempts(operation) == 0 && instance.DrainPhase != operations.DrainPhaseGuestUnresponsive {
-		e.Traffic.RecordGuestTraffic(ctx, instance)
+	if StopAttempts(operation) == 0 && instance.DrainPhase != operations.DrainPhaseGuestUnresponsive {
+		if e.Traffic != nil {
+			e.Traffic.RecordGuestTraffic(ctx, instance)
+		}
+		if e.Refusal != nil {
+			e.Refusal.ReadRunnerRefusal(ctx, instance)
+		}
 	}
 	var stopErr error
 	switch force := StopEscalation(StopAttempts(operation)); force {

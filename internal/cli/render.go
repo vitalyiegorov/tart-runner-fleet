@@ -108,6 +108,20 @@ func renderStatus(output io.Writer, status adminapi.StatusEnvelope) {
 			fmt.Fprintf(output, "%s/%d  %s\n", row.Scope, row.ScaleSetID, row.Stage)
 		}
 	}
+	// Withheld work prints above the queues too: the queue is what keeps showing it
+	// while the node spends nothing on it. Signals decide nothing and are said as such.
+	if emptyExits := status.Data.EffectiveEmptyExitCheck(); !emptyExits.OK {
+		fmt.Fprintln(output, "\nWITHHELD")
+		for _, line := range emptyExits.Reasons {
+			fmt.Fprintln(output, line)
+		}
+	}
+	if len(status.Data.ImageSignals) > 0 {
+		fmt.Fprintln(output, "\nIMAGE SIGNALS (display only)")
+		for _, signal := range status.Data.ImageSignals {
+			fmt.Fprintln(output, signal.Detail)
+		}
+	}
 	fmt.Fprintln(output, "\nQUEUES")
 	renderQueues(output, status.Data.Queues)
 	fmt.Fprintln(output, "\nINSTANCES")

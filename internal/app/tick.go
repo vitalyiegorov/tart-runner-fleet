@@ -33,6 +33,12 @@ type Engine struct {
 	ControllerID string
 	Mode         reconcile.Mode
 	Now          func() time.Time
+	// Refusals is what this node's guests' logs say about their images. It is display
+	// only: a job can write that log, so nothing here reaches a plan (ADR 0094).
+	Refusals *RunnerRefusals
+	// Images names the image generation each platform launches from, which scopes empty
+	// exits so a rebuilt image owes nothing for its predecessor's (ADR 0094).
+	Images map[domain.Platform]string
 }
 
 type TickResult struct {
@@ -70,6 +76,15 @@ type TickResult struct {
 	// the envelope could not be computed, and a binding absent from it advertises
 	// its configured capacity: unknown is never zero.
 	Headroom []ScaleSetHeadroom
+	// EmptyExitBackoffs names the queued demand whose instances keep exiting
+	// without its job (issue #493). The demand stays in Queues and ScopeQueues,
+	// and is absent from Demands only while its hold lasts.
+	EmptyExitBackoffs []EmptyExitBackoff
+	// ImageSignals is what an operator should read about this node's images. Display
+	// only: nothing here reaches a plan (ADR 0094).
+	ImageSignals []ImageSignal
+	// RunnerRefusals is the latest advisory reading of each platform's guests (ADR 0094).
+	RunnerRefusals map[domain.Platform]domain.RunnerRefusal
 }
 
 // commitFailureReason names why a commit failed. A non-ready plan never reached
@@ -96,9 +111,9 @@ func commitFailureReason(status scheduler.PlanStatus, err error) string {
 }
 
 // plannableDemands drops every queued demand a live, non-terminal instance
-// already incarnates. It is the single seam where the scheduler's queue is
-// assembled, so every admission path downstream inherits the rule instead of
-// restating it (ADR 0027).
+// already incarnates, or that is waiting out an empty-exit hold. It is the single
+// seam where the scheduler's queue is assembled, so every admission path downstream
+// inherits the rule instead of restating it (ADR 0027).
 //
 // GitHub keeps a job Available until a runner acquires it, and production
 // acquires at the reachable -> registering edge, minutes after the spawn. For
@@ -117,10 +132,16 @@ func commitFailureReason(status scheduler.PlanStatus, err error) string {
 // choice ADR 0027 made for one tick's two passes: a demand already being served
 // must not be counted against slots, repository caps, or the residual envelope
 // either.
-func plannableDemands(queued []domain.Demand, liveIncarnations map[domain.DemandKey]bool) []domain.Demand {
+//
+// A demand on an empty-exit hold (issue #493, ADR 0094) leaves by the same door
+// and for the same reason: it must not be counted against anything while it costs
+// nothing, so the slot, the reservation and the repository cap all go to whatever
+// is next, and every other demand is untouched. Its queue summary is read from the
+// unfiltered queue, so it stays visible.
+func plannableDemands(queued []domain.Demand, withheld map[domain.DemandKey]bool) []domain.Demand {
 	plannable := make([]domain.Demand, 0, len(queued))
 	for _, demand := range queued {
-		if liveIncarnations[demand.Key] {
+		if withheld[demand.Key] {
 			continue
 		}
 		plannable = append(plannable, demand)
@@ -199,12 +220,13 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	// Every admission path is bounded by this one fact: a demand a live instance
 	// already serves is not plannable work, whatever the broker still advertises
 	// and whatever the statistics still bound.
-	liveIncarnations := make(map[domain.DemandKey]bool, len(instances.Value))
+	withheld := make(map[domain.DemandKey]bool, len(instances.Value))
 	for _, instance := range instances.Value {
 		if instance.IncarnatesDemand() {
-			liveIncarnations[instance.Demand] = true
+			withheld[instance.Demand] = true
 		}
 	}
+	readings := e.Refusals.Observe(instances.Value)
 	// Before demand is read: a row GitHub has already failed must not spend one
 	// more tick as plannable work or as queue-SLO age. This is the path that
 	// needs neither a session nor a REST observer, so it works on the first
@@ -219,12 +241,25 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	waiting := make([]domain.Demand, 0)
 	held := make(map[int64]int, len(e.Bindings))
 	undelivered := make(map[int64]int, len(e.Bindings))
+	emptyExits, err := coordinator.EmptyExits(ctx, now)
+	if err != nil {
+		return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
+	}
+	var backoffs []EmptyExitBackoff
+	var allQueued []domain.Demand
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
+		allQueued = append(allQueued, queued...)
+		for _, backoff := range emptyExitBackoffs(binding, queued, emptyExits, e.Images, now) {
+			backoffs = append(backoffs, backoff)
+			if domain.EmptyExitBackoff.Holds(domain.EmptyExits{Count: backoff.Exits, Last: backoff.LastAt}, now) {
+				withheld[backoff.Demand] = true
+			}
+		}
 		// One filter for every path: a demand whose VM is already cloning,
 		// booting, registering, assigned, running, or tearing down is not
 		// re-planned, and a terminal incarnation releases it again.
-		schedulable := plannableDemands(queued, liveIncarnations)
+		schedulable := plannableDemands(queued, withheld)
 		waiting = append(waiting, schedulable...)
 		held[binding.durableKey()] += len(schedulable)
 		if errors.Is(err, ErrDemandStatisticsUnavailable) {
@@ -274,12 +309,14 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
 	headroom := coordinator.scaleSetHeadroom(ctx, e.Bindings, scheduler.Input{Now: now, Config: e.Config,
 		Demands: domain.Fresh(waiting, now), Instances: instances, Host: host, Prior: prior}, held, undelivered)
-	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
+	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles, Images: e.Images}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			ScopeInstances: ScaleSetInstances(e.Bindings, instances),
 			Instances:      append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
 			HostHealthy:    hostHealthy(host),
-			ExpiredOverdue: expiredOverdue, CompletedDrains: completedDrains, Headroom: headroom},
+			ExpiredOverdue: expiredOverdue, CompletedDrains: completedDrains, Headroom: headroom,
+			EmptyExitBackoffs: backoffs, RunnerRefusals: readings,
+			ImageSignals: imageSignals(allQueued, emptyExits, readings, e.Images, now)},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }
