@@ -186,7 +186,8 @@ func (e engineTicker) recordRunnerImages(result app.TickResult) {
 	releases := e.releases.load()
 	for _, image := range images {
 		image.Releases, image.Now = releases, result.At
-		metric := telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM, Version: image.Version, Floor: image.Floor}
+		metric := telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM, Version: image.Version,
+			Floor: image.Floor, BelowFloor: image.BelowFloor()}
 		if refusal, refused := result.RunnerRefusals[runnerImagePlatform(image.Platform)]; refused {
 			image.Refusal = &refusal
 			metric.RefusedVersion, metric.RefusedAt, metric.NextProbeAt = refusal.Version, refusal.At, refusal.RetryAt()
@@ -209,34 +210,60 @@ func runnerImagePlatform(platform string) domain.Platform {
 }
 
 // recordEmptyExitBackoffs publishes the demand the fleet stopped spending instances
-// on back to back, and says so once per attempt rather than once per tick.
+// on back to back, and says so once per exit rather than once per tick.
 func (e engineTicker) recordEmptyExitBackoffs(result app.TickResult) {
 	metrics := make([]telemetry.EmptyExitBackoffMetric, 0, len(result.EmptyExitBackoffs))
 	for _, backoff := range result.EmptyExitBackoffs {
 		metrics = append(metrics, telemetry.EmptyExitBackoffMetric{Demand: backoff.Demand.String(), Scope: backoff.Scope,
 			Profile: string(backoff.Profile), Exits: backoff.Exits, LastExitAt: backoff.LastAt, RetryAt: backoff.RetryAt})
-		if e.reporter != nil {
-			e.reporter.reportEmptyExitBackoff(backoff)
-		}
+	}
+	if e.reporter != nil {
+		e.reporter.reportEmptyExitBackoffs(result.EmptyExitBackoffs)
 	}
 	e.health.SetEmptyExitBackoffs(metrics)
 }
 
-// reportRunnerRefusal says once per reading of a standing verdict that an image is refused.
+// reportRunnerRefusal says a verdict once per reading that dates it. A hold outlasts
+// admit's window many times over, so the reading itself is what makes it news.
 func (r *failureReporter) reportRunnerRefusal(platform, vm string, refusal domain.RunnerRefusal) {
-	if r.logger == nil || !r.admit("runner-refusal\x00"+platform+"\x00"+refusal.At.String()) {
+	if r.logger == nil {
+		return
+	}
+	r.mu.Lock()
+	said := r.refusals[platform].Equal(refusal.At)
+	if !said {
+		if r.refusals == nil {
+			r.refusals = map[string]time.Time{}
+		}
+		r.refusals[platform] = refusal.At
+	}
+	r.mu.Unlock()
+	if said {
 		return
 	}
 	r.logger.Warn("runner image refused by GitHub, launches held", "platform", platform, "image", vm,
 		"version", refusal.Version, "instance", refusal.Instance, "nextProbe", refusal.RetryAt().UTC().Format(time.RFC3339))
 }
 
-// reportEmptyExitBackoff says once per attempt that a demand is being held.
-func (r *failureReporter) reportEmptyExitBackoff(backoff app.EmptyExitBackoff) {
-	if r.logger == nil || !r.admit("empty-exit\x00"+backoff.Demand.String()+"\x00"+backoff.LastAt.String()) {
+// reportEmptyExitBackoffs says each hold once per exit that dates it, for the same
+// reason. Replacing the whole set is what stops it growing with every demand ever held.
+func (r *failureReporter) reportEmptyExitBackoffs(backoffs []app.EmptyExitBackoff) {
+	if r.logger == nil {
 		return
 	}
-	r.logger.Warn("demand instances keep exiting without a job, holding it", "reason", "demand_empty_exit_backoff",
-		"demand", backoff.Demand.String(), "scope", backoff.Scope, "profile", string(backoff.Profile),
-		"exits", backoff.Exits, "retryAt", backoff.RetryAt.UTC().Format(time.RFC3339))
+	r.mu.Lock()
+	previous := r.emptyExits
+	r.emptyExits = make(map[domain.DemandKey]time.Time, len(backoffs))
+	for _, backoff := range backoffs {
+		r.emptyExits[backoff.Demand] = backoff.LastAt
+	}
+	r.mu.Unlock()
+	for _, backoff := range backoffs {
+		if previous[backoff.Demand].Equal(backoff.LastAt) {
+			continue
+		}
+		r.logger.Warn("demand instances keep exiting without a job, holding it", "reason", "demand_empty_exit_backoff",
+			"demand", backoff.Demand.String(), "scope", backoff.Scope, "profile", string(backoff.Profile),
+			"exits", backoff.Exits, "retryAt", backoff.RetryAt.UTC().Format(time.RFC3339))
+	}
 }

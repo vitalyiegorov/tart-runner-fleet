@@ -362,7 +362,7 @@ type RunnerImage struct {
 	// failing state and carries a Reason.
 	Version string `json:"version,omitempty"`
 	Floor   string `json:"floor"`
-	// BelowFloor is the verdict, published beside the two versions because a
+	// BelowFloor is the floor verdict, published beside the two versions because a
 	// reader comparing them by eye is a reader who will eventually compare 2.9.0
 	// against 2.10.0 and be wrong.
 	BelowFloor bool `json:"belowFloor"`

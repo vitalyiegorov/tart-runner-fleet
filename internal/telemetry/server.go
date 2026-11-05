@@ -413,9 +413,10 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 	}
 	rows := make([]adminapi.RunnerImage, 0, len(snapshot.RunnerImages))
 	for _, metric := range snapshot.RunnerImages {
-		rows = append(rows, adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM,
-			Version: metric.Version, Floor: metric.Floor, BelowFloor: metric.Reason != "", Reason: metric.Reason,
-			RefusedVersion: metric.RefusedVersion, RefusedAt: metric.RefusedAt, NextProbeAt: metric.NextProbeAt})
+		row := adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM, Version: metric.Version,
+			Floor: metric.Floor, BelowFloor: metric.BelowFloor, Reason: metric.Reason}
+		row.RefusedVersion, row.RefusedAt, row.NextProbeAt = metric.RefusedVersion, metric.RefusedAt, metric.NextProbeAt
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -755,7 +756,7 @@ func renderMetrics(snapshot Snapshot) string {
 			"1 when a base image's actions/runner version is below the enforcement floor, or is not declared at all.", "gauge")
 		for _, metric := range snapshot.RunnerImages {
 			fmt.Fprintf(&output, "fleet_runner_image_below_floor{platform=%s} %d\n",
-				prometheusLabel(metric.Platform), boolGauge(metric.Reason != ""))
+				prometheusLabel(metric.Platform), boolGauge(metric.BelowFloor))
 		}
 	}
 	renderGuestTraffic(&output, snapshot.GuestTraffic)

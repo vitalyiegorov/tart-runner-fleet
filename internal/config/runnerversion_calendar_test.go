@@ -74,3 +74,23 @@ func TestARefusalOutranksEveryOtherReasonAndIsNamed(t *testing.T) {
 		t.Fatalf("reason exceeds what telemetry will carry: %d bytes", len(reason))
 	}
 }
+
+// The floor verdict is about the floor. A refusal or a closed window fails the check
+// through Reason without claiming the image is below a floor it clears.
+func TestTheFloorVerdictIsAboutTheFloorAlone(t *testing.T) {
+	refusal := domain.RunnerRefusal{Version: "2.336.0", Instance: "trf-a", At: time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)}
+	for name, test := range map[string]struct {
+		image RunnerImage
+		below bool
+	}{
+		"clears it":   {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0"}},
+		"refused":     {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0", Refusal: &refusal}},
+		"past window": {image: RunnerImage{Version: "2.336.0", Floor: "2.336.0", Releases: runnerCalendar(), Now: refusal.At}},
+		"below it":    {image: RunnerImage{Version: "2.335.1", Floor: "2.336.0"}, below: true},
+		"undeclared":  {image: RunnerImage{Floor: "2.336.0"}, below: true},
+	} {
+		if got := test.image.BelowFloor(); got != test.below {
+			t.Errorf("%s: below floor = %v, want %v", name, got, test.below)
+		}
+	}
+}

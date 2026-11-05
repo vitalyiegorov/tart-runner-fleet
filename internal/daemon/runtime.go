@@ -1073,7 +1073,7 @@ func runnerImages(cfg config.Config) []telemetry.RunnerImageMetric {
 	images := make([]telemetry.RunnerImageMetric, 0, len(declared))
 	for _, image := range declared {
 		images = append(images, telemetry.RunnerImageMetric{Platform: image.Platform, VM: image.VM,
-			Version: image.Version, Floor: image.Floor, Reason: image.Reason()})
+			Version: image.Version, Floor: image.Floor, BelowFloor: image.BelowFloor(), Reason: image.Reason()})
 	}
 	return images
 }
@@ -2031,12 +2031,16 @@ type failureCounter interface {
 }
 
 type failureReporter struct {
-	mu      sync.Mutex
-	last    map[string]time.Time
-	now     func() time.Time
-	window  time.Duration
-	logger  *slog.Logger
-	counter failureCounter
+	mu   sync.Mutex
+	last map[string]time.Time
+	// refusals and emptyExits date what was last said about a hold that outlasts
+	// admit's window (ADR 0094).
+	refusals   map[string]time.Time
+	emptyExits map[domain.DemandKey]time.Time
+	now        func() time.Time
+	window     time.Duration
+	logger     *slog.Logger
+	counter    failureCounter
 }
 
 func newFailureReporter(w io.Writer, now func() time.Time) *failureReporter {

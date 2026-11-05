@@ -1352,7 +1352,7 @@ fleet status --endpoint "$ENDPOINT" --output json | jq '.data.runnerImages'
 | `vm` | The base image that platform boots. |
 | `version` | The `actions/runner` release the image carries, as declared. Empty means nobody has vouched for it. |
 | `floor` | The version it is judged against: `runnerVersionFloor`, or 2.329.0. |
-| `belowFloor` | The verdict: any failing `reason`, not only a version below the floor. |
+| `belowFloor` | The floor verdict alone. `reason` can also fail on a refusal or a closed install window while this stays false. |
 | `refusedVersion`, `refusedAt`, `nextProbeAt` | A guest's own log said GitHub refuses this runner, when that was read, and when one guest next launches to find out (ADR 0094). Only a container node can read this. |
 
 The check passes loudly as well as failing loudly: a passing `runner version`
@@ -1395,7 +1395,7 @@ that took a job is never asked. The node stops launching from that image, leaves
 visible in the queue, and launches one guest per half hour to find out whether the
 image works again. A job that starts on that platform clears the verdict at once.
 A Tart node cannot read this, because `tart exec` is vsock traffic (#478): there the
-symptom is `demand_empty_exit_backoff` beside this calendar finding. Rebuilding the
+symptom is `demand_empty_exit_backoff` and, when present, the calendar finding. Rebuilding the
 image is the remedy; restarting the daemon only forgets the verdict.
 
 **`demand_empty_exit_backoff` means one queued job keeps costing instances** that

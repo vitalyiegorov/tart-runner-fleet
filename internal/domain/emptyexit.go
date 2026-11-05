@@ -42,7 +42,8 @@ type EmptyExitPolicy struct {
 
 // EmptyExitBackoff is the fleet's policy. It is deliberately not configurable, as
 // PowerCorroboration is not: nothing about a node changes the right answer. Against
-// the 2026-11-05 incident's roughly forty VMs an hour it allows at most two.
+// the 2026-11-05 incident's roughly forty VMs an hour this settles to a retry cadence of
+// two an hour per job. It slows a failing demand and does not cap its total.
 var EmptyExitBackoff = EmptyExitPolicy{Tolerated: 2, Base: 5 * time.Minute, Cap: 30 * time.Minute}
 
 // Exceeded reports that these exits are no longer ordinary.

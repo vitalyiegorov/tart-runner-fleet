@@ -107,7 +107,9 @@ cutoff says nothing about the image today.
 
 `config.RunnerImage.Reason` stays the one statement of the rule, and now reads
 `runner_version_refused: ...` first. `runnerVersionCheck` carries it, and
-`runnerImages[]` gains `refusedVersion`, `refusedAt` and `nextProbeAt`. It never
+`runnerImages[]` gains `refusedVersion`, `refusedAt` and `nextProbeAt`. `belowFloor` and
+`fleet_runner_image_below_floor` stay the floor verdict alone, so a refused image the
+floor clears reads as what it is. It never
 touches `ready` or `healthy` (ADR 0052): a release may be what ends the condition.
 
 ### 4. Read the calendar
@@ -176,11 +178,11 @@ Corpus over 32 seeds at 200 ticks, spawns and findings per arm:
 
 | Arm | Merge base | Branch, faults out of the draw | Branch, faults in the draw |
 | --- | --- | --- | --- |
-| `m4-mac-mini` | 1157, 0 | 1153, 0 | 907, 1 |
-| `geekom-linux-amd64` | 1266, 0 | 1264, 0 | 836, 0 |
+| `m4-mac-mini` | 1157, 0 | 1153, 0 | 944, 0 |
+| `geekom-linux-amd64` | 1266, 0 | 1264, 0 | 897, 0 |
 | `federated-maestro-scope` | 683, 0 | 684, 0 | 662, 0 |
-| `tiered-release-priority` | 1132, 0 | 1134, 0 | 894, 0 |
-| `sequence-reset-linux-large` | 1048, 0 | 1049, 0 | 700, 0 |
+| `tiered-release-priority` | 1132, 0 | 1134, 0 | 926, 0 |
+| `sequence-reset-linux-large` | 1048, 0 | 1049, 0 | 746, 0 |
 | `mac-mini-macos-only` | 607, 0 | 607, 0 | 543, 0 |
 | `mac-studio-4x10-budget` | 307, 0 | 307, 0 | 271, 0 |
 
@@ -188,12 +190,13 @@ The middle column is a real behaviour change and its digests differ in five of t
 seven arms: existing faults such as a stalled runner already reach three empty exits
 on one demand, and those demands now back off.
 
-**The faults ship out of `faultThisTick`'s draw**, per `docs/TESTING.md`. The new
-stream's one finding is
-[#494](https://github.com/vitalyiegorov/tart-runner-fleet/issues/494), a liveness
-wedge containing neither fault that reproduces on the merge base. Drawn, every other
-arm is clean at the gate's 80 seeds and this arm on seeds 20-80. The draw line lands
-with #494's fix.
+**Both faults are in `faultThisTick`'s draw**, the sweep being green with them at the
+gate's 80 seeds, per `docs/TESTING.md`. The first version of this change was not: one
+seed reached
+[#494](https://github.com/vitalyiegorov/tart-runner-fleet/issues/494), a liveness wedge
+whose shrunk trace contains neither fault and reproduces on the merge base. Requiring
+two witnesses changed what that seed's full trace does, so the stream no longer reaches
+it. **#494 itself is unfixed**, and its shrunk trace still fails.
 
 ## Consequences
 
@@ -201,7 +204,8 @@ A node serving a refused image reads as what it is, not as busy. Learning it tak
 teardowns, so a one-slot node may take a second assignment deadline to hold. On a
 container node it then spends one guest per half hour instead of every slot, and can reach quiescence for
 an update while it waits. On a Tart node the loop falls from about forty VMs an hour
-to at most two per job, and `doctor` shows the backoff beside the calendar finding,
+to a retry cadence of two an hour per job (it slows a failing demand and does not cap
+its total), and `doctor` shows the backoff beside the calendar finding,
 but the fleet never asserts a refusal it did not read.
 
 Once deployed, `fleet doctor` will fail `runner version` on any node whose image is

@@ -935,7 +935,9 @@ func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (i
 
 // EmptyExits reports, per demand and image generation, the deleted instances still
 // bound to it since the given instant. A failed row is not counted, because a
-// provisioning failure never reached a runner and has its own retry path. A row older
+// provisioning failure never reached a runner and has its own retry path, and neither
+// is one an operator later reaped: Failed leaves only through reapInstance, which keeps
+// its failure code, while every autonomous step to Deleted clears it. A row older
 // than the image field reads as the empty generation, which no node launching from a
 // named one will ask about, so upgrading can only forget a hold, never invent one.
 // Nothing here is new state: these are the same terminal rows SpawnGeneration already
@@ -946,7 +948,7 @@ func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.Emp
 		json_extract(scheduling_metadata,'$.demand.RunID'),json_extract(scheduling_metadata,'$.demand.Attempt'),
 		json_extract(scheduling_metadata,'$.demand.JobID'),COALESCE(json_extract(scheduling_metadata,'$.image'),''),
 		COUNT(*),MAX(updated_at)
-		FROM instances WHERE state=? AND updated_at>=? AND json_extract(scheduling_metadata,'$.demand.JobID')>0
+		FROM instances WHERE state=? AND last_error='' AND updated_at>=? AND json_extract(scheduling_metadata,'$.demand.JobID')>0
 		GROUP BY 1,2,3,4,5`, operations.StateDeleted, since.UTC().UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("list empty exits: %w", err)

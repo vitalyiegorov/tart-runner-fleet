@@ -249,5 +249,41 @@ func TestTheTickSaysEachVerdictOnce(t *testing.T) {
 
 func TestAReporterWithNoLoggerStaysSilent(t *testing.T) {
 	(&failureReporter{}).reportRunnerRefusal("linux", "base", domain.RunnerRefusal{})
-	(&failureReporter{}).reportEmptyExitBackoff(app.EmptyExitBackoff{})
+	(&failureReporter{}).reportEmptyExitBackoffs([]app.EmptyExitBackoff{{}})
+}
+
+// A hold lasts up to half an hour and the reporter's rate limit one minute, so "once"
+// has to be stated by the thing that changed, not by a window. A new reading or a new
+// exit is the only news.
+func TestAStandingVerdictAndHoldAreSaidOnceHoweverLongTheyLast(t *testing.T) {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	clock := now
+	var logged strings.Builder
+	reporter := newFailureReporter(&logged, func() time.Time { return clock })
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+	cfg := config.Default()
+	cfg.Linux.BaseVM = "base"
+	cfg.Linux.BaseImageRunnerVersion = "2.336.0"
+	ticker := engineTicker{health: health, runnerImages: cfg, reporter: reporter}
+	key := domain.DemandKey{Repo: "o/r", RunID: 1, Attempt: 1, JobID: 7}
+	tick := func(refusedAt, exitAt time.Time) {
+		t.Helper()
+		result := app.TickResult{At: clock,
+			RunnerRefusals:    map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: {Version: "2.336.0", Instance: "trf-a", At: refusedAt}},
+			EmptyExitBackoffs: []app.EmptyExitBackoff{{Demand: key, Exits: 3, LastAt: exitAt, RetryAt: exitAt.Add(30 * time.Minute)}}}
+		ticker.recordRunnerImages(result)
+		ticker.recordEmptyExitBackoffs(result)
+	}
+	count := func(want string) int { return strings.Count(logged.String(), want) }
+	for range 10 {
+		tick(now, now)
+		clock = clock.Add(3 * time.Minute)
+	}
+	if refusals, holds := count("runner image refused by GitHub"), count("demand_empty_exit_backoff"); refusals != 1 || holds != 1 {
+		t.Fatalf("said %d and %d times across one half-hour hold:\n%s", refusals, holds, logged.String())
+	}
+	tick(clock, clock)
+	if refusals, holds := count("runner image refused by GitHub"), count("demand_empty_exit_backoff"); refusals != 2 || holds != 2 {
+		t.Fatalf("a new reading and a new exit are news: %d and %d", refusals, holds)
+	}
 }

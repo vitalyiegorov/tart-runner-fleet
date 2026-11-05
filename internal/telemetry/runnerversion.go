@@ -22,6 +22,9 @@ type RunnerImageMetric struct {
 	Version string
 	// Floor is the version Version was judged against, always populated.
 	Floor string
+	// BelowFloor is the floor verdict alone. Reason fails for more than that: a
+	// refusal, or a calendar window, on an image the floor still clears.
+	BelowFloor bool
 	// Reason is empty when the image is compliant, and is the operator-facing
 	// explanation otherwise.
 	Reason string

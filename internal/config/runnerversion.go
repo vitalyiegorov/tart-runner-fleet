@@ -88,7 +88,7 @@ func (i RunnerImage) Reason() string {
 		return fmt.Sprintf("%s base image %q declares no runner version, so its brownout compliance "+
 			"cannot be judged", i.Platform, i.VM)
 	}
-	if compareRunnerVersions(i.Version, i.Floor) >= 0 {
+	if !i.BelowFloor() {
 		return i.pastInstallWindow()
 	}
 	return fmt.Sprintf("%s base image %q carries actions/runner %s, below the %s floor; GitHub refuses "+
@@ -204,4 +204,11 @@ func compareRunnerVersions(left, right string) int {
 		}
 	}
 	return len(leftParts) - len(rightParts)
+}
+
+// BelowFloor is the floor verdict alone, separate from Reason, which also fails for a
+// refusal or a closed install window on an image the floor clears. An undeclared
+// version is below it, because it cannot be shown to clear it (ADR 0041).
+func (i RunnerImage) BelowFloor() bool {
+	return i.Version == "" || compareRunnerVersions(i.Version, i.Floor) < 0
 }

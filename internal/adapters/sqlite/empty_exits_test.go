@@ -117,3 +117,43 @@ func TestInstanceTookJobReadsOnlyWhatTheBrokerSaid(t *testing.T) {
 		t.Fatal("an unreadable store must not read as no job")
 	}
 }
+
+// An operator reaping a Failed instance is clearing up a provisioning failure that
+// never reached a runner, and it must not read as that demand's runner exiting empty.
+func TestAReapedFailedInstanceIsNotAnEmptyExit(t *testing.T) {
+	ctx := context.Background()
+	store := overdueStore(t)
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	key := domain.DemandKey{Repo: "o/r", RunID: 1, Attempt: 1, JobID: 8}
+	metadata, err := json.Marshal(schedulingMetadata{SchemaVersion: 1, Repo: key.Repo, Demand: key, Image: "base@1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id        string
+		state     operations.State
+		lastError string
+	}{{"failed", operations.StateFailed, "acquire"}, {"stopping", operations.StateStopping, ""}} {
+		if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at)
+			VALUES(?,?,1,0,'{}',?,?,?,?)`, row.id, row.state, metadata, row.lastError, now.UnixNano(), now.UnixNano()); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.reapInstance(ctx, tx, operations.Instance{ID: row.id, State: row.state, Version: 1}, now.UnixNano()); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exits, err := store.EmptyExits(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := exits[domain.EmptyExitKey{Demand: key, Image: "base@1"}]; got.Count != 1 {
+		t.Fatalf("only the instance that reached a runner counts: %+v", got)
+	}
+}

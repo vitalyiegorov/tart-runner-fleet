@@ -206,10 +206,6 @@ const (
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
 	eventSiblingSubstitute eventKind = "sibling_substitute"
-	// Neither of the next two is in faultThisTick's draw yet: drawing them shifts the
-	// stream onto #494, which reproduces without them. They ship exercised by pinned
-	// traces, and the draw line lands with #494's fix (docs/TESTING.md).
-	//
 	// eventEmptyExit is issue #493: GitHub keeps the next job to arrive queued and
 	// corroborated by REST, while every runner the fleet provisions for it
 	// registers, takes nothing, and exits, so its guest powers itself off. Count is
@@ -294,7 +290,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel, eventInodeExhausted,
-		eventSwapResidue, eventSwapThrash}
+		eventSwapResidue, eventSwapThrash, eventEmptyExit, eventRunnerRefused}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
