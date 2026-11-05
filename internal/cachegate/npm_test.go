@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +18,7 @@ import (
 const lanGate = "192.168.1.64:3017"
 
 // TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds is the route's whole policy,
-// stated independently of what Verdaccio would do with the request.
+// stated independently of what the registry would do with the request.
 func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 	for _, test := range []struct {
 		method, path string
@@ -49,6 +50,11 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodGet, "/npm/-/ping", 0},
 		{http.MethodGet, "/npm/-/package/lodash/dist-tags", 0},
 		{http.MethodGet, "/npm/-/package/@types%2fnode/dist-tags", 0},
+		// Attestations: where pnpm reads a publish time, before it falls back to a full document.
+		{http.MethodGet, "/npm/-/npm/v1/attestations/metro-runtime@0.87.1", 0},
+		{http.MethodHead, "/npm/-/npm/v1/attestations/metro-runtime@0.87.1", 0},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/@babel/core@7.0.0", 0},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/@babel%2fcore@7.0.0", 0},
 
 		// Every mutation, by method, whatever the path is.
 		{http.MethodPut, "/npm/lodash", http.StatusForbidden},                                  // publish
@@ -75,11 +81,26 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodPut, "/npm/-/_view/starredByUser", http.StatusForbidden},                   // legacy star
 		{http.MethodPost, "/npm/-/npm/v1/security/advisories/bulk?write=true", http.StatusForbidden},
 
+		// Attestations can be read and nothing else.
+		{http.MethodPost, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+		{http.MethodPut, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+		{http.MethodPatch, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+		{http.MethodDelete, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+
 		// Reads that name an account, a token, or Verdaccio's own surface.
 		{http.MethodGet, "/npm/-/whoami", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/user/org.couchdb.user:eve", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/npm/v1/tokens", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/npm/v1/security/audits", http.StatusNotFound},
+		// Attestations are one package at one version, and nothing near them.
+		{http.MethodGet, "/npm/-/npm/v1/attestations", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash@", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash%404.17.21", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash@4.17.21/extra", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/../tokens", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash@4.17.21%2f..%2ftokens", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/v1/search", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/verdaccio/data/packages", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/web/detail/lodash", http.StatusNotFound},
@@ -124,8 +145,7 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 }
 
 // TestDecideNPMRefusesAnythingButADirectLANAddress pins cloudflared to admin and
-// health: the tarball URLs Verdaccio advertises are built from this Host, so a
-// tunnel hostname here would both move cache data over it and advertise it.
+// health: a tunnel hostname here would move cache data over it.
 func TestDecideNPMRefusesAnythingButADirectLANAddress(t *testing.T) {
 	for host, allowed := range map[string]bool{
 		"192.168.1.64:3017":             true,
@@ -158,7 +178,7 @@ func TestDecideNPMRefusesAnythingButADirectLANAddress(t *testing.T) {
 	}
 }
 
-// npmBackend records what reaches the npm cache and answers like Verdaccio does.
+// npmBackend records what reaches the npm cache and answers like a registry does.
 type npmBackend struct {
 	*httptest.Server
 	mu       sync.Mutex
@@ -203,7 +223,11 @@ func npmGate(t *testing.T, npm *url.URL, logs io.Writer, counters *Counters) (*h
 	t.Helper()
 	cache, _ := upstream(t)
 	results, resultsSeen := upstream(t)
-	gate := httptest.NewServer(countingHandler(cache, results, npm, logs, counters))
+	var route *npmCache
+	if npm != nil {
+		route = newNPMCache(filepath.Join(t.TempDir(), "data"), npm)
+	}
+	gate := httptest.NewServer(countingHandler(cache, results, route, logs, counters))
 	t.Cleanup(gate.Close)
 	return gate, cache, resultsSeen
 }
@@ -214,10 +238,9 @@ func TestTheNPMRouteStripsTheGatePrefixAndKeepsAScopesEncoding(t *testing.T) {
 	for path, want := range map[string]string{
 		"/npm/lodash":                    "/lodash",
 		"/npm/@types%2fnode":             "/@types%2fnode",
-		"/npm/@types%2Fnode":             "/@types%2Fnode",
-		"/npm/@types/node":               "/@types/node",
+		"/npm/@other%2Fnode":             "/@other%2Fnode",
+		"/npm/@third/node":               "/@third/node",
 		"/npm/lodash/-/lodash-1.0.0.tgz": "/lodash/-/lodash-1.0.0.tgz",
-		"/npm/-/ping":                    "/-/ping",
 	} {
 		resp, err := http.Get(gate.URL + path)
 		if err != nil {
@@ -229,13 +252,13 @@ func TestTheNPMRouteStripsTheGatePrefixAndKeepsAScopesEncoding(t *testing.T) {
 			t.Fatalf("%s: status=%d body=%q, want %q", path, resp.StatusCode, body, want)
 		}
 	}
-	if _, uris, _ := backend.seen(); len(uris) != 6 {
+	if _, uris, _ := backend.seen(); len(uris) != 5 {
 		t.Fatalf("uris = %q", uris)
 	}
 }
 
 // TestTheNPMRouteForwardsNoGuestCredential: nothing a guest attaches reaches
-// Verdaccio except the short list of read headers a registry needs, so a header
+// the registry except the short list of read headers it needs, so a header
 // nobody thought of is refused by default.
 func TestTheNPMRouteForwardsNoGuestCredential(t *testing.T) {
 	const secret = "npm_S3CRET-token"
@@ -270,10 +293,8 @@ func TestTheNPMRouteForwardsNoGuestCredential(t *testing.T) {
 			t.Errorf("%s carried the credential to the backend", name)
 		}
 	}
-	host := strings.TrimPrefix(gate.URL, "http://")
-	want := http.Header{"Accept": {"application/vnd.npm.install-v1+json"}, "Accept-Encoding": {"gzip"},
-		"If-None-Match": {`"abc"`}, "If-Modified-Since": {"Mon, 02 Jan 2006 15:04:05 GMT"}, "Range": {"bytes=0-1"},
-		"If-Range": {`"abc"`}, "User-Agent": {"pnpm/11"}, "X-Forwarded-Host": {host}, "X-Forwarded-Proto": {"http"}}
+	host := target.Host
+	want := http.Header{"Accept": {npmAbbreviated}, "Accept-Encoding": {"gzip"}, "User-Agent": {npmUserAgent}}
 	for name := range requests[0].Header {
 		if _, ok := want[name]; !ok {
 			t.Errorf("unexpected header %s reached the backend", name)
@@ -285,7 +306,7 @@ func TestTheNPMRouteForwardsNoGuestCredential(t *testing.T) {
 		}
 	}
 	if requests[0].Host != host {
-		t.Errorf("host = %q, want the address the guest used, %q", requests[0].Host, host)
+		t.Errorf("host = %q, want the registry's own, %q", requests[0].Host, host)
 	}
 	if strings.Contains(logs.String(), secret) {
 		t.Fatalf("the gate logged the credential: %q", logs.String())
@@ -304,6 +325,8 @@ func TestARefusedMutationNeverReachesTheBackendAndLeavesNoTokenInTheLog(t *testi
 		{http.MethodPut, "/npm/-/user/org.couchdb.user:" + secret},
 		{http.MethodPut, "/npm/lodash"},
 		{http.MethodPost, "/npm/-/npm/v1/security/advisories/bulk"},
+		{http.MethodPost, "/npm/-/npm/v1/attestations/lodash@4.17.21"},
+		{http.MethodDelete, "/npm/-/npm/v1/attestations/lodash@4.17.21"},
 	} {
 		req, _ := http.NewRequest(request.method, gate.URL+request.path, strings.NewReader("{}"))
 		req.Header.Set("Authorization", "Bearer "+secret)
@@ -354,7 +377,7 @@ func TestTheNPMRouteLeavesEveryOtherRouteAlone(t *testing.T) {
 	backend, target := newNPMBackend(t)
 	cache, cacheSeen := upstream(t)
 	results, resultsSeen := upstream(t)
-	gate := httptest.NewServer(countingHandler(cache, results, target, io.Discard, &Counters{}))
+	gate := httptest.NewServer(countingHandler(cache, results, newNPMCache(filepath.Join(t.TempDir(), "data"), target), io.Discard, &Counters{}))
 	t.Cleanup(gate.Close)
 	for _, path := range []string{"/download/x", "/npmish/x", "/twirp/x/y", "/lodash"} {
 		resp, err := http.Get(gate.URL + path)
@@ -455,19 +478,25 @@ func TestCountersReportTheNPMRouteOnTheExistingShape(t *testing.T) {
 	}
 }
 
-func TestExecuteRefusesAnNPMUpstreamOffLoopback(t *testing.T) {
-	for _, npm := range []string{"http://192.168.1.64:3020", "http://localhost:3020", "https://registry.npmjs.org", "127.0.0.1:3020",
-		"http://127.0.0.1:3020/npm", "https://127.0.0.1:3020", "http://user:pass@127.0.0.1:3020"} {
+func TestExecuteRefusesAnUnusableNPMCacheOrRegistry(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"relative cache": {"--npm-cache", "data"},
+		"unclean cache":  {"--npm-cache", "/tmp/../data"},
+		"no scheme":      {"--npm-cache", "/data", "--npm-upstream", "127.0.0.1:3020"},
+		"other scheme":   {"--npm-cache", "/data", "--npm-upstream", "ftp://registry.example"},
+		"credentials":    {"--npm-cache", "/data", "--npm-upstream", "https://user:pass@registry.example"},
+		"a path":         {"--npm-cache", "/data", "--npm-upstream", "https://registry.example/npm"},
+		"unparseable":    {"--npm-cache", "/data", "--npm-upstream", "http://[::1"},
+	} {
 		var stderr bytes.Buffer
-		code := Execute(context.Background(), []string{"--listen", "127.0.0.1:0", "--upstream", "http://127.0.0.1:1", "--npm-upstream", npm},
-			io.Discard, &stderr)
-		if code != 2 || !strings.Contains(stderr.String(), "--npm-upstream") {
-			t.Fatalf("%s: code=%d stderr=%q", npm, code, stderr.String())
+		code := Execute(context.Background(), append([]string{"--listen", "127.0.0.1:0", "--upstream", "http://127.0.0.1:1"}, extra...), io.Discard, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "--npm-cache") {
+			t.Fatalf("%s: code=%d stderr=%q", name, code, stderr.String())
 		}
 	}
 }
 
-func TestExecuteServesTheNPMRouteFromItsUpstream(t *testing.T) {
+func TestExecuteServesTheNPMRouteFromItsCache(t *testing.T) {
 	_, target := newNPMBackend(t)
 	address := freeAddress(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -476,9 +505,9 @@ func TestExecuteServesTheNPMRouteFromItsUpstream(t *testing.T) {
 	cache, _ := upstream(t)
 	go func() {
 		done <- Execute(ctx, []string{"--listen", address, "--upstream", cache.String(), "--results-upstream", cache.String(),
-			"--npm-upstream", target.String()}, &stdout, io.Discard)
+			"--npm-cache", filepath.Join(t.TempDir(), "data"), "--npm-upstream", target.String()}, &stdout, io.Discard)
 	}()
-	if body := waitFor(t, "http://"+address+"/npm/-/ping"); body != "npm:/-/ping" {
+	if body := waitFor(t, "http://"+address+"/npm/lodash"); body != "npm:/lodash" {
 		t.Fatalf("body = %q", body)
 	}
 	cancel()
@@ -487,6 +516,29 @@ func TestExecuteServesTheNPMRouteFromItsUpstream(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "npm "+target.Redacted()) {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestARegistryWithNoCacheIsNoRoute: Omarchy's old drop-in passes --npm-upstream at a Verdaccio. A
+// gate restarted on it after the release must start, and must serve no npm route.
+func TestARegistryWithNoCacheIsNoRoute(t *testing.T) {
+	address := freeAddress(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	cache, _ := upstream(t)
+	go func() {
+		done <- Execute(ctx, []string{"--listen", address, "--upstream", cache.String(), "--results-upstream", cache.String(),
+			"--npm-upstream", "http://127.0.0.1:3020"}, io.Discard, io.Discard)
+	}()
+	waitFor(t, "http://"+address+"/health")
+	response, err := http.Get("http://" + address + "/npm/lodash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	cancel()
+	if code := <-done; code != 0 || response.StatusCode != http.StatusNotFound {
+		t.Fatalf("code=%d status=%d", code, response.StatusCode)
 	}
 }
 
@@ -533,7 +585,7 @@ func TestNPMReadyIsFalseWhenNothingAnswers(t *testing.T) {
 func TestAGateWithNoNPMCacheExportsNoNPMSeries(t *testing.T) {
 	_, target := newNPMBackend(t)
 	cache, _ := upstream(t)
-	for name, extra := range map[string][]string{"off": nil, "on": {"--npm-upstream", target.String()}} {
+	for name, extra := range map[string][]string{"off": nil, "on": {"--npm-cache", filepath.Join(t.TempDir(), "data"), "--npm-upstream", target.String()}} {
 		t.Run(name, func(t *testing.T) {
 			gateAddress, metricsAddress := freeAddress(t), freeAddress(t)
 			ctx, cancel := context.WithCancel(context.Background())

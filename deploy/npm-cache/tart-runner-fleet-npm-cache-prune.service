@@ -1,11 +1,11 @@
 # Keeps the npm cache inside its limits (ADR 0093). Install beside its timer in
 # ~/.config/systemd/user/, and the script as
-# ~/.config/tart-runner-fleet-npm-cache/prune-npm-cache.py. A failed run means it stopped
-# the cache, or could not, because it could not enforce the limits: read its journal. If it is
-# killed at its timeout or never starts, the script cannot act, so OnFailure= stops the cache.
+# ~/.config/tart-runner-fleet-npm-cache/prune-npm-cache.py. A failed run means it froze the cache,
+# or could not, because it could not enforce the limits: read its journal. If it is killed at its
+# timeout or never starts, the script cannot act, so OnFailure= freezes the cache from outside.
 [Unit]
 Description=tart-runner-fleet npm cache limits (ADR 0093)
-OnFailure=tart-runner-fleet-npm-cache-stop.service
+OnFailure=tart-runner-fleet-npm-cache-freeze.service
 
 [Service]
 Type=oneshot
@@ -14,10 +14,10 @@ ExecStart=/usr/bin/python3 -I %h/.config/tart-runner-fleet-npm-cache/prune-npm-c
 TimeoutStartSec=300
 Nice=15
 IOSchedulingClass=idle
-# It can write only to its storage, and it speaks only to systemd.
+# It can write only to its storage, and it speaks to nothing.
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/share/tart-runner-fleet-npm-cache
 PrivateTmp=yes
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=none

@@ -430,7 +430,7 @@ A job needs no change.
 | --- | --- |
 | pnpm 11 and 12, with or without `--frozen-lockfile` | Yes. Integrity, `trustPolicy` and `minimumReleaseAge` still fail when they should, and the lockfile never names the gate |
 | `npm ci` | Yes. npm rewrites the lockfile's `registry.npmjs.org` URLs on its own |
-| `npm install` | Yes. A lockfile it **generates** names the gate |
+| `npm install` | Yes |
 | `npx`, `npm exec`, `npm install --global` | Yes |
 | Modern Yarn, Bun | No, they go direct. No setting is added for them |
 | Corepack | Its own fetch of pnpm goes direct. pnpm 12's self-bootstrap then uses the cache |
@@ -456,7 +456,7 @@ A job must opt out to:
   own audit step only loses its summary;
 - **run `npm audit signatures`, `npm search`** or anything else that needs the registry
   itself, which answers 404;
-- **commit a generated `package-lock.json`**, which would otherwise name the gate;
+- **commit a lockfile it generates**, because pnpm then records `registry.npmjs.org` `tarball:` lines;
 - **read a version published in the last 10 minutes.**
 
 **Private packages keep working.** Give a private scope its own

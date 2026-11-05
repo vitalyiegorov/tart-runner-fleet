@@ -1,38 +1,39 @@
 #!/usr/bin/env python3
-"""Keep a node's npm cache inside its limits (ADR 0093). Verdaccio does not prune.
+"""Keep a node's npm cache inside its limits (ADR 0093).
 
-Run by tart-runner-fleet-npm-cache-prune.timer. Past --high-gib, or with the filesystem
-under --reserve-gib free, it evicts whole packages, least recently used first, down to
---low-gib. A whole package, because metadata is the larger part of this cache and a
-tarball-only prune would never reclaim it. The next read fetches an evicted package again.
+Run by tart-runner-fleet-npm-cache-prune.timer. Past --high-gib, or with the filesystem under
+--reserve-gib free, it evicts the least recently used objects down to --low-gib. The gate fetches
+an evicted object again on its next read, and a reader that already has it open keeps its bytes.
 
 It deletes only inside the one directory it is pinned to, $HOME/.local/share/
-tart-runner-fleet-npm-cache/data, reached with no symlink and no mount at or under it, and
-every delete is relative to a directory it has verified. It never evicts a package touched
-in the last --grace-minutes or holding a file that is not plainly finished, and it looks
-again immediately before each delete, because a running install has no fallback.
+tart-runner-fleet-npm-cache/data, reached with no symlink and no mount at or under it, and every
+delete is relative to that verified directory. It leaves alone anything touched in the last
+--grace-minutes, and it looks again immediately before each delete.
 
-Any enforcement failure stops the cache and exits 1, and exit 3 means it could not confirm
-that stop. New guests then go direct and `fleet doctor` says `npm cache not ready`. Bringing
-the cache back is an operator's `systemctl --user start`.
+The gate writes nothing it can't: a directory with no write permission is a cache that serves what
+it holds and passes the rest straight to npmjs. So any failure to enforce freezes the directory
+and exits 1, and the next run that gets back inside the limits thaws it. Exit 3 means it could not
+confirm a freeze, or would not trust the path enough to try. The unit's OnFailure= then freezes it
+from outside, as it does if systemd kills this script or never starts it.
 
 This checks growth between runs and has no strict bound on it: only a kernel quota could do that.
-If systemd kills this script or never starts it, the unit's OnFailure= stops the cache instead.
 """
 import argparse
 import errno
 import math
 import os
-import shutil
+import re
 import stat
-import subprocess
 import sys
 import time
 
 GIB = 1024**3
 STORAGE = ".local/share/tart-runner-fleet-npm-cache"
-SERVICE = "tart-runner-fleet-npm-cache.service"
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+WRITABLE = 0o700
+FROZEN = 0o500
+OBJECT = re.compile(r"^[0-9a-f]{64}$")
+TEMP = re.compile(r"^\.tmp-[0-9]+$")
 SETTLE_POLL_SECONDS = 5
 
 
@@ -52,15 +53,13 @@ def free_bytes(fd):
 
 
 def pin_data(data):
-    """An fd for the expected data directory, or None if Verdaccio has not created it yet."""
+    """An fd for the expected data directory, or None if the gate has not created it yet."""
     home = os.environ.get("HOME", "")
     if not os.path.isabs(home) or os.path.normpath(home) != home:
         raise Refused(f"HOME {home!r} is not a clean absolute path")
     expected = os.path.join(home, STORAGE, "data")
     if data != expected:
         raise Refused(f"--data {data!r} is not the npm cache's storage, {expected}")
-    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
-        raise Refused("this platform's rmtree cannot delete safely")
     for mount in mount_points():
         if mount == expected or mount.startswith(expected + "/"):
             raise Refused(f"{mount} is a mount at or under the npm cache's storage")
@@ -86,155 +85,95 @@ def pin_data(data):
         os.close(parent)
 
 
-def real_directories(fd):
+def last_used(info):
+    return max(info.st_atime, info.st_mtime)
+
+
+def listing(fd, device):
+    """Every stored object and temp as {name: stat}. Anything else means this is not what the gate
+    wrote, so nothing here can be trusted to be deletable."""
+    found = {}
     with os.scandir(fd) as entries:
-        return [entry.name for entry in entries if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(".")]
+        for entry in entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:  # The gate replaced it, or removed its temp, meanwhile.
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_dev != device or not (OBJECT.match(entry.name) or TEMP.match(entry.name)):
+                raise Refused(f"{entry.name!r} does not belong in a flat npm cache")
+            found[entry.name] = info
+    return found
 
 
-class Package:
-    """What a package directory holds right now. Only a package that is plainly at rest,
-    all on the cache's own device, may be evicted."""
-
-    def __init__(self, parent_fd, name, device):
-        self.used, self.last_used, self.at_rest = 0, 0.0, True
-        fd = os.open(name, DIRECTORY, dir_fd=parent_fd)
-        try:
-            # Directories count by mtime only: a create or rename inside changes it, and this
-            # very walk changes their atime.
-            for _, _, files, root in os.fwalk(".", dir_fd=fd, follow_symlinks=False):
-                info = os.fstat(root)
-                self.used += info.st_blocks * 512
-                self.last_used = max(self.last_used, info.st_mtime)
-                self.at_rest = self.at_rest and info.st_dev == device
-                for file in files:
-                    self._count(root, file, device)
-        finally:
-            os.close(fd)
-
-    def _count(self, root, file, device):
-        try:
-            info = os.lstat(file, dir_fd=root)
-        except FileNotFoundError:  # Verdaccio renamed or removed it meanwhile.
-            return
-        self.used += info.st_blocks * 512
-        self.last_used = max(self.last_used, info.st_atime, info.st_mtime)
-        finished = stat.S_ISREG(info.st_mode) and (file == "package.json" or file.endswith(".tgz"))
-        self.at_rest = self.at_rest and finished and info.st_dev == device
-
-
-def open_scope(data_fd, scope, device):
-    """The verified directory a package sits in: data itself, or one of its `@scope`s. None if it
-    is not a real directory on this device any more, which is never followed."""
-    if scope is None:
-        return data_fd
+def evict(fd, name, device, oldest_allowed):
+    """Delete one file if, looking again now, it is still idle. Returns what was reclaimed."""
     try:
-        fd = os.open(scope, DIRECTORY, dir_fd=data_fd)
-    except OSError:
-        return None
-    if os.fstat(fd).st_dev != device:
-        os.close(fd)
-        return None
-    return fd
-
-
-def listing(data_fd, device):
-    """Every package, as {(scope, name): Package}."""
-    packages = {}
-    for entry in real_directories(data_fd):
-        scope = entry if entry.startswith("@") else None
-        parent = open_scope(data_fd, scope, device)
-        if parent is None:
-            continue
-        try:
-            for name in real_directories(parent) if scope else [entry]:
-                try:
-                    packages[(scope, name)] = Package(parent, name, device)
-                except (FileNotFoundError, NotADirectoryError):
-                    continue  # Gone or swapped since it was listed.
-        finally:
-            if scope:
-                os.close(parent)
-    return packages
-
-
-def evict(data_fd, key, device, grace_seconds):
-    """Delete one package if, looking again now, it is still idle. Returns what was reclaimed."""
-    scope, name = key
-    parent = open_scope(data_fd, scope, device)
-    if parent is None:
-        return 0
-    try:
-        try:
-            now = Package(parent, name, device)
-        except OSError:
-            return 0  # Gone, or replaced by something that is not a real directory.
-        if not now.at_rest or now.last_used >= time.time() - grace_seconds:
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_dev != device or last_used(info) >= oldest_allowed:
             return 0
-        shutil.rmtree(name, dir_fd=parent)
-        return now.used
-    finally:
-        if scope:
-            os.close(parent)
+        os.unlink(name, dir_fd=fd)
+    except FileNotFoundError:
+        return 0
+    return info.st_blocks * 512
 
 
-def enforce(args):
+def allocated(found):
+    return sum(info.st_blocks * 512 for info in found.values())
+
+
+def enforce(fd, args):
     """None when inside the limits, otherwise what is wrong."""
     high, low, reserve = args.high_gib * GIB, args.low_gib * GIB, args.reserve_gib * GIB
-    if not all(math.isfinite(limit) for limit in (high, low, reserve)) or not 0 < low < high or reserve < 0:
-        raise Refused(f"limits make no sense: high {args.high_gib}, low {args.low_gib}, reserve {args.reserve_gib}")
-    data_fd = pin_data(args.data)
-    if data_fd is None:
-        return None
-    try:
-        device = os.fstat(data_fd).st_dev
-        grace_seconds = args.grace_minutes * 60
-        packages = listing(data_fd, device)
-        size = sum(package.used for package in packages.values())
-        free = free_bytes(data_fd)
-        evicted, reclaimed = 0, 0
-        if size > high or free < reserve:
-            for key in sorted(packages, key=lambda key: packages[key].last_used):
-                if size - reclaimed <= low and free + reclaimed >= reserve:
-                    break
-                freed = evict(data_fd, key, device, grace_seconds)
-                evicted += 1 if freed else 0
-                reclaimed += freed
-            # Measure again rather than trust the arithmetic. btrfs frees asynchronously, so wait
-            # a little for space the deletes could have returned, and never claim it unseen.
-            size = sum(package.used for package in listing(data_fd, device).values())
-            free = free_bytes(data_fd)
-            deadline = time.monotonic() + args.settle_seconds
-            while reclaimed and free < reserve and time.monotonic() < deadline:
-                time.sleep(SETTLE_POLL_SECONDS)
-                free = free_bytes(data_fd)
-        print(f"npm-cache: size={size / GIB:.2f}GiB free={free / GIB:.1f}GiB evicted={evicted} reclaimed={reclaimed / GIB:.2f}GiB")
-        faults = []
-        if size > high:
-            faults.append(f"still {size / GIB:.2f}GiB, over the {args.high_gib}GiB limit")
-        if free < reserve:
-            faults.append(f"{free / GIB:.1f}GiB free, under the {args.reserve_gib}GiB reserve")
-        return "; ".join(faults) or None
-    finally:
-        os.close(data_fd)
+    device = os.fstat(fd).st_dev
+    found = listing(fd, device)
+    free = free_bytes(fd)
+    oldest_allowed = time.time() - args.grace_minutes * 60
+    # Thaw first: it cannot evict from a frozen directory, and a frozen cache has nothing to protect.
+    os.fchmod(fd, WRITABLE)
+    reclaimed = sum(evict(fd, name, device, oldest_allowed) for name in found if TEMP.match(name))
+    objects = {name: info for name, info in found.items() if OBJECT.match(name)}
+    size = allocated(objects)
+    evicted = 0
+    if size > high or free < reserve:
+        for name in sorted(objects, key=lambda name: last_used(objects[name])):
+            if size - reclaimed <= low and free + reclaimed >= reserve:
+                break
+            freed = evict(fd, name, device, oldest_allowed)
+            evicted += 1 if freed else 0
+            reclaimed += freed
+    # Measure again rather than trust the arithmetic. btrfs frees asynchronously, so wait a little
+    # for space the deletes could have returned, and never claim it unseen.
+    size = allocated(listing(fd, device))
+    could_recover = free + reclaimed >= reserve
+    free = free_bytes(fd)
+    deadline = time.monotonic() + args.settle_seconds
+    while reclaimed and could_recover and free < reserve and time.monotonic() < deadline:
+        time.sleep(SETTLE_POLL_SECONDS)
+        free = free_bytes(fd)
+    print(f"npm-cache: size={size / GIB:.2f}GiB free={free / GIB:.1f}GiB evicted={evicted} reclaimed={reclaimed / GIB:.2f}GiB")
+    faults = []
+    if size > high:
+        faults.append(f"still {size / GIB:.2f}GiB, over the {args.high_gib}GiB limit")
+    if free < reserve:
+        faults.append(f"{free / GIB:.1f}GiB free, under the {args.reserve_gib}GiB reserve")
+    return "; ".join(faults) or None
 
 
-def stop_cache():
-    """Stop the cache and confirm it. 1 when it is down, 3 when that cannot be confirmed."""
+def freeze(fd):
+    """Stop the cache growing and confirm it. 1 when it cannot grow, 3 when that is unconfirmed."""
     try:
-        subprocess.run(["systemctl", "--user", "stop", SERVICE], check=False, timeout=180)
-        state = subprocess.run(["systemctl", "--user", "is-active", SERVICE], check=False, timeout=30,
-                               capture_output=True, text=True).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as error:
-        state = f"unknown ({error})"
-    if state in ("inactive", "failed"):
-        return 1
-    print(f"npm-cache: could not stop {SERVICE}: it reads {state}", file=sys.stderr)
+        os.fchmod(fd, FROZEN)
+        if stat.S_IMODE(os.fstat(fd).st_mode) & 0o222 == 0:
+            return 1
+    except OSError as error:
+        print(f"npm-cache: {error}", file=sys.stderr)
+    print("npm-cache: could not freeze the cache", file=sys.stderr)
     return 3
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--data", required=True, help="Verdaccio's storage directory, which must be the expected one")
+    parser.add_argument("--data", required=True, help="the gate's --npm-cache directory, which must be the expected one")
     parser.add_argument("--high-gib", type=float, default=40.0, help="evict past this size")
     parser.add_argument("--low-gib", type=float, default=32.0, help="evict down to this size")
     parser.add_argument("--reserve-gib", type=float, default=100.0, help="free space the filesystem must keep")
@@ -242,13 +181,23 @@ def main():
     parser.add_argument("--settle-seconds", type=float, default=60.0, help="how long deleted space may take to come back")
     args = parser.parse_args()
     try:
-        fault = enforce(args)
-    except Exception as error:  # Every failure to enforce stops the cache, whatever it was.
+        limits = (args.high_gib, args.low_gib, args.reserve_gib)
+        if not all(math.isfinite(limit) for limit in limits) or not 0 < args.low_gib < args.high_gib or args.reserve_gib < 0:
+            raise Refused(f"limits make no sense: high {args.high_gib}, low {args.low_gib}, reserve {args.reserve_gib}")
+        fd = pin_data(args.data)
+    except Exception as error:  # Nothing is pinned, so nothing here can be trusted to freeze.
+        print(f"npm-cache: {type(error).__name__}: {error}", file=sys.stderr)
+        sys.exit(3)
+    if fd is None:
+        sys.exit(0)
+    try:
+        fault = enforce(fd, args)
+    except Exception as error:  # Every failure to enforce freezes the cache, whatever it was.
         fault = f"{type(error).__name__}: {error}"
     if fault is None:
         sys.exit(0)
-    print(f"npm-cache: stopping {SERVICE}: {fault}", file=sys.stderr)
-    sys.exit(stop_cache())
+    print(f"npm-cache: freezing the cache: {fault}", file=sys.stderr)
+    sys.exit(freeze(fd))
 
 
 if __name__ == "__main__":

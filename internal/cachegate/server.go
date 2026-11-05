@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -53,14 +54,15 @@ func Handler(cache, results *url.URL, logOutput io.Writer) http.Handler {
 
 // countingHandler is Handler counting the bytes of every request it proxies.
 // A nil npm means this gate has no npm cache, and its route answers 404.
-func countingHandler(cache, results, npm *url.URL, logOutput io.Writer, counters *Counters) http.Handler {
+func countingHandler(cache, results *url.URL, npm *npmCache, logOutput io.Writer, counters *Counters) http.Handler {
 	logger := slog.New(slog.NewTextHandler(logOutput, nil))
-	proxies := map[Upstream]*httputil.ReverseProxy{
+	proxies := map[Upstream]http.Handler{
 		CacheServer: httputil.NewSingleHostReverseProxy(cache),
 		Results:     resultsProxy(results),
 	}
 	if npm != nil {
-		proxies[NPM] = npmProxy(npm)
+		proxies[NPM] = npm
+		npm.logger, npm.counters = logger, counters
 		counters.npmEnabled = true
 	}
 	limit := &refusalLog{logger: logger}
@@ -167,21 +169,23 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	resultsRaw := flags.String("results-upstream", defaultResults, "absolute URL of GitHub's results service")
 	metricsListen := flags.String("metrics-listen", "", "optional loopback host:port serving /metrics byte counters")
 	identityKey := flags.String("identity-key", "", "optional file holding the key the gate proves itself with, created if absent")
-	npmRaw := flags.String("npm-upstream", "", "optional loopback URL of the npm read-through cache served under /npm/")
+	npmDir := flags.String("npm-cache", "", "optional absolute directory of the npm read-through cache served under /npm/")
+	npmRaw := flags.String("npm-upstream", defaultNPMUpstream, "absolute URL of the npm registry the cache reads through to")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	cache, cacheOK := absoluteURL(*cacheRaw)
 	results, resultsOK := absoluteURL(*resultsRaw)
-	var npm *url.URL
-	npmOK := true
-	if *npmRaw != "" {
-		npm, npmOK = validNPMUpstream(*npmRaw)
-	}
+	registry, npmOK := validNPMUpstream(*npmRaw)
+	npmOK = npmOK && (*npmDir == "" || (filepath.IsAbs(*npmDir) && filepath.Clean(*npmDir) == *npmDir))
 	if flags.NArg() != 0 || *listen == "" || !cacheOK || !resultsOK || !npmOK || (*metricsListen != "" && !loopbackAddress(*metricsListen)) {
 		_, _ = fmt.Fprintln(stderr, "usage: fleet cache-gate --listen host:port --upstream http://127.0.0.1:port "+
-			"[--results-upstream url] [--metrics-listen 127.0.0.1:port] [--identity-key path] [--npm-upstream http://127.0.0.1:port]")
+			"[--results-upstream url] [--metrics-listen 127.0.0.1:port] [--identity-key path] [--npm-cache dir] [--npm-upstream url]")
 		return 2
+	}
+	var npm *npmCache
+	if *npmDir != "" {
+		npm = newNPMCache(*npmDir, registry)
 	}
 	var identity ed25519.PrivateKey
 	if *identityKey != "" {
@@ -216,7 +220,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	_, _ = fmt.Fprintf(stdout, "cache-gate: serving %s, cache %s, results %s\n", listener.Addr(), cache.Redacted(), results.Redacted())
 	if npm != nil {
-		_, _ = fmt.Fprintf(stdout, "cache-gate: npm %s under %s\n", npm.Redacted(), NPMPrefix)
+		_, _ = fmt.Fprintf(stdout, "cache-gate: npm %s under %s, cached in %s\n", registry.Redacted(), NPMPrefix, *npmDir)
 	}
 	select {
 	case err := <-served:
