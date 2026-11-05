@@ -2200,7 +2200,7 @@ from home. Cache data never crosses cloudflared, which stays admin and health on
 | --- | --- | --- |
 | `tart-runner-fleet-npm-cache.service` | Verdaccio, pinned by digest, a rootless quadlet | `127.0.0.1:3020` only |
 | `tart-runner-fleet-cache-gate.service.d/npm-cache.conf` | gives the gate its `/npm/` route | the gate's existing `:3017` |
-| `cacheGate.npmRegistry` in a node's config | what that node's guests are given, on each launch's proof | — |
+| `cacheGate.npmRegistry` in a node's config | the registry that node's guests may be given, on each launch's proof | — |
 
 Nothing changes for a node until its config has `npmRegistry`. The first two pieces can
 run for days beforehand with no guest using them.
@@ -2248,11 +2248,16 @@ loopback:
 ```
 
 Then the MacBook, with the Mac mini's values, while it is at home. After each, `fleet
-doctor` must read `verified … npm cache …`, and one job must move the counter:
+doctor` on that node must read `verified … npm cache …`, and one of its jobs must move the
+counter. The counter lives in the gate, so **run this on Omarchy, whichever node ran the
+job**. It counts every node's guests, so read it across a job on that node alone:
 
 ```sh
-curl -fsS http://127.0.0.1:3019/metrics | grep 'upstream="npm"'
+ssh omarchy "curl -fsS http://127.0.0.1:3019/metrics | grep 'upstream=\"npm\"'"
 ```
+
+That doctor row is the host's own probe. A guest also asks from its own network and can
+stay direct while the row passes, which is why a job moving the counter is the check.
 
 Validation refuses a hostname, a public address, HTTPS and anything but the gate's own
 host and port, so a tunnel address cannot be configured. Ubuntu and the Mac Studio never

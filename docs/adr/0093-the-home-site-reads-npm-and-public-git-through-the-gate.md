@@ -129,7 +129,7 @@ that mechanism does not apply. Config validation also refused a gate on a podman
 outright. Both are resolved by making the registry a separate choice that takes the
 same path on every guest, since both backends start guests through `exec`:
 
-| Node | `cacheGate.url` (what the host proves) | `cacheGate.npmRegistry` (what a guest uses) |
+| Node | `cacheGate.url` (what the host proves) | `cacheGate.npmRegistry` (what a guest may be given) |
 | --- | --- | --- |
 | Mac mini, MacBook (Tart) | `http://192.168.1.64:3017/` | `http://192.168.1.64:3017/npm/` |
 | Omarchy (Podman) | `http://127.0.0.1:3017/` | `http://host.containers.internal:3017/npm/` |
@@ -259,7 +259,7 @@ Each step leaves every node working, so a step can stop anywhere:
 2. On Omarchy, install the quadlet and config, then the gate drop-in, and restart the
    gate. Guests still have no setting.
 3. Add `npmRegistry` to the Mac mini and restart its daemon. `fleet doctor` must read
-   `npm cache`. Run one job and watch the counter.
+   `npm cache`. Run one job and watch the counter, on Omarchy, where the gate keeps it.
 4. Then Omarchy, then the MacBook while it is at home.
 
 **Rollback: remove `npmRegistry` from a node's config and restart its daemon.** New
