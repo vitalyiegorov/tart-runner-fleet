@@ -1456,6 +1456,26 @@ grep 'identity public key' ~/.local/share/tart-runner-fleet/state/cache-gate.log
 ADR 0078's 2026-11-04 amendment gives the rollout order. To turn the check off,
 remove `cacheGate` from the node's config and restart its daemon.
 
+On a podman node that configures the gate for its npm cache, the reason says guests
+reach npm directly instead. Its Actions cache is image `ENV`, so a failed proof does
+not change it.
+
+### `npm cache not ready`
+
+`fleet doctor` reports `FAIL  cache gate` (exit 5) with this reason when the gate
+proved itself but its `/npm/` route did not answer. Nothing is unhealthy: guests
+launched since go straight to npmjs. At home it is a fault, because every npm byte is
+back on the uplink and this row is the only signal. Check Omarchy:
+
+```sh
+systemctl --user status tart-runner-fleet-npm-cache.service
+curl -fsS http://127.0.0.1:3020/-/ping    # the server
+curl -fsS http://127.0.0.1:3017/npm/-/ping # through the gate
+```
+
+The second answering 404 means the gate has no `--npm-upstream`, so its drop-in is
+not installed. See [The npm read-through cache](#the-npm-read-through-cache-adr-0093).
+
 ### A dead guest with no console to leave behind
 
 `fleet doctor` reports `FAIL  guest console` when a node boots Linux guests and
@@ -2110,8 +2130,10 @@ refused on any non-loopback address, and the guest-facing `:3017` never serves
 it. The shipped unit passes the flag, and `--identity-key` beside it. Install
 that unit only once the node's `fleet` release understands both; an older release
 exits with its usage text and systemd restarts it in a loop.
-`cache/to_guest` is what guests read from the LAN cache. Subtract its increase
-from `fleet traffic`'s receive bytes for the WAN estimate (see
+`cache/to_guest` is what guests read from the LAN cache, and `npm/to_guest` what they
+read from the npm cache (ADR 0093). The npm series exist only on a gate with
+`--npm-upstream`, so their absence means the route is off. Subtract both increases from `fleet traffic`'s
+receive bytes for the WAN estimate (see
 [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md#analyze-ci-traffic)).
 
 ### Health
@@ -2167,6 +2189,163 @@ sending is never interrupted.
 3. Then, if wanted, `systemctl --user disable --now tart-runner-fleet-cache-gate.service`
    and `systemctl --user stop tart-runner-fleet-actions-cache.service`. The
    cache directory can stay; it is only read again when the image is.
+
+## The npm read-through cache (ADR 0093)
+
+The home site only. Omarchy hosts it. Omarchy, the Mac mini and the MacBook read it over
+the home LAN. Ubuntu and the Mac Studio stay direct, and the MacBook goes direct away
+from home. Cache data never crosses cloudflared, which stays admin and health only.
+
+| Piece | What it is | Where it listens |
+| --- | --- | --- |
+| `tart-runner-fleet-npm-cache.service` | Verdaccio, pinned by digest, a rootless quadlet | `127.0.0.1:3020` only |
+| `tart-runner-fleet-cache-gate.service.d/npm-cache.conf` | gives the gate its `/npm/` route | the gate's existing `:3017` |
+| `cacheGate.npmRegistry` in a node's config | the registry that node's guests may be given, on each launch's proof | — |
+
+Nothing changes for a node until its config has `npmRegistry`. The first two pieces can
+run for days beforehand with no guest using them.
+
+### Install on Omarchy
+
+Do this between rollouts, never during another node update or drain. The `fleet` release
+must understand `--npm-upstream`, because an older one exits with its usage text and
+systemd restarts it in a loop.
+
+```sh
+set -eu
+REPO=/path/to/a/clone/of/tart-runner-fleet
+mkdir -p ~/.config/containers/systemd ~/.config/tart-runner-fleet-npm-cache \
+  ~/.local/share/tart-runner-fleet-npm-cache \
+  ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.d
+install -m 0644 "$REPO/deploy/npm-cache/verdaccio.yaml" ~/.config/tart-runner-fleet-npm-cache/config.yaml
+install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache.container" ~/.config/containers/systemd/
+install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-cache-gate.service.d/npm-cache.conf" \
+  ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.d/
+systemctl --user daemon-reload
+systemctl --user start tart-runner-fleet-npm-cache.service
+curl -fsS http://127.0.0.1:3020/-/ping
+systemctl --user restart tart-runner-fleet-cache-gate.service
+curl -fsS http://127.0.0.1:3017/npm/-/ping
+```
+
+Restarting the gate interrupts Actions cache calls in flight, which those jobs treat as
+warnings, and artifact uploads, which they do not. Do it with no guest running.
+
+### Enable a node
+
+Add the key, `fleet config validate`, swap the file in, and restart the daemon. The Mac
+mini goes first, because it never roams:
+
+```json
+"cacheGate": {"url": "http://192.168.1.64:3017/", "publicKey": "…", "npmRegistry": "http://192.168.1.64:3017/npm/"}
+```
+
+Then Omarchy, whose guests need pasta's name for the host, and which proves the gate on
+loopback:
+
+```json
+"cacheGate": {"url": "http://127.0.0.1:3017/", "publicKey": "…", "npmRegistry": "http://host.containers.internal:3017/npm/"}
+```
+
+Then the MacBook, with the Mac mini's values, while it is at home. After each, `fleet
+doctor` on that node must read `verified … npm cache …`, and one of its jobs must move the
+counter. The counter lives in the gate, so **run this on Omarchy, whichever node ran the
+job**. It counts every node's guests, so read it across a job on that node alone:
+
+```sh
+ssh omarchy "curl -fsS http://127.0.0.1:3019/metrics | grep 'upstream=\"npm\"'"
+```
+
+That doctor row is the host's own probe. A guest also asks from its own network and can
+stay direct while the row passes, which is why a job moving the counter is the check.
+
+Validation refuses a hostname, a public address, HTTPS and anything but the gate's own
+host and port, so a tunnel address cannot be configured. Ubuntu and the Mac Studio never
+get this key.
+
+### What a launch does
+
+The node proves the gate and removes any `~/.npmrc` an earlier attempt wrote. If it cannot
+show that file is gone, the runner does not start, because that guest may still name a gate
+this launch did not prove. Then it asks the npm route, and asks again from inside the
+guest, where only an exact 200 counts. Only when both answer does the guest get a new file.
+Anything else, including a failed write, means no file, which means npmjs. A guest image
+must not bake a `~/.npmrc`: a guest with its own is left alone and goes direct.
+
+[USAGE.md](../USAGE.md#the-npm-cache-at-the-home-site) says what each client does and how
+a job opts out.
+
+### A lost gate fails an install
+
+**A gate lost mid-job fails an npm install, and that needs a rerun.** No client falls back
+once its registry is set, and the choice is made once, at launch. pnpm retries for about
+three and a half minutes and then fails. A rerun gets a fresh launch, which goes direct
+if the gate is still down. Do not read this as a cache fault to mask.
+
+### Disk: thresholds, pruning and reserves
+
+**The shipped deployment neither caps nor prunes this storage.** Verdaccio does not prune,
+the quadlet sets no size limit, and any job can make it cache any public package. These
+figures are operational thresholds to act on, and nothing enforces them. Its data is
+rebuildable and it holds nothing else, so the plan is deliberately blunt:
+
+| What to watch | Act at |
+| --- | --- |
+| Threshold | 40 GiB in `~/.local/share/tart-runner-fleet-npm-cache` |
+| Reserve | prune when the filesystem has less free than `minFreeDiskGb` plus 40 GiB |
+| Backstop | the node's own `disk reserve` and `inode reserve` (ADR 0083), which stop admission |
+
+Weekly, delete tarballs nobody has read for 30 days. The next read fetches them again:
+
+```sh
+find ~/.local/share/tart-runner-fleet-npm-cache/data -name '*.tgz' -atime +30 -delete
+```
+
+This relies on access times, so read `findmnt -no OPTIONS --target ~/.local/share`
+first. On `noatime` the test falls back to the file's age, which still bounds the cache
+but evicts tarballs that are in use.
+
+That reclaims only tarballs, and metadata is the larger half: three real lockfiles left
+1.56 GiB of metadata beside 0.93 GiB of tarballs, in 7,406 inodes.
+
+Past either limit, wipe it. That costs one cold round, about what one hour of CI already
+downloads:
+
+```sh
+systemctl --user stop tart-runner-fleet-npm-cache.service
+rm -rf ~/.local/share/tart-runner-fleet-npm-cache/data
+systemctl --user start tart-runner-fleet-npm-cache.service
+```
+
+A wipe while guests are running fails their next installs, so do it with none running.
+Scheduling these is an operational step of the rollout, because no unit ships for it and
+until then nothing watches these figures. Watch both numbers, because a cache of small tarballs spends inodes faster than bytes:
+
+```sh
+du -sh ~/.local/share/tart-runner-fleet-npm-cache
+find ~/.local/share/tart-runner-fleet-npm-cache | wc -l
+```
+
+### Purge one package
+
+A version npmjs removed stays cached until it is pruned, and a non-frozen install can
+still resolve it. To remove a bad package at once:
+
+```sh
+rm -rf ~/.local/share/tart-runner-fleet-npm-cache/data/NAME   # or data/@scope/NAME
+```
+
+The next read fetches what npmjs says now.
+
+### Roll back
+
+1. Remove `npmRegistry` from a node's config and restart its daemon. New guests get no
+   setting. **Existing Actions-cache behaviour is unchanged**, because nothing else moved.
+   On a podman node remove the whole `cacheGate` key, since it exists only for this.
+2. Wait until that node's running guests end: they still name the gate.
+3. Then, if wanted, on Omarchy remove the drop-in, `systemctl --user daemon-reload`,
+   restart the gate, and `systemctl --user disable --now tart-runner-fleet-npm-cache.service`.
+   The data directory can stay.
 
 ## Recovery
 

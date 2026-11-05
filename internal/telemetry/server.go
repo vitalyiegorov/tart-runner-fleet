@@ -264,7 +264,11 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 	if gate := cacheGateResult(snapshot); gate != nil {
 		cacheGateCheck = &adminapi.Check{OK: gate.OK, Reasons: nonNilStrings(gate.Reasons)}
 		cacheGateRow = &adminapi.CacheGate{URL: snapshot.CacheGate.URL, Verified: snapshot.CacheGate.Verified,
-			ProbedAt: snapshot.CacheGate.ProbedAt}
+			ProbedAt: snapshot.CacheGate.ProbedAt, NPMRegistry: snapshot.CacheGate.NPMRegistry}
+		if snapshot.CacheGate.NPMRegistry != "" {
+			ready := snapshot.CacheGate.NPMReady
+			cacheGateRow.NPMReady, cacheGateRow.NPMProbedAt = &ready, snapshot.CacheGate.NPMProbedAt
+		}
 	}
 	yield := sessionYieldResult(snapshot.SessionYield)
 	drain := updateDrainResult(snapshot.UpdateDrain)

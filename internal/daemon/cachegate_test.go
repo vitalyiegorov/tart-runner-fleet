@@ -29,7 +29,7 @@ func TestANodeWithNoGateGetsNoVerifierAndAKnownPosture(t *testing.T) {
 		t.Fatalf("%+v", snapshot.CacheGate)
 	}
 	bootstrapper := lifecycle.StdinBootstrapper{}
-	if got := withCacheGate(bootstrapper, nil).(lifecycle.StdinBootstrapper); got.Gate != nil {
+	if got := withCacheGate(bootstrapper, nil, nil).(lifecycle.StdinBootstrapper); got.Gate != nil || got.NPM != nil {
 		t.Fatal("a node with no gate got one")
 	}
 }
@@ -50,7 +50,7 @@ func TestAnUnreachableGateIsPublishedAsUnverifiedBeforeAnyLaunch(t *testing.T) {
 	if gate.Verified(context.Background()) {
 		t.Fatal("verified")
 	}
-	if got := withCacheGate(lifecycle.StdinBootstrapper{}, gate).(lifecycle.StdinBootstrapper); got.Gate == nil {
+	if got := withCacheGate(lifecycle.StdinBootstrapper{}, gate, nil).(lifecycle.StdinBootstrapper); got.Gate == nil || got.NPM != nil {
 		t.Fatal("the bootstrapper did not get the gate")
 	}
 }
@@ -66,9 +66,60 @@ func TestAnUnparseableGateFailsClosed(t *testing.T) {
 
 type otherBootstrapper struct{ lifecycle.Bootstrapper }
 
+func TestANodeWithNoNPMRegistryGetsNoRoute(t *testing.T) {
+	health := gateTestHealth(t)
+	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}
+	if route := newNPMRoute(context.Background(), cfg, health, time.Now); route != nil {
+		t.Fatalf("route = %+v", route)
+	}
+	if snapshot := health.Snapshot(); snapshot.CacheGate.NPMRegistry != "" {
+		t.Fatalf("%+v", snapshot.CacheGate)
+	}
+}
+
+// TestAnNPMRouteReachesBothKindsOfGuestAndPublishesItsAnswer: Omarchy's Podman guests
+// and the Macs' Tart guests are the same path, unlike the results rewrite.
+func TestAnNPMRouteReachesBothKindsOfGuestAndPublishesItsAnswer(t *testing.T) {
+	at := time.Unix(100, 0)
+	const registry = "http://host.containers.internal:3017/npm/"
+	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/",
+		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", NPMRegistry: registry}}
+	health := gateTestHealth(t)
+	gate := newCacheGate(context.Background(), cfg, health, func() time.Time { return at })
+	route := newNPMRoute(context.Background(), cfg, health, func() time.Time { return at })
+	if route == nil || route.Registry != registry || route.Host != "host.containers.internal" {
+		t.Fatalf("route = %+v", route)
+	}
+	if route.Ready.Verified(context.Background()) {
+		t.Fatal("a port nothing listens on read as ready")
+	}
+	snapshot := health.Snapshot()
+	if snapshot.CacheGate.NPMRegistry != registry || snapshot.CacheGate.NPMReady || !snapshot.CacheGate.Container {
+		t.Fatalf("%+v", snapshot.CacheGate)
+	}
+	got := withCacheGate(lifecycle.StdinBootstrapper{ContainerGuest: true}, gate, route).(lifecycle.StdinBootstrapper)
+	if got.Gate == nil || got.NPM != route || !got.ContainerGuest {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestATartRegistryIsNotAContainerGate(t *testing.T) {
+	const registry = "http://192.168.1.64:3017/npm/"
+	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/",
+		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", NPMRegistry: registry}}
+	health := gateTestHealth(t)
+	route := newNPMRoute(context.Background(), cfg, health, time.Now)
+	if route == nil || route.Host != "192.168.1.64" {
+		t.Fatalf("route = %+v", route)
+	}
+	if health.Snapshot().CacheGate.Container {
+		t.Fatal("a Tart node read as a container node")
+	}
+}
+
 func TestAnotherBootstrapperIsLeftAlone(t *testing.T) {
 	other := otherBootstrapper{}
-	if got := withCacheGate(other, publishedGate{}); got != lifecycle.Bootstrapper(other) {
+	if got := withCacheGate(other, publishedGate{}, nil); got != lifecycle.Bootstrapper(other) {
 		t.Fatalf("got %T", got)
 	}
 }

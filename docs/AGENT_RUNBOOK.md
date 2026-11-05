@@ -236,13 +236,15 @@ the end of its job; a Tart guest's are read from the host while it runs ([ADR 00
 
 How to read the output:
 
-- Bytes include the LAN Actions cache. The shipped gate unit serves its counters
-  on `127.0.0.1:3019`, so on a podman node with that unit installed the WAN share
-  over a window is guest
-  receive minus the increase of
-  `fleet_cache_gate_bytes_total{upstream="cache",direction="to_guest"}`
+- Bytes include the LAN Actions cache and the npm cache. The shipped gate unit
+  serves its counters on `127.0.0.1:3019`, so on a podman node with that unit
+  installed the WAN share over a window is guest receive minus the increases of
+  `fleet_cache_gate_bytes_total{upstream="cache",direction="to_guest"}` and
+  `{upstream="npm",direction="to_guest"}`
   (`curl -fsS http://127.0.0.1:3019/metrics`). That is a node-wide estimate,
-  not a per-job one.
+  not a per-job one. A npm cache miss also crossed the WAN once between Verdaccio
+  and npmjs, which no counter here sees, and the gate serves other nodes' guests,
+  so subtract only across the nodes it serves.
 - An `unmeasured` job has no bytes, which is not the same as zero bytes. Its
   guest was sampled but could not be read (`exec_failed`, `exec_timeout`,
   `unreadable`, `no_command`), or, on Tart, the host never saw it (`no_reading`:
@@ -353,3 +355,23 @@ placement. Studio and Mini expansion requires separate evidence.
 Do not delete ambiguous VMs, edit durable state, stop authority, or weaken a
 safety gate merely to clear a queue. Promotion and rollback remain explicit
 operator actions described in [`OPERATIONS.md`](OPERATIONS.md).
+
+## npm install fails at a home-site job
+
+A guest at the home site may be reading npm through the gate (ADR 0093). Read
+`fleet doctor`'s `cache gate` row on that node first.
+
+- **`ECONNREFUSED` or a 5xx from `http://…:3017/npm/`, and the run started with the
+  gate up.** The gate or Verdaccio was lost mid-job. There is no fallback, by design. Rerun
+  the job: a fresh launch goes direct if it is still down. Then see
+  `npm cache not ready` in [`OPERATIONS.md`](OPERATIONS.md).
+- **`403` naming a read-only cache.** The job tried to publish, log in or audit. That is
+  not a cache fault. The job needs to opt out, as
+  [`USAGE.md`](../USAGE.md#the-npm-cache-at-the-home-site) shows.
+- **`404` for a package that exists.** It is private, so the job's repository needs
+  `@scope:registry` for it. The cache has no credentials and never will.
+- **A `package-lock.json` naming the gate.** A job generated it through the cache. Regenerate
+  it with the same opt-out.
+
+Do not edit a guest's `~/.npmrc` by hand. Rollback is removing `npmRegistry` from the node's config, which needs operator approval
+like any node change.

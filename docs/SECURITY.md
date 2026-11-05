@@ -33,6 +33,25 @@
 - `pull_request_target` runs in the base branch's scope and can save, as on
   GitHub's own cache. Treat it as trusted code.
 
+## The npm read-through cache
+
+- A home-site guest may read public packages through the gate's `/npm/` route (ADR 0093).
+  Nothing can write to it from a guest: the gate allows only `GET` and `HEAD` of
+  metadata, tarballs, the ping and dist-tags, independently of Verdaccio's own config,
+  which also refuses registration, publish and unpublish.
+- The gate forwards seven read headers and no query or body, so a credential a client
+  attaches under any name stops there, and a refusal never quotes the path. That is a
+  backstop. The guarantee is that a private scope's `@scope:registry` and
+  `//host/:_authToken` bind its name and token to their own host. Verdaccio's uplink is
+  anonymous, so a private package answers 404.
+- A guest gets the setting only on that launch's proof, and validation holds the
+  addresses to the direct LAN. The gate refuses a tunnel hostname and any request carrying
+  Cloudflare's headers. **Cache data never crosses cloudflared.**
+- It is plain HTTP on the LAN. A lockfile's integrity protects a frozen install from a
+  tampered response; a non-frozen install has no such check.
+- Gate identity proves the gate to a node. It does not authorize a guest, which is why
+  only public data is ever served here, and why private repositories get no git seeds.
+
 ## Public repositories served by a private fleet
 
 - Treat a public target repository as a source of untrusted code. The fleet

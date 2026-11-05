@@ -484,6 +484,42 @@ stopped. `fleet update` discounts a parked resource from its quiescence gate and
 nothing else; a running VM always defers a release. The field is omitted while
 nothing is parked and is absent on older daemons.
 
+### The LAN cache gate
+
+```json
+"cacheGate": {
+  "url": "http://192.168.1.64:3017/",
+  "verified": true,
+  "probedAt": "2026-11-05T12:00:00Z",
+  "npmRegistry": "http://192.168.1.64:3017/npm/",
+  "npmReady": true,
+  "npmProbedAt": "2026-11-05T12:00:01Z"
+},
+"cacheGateCheck": {"ok": true, "reasons": []}
+```
+
+`cacheGate` is the latest answer to whether the gate this node's guests use proved it is
+ours (ADR 0078), and `probedAt` is when that proof was asked. An empty `url` means the node
+configures none.
+
+`npmRegistry`, `npmReady` and `npmProbedAt` are additive (ADR 0093):
+
+- `npmRegistry` is the **configured candidate** a guest may be given. It is published even
+  when the host's probe fails.
+- `npmReady` is the **last host-side probe** of the gate's npm route, and `npmProbedAt` is
+  when it ran. That is a separate moment from `probedAt`, and each failure reason names the
+  time of its own probe.
+
+None of them says what a guest was given. A guest also asks the route from its own network
+and can stay direct while `npmReady` is true, and a guest whose image has its own
+`~/.npmrc` is left alone. All three are absent on a node that configures no npm cache, so
+an absent `npmReady` means *no npm cache here*, never *not ready*.
+
+`cacheGateCheck` fails with `cache gate unreachable` or `npm cache not ready`, and no
+health or readiness check does, because guests going direct is working as designed.
+Both objects are absent on a daemon that has not published, which
+`EffectiveCacheGateCheck()` exists for.
+
 ## Guarded mutation
 
 ```

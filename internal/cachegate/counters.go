@@ -15,7 +15,10 @@ import (
 // estimate the WAN share. They live for the process, like any Prometheus
 // counter.
 type Counters struct {
-	toGuest, fromGuest [2]atomic.Int64
+	toGuest, fromGuest [upstreamCount]atomic.Int64
+	// npmEnabled exports the npm series, so a gate with no npm cache scrapes exactly
+	// the series it always did. countingHandler sets it before the gate serves.
+	npmEnabled bool
 }
 
 func (c *Counters) render() string {
@@ -25,7 +28,10 @@ func (c *Counters) render() string {
 	for _, upstream := range []struct {
 		name  string
 		index Upstream
-	}{{"cache", CacheServer}, {"results", Results}} {
+	}{{"cache", CacheServer}, {"results", Results}, {"npm", NPM}} {
+		if upstream.index == NPM && !c.npmEnabled {
+			continue
+		}
 		fmt.Fprintf(&output, "fleet_cache_gate_bytes_total{upstream=%q,direction=\"to_guest\"} %d\n",
 			upstream.name, c.toGuest[upstream.index].Load())
 		fmt.Fprintf(&output, "fleet_cache_gate_bytes_total{upstream=%q,direction=\"from_guest\"} %d\n",

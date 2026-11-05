@@ -145,10 +145,7 @@ func (v Verifier) Verified(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	// No proxy and no redirect: only the address the node pinned may answer.
-	client := http.Client{Transport: &http.Transport{DisableKeepAlives: true},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request) // #nosec G704 -- the URL is the node's pinned gate.
+	response, err := directClient().Do(request) // #nosec G704 -- the URL is the node's pinned gate.
 	if err != nil {
 		return false
 	}

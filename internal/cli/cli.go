@@ -1004,6 +1004,9 @@ func cacheGateDetail(status adminapi.Status, check adminapi.Check) string {
 	case status.CacheGate.URL == "":
 		return "no gate configured; guests use what their image says"
 	}
+	if status.CacheGate.NPMRegistry != "" {
+		return "verified " + status.CacheGate.URL + "; npm cache " + status.CacheGate.NPMRegistry
+	}
 	return "verified " + status.CacheGate.URL
 }
 

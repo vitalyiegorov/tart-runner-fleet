@@ -22,7 +22,7 @@ func TestCountersSeparateLANCacheBytesFromResultsBytes(t *testing.T) {
 	cache, _ := upstream(t)
 	results, _ := upstream(t)
 	counters := &Counters{}
-	gate := httptest.NewServer(countingHandler(cache, results, io.Discard, counters))
+	gate := httptest.NewServer(countingHandler(cache, results, nil, io.Discard, counters))
 	t.Cleanup(gate.Close)
 	for _, request := range []struct{ path, body string }{
 		{"/download/archive", ""},

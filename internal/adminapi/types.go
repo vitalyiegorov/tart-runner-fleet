@@ -87,10 +87,10 @@ type Status struct {
 	ImageTools     []ImageTools `json:"imageTools,omitempty"`
 	ImageToolCheck *Check       `json:"imageToolCheck,omitempty"`
 	// CacheGate is an additive fleet.v1 field: the latest answer to whether the
-	// LAN cache gate this node's Tart guests are baked to use proved it is ours
-	// (ADR 0078). A failed proof is a roaming node working as designed, so it
-	// fails this doctor row and no health check. CacheGateCheck is absent, not
-	// passing, when the daemon has not published (EffectiveCacheGateCheck).
+	// LAN cache gate this node's guests use proved it is ours (ADR 0078). A failed
+	// proof is a roaming node working as designed, so it fails this doctor row and no
+	// health check. CacheGateCheck is absent, not passing, when the daemon has not
+	// published (EffectiveCacheGateCheck).
 	CacheGate      *CacheGate `json:"cacheGate,omitempty"`
 	CacheGateCheck *Check     `json:"cacheGateCheck,omitempty"`
 	// GuestConsole is an additive fleet.v1 field: whether this node boots Linux
@@ -386,11 +386,19 @@ func (s Status) EffectiveCacheGateCheck() Check {
 }
 
 // CacheGate is the latest verification of a node's LAN cache gate. An empty URL
-// means the node configures none.
+// means the node configures none. ProbedAt is when the identity proof was last asked.
+// NPMRegistry, NPMReady and NPMProbedAt are additive fleet.v1 fields (ADR 0093): the
+// configured candidate a guest may be given, the host's last probe of the gate's npm
+// route, and when it asked. None says what a guest received, because a guest also asks
+// from its own network and can stay direct while NPMReady is true. All three are absent
+// on a node that configures no npm cache.
 type CacheGate struct {
-	URL      string    `json:"url,omitempty"`
-	Verified bool      `json:"verified"`
-	ProbedAt time.Time `json:"probedAt,omitzero"`
+	URL         string    `json:"url,omitempty"`
+	Verified    bool      `json:"verified"`
+	ProbedAt    time.Time `json:"probedAt,omitzero"`
+	NPMRegistry string    `json:"npmRegistry,omitempty"`
+	NPMReady    *bool     `json:"npmReady,omitempty"`
+	NPMProbedAt time.Time `json:"npmProbedAt,omitzero"`
 }
 
 // ImageTools is one guest image's declared tool versions and the required ones

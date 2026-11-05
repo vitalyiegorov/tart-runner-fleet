@@ -595,8 +595,8 @@ type Config struct {
 	// capabilities beside it are: `fleet config validate` decodes a file and
 	// never touches a host, and a node's configuration is written, rendered, and
 	// checked on machines other than the one that will run it.
-	// CacheGate is the LAN cache gate this node's Tart guests are baked to use
-	// (ADR 0078). Empty on a node that checks none.
+	// CacheGate is the LAN cache gate this node's guests use, and the optional npm
+	// registry it gives them (ADR 0078, 0093). Empty on a node that checks none.
 	CacheGate       CacheGate
 	GuestArch       string
 	Linux           Linux

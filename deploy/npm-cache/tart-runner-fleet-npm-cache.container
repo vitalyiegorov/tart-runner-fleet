@@ -1,0 +1,39 @@
+# Quadlet unit for a node's npm read-through cache (ADR 0093), the same shape as
+# the Actions cache server beside it. Install as
+# ~/.config/containers/systemd/tart-runner-fleet-npm-cache.container; systemd
+# generates tart-runner-fleet-npm-cache.service from it. Home site only: Omarchy
+# runs this, and no other node does.
+[Unit]
+Description=tart-runner-fleet npm read-through cache (ADR 0093)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+# Outside the reserved trf- runner namespace (issue #415).
+ContainerName=fleet-npm-cache
+# Verdaccio 6, pinned by digest.
+Image=docker.io/verdaccio/verdaccio@sha256:8fc9be34bc675ccc96f7c68c7999911fdac8019158a9f79239b68776507d8e5b
+# Loopback only: guests reach this server through the gate, never directly.
+PublishPort=127.0.0.1:3020:4873
+# The image runs as this user; keep-id makes the bind mount its own.
+UserNS=keep-id:uid=10001,gid=65533
+Volume=%h/.config/tart-runner-fleet-npm-cache:/verdaccio/conf:ro,Z
+Volume=%h/.local/share/tart-runner-fleet-npm-cache:/verdaccio/storage:Z
+# No credential of any kind: the uplink is anonymous, by the config and by this.
+DropCapability=all
+NoNewPrivileges=true
+# No quoting, for the reason the Actions cache unit gives: Podman 5.7's Quadlet
+# drops the closing quote of a nested-quote probe.
+HealthCmd=wget -q -O /dev/null http://127.0.0.1:4873/-/ping
+HealthInterval=30s
+HealthRetries=3
+HealthOnFailure=kill
+PodmanArgs=--memory=1024m --memory-swap=1024m --cpus=2
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
