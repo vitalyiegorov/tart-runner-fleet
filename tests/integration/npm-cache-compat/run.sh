@@ -148,8 +148,10 @@ MAIN_GATE_PID=$GATE_PID
 background "$LOGS/recorder.out" python3 "$HERE/fixture.py" record "$RECORDER" "127.0.0.1:$GATE" "$LOGS/recorder.log"
 background "$LOGS/private.out" python3 "$HERE/fixture.py" registry "$PRIVATE" "$LOGS/private.log"
 background "$LOGS/fixture.out" python3 "$HERE/fixture.py" registry "$FIXTURE" "$LOGS/fixture.log"
-wait_http "http://127.0.0.1:$RECORDER/npm/-/ping"
-wait_http "http://127.0.0.1:$FIXTURE/-/ping" || true
+wait_http "http://127.0.0.1:$RECORDER/npm/-/ping" || fail "the recording proxy did not start"
+# A package each registry serves: they answer 404 to anything else, and wait_http needs a 2xx.
+wait_http "http://127.0.0.1:$FIXTURE/trust-fixture" || fail "the fixture registry did not start"
+wait_http "http://127.0.0.1:$PRIVATE/trust-fixture" || fail "the private registry did not start"
 
 for version in $PNPM_VERSIONS; do
     npm i --silent --no-audit --no-fund --prefix "$WORK/tools/pnpm-$version" "pnpm@$version" >/dev/null 2>&1
