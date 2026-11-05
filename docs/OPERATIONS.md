@@ -2131,7 +2131,8 @@ it. The shipped unit passes the flag, and `--identity-key` beside it. Install
 that unit only once the node's `fleet` release understands both; an older release
 exits with its usage text and systemd restarts it in a loop.
 `cache/to_guest` is what guests read from the LAN cache, and `npm/to_guest` what they
-read from the npm cache (ADR 0092). Subtract both increases from `fleet traffic`'s
+read from the npm cache (ADR 0092). The npm series exist only on a gate with
+`--npm-upstream`, so their absence means the route is off. Subtract both increases from `fleet traffic`'s
 receive bytes for the WAN estimate (see
 [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md#analyze-ci-traffic)).
 
@@ -2259,10 +2260,12 @@ get this key.
 
 ### What a launch does
 
-The node proves the gate, asks its npm route, and then asks from inside the guest. Only
-when all three answer does the guest get a `~/.npmrc`. Anything else means no file, which
-means npmjs. A guest image must not bake a `~/.npmrc`: a guest with its own is left alone
-and goes direct.
+The node proves the gate and removes any `~/.npmrc` an earlier attempt wrote. If it cannot
+show that file is gone, the runner does not start, because that guest may still name a gate
+this launch did not prove. Then it asks the npm route, and asks again from inside the
+guest, where only an exact 200 counts. Only when both answer does the guest get a new file.
+Anything else, including a failed write, means no file, which means npmjs. A guest image
+must not bake a `~/.npmrc`: a guest with its own is left alone and goes direct.
 
 [USAGE.md](../USAGE.md#the-npm-cache-at-the-home-site) says what each client does and how
 a job opts out.
@@ -2274,14 +2277,16 @@ once its registry is set, and the choice is made once, at launch. pnpm retries f
 three and a half minutes and then fails. A rerun gets a fresh launch, which goes direct
 if the gate is still down. Do not read this as a cache fault to mask.
 
-### Disk: quota, pruning and reserves
+### Disk: thresholds, pruning and reserves
 
-**Verdaccio does not prune.** Any job can make it cache any public package. Its data is
+**The shipped deployment neither caps nor prunes this storage.** Verdaccio does not prune,
+the quadlet sets no size limit, and any job can make it cache any public package. These
+figures are operational thresholds to act on, and nothing enforces them. Its data is
 rebuildable and it holds nothing else, so the plan is deliberately blunt:
 
-| Limit | Value |
+| What to watch | Act at |
 | --- | --- |
-| Quota | 40 GiB in `~/.local/share/tart-runner-fleet-npm-cache` |
+| Threshold | 40 GiB in `~/.local/share/tart-runner-fleet-npm-cache` |
 | Reserve | prune when the filesystem has less free than `minFreeDiskGb` plus 40 GiB |
 | Backstop | the node's own `disk reserve` and `inode reserve` (ADR 0083), which stop admission |
 
@@ -2308,8 +2313,8 @@ systemctl --user start tart-runner-fleet-npm-cache.service
 ```
 
 A wipe while guests are running fails their next installs, so do it with none running.
-Scheduling these is an operational step of the rollout; no unit ships for it. Watch both
-numbers, because a cache of small tarballs spends inodes faster than bytes:
+Scheduling these is an operational step of the rollout, because no unit ships for it and
+until then nothing watches these figures. Watch both numbers, because a cache of small tarballs spends inodes faster than bytes:
 
 ```sh
 du -sh ~/.local/share/tart-runner-fleet-npm-cache

@@ -98,19 +98,23 @@ under `/npm/`, and metadata cached for at most 10 minutes. Audit is off.
 launch, with the proof ADR 0078's amendment introduced:
 
 1. The host asks the gate to sign a fresh nonce, with no proxy and no redirect.
-2. If that proves it, the host asks `/npm/-/ping` the same way, because a verified
+2. Whatever the answer, the host removes any `~/.npmrc` this fleet wrote, because a launch
+   can retry on the same guest and the file may name a gate this launch did not prove.
+   **A failed removal stops the runner from starting**, exactly as a failed results rewrite
+   does, and so does a file the script cannot read, since it cannot say whose that is.
+3. If the gate proved itself, the host asks `/npm/-/ping` the same way, because a verified
    gate over a dead Verdaccio would otherwise fail every install in the job.
-3. If that answers, the host runs a script in the guest. The script asks the route
-   again **from inside the guest**, with no proxy, no redirect and plain HTTP only.
-   The host's proof says nothing about the guest's network, such as a NAT, and no
-   client falls back once its registry is set.
-4. Only then does it write `~/.npmrc`, atomically and marked as ours.
+4. If that answers, a second script asks the route again **from inside the guest**, with no
+   proxy, no redirect and plain HTTP only, and only an exact 200 counts: with no
+   `--location`, curl calls a redirect success. The host's proof says nothing about the
+   guest's network, such as a NAT, and no client falls back once its registry is set.
+5. Only then does it write `~/.npmrc`, atomically and marked as ours.
 
-Anything else leaves no setting, and no setting means npmjs. A launch can retry on
-the same guest, so every other path removes a file this fleet wrote. A failed removal
-stops the runner from starting, exactly as a failed results rewrite does. A failed
-write only costs a cold job. An image's own `~/.npmrc` is left alone and that guest
-stays direct, because nothing merges a file this fleet did not write.
+Anything else leaves no setting, and no setting means npmjs. Removal and write are separate
+scripts so that their failures cannot be confused: the removal has already succeeded by the
+time the write runs, so a failed write, even a lost `exec`, only costs a cold job. An image's
+own `~/.npmrc` is left alone and that guest stays direct, because nothing merges a file this
+fleet did not write.
 
 **Why `~/.npmrc`, and not an environment variable.** It is the lowest layer that every
 Node version on a guest reads. `setup-node` changes the global prefix, so a global
@@ -167,27 +171,32 @@ that is a backstop and not the guarantee.
 ### 6. Metrics
 
 The npm route uses the existing shape: `fleet_cache_gate_bytes_total{upstream="npm",
-direction="to_guest"|"from_guest"}`. `from_guest` stays at 0, because nothing is
+direction="to_guest"|"from_guest"}`. A gate with no `--npm-upstream` does not export
+these series at all, so its scrape is exactly what it was, and an absent series means the
+route is off, not that it moved nothing. `from_guest` stays at 0, because nothing is
 forwarded. The WAN estimate over a window becomes guest receive minus `cache/to_guest`
 minus `npm/to_guest`. A miss still crossed the WAN once, between Verdaccio and npmjs,
 and the gate cannot see that: it counts what guests read, not what the uplink carried.
 
 ### 7. Disk
 
-**Verdaccio does not prune.** Any job can make it cache any public package, so without
-a plan it grows until admission's reserves refuse guests (ADR 0083).
+**The shipped deployment neither caps nor prunes this storage.** Verdaccio does not prune,
+the quadlet sets no size limit, and any job can make it cache any public package. Left
+alone it grows until admission's reserves refuse guests (ADR 0083). The figures below are
+**operational thresholds an operator acts on, not limits anything enforces**:
 
-- **Quota: 40 GiB on Omarchy.** A full wipe costs one cold round, about what one hour
-  of CI already downloads, so the quota is deliberately small beside the node's disk.
-- **Reserve: prune at the quota, or when free space falls below the node's
-  `minFreeDiskGb` plus 40 GiB.** The node's own disk and inode floors stay the backstop.
+- **Threshold: 40 GiB on Omarchy.** A full wipe costs one cold round, about what one hour
+  of CI already downloads, so the figure is deliberately small beside the node's disk.
+- **Reserve: prune at that threshold, or when free space falls below the node's
+  `minFreeDiskGb` plus 40 GiB.** The node's own disk and inode floors stay the backstop,
+  and they stop admission, not the cache's growth.
 - **Pruning** deletes old tarballs weekly and, past either limit, the whole `data`
   directory. The run proved both are safe: the next read fetches again. Weekly pruning
   reclaims only part of it, because metadata is the larger half: three real lockfiles left
   1.56 GiB of metadata beside 0.93 GiB of tarballs. Only the wipe reclaims that.
 
-The recipe is in `docs/OPERATIONS.md`. Its schedule is an operational step of the
-rollout and is not shipped as a unit here.
+The recipe is in `docs/OPERATIONS.md`. Scheduling it is an operational step of the rollout,
+and no unit ships for it here, so until someone does, nothing watches these figures.
 
 ### 8. Git seeds: decided, and shipped later
 
@@ -263,8 +272,9 @@ itself.
 
 Unit tests pin the route's whole policy table, the header allowlist, the log, the
 loopback-only upstream, the deploy files' security properties, the launch selection on
-both backends, the real guest script against a stand-in `curl`, validation, the doctor
-row and the additive API fields.
+both backends, validation, the doctor row and the additive API fields. The launch's real
+guest scripts run in a throwaway `HOME`: a removal or read that fails stops the runner, a
+write that fails carries on direct, and real `curl` gets a registry only from an exact 200.
 
 **A real compatibility run** (`tests/integration/npm-cache-compat/run.sh`, ubuntu-vitalii,
 2026-11-05): the shipped Verdaccio config on the pinned Verdaccio 6.11.1 image, rootless
@@ -303,14 +313,15 @@ what clients send. Each client ran in a clean environment with explicit store di
 - **Nothing ran on a real guest.** Neither a Tart VM nor a fleet Podman container has
   run this. The compatibility run used the real gate, the real Verdaccio and real
   clients on ubuntu-vitalii, with a `~/.npmrc` written as the script writes it, not one
-  written by a launch. The script itself ran only in unit tests, against a stand-in `curl`.
+  written by a launch. The launch scripts themselves ran only in unit tests, in a throwaway
+  `HOME`, with real `curl` against a fixture and stand-ins for the steps made to fail.
 - **Real LAN and pasta addressing.** The run reached the gate on loopback. It asserted
   the advertised URLs for `192.168.1.64` and `host.containers.internal` with a `Host`
   header, not from a guest on those networks. In particular, a macOS guest behind Tart's
   NAT reaching `192.168.1.64` is unproven, though the guest-side probe sends it direct
   if it cannot.
 - **Real savings.** No before-and-after measurement exists, because nothing is deployed.
-- **Long-term disk growth**, and the 40 GiB quota against real traffic.
+- **Long-term disk growth**, and whether the 40 GiB threshold suits real traffic.
 - **The installed quadlet.** The run started the image with the same user namespace,
   capabilities and mounts, but not through systemd or Quadlet.
 
@@ -329,7 +340,8 @@ what clients send. Each client ran in a clean environment with explicit store di
 ## Not built
 
 - **Git seeds**, here. See section 8.
-- **A pruning unit.** The recipe is documented and scheduling it is a rollout step.
+- **A storage cap or a pruning unit.** The recipe is documented and scheduling it is a
+  rollout step. Nothing enforces the 40 GiB threshold.
 - **Yarn and Bun settings beyond what section 5 states.**
 - **Per-job attribution of cache bytes**, for the reason ADR 0080 gives.
 - **A cache at the office site**, where the uplink is not the bottleneck.
