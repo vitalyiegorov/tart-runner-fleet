@@ -13,6 +13,7 @@ func TestTrafficSampleValidKeepsMeasuredAndUnmeasuredApart(t *testing.T) {
 	}{
 		"measured":                {TrafficSample{InstanceID: "a", SampledAt: at, Measured: true, ReceiveBytes: 1}, true},
 		"unmeasured":              {TrafficSample{InstanceID: "a", SampledAt: at, Unmeasured: TrafficExecFailed}, true},
+		"unmeasured, no reading":  {TrafficSample{InstanceID: "a", SampledAt: at, Unmeasured: TrafficNoReading}, true},
 		"no instance":             {TrafficSample{SampledAt: at, Measured: true}, false},
 		"no time":                 {TrafficSample{InstanceID: "a", Measured: true}, false},
 		"measured with reason":    {TrafficSample{InstanceID: "a", SampledAt: at, Measured: true, Unmeasured: TrafficExecFailed}, false},

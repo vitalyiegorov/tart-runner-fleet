@@ -41,18 +41,29 @@ type guestTrafficRecorder struct {
 
 func (r guestTrafficRecorder) RecordGuestTraffic(ctx context.Context, instance operations.Instance) {
 	sample := r.sample(ctx, instance)
-	changed, err := r.Store.RecordGuestTraffic(ctx, sample)
+	storeGuestTraffic(ctx, r.Store, r.Metrics, r.warn, sample)
+}
+
+// storeGuestTraffic records one sample and counts it, once. It is shared by the
+// exec recorder and the host-counter recorder, and neither failure can fail a
+// drain: the sample is evidence, not a precondition.
+func storeGuestTraffic(ctx context.Context, store guestTrafficStore, metrics guestTrafficMetrics,
+	warn func(string, ...any), sample operations.TrafficSample) {
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
+	changed, err := store.RecordGuestTraffic(ctx, sample)
 	if err != nil {
-		r.warn("guest traffic sample was not stored", "instance", instance.ID, "error", err)
+		warn("guest traffic sample was not stored", "instance", sample.InstanceID, "error", err)
 		return
 	}
 	if !changed {
 		return
 	}
-	if err := r.Metrics.AddGuestTraffic(telemetry.GuestTrafficMetric{Platform: string(sample.Platform),
+	if err := metrics.AddGuestTraffic(telemetry.GuestTrafficMetric{Platform: string(sample.Platform),
 		Profile: string(sample.Profile), Repo: sample.Repo, Measured: sample.Measured,
 		ReceiveBytes: sample.ReceiveBytes, TransmitBytes: sample.TransmitBytes}); err != nil {
-		r.warn("guest traffic sample was not counted", "instance", instance.ID, "error", err)
+		warn("guest traffic sample was not counted", "instance", sample.InstanceID, "error", err)
 	}
 }
 
@@ -90,20 +101,34 @@ func (r guestTrafficRecorder) warn(message string, args ...any) {
 	}
 }
 
-// guestTraffic builds the drain's traffic recorder, or nil on a node with no
-// guest to exec into. The nil is an untyped interface nil, so the drain's
-// `Traffic != nil` check sees it.
+// guestTraffic builds the node's traffic recorder and, on a Tart node, the
+// host recorder the sweeper feeds (the same recorder, returned so the caller can
+// sweep it). The recorder is nil (an untyped interface nil, so the
+// drain's `Traffic != nil` check sees it) on a node with no guest to measure.
+//
+// A Tart node never execs into a guest for traffic: it reads the host's own
+// counters for the guest's virtual NIC (ADR 0080, amendment 2026-11-05). A
+// container node has no such NIC and keeps the end-of-job exec read.
 func (d dependencies) guestTraffic(store guestTrafficStore, metrics guestTrafficMetrics, cfg config.Config,
-	warn func(string, ...any)) lifecycle.GuestTrafficRecorder {
+	warn func(string, ...any)) (lifecycle.GuestTrafficRecorder, *lifecycle.HostTrafficRecorder) {
+	if d.hostTraffic != nil {
+		if host := d.hostTraffic(cfg); host != nil {
+			recorder := lifecycle.NewHostTrafficRecorder(host, guestTrafficTimeout,
+				func(ctx context.Context, sample operations.TrafficSample) {
+					storeGuestTraffic(ctx, store, metrics, warn, sample)
+				}, d.now, warn)
+			return recorder, recorder
+		}
+	}
 	if d.guestExec == nil {
-		return nil
+		return nil, nil
 	}
 	runner := d.guestExec(cfg)
 	if runner == nil {
-		return nil
+		return nil, nil
 	}
 	return guestTrafficRecorder{Runner: runner, Timeout: guestTrafficTimeout, Store: store, Metrics: metrics,
-		Now: d.now, Warn: warn}
+		Now: d.now, Warn: warn}, nil
 }
 
 // guestTrafficReader is telemetry.TrafficReader over the store.

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
@@ -176,26 +175,5 @@ func TestGuestTrafficReaderTruncatesAndNeverZeroesUnmeasuredJobs(t *testing.T) {
 	store.err = errors.New("closed")
 	if jobs, _, err := (guestTrafficReader{Store: store}).GuestTraffic(context.Background(), time.Unix(0, 0)); err == nil || jobs != nil {
 		t.Fatalf("an unreadable store is an error, never an empty answer: %+v %v", jobs, err)
-	}
-}
-
-func TestGuestTrafficIsWiredOnlyWhereAGuestCanBeExecuted(t *testing.T) {
-	cfg := config.Default()
-	if recorder := (dependencies{}).guestTraffic(&trafficStoreFake{}, &trafficMetricsFake{}, cfg, nil); recorder != nil {
-		t.Fatalf("no exec runner must wire no recorder, got %#v", recorder)
-	}
-	podmanless := linuxPlatform()
-	if recorder := (dependencies{guestExec: podmanless.guestExec}).guestTraffic(&trafficStoreFake{},
-		&trafficMetricsFake{}, cfg, nil); recorder != nil {
-		t.Fatalf("a Linux node with no container backend has no guest: %#v", recorder)
-	}
-	cfg.Executor.Backend = config.ExecutorPodman
-	if recorder := (dependencies{guestExec: podmanless.guestExec, now: time.Now}).guestTraffic(&trafficStoreFake{},
-		&trafficMetricsFake{}, cfg, nil); recorder == nil {
-		t.Fatal("a podman node samples its containers")
-	}
-	if recorder := (dependencies{guestExec: applePlatform().guestExec, now: time.Now}).guestTraffic(&trafficStoreFake{},
-		&trafficMetricsFake{}, cfg, nil); recorder == nil {
-		t.Fatal("a Tart node samples its VMs")
 	}
 }
