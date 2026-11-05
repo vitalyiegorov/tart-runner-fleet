@@ -7,9 +7,11 @@ import (
 
 // CacheGateMetric is the last answer to "is the LAN cache gate really ours?"
 // (ADR 0078). An empty URL means this node configures no gate. Container says its
-// guests are containers, whose results URL no failed proof rewrites. An empty
-// NPMRegistry means no guest is given one (ADR 0093), and NPMReady is otherwise the
-// latest answer from the gate's npm route.
+// guests are containers, whose results URL no failed proof rewrites. ProbedAt is when the
+// identity proof was last asked. An empty NPMRegistry means the node configures no npm
+// cache (ADR 0093). Otherwise it is the registry a guest may be given, NPMReady is the
+// host's latest answer from the gate's npm route, and NPMProbedAt is when it asked. The
+// two probes run at different moments, so each keeps its own time.
 type CacheGateMetric struct {
 	URL         string
 	Verified    bool
@@ -17,6 +19,7 @@ type CacheGateMetric struct {
 	Container   bool
 	NPMRegistry string
 	NPMReady    bool
+	NPMProbedAt time.Time
 }
 
 // SetCacheGate publishes the latest verification and keeps the npm route's answer,
@@ -25,7 +28,7 @@ func (h *Health) SetCacheGate(metric CacheGateMetric) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.revision++
-	metric.NPMRegistry, metric.NPMReady = h.cacheGate.NPMRegistry, h.cacheGate.NPMReady
+	metric.NPMRegistry, metric.NPMReady, metric.NPMProbedAt = h.cacheGate.NPMRegistry, h.cacheGate.NPMReady, h.cacheGate.NPMProbedAt
 	h.cacheGate = metric
 	h.cacheGatePublished = true
 }
@@ -35,7 +38,7 @@ func (h *Health) SetCacheGateNPM(registry string, ready bool, at time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.revision++
-	h.cacheGate.NPMRegistry, h.cacheGate.NPMReady, h.cacheGate.ProbedAt = registry, ready, at
+	h.cacheGate.NPMRegistry, h.cacheGate.NPMReady, h.cacheGate.NPMProbedAt = registry, ready, at
 }
 
 // cacheGateResult judges the published answer, or returns nil when nothing has
@@ -60,7 +63,7 @@ func cacheGateResult(snapshot Snapshot) *HealthResult {
 	case gate.NPMRegistry != "" && !gate.NPMReady:
 		return &HealthResult{OK: false, Reasons: []string{fmt.Sprintf(
 			"npm cache not ready: %s did not answer at %s, so guests launched since reach npm directly",
-			gate.NPMRegistry, probed)}}
+			gate.NPMRegistry, gate.NPMProbedAt.UTC().Format(time.RFC3339))}}
 	}
 	return &HealthResult{OK: true, Reasons: []string{}}
 }

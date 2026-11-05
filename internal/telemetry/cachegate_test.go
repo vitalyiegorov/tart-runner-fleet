@@ -63,7 +63,7 @@ func TestPublishingOneGateAnswerKeepsTheOther(t *testing.T) {
 	}
 	health.SetCacheGateNPM("http://192.168.1.64:3017/npm/", false, time.Unix(110, 0))
 	gate = health.Snapshot().CacheGate
-	if gate.NPMReady || !gate.Verified || !gate.ProbedAt.Equal(time.Unix(110, 0)) {
+	if gate.NPMReady || !gate.Verified || !gate.ProbedAt.Equal(time.Unix(100, 0)) || !gate.NPMProbedAt.Equal(time.Unix(110, 0)) {
 		t.Fatalf("%+v", gate)
 	}
 }
@@ -71,9 +71,10 @@ func TestPublishingOneGateAnswerKeepsTheOther(t *testing.T) {
 func TestTheNPMAnswerReachesTheStatusDocument(t *testing.T) {
 	health, _ := newTestHealth(t)
 	health.SetCacheGate(CacheGateMetric{URL: "http://192.168.1.64:3017/", Verified: true, ProbedAt: time.Unix(100, 0)})
-	health.SetCacheGateNPM("http://192.168.1.64:3017/npm/", true, time.Unix(100, 0))
+	health.SetCacheGateNPM("http://192.168.1.64:3017/npm/", true, time.Unix(130, 0))
 	gate := imageToolsStatus(health).Data.CacheGate
-	if gate == nil || gate.NPMRegistry != "http://192.168.1.64:3017/npm/" || gate.NPMReady == nil || !*gate.NPMReady {
+	if gate == nil || gate.NPMRegistry != "http://192.168.1.64:3017/npm/" || gate.NPMReady == nil || !*gate.NPMReady ||
+		!gate.ProbedAt.Equal(time.Unix(100, 0)) || !gate.NPMProbedAt.Equal(time.Unix(130, 0)) {
 		t.Fatalf("%+v", gate)
 	}
 }
@@ -82,7 +83,7 @@ func TestANodeWithNoNPMRouteStatesNothingAboutOne(t *testing.T) {
 	health, _ := newTestHealth(t)
 	health.SetCacheGate(CacheGateMetric{URL: "http://192.168.1.64:3017/", Verified: true, ProbedAt: time.Unix(100, 0)})
 	gate := imageToolsStatus(health).Data.CacheGate
-	if gate == nil || gate.NPMRegistry != "" || gate.NPMReady != nil {
+	if gate == nil || gate.NPMRegistry != "" || gate.NPMReady != nil || !gate.NPMProbedAt.IsZero() {
 		t.Fatalf("%+v", gate)
 	}
 }
@@ -99,4 +100,41 @@ func TestCacheGateReachesTheStatusDocument(t *testing.T) {
 		after.Data.CacheGate.URL != "http://192.168.1.64:3017/" || after.Data.CacheGate.Verified {
 		t.Fatalf("check = %+v, gate = %+v", after.Data.CacheGateCheck, after.Data.CacheGate)
 	}
+}
+
+// TestEachProbeKeepsItsOwnTime: the identity proof and the npm route are asked at
+// different moments, so a reason or a status field naming the other one's time reports
+// a failure at a moment nothing failed.
+func TestEachProbeKeepsItsOwnTime(t *testing.T) {
+	const gateURL, registry = "http://192.168.1.64:3017/", "http://192.168.1.64:3017/npm/"
+	earlier := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	later := earlier.Add(30 * time.Second)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+
+	t.Run("a failed proof keeps its time past a later npm probe", func(t *testing.T) {
+		health, _ := newTestHealth(t)
+		health.SetCacheGate(CacheGateMetric{URL: gateURL, ProbedAt: earlier})
+		health.SetCacheGateNPM(registry, false, later)
+		status := imageToolsStatus(health)
+		reason := status.Data.CacheGateCheck.Reasons[0]
+		if !strings.Contains(reason, "did not prove its identity at "+stamp(earlier)) {
+			t.Fatalf("reason = %q", reason)
+		}
+		if !status.Data.CacheGate.ProbedAt.Equal(earlier) {
+			t.Fatalf("probedAt = %v, want the identity proof's %v", status.Data.CacheGate.ProbedAt, earlier)
+		}
+	})
+	t.Run("a down npm route keeps its time past a later proof", func(t *testing.T) {
+		health, _ := newTestHealth(t)
+		health.SetCacheGateNPM(registry, false, earlier)
+		health.SetCacheGate(CacheGateMetric{URL: gateURL, Verified: true, ProbedAt: later})
+		status := imageToolsStatus(health)
+		reason := status.Data.CacheGateCheck.Reasons[0]
+		if !strings.Contains(reason, "npm cache not ready: "+registry+" did not answer at "+stamp(earlier)) {
+			t.Fatalf("reason = %q", reason)
+		}
+		if !status.Data.CacheGate.ProbedAt.Equal(later) {
+			t.Fatalf("probedAt = %v, want the identity proof's %v", status.Data.CacheGate.ProbedAt, later)
+		}
+	})
 }

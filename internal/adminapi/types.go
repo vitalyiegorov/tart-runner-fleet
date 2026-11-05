@@ -386,15 +386,19 @@ func (s Status) EffectiveCacheGateCheck() Check {
 }
 
 // CacheGate is the latest verification of a node's LAN cache gate. An empty URL
-// means the node configures none. NPMRegistry and NPMReady are additive fleet.v1
-// fields: what this node's guests are given while the gate's npm route answers, and
-// whether it last did (ADR 0093). Both are absent on a node that gives none.
+// means the node configures none. ProbedAt is when the identity proof was last asked.
+// NPMRegistry, NPMReady and NPMProbedAt are additive fleet.v1 fields (ADR 0093): the
+// configured candidate a guest may be given, the host's last probe of the gate's npm
+// route, and when it asked. None says what a guest received, because a guest also asks
+// from its own network and can stay direct while NPMReady is true. All three are absent
+// on a node that configures no npm cache.
 type CacheGate struct {
 	URL         string    `json:"url,omitempty"`
 	Verified    bool      `json:"verified"`
 	ProbedAt    time.Time `json:"probedAt,omitzero"`
 	NPMRegistry string    `json:"npmRegistry,omitempty"`
 	NPMReady    *bool     `json:"npmReady,omitempty"`
+	NPMProbedAt time.Time `json:"npmProbedAt,omitzero"`
 }
 
 // ImageTools is one guest image's declared tool versions and the required ones

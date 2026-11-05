@@ -267,7 +267,7 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 			ProbedAt: snapshot.CacheGate.ProbedAt, NPMRegistry: snapshot.CacheGate.NPMRegistry}
 		if snapshot.CacheGate.NPMRegistry != "" {
 			ready := snapshot.CacheGate.NPMReady
-			cacheGateRow.NPMReady = &ready
+			cacheGateRow.NPMReady, cacheGateRow.NPMProbedAt = &ready, snapshot.CacheGate.NPMProbedAt
 		}
 	}
 	yield := sessionYieldResult(snapshot.SessionYield)
