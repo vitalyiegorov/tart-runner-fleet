@@ -58,7 +58,7 @@ type CompletedRunnerDrainStore interface {
 // optional for the reason the two stores above are: a store without it never holds
 // a demand back, which is the behaviour before issue #493.
 type EmptyExitStore interface {
-	EmptyExits(context.Context, time.Time) (map[domain.DemandKey]domain.EmptyExits, error)
+	EmptyExits(context.Context, time.Time) (map[domain.EmptyExitKey]domain.EmptyExits, error)
 }
 
 // EmptyExitBackoff is one queued demand whose instances keep exiting without its
@@ -873,7 +873,7 @@ func (c DemandCoordinator) DrainCompletedRunners(ctx context.Context, bindings [
 
 // EmptyExits reads what the demand's spent instances say. Rows older than GitHub's
 // doubled job-start bound cannot name a queued demand, so they are not read at all.
-func (c DemandCoordinator) EmptyExits(ctx context.Context, now time.Time) (map[domain.DemandKey]domain.EmptyExits, error) {
+func (c DemandCoordinator) EmptyExits(ctx context.Context, now time.Time) (map[domain.EmptyExitKey]domain.EmptyExits, error) {
 	store, ok := c.Store.(EmptyExitStore)
 	if !ok {
 		return nil, nil
@@ -885,10 +885,12 @@ func (c DemandCoordinator) EmptyExits(ctx context.Context, now time.Time) (map[d
 // whole queue rather than the plannable one, because a demand on its next attempt
 // is still over the bound. It decides only whether the demand is planned: the row,
 // the job at GitHub, the queue SLO and its age are all left exactly as they were.
-func emptyExitBackoffs(binding Binding, queued []domain.Demand, exits map[domain.DemandKey]domain.EmptyExits) []EmptyExitBackoff {
+func emptyExitBackoffs(binding Binding, queued []domain.Demand, exits map[domain.EmptyExitKey]domain.EmptyExits,
+	images map[domain.Platform]string,
+) []EmptyExitBackoff {
 	var backoffs []EmptyExitBackoff
 	for _, demand := range queued {
-		spent := exits[demand.Key]
+		spent := exits[domain.EmptyExitKey{Demand: demand.Key, Image: images[demand.Platform]}]
 		if domain.EmptyExitBackoff.Exceeded(spent) {
 			backoffs = append(backoffs, EmptyExitBackoff{Demand: demand.Key, Scope: binding.Scope, Profile: binding.Profile.ID,
 				Exits: spent.Count, LastAt: spent.Last, RetryAt: domain.EmptyExitBackoff.RetryAt(spent)})

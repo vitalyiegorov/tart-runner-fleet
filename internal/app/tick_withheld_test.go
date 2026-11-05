@@ -13,15 +13,15 @@ import (
 
 type emptyExitStoreFake struct {
 	*tickStore
-	exits map[domain.DemandKey]domain.EmptyExits
+	exits map[domain.EmptyExitKey]domain.EmptyExits
 	err   error
 }
 
-func (s emptyExitStoreFake) EmptyExits(context.Context, time.Time) (map[domain.DemandKey]domain.EmptyExits, error) {
+func (s emptyExitStoreFake) EmptyExits(context.Context, time.Time) (map[domain.EmptyExitKey]domain.EmptyExits, error) {
 	return s.exits, s.err
 }
 
-func withheldEngine(now time.Time, exits map[domain.DemandKey]domain.EmptyExits, err error) Engine {
+func withheldEngine(now time.Time, exits map[domain.EmptyExitKey]domain.EmptyExits, err error) Engine {
 	engine := liveIncarnationEngine(now, nil)
 	store := emptyExitStoreFake{tickStore: engine.Store.(*tickStore), exits: exits, err: err}
 	engine.Store, engine.Demand.Store = store, store
@@ -30,7 +30,8 @@ func withheldEngine(now time.Time, exits map[domain.DemandKey]domain.EmptyExits,
 
 func TestAnEmptyExitHoldWithholdsTheDemandAndKeepsItNamed(t *testing.T) {
 	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
-	exits := map[domain.DemandKey]domain.EmptyExits{liveIncarnationKey: {Count: 3, Last: now.Add(-time.Minute)}}
+	key := domain.EmptyExitKey{Demand: liveIncarnationKey}
+	exits := map[domain.EmptyExitKey]domain.EmptyExits{key: {Count: 3, Last: now.Add(-time.Minute)}}
 	result, err := withheldEngine(now, exits, nil).Tick(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -42,13 +43,38 @@ func TestAnEmptyExitHoldWithholdsTheDemandAndKeepsItNamed(t *testing.T) {
 		t.Fatalf("the hold must be named: %+v", result.EmptyExitBackoffs)
 	}
 
-	exits[liveIncarnationKey] = domain.EmptyExits{Count: 3, Last: now.Add(-5 * time.Minute)}
+	exits[key] = domain.EmptyExits{Count: 3, Last: now.Add(-5 * time.Minute)}
 	result, err = withheldEngine(now, exits, nil).Tick(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Plan.Operations) != 1 || len(result.EmptyExitBackoffs) != 1 {
 		t.Fatalf("after the hold it is retried and still named: %+v %+v", result.Plan.Operations, result.EmptyExitBackoffs)
+	}
+}
+
+// The image generation scopes the count: exits on the image that was replaced never
+// hold its replacement back, and it starts from zero rather than from theirs.
+func TestAReplacementImageOwesNothingForItsPredecessorsExits(t *testing.T) {
+	now := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+	old := domain.EmptyExitKey{Demand: liveIncarnationKey, Image: "base@2.336.0"}
+	exits := map[domain.EmptyExitKey]domain.EmptyExits{old: {Count: 6, Last: now.Add(-time.Minute)}}
+	engine := withheldEngine(now, exits, nil)
+	engine.Images = map[domain.Platform]string{domain.PlatformLinux: "base@2.336.0"}
+	result, err := engine.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spawnKeys(result.Plan)) != 0 || len(result.EmptyExitBackoffs) != 1 {
+		t.Fatalf("the image that earned the hold keeps it: %+v", result.Plan.Operations)
+	}
+	engine.Images = map[domain.Platform]string{domain.PlatformLinux: "base@2.338.2"}
+	result, err = engine.Tick(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spawnKeys(result.Plan)) != 1 || len(result.EmptyExitBackoffs) != 0 {
+		t.Fatalf("the replacement was charged: %+v %+v", result.Plan.Operations, result.EmptyExitBackoffs)
 	}
 }
 
@@ -64,6 +90,7 @@ func TestARefusedImageWithholdsItsWorkFromTheTick(t *testing.T) {
 	engine := liveIncarnationEngine(now, nil)
 	engine.Refusals = &RunnerRefusals{Now: func() time.Time { return now }}
 	engine.Refusals.Record(domain.PlatformLinux, "2.336.0", "trf-a")
+	engine.Refusals.Record(domain.PlatformLinux, "2.336.0", "trf-b")
 	result, err := engine.Tick(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +111,7 @@ func TestARefusedImageWithholdsItsWorkFromTheTick(t *testing.T) {
 func TestARefusalOnTheWallClockIsDated(t *testing.T) {
 	refusals := &RunnerRefusals{}
 	refusals.Record(domain.PlatformLinux, "2.336.0", "trf-a")
+	refusals.Record(domain.PlatformLinux, "2.336.0", "trf-b")
 	if refusals.Observe(nil)[domain.PlatformLinux].At.IsZero() {
 		t.Fatal("a nil clock is the wall clock")
 	}

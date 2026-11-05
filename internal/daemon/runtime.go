@@ -36,6 +36,7 @@ import (
 )
 
 type runtimeStore interface {
+	app.RunnerJobEvidence
 	operations.Store
 	app.EngineStore
 	app.LiveInstanceStore
@@ -960,7 +961,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		ingesters = append(ingesters, &runnerReleaseObserver{releases: releases, fetch: fetchRunnerReleases,
 			now: d.now, warn: reporter.logger.Warn})
 	}
-	engine := app.Engine{Refusals: refusals, Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
+	engine := app.Engine{Refusals: refusals, Images: d.imageGenerations(cfg), Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
 		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
 	yield := newSessionYieldController(yieldState, closers, reporter)
 	member := newMembershipController(membershipMode(opts.Mode, cfg), cfg.GitHub.ParkedScaleSetAuditInterval(),
@@ -993,7 +994,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, refusals)},
+					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, store, refusals)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{

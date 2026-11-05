@@ -31,6 +31,9 @@ type Controller struct {
 	ControllerID string
 	Mode         Mode
 	Profiles     map[domain.ProfileID]domain.Profile
+	// Images names the generation each platform launches from, stamped on every
+	// instance so its exits can be scoped to it (ADR 0094). Nil stamps nothing.
+	Images map[domain.Platform]string
 }
 
 func (c Controller) Commit(ctx context.Context, plan scheduler.Plan, observationCursor string, now time.Time) (bool, error) {
@@ -200,7 +203,7 @@ func (c Controller) translate(ctx context.Context, plan scheduler.Plan, prior op
 			operationID := attemptIdentity(operation.ID, generation)
 			ownership := operations.Ownership{ControllerID: c.ControllerID, ResourceID: operation.Demand.String(), OperationID: operationID}
 			instance := operations.Instance{ID: name, Repo: operation.Demand.Repo, Platform: profile.Platform, Profile: profile.ID, Route: profile.Route,
-				Resources: profile.Resources, Demand: operation.Demand, State: operations.StatePlanned, Version: 0, Ownership: ownership, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
+				Resources: profile.Resources, Demand: operation.Demand, Image: c.Images[profile.Platform], State: operations.StatePlanned, Version: 0, Ownership: ownership, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
 			durable.Instances = append(durable.Instances, operations.InstanceIntent{ExpectedVersion: -1, Instance: instance})
 			durable.Operations = append(durable.Operations, outbox(operation, operationID, "clone", name, ownership, now))
 		default:

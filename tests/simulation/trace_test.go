@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strings"
+	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
@@ -406,7 +407,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 	case eventImageSwap:
 		w.engine.Images = simImages("rebuilt")
 		for _, job := range w.jobs {
-			job.emptyExits = 0
+			// The world's count is per generation too, as property (w) judges it.
+			job.emptyExits, job.exitedEmpty, job.lastEmptyExit = 0, 0, time.Time{}
 		}
 	}
 }

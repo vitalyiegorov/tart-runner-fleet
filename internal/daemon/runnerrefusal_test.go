@@ -28,32 +28,51 @@ func (r *refusalRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 	return r.output, r.err
 }
 
-func TestATeardownReadRecordsWhatTheGuestLogSays(t *testing.T) {
-	refusals := &app.RunnerRefusals{}
-	instance := operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux}
+type noJobEvidence struct{}
 
+func (noJobEvidence) InstanceTookJob(context.Context, string) (bool, error) { return false, nil }
+
+// The production read addresses the guest by argument vector, refuses a name the
+// grammar does not admit, and feeds the shared gate.
+func TestATeardownReadRunsTheFixedCommandAgainstTheGuest(t *testing.T) {
+	refusals := &app.RunnerRefusals{}
 	runner := &refusalRunner{output: []byte("An error occurred: Runner version v2.336.0 is deprecated and cannot receive messages.\n")}
-	guestRunnerRefusalReader{Runner: runner, Refusals: refusals}.ReadRunnerRefusal(context.Background(), instance)
-	refusal, refused := refusals.Observe(nil)[domain.PlatformLinux]
-	if !refused || refusal.Version != "2.336.0" || refusal.Instance != instance.ID {
-		t.Fatalf("got %+v", refusal)
+	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return runner }}
+	reader := node.runnerRefusalReader(config.Default(), noJobEvidence{}, refusals)
+	for _, id := range []string{"trf-linux-2x4-abc", "trf-linux-2x4-def"} {
+		reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: id, Platform: domain.PlatformLinux})
 	}
-	if runner.args[0] != "exec" || runner.args[1] != instance.ID {
-		t.Fatalf("the read must address the guest by argument vector: %v", runner.args[:2])
+	if refusals.Observe(nil)[domain.PlatformLinux].Version != "2.336.0" {
+		t.Fatalf("two fresh guests make a verdict: %+v", refusals.Observe(nil))
+	}
+	if runner.args[0] != "exec" || runner.args[1] != "trf-linux-2x4-def" {
+		t.Fatalf("got %v", runner.args[:2])
+	}
+	runner.args = nil
+	reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: "bad name; rm -rf", Platform: domain.PlatformLinux})
+	if runner.args != nil {
+		t.Fatalf("executed %v", runner.args)
 	}
 }
 
-func TestAGuestThatDoesNotSaySoIsNoEvidence(t *testing.T) {
-	for name, runner := range map[string]*refusalRunner{
-		"no such line": {err: errors.New("exit status 1")},
-		"other text":   {output: []byte("An error occurred: something else\n")},
-	} {
-		refusals := &app.RunnerRefusals{}
-		guestRunnerRefusalReader{Runner: runner, Refusals: refusals}.ReadRunnerRefusal(context.Background(),
-			operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux})
-		if len(refusals.Observe(nil)) != 0 {
-			t.Fatalf("%s produced a verdict", name)
-		}
+// The identity moves with either thing a rebuild changes.
+func TestAnImageGenerationMovesWithTheReferenceAndTheDeclaredVersion(t *testing.T) {
+	cfg := config.Default()
+	cfg.MacOS.BaseVM, cfg.MacOS.BaseImageRunnerVersion = "macos-base", "2.336.0"
+	cfg.Linux.BaseImageRunnerVersion = "2.336.0"
+	node := dependencies{linuxImage: func(config.Config) string { return "registry/runner:1" }}
+	first := node.imageGenerations(cfg)
+	if first[domain.PlatformLinux] != "registry/runner:1@2.336.0" || first[domain.PlatformMacOS] != "macos-base@2.336.0" {
+		t.Fatalf("got %+v", first)
+	}
+	cfg.MacOS.BaseImageRunnerVersion = "2.338.2"
+	moved := node.imageGenerations(cfg)
+	if moved[domain.PlatformMacOS] == first[domain.PlatformMacOS] || moved[domain.PlatformLinux] != first[domain.PlatformLinux] {
+		t.Fatalf("got %+v", moved)
+	}
+	node.linuxImage = func(config.Config) string { return "registry/runner:2" }
+	if node.imageGenerations(cfg)[domain.PlatformLinux] == first[domain.PlatformLinux] {
+		t.Fatal("a new reference is a new generation")
 	}
 }
 
@@ -61,14 +80,14 @@ func TestAGuestThatDoesNotSaySoIsNoEvidence(t *testing.T) {
 func TestATartNodeHasNoRefusalReader(t *testing.T) {
 	cfg := config.Default()
 	tartNode := dependencies{guestExec: applePlatform().guestExec, hostTraffic: applePlatform().hostTraffic}
-	if reader := tartNode.runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader != nil {
+	if reader := tartNode.runnerRefusalReader(cfg, noJobEvidence{}, &app.RunnerRefusals{}); reader != nil {
 		t.Fatal("a Tart node must not exec into a guest for this")
 	}
 	containerNode := dependencies{guestExec: func(config.Config) executor.CommandRunner { return &refusalRunner{} }}
-	if reader := containerNode.runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader == nil {
+	if reader := containerNode.runnerRefusalReader(cfg, noJobEvidence{}, &app.RunnerRefusals{}); reader == nil {
 		t.Fatal("a container node reads its guest")
 	}
-	if reader := (dependencies{}).runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader != nil {
+	if reader := (dependencies{}).runnerRefusalReader(cfg, noJobEvidence{}, &app.RunnerRefusals{}); reader != nil {
 		t.Fatal("a node with no way to exec has no reader")
 	}
 }
@@ -183,15 +202,6 @@ func TestReleasesAreFetchedAndAFailedAnswerIsAnError(t *testing.T) {
 	}
 }
 
-func TestAnInvalidInstanceNameIsNeverExecuted(t *testing.T) {
-	runner := &refusalRunner{}
-	guestRunnerRefusalReader{Runner: runner, Refusals: &app.RunnerRefusals{}}.ReadRunnerRefusal(context.Background(),
-		operations.Instance{ID: "bad name; rm -rf", Platform: domain.PlatformLinux})
-	if runner.args != nil {
-		t.Fatalf("executed %v", runner.args)
-	}
-}
-
 func TestANilReleaseStoreIsAnUnreadCalendar(t *testing.T) {
 	var releases *runnerReleases
 	if releases.load() != nil {
@@ -201,7 +211,7 @@ func TestANilReleaseStoreIsAnUnreadCalendar(t *testing.T) {
 
 func TestAContainerNodeWhoseConfigRunsNoContainersHasNoReader(t *testing.T) {
 	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return nil }}
-	if node.runnerRefusalReader(config.Default(), &app.RunnerRefusals{}) != nil {
+	if node.runnerRefusalReader(config.Default(), noJobEvidence{}, &app.RunnerRefusals{}) != nil {
 		t.Fatal("no runner, no reader")
 	}
 }

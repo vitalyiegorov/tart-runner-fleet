@@ -334,6 +334,7 @@ type schedulingMetadata struct {
 	Route         domain.Route     `json:"route,omitempty"`
 	Resources     domain.Resources `json:"resources,omitempty"`
 	Demand        domain.DemandKey `json:"demand,omitempty"`
+	Image         string           `json:"image,omitempty"`
 }
 
 func encodeSchedulingMetadata(instance operations.Instance) ([]byte, error) {
@@ -345,7 +346,7 @@ func encodeSchedulingMetadata(instance operations.Instance) ([]byte, error) {
 		version = 1
 	}
 	encoded, _ := json.Marshal(schedulingMetadata{SchemaVersion: version, Repo: instance.Repo, Platform: instance.Platform,
-		Profile: instance.Profile, Route: instance.Route, Resources: instance.Resources, Demand: instance.Demand})
+		Profile: instance.Profile, Route: instance.Route, Resources: instance.Resources, Demand: instance.Demand, Image: instance.Image})
 	return encoded, nil
 }
 
@@ -358,7 +359,7 @@ func decodeSchedulingMetadata(encoded []byte, instance *operations.Instance) err
 		return fmt.Errorf("unsupported scheduling metadata version %d: %w", metadata.SchemaVersion, operations.ErrInvalid)
 	}
 	instance.Repo, instance.Platform, instance.Profile, instance.Route = metadata.Repo, metadata.Platform, metadata.Profile, metadata.Route
-	instance.Resources, instance.Demand = metadata.Resources, metadata.Demand
+	instance.Resources, instance.Demand, instance.Image = metadata.Resources, metadata.Demand, metadata.Image
 	if !instance.SchedulingMetadataValid() {
 		return operations.ErrInvalid
 	}
@@ -932,26 +933,31 @@ func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (i
 	return generation, nil
 }
 
-// EmptyExits reports, per demand, the deleted instances still bound to it since
-// the given instant. A failed row is not counted, because a provisioning failure
-// never reached a runner and has its own retry path. Nothing here is new state:
-// these are the same terminal rows SpawnGeneration already counts, so the answer
-// survives a restart and cannot drift from what happened (issue #493).
-func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.DemandKey]domain.EmptyExits, error) {
+// EmptyExits reports, per demand and image generation, the deleted instances still
+// bound to it since the given instant. A failed row is not counted, because a
+// provisioning failure never reached a runner and has its own retry path. A row older
+// than the image field reads as the empty generation, which no node launching from a
+// named one will ask about, so upgrading can only forget a hold, never invent one.
+// Nothing here is new state: these are the same terminal rows SpawnGeneration already
+// counts, so the answer survives a restart and cannot drift from what happened (issue
+// #493).
+func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.EmptyExitKey]domain.EmptyExits, error) {
 	rows, err := s.dbQuery(ctx, "inbox.empty_exits", `SELECT json_extract(scheduling_metadata,'$.demand.Repo'),
 		json_extract(scheduling_metadata,'$.demand.RunID'),json_extract(scheduling_metadata,'$.demand.Attempt'),
-		json_extract(scheduling_metadata,'$.demand.JobID'),COUNT(*),MAX(updated_at)
+		json_extract(scheduling_metadata,'$.demand.JobID'),COALESCE(json_extract(scheduling_metadata,'$.image'),''),
+		COUNT(*),MAX(updated_at)
 		FROM instances WHERE state=? AND updated_at>=? AND json_extract(scheduling_metadata,'$.demand.JobID')>0
-		GROUP BY 1,2,3,4`, operations.StateDeleted, since.UTC().UnixNano())
+		GROUP BY 1,2,3,4,5`, operations.StateDeleted, since.UTC().UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("list empty exits: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	result := map[domain.DemandKey]domain.EmptyExits{}
+	result := map[domain.EmptyExitKey]domain.EmptyExits{}
 	for rows.Next() {
-		var key domain.DemandKey
+		var key domain.EmptyExitKey
 		var exits domain.EmptyExits
-		if err := rows.Scan(&key.Repo, &key.RunID, &key.Attempt, &key.JobID, &exits.Count, (*nanosTime)(&exits.Last)); err != nil {
+		if err := rows.Scan(&key.Demand.Repo, &key.Demand.RunID, &key.Demand.Attempt, &key.Demand.JobID, &key.Image,
+			&exits.Count, (*nanosTime)(&exits.Last)); err != nil {
 			return nil, fmt.Errorf("scan empty exits: %w", err)
 		}
 		result[key] = exits
@@ -960,6 +966,21 @@ func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.Dem
 		return nil, fmt.Errorf("iterate empty exits: %w", err)
 	}
 	return result, nil
+}
+
+// InstanceTookJob reports whether any durable fact says this instance was given a job:
+// it entered Running, or GitHub named it as the runner on a job's own row. A job cannot
+// write either of them, because both come from the broker. They read every scale set
+// and the unindexed history, so this is for a teardown and never for a tick.
+func (s *Store) InstanceTookJob(ctx context.Context, instanceID string) (bool, error) {
+	var took bool
+	err := s.dbRow(ctx, "instances.took_job", `SELECT EXISTS(SELECT 1 FROM transition_history WHERE instance_id=? AND to_state=?)
+		OR EXISTS(SELECT 1 FROM runner_demands WHERE runner_name=? AND status_rank>=?)`,
+		instanceID, operations.StateRunning, instanceID, demandRank(operations.DemandJobAssigned)).Scan(&took)
+	if err != nil {
+		return false, fmt.Errorf("read instance job evidence: %w", err)
+	}
+	return took, nil
 }
 
 // DrainGeneration counts the instance's prior drain attempts that can no longer

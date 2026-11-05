@@ -56,28 +56,51 @@ GitHub publishes no cutoff, so this ADR relies on neither as a date.
 launching from that image, and probes it on a bound. Where the fleet cannot read
 that fact, it still bounds the loop and says what it can see.**
 
-### 1. Read the refusal where reading is safe
+### 1. Read the refusal where reading is safe, and only where a job cannot forge it
 
 Beside the first stop of a teardown, a container node reads the one fixed line from
 the guest's `runner.log`. Only a version matching the grammar leaves the read, so no
 other guest text reaches a log or a status document. A read that fails is no
 evidence. A Tart node has no reader at all (#478, ADR 0080).
 
+That log is writable by the user that runs jobs, so a pull request from a fork could
+append the line. A job must not be able to stop a node, so two rules stand between
+the text and a hold:
+
+- **A guest that ever took a job is not asked.** A real refusal never receives one.
+  "Took a job" is read from what only the broker can write: the instance entered
+  Running, or a job's own row names it as the runner. If that cannot be read, the
+  guest counts for nothing.
+- **A verdict takes two distinct guests**, naming one version, within an hour. One
+  guest is only a witness. This covers the one hole left by the first rule, a job
+  whose broker messages were lost, because a job can only write to its own guest.
+
+Under a standing verdict one probe's reading renews it, because only one probe runs
+at a time. A job that started after a reading clears it, witness or verdict.
+
 The verdict lives per platform, in process, like `GuestLivenessTracker`. A rebuilt
 image only reaches a daemon through a restart, so a verdict cannot outlive the image
-it names. A restart forgets it and the next teardown learns it again, which costs a
-few launches and can never hold back a working image.
+it names. A restart forgets it and later teardowns learn it again, which costs a few
+launches and can never hold back a working image.
 
 ### 2. Hold launches, and probe
 
 While a verdict stands, `plannableDemands` receives that platform's whole queue as
 withheld. Rows, queue age, the SLO and the job at GitHub are untouched; running work
 is left alone; nothing is cancelled. After `RunnerRefusalProbeInterval` (30 minutes)
-one demand is planned, if no job-less guest on that platform is already answering
-the question. The interval exists because enforcement began as brownouts (ADR 0041),
-so a refusal is never taken as permanent.
+one guest launches, because enforcement began as brownouts (ADR 0041), so a refusal is
+never taken as permanent.
 
-Only a job that **started after** the verdict clears it. One already running at the
+A probe is due only if no guest on that platform can already answer, meaning none is
+live, job-less and outside teardown. A guest in cleanup can never answer, and a stuck
+cleanup or parked dead letter can stay that way indefinitely.
+
+Which demand probes is the scheduler's decision. Each candidate is offered to
+`PlanTick`, oldest first, and the first plan that actually spawns it is kept, so an
+unschedulable head cannot hold the allowance. Nothing is spent until a spawn is
+selected.
+
+Only a job that **started after** the reading clears it. One already running at the
 cutoff says nothing about the image today.
 
 ### 3. Name it through the existing check
@@ -107,6 +130,14 @@ which covers a sibling taking the job first or a guest crashing once; from the t
 the demand waits 5, 10, 20, then at most 30 minutes after its last exit, and is named
 `demand_empty_exit_backoff` under a new `empty exits` doctor check.
 
+Exits count against one demand on one **image generation**, stamped on the instance
+row as the image reference and its declared runner version. A rebuilt image owes
+nothing for its predecessor's exits, so the operator's remedy works on the first launch
+after the restart. A rebuild under the same reference and declared version looks like
+the same generation, which is the declaration's one way to lie (ADR 0041), and such a
+hold still ends within 30 minutes. Rows older than the field are an empty generation no
+node asks about, so upgrading can only forget a hold.
+
 A hold ends by time alone, so it cannot strand a job: a job GitHub starts dispatching
 again waits at most the cap. It is the only bound on a Tart node, and the only bound
 anywhere on a job that one runner after another will not take while the image is fine.
@@ -134,7 +165,10 @@ because each of many demands earns its own three strikes.
 
 `tests/simulation/empty_exit_test.go` and `runner_refused_test.go` replay both. Red
 before the fix: one job booted 24 VMs in two hours and held a slot for 183 of 240
-ticks; a refused image launched 28 guests after a first batch of 4. Property (w),
+ticks; a refused image launched 28 guests after a first batch of 4. Review of the first
+version added four more, each red first: two jobs forging the line stopped a node, a
+stuck cleanup blocked every probe, an unschedulable demand held the only allowance, and
+a rebuilt image waited out its predecessor's hold. Property (w),
 `launch_hold`, judges every plan against the hold. It counts empty exits from the
 world, so a query that lost rows would be caught rather than agreed with.
 
@@ -163,8 +197,9 @@ with #494's fix.
 
 ## Consequences
 
-A node serving a refused image reads as what it is, not as busy. On a container node
-it spends one guest per half hour instead of every slot, and can reach quiescence for
+A node serving a refused image reads as what it is, not as busy. Learning it takes two
+teardowns, so a one-slot node may take a second assignment deadline to hold. On a
+container node it then spends one guest per half hour instead of every slot, and can reach quiescence for
 an update while it waits. On a Tart node the loop falls from about forty VMs an hour
 to at most two per job, and `doctor` shows the backoff beside the calendar finding,
 but the fleet never asserts a refusal it did not read.

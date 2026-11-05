@@ -83,13 +83,16 @@ func (o Ownership) Valid() bool {
 }
 
 type Instance struct {
-	ID         string
-	Repo       string
-	Platform   domain.Platform
-	Profile    domain.ProfileID
-	Route      domain.Route
-	Resources  domain.Resources
-	Demand     domain.DemandKey
+	ID        string
+	Repo      string
+	Platform  domain.Platform
+	Profile   domain.ProfileID
+	Route     domain.Route
+	Resources domain.Resources
+	Demand    domain.DemandKey
+	// Image is the generation this instance was launched from, empty on a row older
+	// than the field. It is an opaque identity, used only to scope empty exits.
+	Image      string
 	State      State
 	Version    int64
 	DrainPhase int

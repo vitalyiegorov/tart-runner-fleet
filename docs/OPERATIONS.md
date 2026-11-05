@@ -1388,9 +1388,10 @@ publishes no cutoff date, so the finding means "may be refused at any time", and
 does not date the refusal. An unread list judges nothing. The check makes staleness
 visible, it does not make it self-correcting.
 
-**`runner_version_refused` means GitHub is refusing this image now** (ADR 0094). A
-guest's log said `Runner version vX is deprecated and cannot receive messages`. The
-node stops launching from that image, leaves running work alone, keeps the jobs
+**`runner_version_refused` means GitHub is refusing this image now** (ADR 0094). Two
+distinct guests that never took a job said `Runner version vX is deprecated and cannot
+receive messages` within an hour. A job can write that line in its own guest, so a guest
+that took a job is never asked. The node stops launching from that image, leaves running work alone, keeps the jobs
 visible in the queue, and launches one guest per half hour to find out whether the
 image works again. A job that starts on that platform clears the verdict at once.
 A Tart node cannot read this, because `tart exec` is vsock traffic (#478): there the
@@ -1400,7 +1401,8 @@ image is the remedy; restarting the daemon only forgets the verdict.
 **`demand_empty_exit_backoff` means one queued job keeps costing instances** that
 leave without taking it. The first two are ordinary. From the third the fleet waits
 5, 10, 20, then at most 30 minutes after each exit before trying again, and other
-work has the slot in between. The job, its queue age and the queue SLO are untouched,
+work has the slot in between. Exits count per image generation, so a rebuilt image
+owes nothing for the old one's. The job, its queue age and the queue SLO are untouched,
 and nothing is cancelled at GitHub. See `fleet doctor`'s `empty exits` row and
 `.data.emptyExitBackoffs`.
 

@@ -16,6 +16,14 @@ type EmptyExits struct {
 	Last  time.Time
 }
 
+// EmptyExitKey is what exits are counted against: one demand on one image generation.
+// A rebuilt image owes nothing for its predecessor's exits, because the operator's
+// remedy must work at once.
+type EmptyExitKey struct {
+	Demand DemandKey
+	Image  string
+}
+
 // EmptyExitPolicy is how many empty exits a queued demand may cost before the
 // fleet stops spending instances on it back to back, and how long it then waits
 // between attempts (issue #493, ADR 0094).

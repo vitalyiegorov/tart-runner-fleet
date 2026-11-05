@@ -21,6 +21,7 @@ package simulation_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -1395,10 +1396,8 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 	case operations.StateDeregistering:
 		// The read production performs beside the first stop (lifecycle.stopGuest).
 		// A guest that never logged a refusal reports nothing.
-		if w.refusedRunners[instance.ID] {
-			delete(w.refusedRunners, instance.ID)
-			w.engine.Refusals.Record(instance.Platform, simRefusedVersion, instance.ID)
-		}
+		app.RunnerRefusalReader{Evidence: w.store, Refusals: w.engine.Refusals, Read: w.readRunnerLog}.
+			ReadRunnerRefusal(w.ctx, instance)
 		// executor.go's deregistering arm: the runner is gone and its deletion is
 		// confirmed, so all that remains is to make the guest stop holding the
 		// host. A guest that will not do so is issue #233, and it is the one
@@ -1421,6 +1420,15 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		// Assigned or running: the drain operation waits for the job to end.
 		return "", false
 	}
+}
+
+// readRunnerLog answers what a guest's runner.log says. What it may be asked, and
+// whether its answer counts, is the production reader's decision.
+func (w *world) readRunnerLog(_ context.Context, id string) ([]byte, error) {
+	if !w.refusedRunners[id] {
+		return nil, errors.New("exit status 1")
+	}
+	return []byte("An error occurred: Runner version v" + simRefusedVersion + " is deprecated and cannot receive messages.\n"), nil
 }
 
 // stopGuest performs one rung of the REAL escalation ladder against the

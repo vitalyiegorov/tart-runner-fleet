@@ -243,15 +243,16 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	var backoffs []EmptyExitBackoff
 	refused := e.Refusals.Observe(instances.Value)
 	probing := probeInFlight(instances.Value)
+	var probes []domain.Demand
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
-		for _, backoff := range emptyExitBackoffs(binding, queued, emptyExits) {
+		for _, backoff := range emptyExitBackoffs(binding, queued, emptyExits, e.Images) {
 			backoffs = append(backoffs, backoff)
 			if now.Before(backoff.RetryAt) {
 				withheld[backoff.Demand] = true
 			}
 		}
-		withholdRefused(queued, refused, probing, withheld, now)
+		probes = append(probes, withholdRefused(queued, refused, probing, withheld, now)...)
 		// One filter for every path: a demand whose VM is already cloning,
 		// booting, registering, assigned, running, or tearing down is not
 		// re-planned, and a terminal incarnation releases it again.
@@ -302,10 +303,10 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		}
 		return scopeQueues[i].ScaleSetID < scopeQueues[j].ScaleSetID
 	})
-	plan := scheduler.PlanTick(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior})
+	plan, demands := planWithProbes(scheduler.Input{Now: now, Config: e.Config, Demands: domain.Fresh(demands, now), Instances: instances, Host: host, Prior: prior}, probes)
 	headroom := coordinator.scaleSetHeadroom(ctx, e.Bindings, scheduler.Input{Now: now, Config: e.Config,
 		Demands: domain.Fresh(waiting, now), Instances: instances, Host: host, Prior: prior}, held, undelivered)
-	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles}).Commit(ctx, plan, "", now)
+	applied, err := (reconcile.Controller{Store: e.Store, ControllerID: e.ControllerID, Mode: e.Mode, Profiles: e.Config.Profiles, Images: e.Images}).Commit(ctx, plan, "", now)
 	mode, _ := domain.DeriveHostMode(instances.Value)
 	return TickResult{At: now, Plan: plan, Applied: applied, Demands: append([]domain.Demand(nil), demands...), Queues: queues, ScopeQueues: scopeQueues,
 			ScopeInstances: ScaleSetInstances(e.Bindings, instances),

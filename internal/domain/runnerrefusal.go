@@ -19,6 +19,11 @@ type RunnerRefusal struct {
 // no job GitHub would now accept waits longer than this for the fleet to notice.
 const RunnerRefusalProbeInterval = 30 * time.Minute
 
+// RunnerRefusalWitnessWindow is how close together two distinct guests must say so
+// before a node stops launching. One guest's word is never enough, because its log is
+// writable by whatever ran in it. Two readings this far apart are not the same event.
+const RunnerRefusalWitnessWindow = 2 * RunnerRefusalProbeInterval
+
 // RetryAt is when a probe may next launch from the refused image.
 func (r RunnerRefusal) RetryAt() time.Time { return r.At.Add(RunnerRefusalProbeInterval) }
 

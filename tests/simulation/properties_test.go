@@ -128,7 +128,8 @@ const (
 	findingSwapAdmission findingKind = "swap_admission"
 	// findingLaunchHold is property (w): a demand over the empty-exit bound, or an
 	// image whose guests said GitHub refuses it, does not launch inside its hold
-	// (ADR 0094). It counts empty exits from the world rather than from the durable
+	// (ADR 0094), and a refused image starts at most one probe per tick. It counts
+	// empty exits from the world rather than from the durable
 	// rows the fleet counts, so a query that lost rows would be caught, not agreed with.
 	findingLaunchHold findingKind = "launch_hold"
 	// findingStoreError is the harness's own fail-closed channel: the durable
@@ -306,6 +307,7 @@ func launchHoldChecker() checker {
 		if !observation.Applied {
 			return nil
 		}
+		probes := map[domain.Platform]int{}
 		for _, key := range observation.spawns() {
 			job := w.jobByRequest(key.JobID)
 			if job == nil {
@@ -318,8 +320,12 @@ func launchHoldChecker() checker {
 			}
 			// A verdict the plan was built on: one read during this tick's operations came
 			// after the plan, and one a started job cleared no longer stands.
-			refusal, standing := observation.RunnerRefusals[w.platformOfJob(key.JobID)]
-			if standing && !refusal.At.After(observation.Now) && observation.Now.Before(refusal.RetryAt()) {
+			platform := w.platformOfJob(key.JobID)
+			refusal, standing := observation.RunnerRefusals[platform]
+			if standing {
+				probes[platform]++
+			}
+			if standing && !refusal.At.After(observation.Now) && (observation.Now.Before(refusal.RetryAt()) || probes[platform] > 1) {
 				return []finding{{Kind: findingLaunchHold, Tick: observation.Tick,
 					Detail: fmt.Sprintf("%s spawned from an image refused at %s\n%s", key, refusal.At, w.dumpPlan(observation))}}
 			}

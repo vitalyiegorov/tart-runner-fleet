@@ -15,9 +15,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/executor"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
@@ -25,36 +23,15 @@ import (
 // it finds, and a guest that cannot answer in time has established nothing.
 const runnerRefusalTimeout = 5 * time.Second
 
-// guestRunnerRefusalReader asks a container guest's runner log whether the broker
-// refused it (ADR 0094). The command is fixed and its output passes the domain's
-// grammar, so no guest text reaches a log line or a status document.
-type guestRunnerRefusalReader struct {
-	Runner   executor.CommandRunner
-	Refusals *app.RunnerRefusals
-}
-
-func (r guestRunnerRefusalReader) ReadRunnerRefusal(ctx context.Context, instance operations.Instance) {
-	if domain.ValidateInstanceName(instance.ID) != nil {
-		return
-	}
-	attempt, cancel := context.WithTimeout(ctx, runnerRefusalTimeout)
-	defer cancel()
-	// grep's non-zero exit is the ordinary "no such line", and a failed read proves
-	// no more than that, so an error is simply no evidence.
-	output, err := r.Runner.Run(attempt, append([]string{"exec", instance.ID}, domain.RunnerRefusalLogCommand()...)...)
-	if err != nil {
-		return
-	}
-	if version, refused := domain.ParseRunnerRefusal(output); refused {
-		r.Refusals.Record(instance.Platform, version, instance.ID)
-	}
-}
-
 // runnerRefusalReader is nil on a node that must not read its guests: a Tart node,
 // where each `tart exec` is vsock traffic (issue #478) and the guest has usually
 // powered itself off by the time a drain could ask (ADR 0080). Such a node relies
-// on the empty-exit backoff and the release calendar instead.
-func (d dependencies) runnerRefusalReader(cfg config.Config, refusals *app.RunnerRefusals) lifecycle.RunnerRefusalReader {
+// on the empty-exit backoff and the release calendar instead. The command is fixed and
+// its output passes the domain's grammar, so no guest text reaches a log line or a
+// status document.
+func (d dependencies) runnerRefusalReader(cfg config.Config, evidence app.RunnerJobEvidence,
+	refusals *app.RunnerRefusals,
+) lifecycle.RunnerRefusalReader {
 	if d.guestExec == nil || (d.hostTraffic != nil && d.hostTraffic(cfg) != nil) {
 		return nil
 	}
@@ -62,7 +39,26 @@ func (d dependencies) runnerRefusalReader(cfg config.Config, refusals *app.Runne
 	if runner == nil {
 		return nil
 	}
-	return guestRunnerRefusalReader{Runner: runner, Refusals: refusals}
+	return app.RunnerRefusalReader{Evidence: evidence, Refusals: refusals, Read: func(ctx context.Context, id string) ([]byte, error) {
+		if err := domain.ValidateInstanceName(id); err != nil {
+			return nil, err
+		}
+		attempt, cancel := context.WithTimeout(ctx, runnerRefusalTimeout)
+		defer cancel()
+		return runner.Run(attempt, append([]string{"exec", id}, domain.RunnerRefusalLogCommand()...)...)
+	}}
+}
+
+// imageGenerations is what each platform launches from, as this process was configured
+// to. A rebuild that fixes a refused runner changes the reference or the declared
+// version, and either reaches the daemon only through a restart, so this is stated once
+// per process. A rebuild under the same name and the same declared version is
+// indistinguishable, which ADR 0041 already names as the declaration's one way to lie.
+func (d dependencies) imageGenerations(cfg config.Config) map[domain.Platform]string {
+	return map[domain.Platform]string{
+		domain.PlatformLinux: d.linuxImage(cfg) + "@" + cfg.Linux.BaseImageRunnerVersion,
+		domain.PlatformMacOS: cfg.MacOS.BaseVM + "@" + cfg.MacOS.BaseImageRunnerVersion,
+	}
 }
 
 // runnerReleases is the last release calendar read. Nil until one succeeds, which
@@ -226,7 +222,7 @@ func (e engineTicker) recordEmptyExitBackoffs(result app.TickResult) {
 	e.health.SetEmptyExitBackoffs(metrics)
 }
 
-// reportRunnerRefusal says once per verdict that an image is refused.
+// reportRunnerRefusal says once per reading of a standing verdict that an image is refused.
 func (r *failureReporter) reportRunnerRefusal(platform, vm string, refusal domain.RunnerRefusal) {
 	if r.logger == nil || !r.admit("runner-refusal\x00"+platform+"\x00"+refusal.At.String()) {
 		return
