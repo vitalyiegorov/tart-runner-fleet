@@ -30,6 +30,11 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodGet, "/npm/@types/node", 0},
 		{http.MethodGet, "/npm/@types%2fnode", 0},
 		{http.MethodGet, "/npm/@types%2Fnode", 0},
+		// Valid names under a scope, which only an unscoped name may not use.
+		{http.MethodGet, "/npm/@_koi/react", 0},
+		{http.MethodGet, "/npm/@scope/_private-looking", 0},
+		{http.MethodGet, "/npm/@_koi/react/-/react-1.0.0.tgz", 0},
+		{http.MethodGet, "/npm/@scope/_y/-/_y-1.0.0.tgz", 0},
 		// Tarballs: what a frozen lockfile asks for without reading metadata.
 		{http.MethodGet, "/npm/lodash/-/lodash-4.17.21.tgz", 0},
 		{http.MethodGet, "/npm/@types/node/-/node-22.0.0.tgz", 0},
@@ -82,6 +87,9 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodGet, "/npm/%2e%2e/metrics", http.StatusNotFound},
 		{http.MethodGet, "/npm/..%2fmetrics", http.StatusNotFound},
 		{http.MethodGet, "/npm/.hidden", http.StatusNotFound},
+		{http.MethodGet, "/npm/@scope/..", http.StatusNotFound},
+		{http.MethodGet, "/npm/@../x", http.StatusNotFound},
+		{http.MethodGet, "/npm/@scope/.hidden", http.StatusNotFound},
 		{http.MethodGet, "/npm//lodash", http.StatusNotFound},
 		{http.MethodGet, "/npm/lodash/", http.StatusNotFound},
 		{http.MethodGet, "/npm/-%2fwhoami", http.StatusNotFound},

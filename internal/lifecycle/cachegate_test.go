@@ -230,7 +230,7 @@ func TestTheScriptWritesTheRegistryOnlyAfterAskingDirectly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := npmMarker + "\nregistry=" + testNPMRegistry + "\nnoproxy=192.168.1.64\n"
+	want := npmMarker + "\nregistry=" + testNPMRegistry + "\nnoproxy=192.168.1.64\nno-proxy=192.168.1.64\n"
 	if got != want {
 		t.Fatalf(".npmrc = %q, want %q", got, want)
 	}

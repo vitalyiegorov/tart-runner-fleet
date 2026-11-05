@@ -50,7 +50,8 @@ const (
 // the host's proof says nothing about the guest's network and no client falls back
 // once its registry is set. Then it writes ~/.npmrc atomically, so the file is whole or
 // absent, and absent means npmjs. The user level is deliberate: a project's .npmrc,
-// a job's NPM_CONFIG_REGISTRY and setup-node's registry-url all still win.
+// a job's NPM_CONFIG_REGISTRY and setup-node's registry-url all still win. Both proxy
+// spellings are needed, because npm reads noproxy and pnpm 11 reads only no-proxy.
 const npmRegistryScript = `set -eu
 rc=$HOME/.npmrc
 if [ -e "$rc" ]; then
@@ -60,7 +61,7 @@ fi
 [ "$#" -eq 2 ] || exit 0
 curl --silent --fail --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null "$1-/ping" || exit 0
 tmp=$(mktemp "$rc.XXXXXX")
-printf '%s\nregistry=%s\nnoproxy=%s\n' '` + npmMarker + `' "$1" "$2" >"$tmp"
+printf '%s\nregistry=%s\nnoproxy=%s\nno-proxy=%s\n' '` + npmMarker + `' "$1" "$2" "$2" >"$tmp"
 mv -f "$tmp" "$rc"`
 
 // selectGate is one launch's choice, on one fresh proof. An unproven gate moves the

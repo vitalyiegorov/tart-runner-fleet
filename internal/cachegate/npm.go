@@ -33,11 +33,12 @@ const (
 
 // The route is an allowlist over the escaped path. Matching the escaped form means
 // no percent-encoding except a scope's slash can reach the backend, so the gate and
-// Verdaccio cannot read one request two ways. A name starts with a letter, digit or
-// `~`, which keeps out `-`, `_session`, and every dot segment.
+// Verdaccio cannot read one request two ways. An unscoped name starts with a letter,
+// digit or `~`, which keeps out `-` and `_session`. A scoped part may also start with
+// `_`, as `@_koi/react` does. Nothing may start with a dot, which keeps out dot segments.
 var (
-	npmName    = `(?:@[A-Za-z0-9~][A-Za-z0-9._~-]*(?:/|%2[fF]))?[A-Za-z0-9~][A-Za-z0-9._~-]*`
-	npmReads   = regexp.MustCompile(`^/npm/` + npmName + `(?:/-/[A-Za-z0-9~][A-Za-z0-9._~-]*\.tgz)?$`)
+	npmName    = `(?:@[A-Za-z0-9~_][A-Za-z0-9._~-]*(?:/|%2[fF])[A-Za-z0-9~_][A-Za-z0-9._~-]*|[A-Za-z0-9~][A-Za-z0-9._~-]*)`
+	npmReads   = regexp.MustCompile(`^/npm/` + npmName + `(?:/-/[A-Za-z0-9~_][A-Za-z0-9._~-]*\.tgz)?$`)
 	npmTags    = regexp.MustCompile(`^/npm/-/package/` + npmName + `/dist-tags$`)
 	npmHeaders = []string{"Accept", "Accept-Encoding", "If-Modified-Since", "If-None-Match", "If-Range", "Range", "User-Agent"}
 )
