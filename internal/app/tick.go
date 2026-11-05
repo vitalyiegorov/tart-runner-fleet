@@ -36,6 +36,8 @@ type Engine struct {
 	// Refusals is what this node's guests have said about their images (ADR 0094).
 	// Nil reads no guest and holds nothing back.
 	Refusals *RunnerRefusals
+	// Images names the image generation each platform launches from (ADR 0094).
+	Images map[domain.Platform]string
 }
 
 type TickResult struct {

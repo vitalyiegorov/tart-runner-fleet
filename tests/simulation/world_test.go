@@ -851,8 +851,9 @@ type world struct {
 	emptyExitNext int
 	// linuxRefused is how many more ticks the broker refuses Linux runners, and
 	// refusedRunners the guests whose log says so (ADR 0094).
-	linuxRefused   int
-	refusedRunners map[string]bool
+	forgeRefusalNext bool
+	linuxRefused     int
+	refusedRunners   map[string]bool
 	// advertisement is the node-wide residual view its scale sets advertise
 	// from, fed by every tick exactly as the daemon feeds it.
 	advertisement app.ResidualAdvertisement

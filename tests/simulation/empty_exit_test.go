@@ -156,3 +156,36 @@ func TestABackedOffJobThatIsLaterAssignedStillRuns(t *testing.T) {
 		t.Fatalf("a finished job must leave no hold behind: %+v", last.EmptyExitBackoffs)
 	}
 }
+
+// simImages is one generation of every image a simulated node boots.
+func simImages(generation string) map[domain.Platform]string {
+	return map[domain.Platform]string{domain.PlatformLinux: "linux@" + generation, domain.PlatformMacOS: "macos@" + generation}
+}
+
+// TestARebuiltImageIsNotChargedForTheOldOnesExits: the operator's remedy must work
+// at once. Exits on the image that was replaced say nothing about its replacement,
+// so the first launch after a swap may not wait out a hold the old image earned.
+func TestARebuiltImageIsNotChargedForTheOldOnesExits(t *testing.T) {
+	t.Parallel()
+	cfg := emptyExitWorld()
+	const swap = 32
+	w := newWorld(t, cfg, emptyExitTrace(cfg, 90, 1_000, simEvent{Tick: swap, Kind: eventImageSwap}))
+	defer w.close()
+	w.engine.Images = simImages("original")
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("the swap violated a property: %s", findings[0])
+	}
+	before := w.observations[swap-2]
+	if len(before.EmptyExitBackoffs) != 1 || !before.EmptyExitBackoffs[0].RetryAt.After(simEpoch.Add((swap+4)*simTick)) {
+		t.Fatalf("the trace must swap well inside a hold, or it proves nothing: %+v", before.EmptyExitBackoffs)
+	}
+	job := w.jobs[0]
+	for _, observation := range w.observations[swap-1 : swap+3] {
+		for _, key := range observation.spawns() {
+			if key.JobID == job.requestID {
+				return
+			}
+		}
+	}
+	t.Fatalf("the rebuilt image waited out the old image's hold: job status %s", job.status)
+}

@@ -128,3 +128,31 @@ func TestARefusedLinuxImageDoesNotHoldMacOSWork(t *testing.T) {
 		t.Fatalf("a macOS job waited on a refused Linux image: %s", mac.status)
 	}
 }
+
+// TestAJobCannotForgeARefusal: the guest's log is writable by the user that runs
+// jobs, so a pull request from a fork could otherwise append the refusal line and
+// stop a node's launches. Two jobs doing it must change nothing, because no guest
+// that took a job is ever asked.
+func TestAJobCannotForgeARefusal(t *testing.T) {
+	t.Parallel()
+	cfg := defaultWorld()
+	w := newWorld(t, cfg, simTrace{Seed: 20_261_105, Ticks: 90, Config: cfg.Name, Events: []simEvent{
+		{Tick: 1, Kind: eventForgedRefusal},
+		{Tick: 1, Kind: eventArrive, Repo: "a/repo", Profile: "medium", Event: "pull_request"},
+		{Tick: 20, Kind: eventForgedRefusal},
+		{Tick: 20, Kind: eventArrive, Repo: "a/repo", Profile: "medium", Event: "pull_request"},
+		{Tick: 40, Kind: eventArrive, Repo: "b/repo", Profile: "medium", Event: "push"},
+	}})
+	defer w.close()
+	if findings := w.run(); len(findings) > 0 {
+		t.Fatalf("forged refusals violated a property: %s", findings[0])
+	}
+	for _, observation := range w.observations {
+		if len(observation.RunnerRefusals) != 0 {
+			t.Fatalf("t%03d: a job's own log line became a verdict on the image: %+v", observation.Tick, observation.RunnerRefusals)
+		}
+	}
+	if next := w.jobs[2]; next.status != jobDone {
+		t.Fatalf("a later job was held by a forged refusal: %s", next.status)
+	}
+}

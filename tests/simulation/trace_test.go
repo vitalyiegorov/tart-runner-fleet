@@ -220,7 +220,14 @@ const (
 	// never receives a job, and idles until the assignment deadline reclaims it.
 	// macOS is left alone, because one image going stale says nothing about another.
 	eventRunnerRefused eventKind = "runner_refused"
-	eventStopArrivals  eventKind = "stop_arrivals"
+	// eventForgedRefusal is the next job to start writing the refusal line into its
+	// own guest's runner.log, which it can: the job runs as the user that owns it.
+	eventForgedRefusal eventKind = "forged_refusal"
+	// eventImageSwap is an operator rolling a rebuilt image out (a config change and
+	// a restart in production): new launches come from a new generation, and the
+	// jobs the old image could not take now run.
+	eventImageSwap    eventKind = "image_swap"
+	eventStopArrivals eventKind = "stop_arrivals"
 )
 
 func (t simTrace) String() string {
@@ -394,6 +401,13 @@ func (w *world) applyTraceEvent(event simEvent) {
 		// Scaled to the assignment deadline, so the generator reaches a refusal that
 		// outlasts a guest's own teardown, which is the only way the fleet learns of it.
 		w.linuxRefused = event.Count * 10
+	case eventForgedRefusal:
+		w.forgeRefusalNext = true
+	case eventImageSwap:
+		w.engine.Images = simImages("rebuilt")
+		for _, job := range w.jobs {
+			job.emptyExits = 0
+		}
 	}
 }
 

@@ -226,6 +226,9 @@ func (w *world) progressJobs() {
 			}
 			job.status = jobRunning
 			job.startedAt = w.now
+			if w.forgeRefusalNext {
+				w.forgeRefusalNext, w.refusedRunners[job.runner] = false, true
+			}
 			// Job duration is a property of the workflow, not of the fleet, and the
 			// harness modelled exactly one of them -- three virtual minutes, five
 			// times shorter than the assignment deadline. No job could therefore
