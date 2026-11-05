@@ -495,9 +495,11 @@ type dependencies struct {
 	// ground truth rather than trusting the observation that planned it.
 	guestProbe func(config.Config) app.GuestProbe
 	guestExec  func(config.Config) executor.CommandRunner
-	now        func() time.Time
-	after      func(time.Duration) <-chan time.Time
-	leaseOwner func(config.Config) string
+	// hostTraffic is the Tart node's host-side counter reader (ADR 0080).
+	hostTraffic func(config.Config) hostCounters
+	now         func() time.Time
+	after       func(time.Duration) <-chan time.Time
+	leaseOwner  func(config.Config) string
 }
 
 var deps = defaultDependencies()
@@ -594,14 +596,15 @@ func newDependencies(goos string) dependencies {
 		cursor: func(ctx context.Context, store runtimeStore, id int64) (int64, error) {
 			return store.DemandCursor(ctx, id)
 		},
-		newVM:      node.newVM,
-		newReaper:  node.newReaper,
-		readiness:  node.readiness,
-		bootstrap:  node.bootstrap,
-		guestProbe: node.guestProbe,
-		guestExec:  node.guestExec,
-		now:        time.Now,
-		after:      time.After,
+		newVM:       node.newVM,
+		newReaper:   node.newReaper,
+		readiness:   node.readiness,
+		bootstrap:   node.bootstrap,
+		guestProbe:  node.guestProbe,
+		guestExec:   node.guestExec,
+		hostTraffic: node.hostTraffic,
+		now:         time.Now,
+		after:       time.After,
 		leaseOwner: func(cfg config.Config) string {
 			owner := cfg.GitHub.SessionOwner
 			if owner == "" {
@@ -971,7 +974,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 		}
 	}
 	var worker app.WorkRunner
-	traffic, hasTraffic := d.guestTraffic(store, health, cfg, reporter.logger.Warn)
+	traffic, hostTraffic := d.guestTraffic(store, health, cfg, reporter.logger.Warn)
 	if opts.Mode == reconcile.Canary || opts.Mode == reconcile.Authority {
 		vm := d.newVM(store, cfg, control)
 		diskGiB := profileDiskFloors(cfg)
@@ -984,7 +987,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: trafficOrNil(traffic, hasTraffic)},
+					OnAbort: reporter.reportDrainAbort, Traffic: traffic},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -997,14 +1000,15 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	defer cancelRun()
 	serviceDone := make(chan error, 1)
 	go func() {
-		if worker != nil && hasTraffic {
-			// Sampling is best-effort and independent of the drain (ADR 0080).
+		if worker != nil && hostTraffic != nil {
+			// Reading the host's counters is best-effort and independent of the
+			// drain (ADR 0080). It never touches a guest.
 			sweepCtx, stopSweep := context.WithCancel(runCtx)
 			sweepDone := make(chan struct{})
-			ticks := time.NewTicker(guestTrafficInterval)
+			ticks := time.NewTicker(hostTrafficInterval)
 			go func() {
 				defer close(sweepDone)
-				guestTrafficSweeper{Source: store, Recorder: traffic, Tick: ticks.C}.Run(sweepCtx)
+				hostTrafficSweeper{Source: store, Recorder: *hostTraffic, Tick: ticks.C}.Run(sweepCtx)
 			}()
 			defer func() { stopSweep(); ticks.Stop(); <-sweepDone }()
 		}

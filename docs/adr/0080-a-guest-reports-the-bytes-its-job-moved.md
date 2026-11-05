@@ -32,7 +32,8 @@ existing `exec` path. Store at most one row per instance and report it by reposi
 workflow and profile.**
 
 1. **Source: the guest's own kernel.**
-   - Linux guests (podman containers and Tart Linux VMs) run `cat /proc/net/dev`.
+   - Linux guests (podman containers, and Tart Linux VMs before the amendment
+     below) run `cat /proc/net/dev`.
    - macOS guests run `netstat -ibn`.
    - The result is the sum of receive and transmit bytes over every interface
      except loopback. On macOS only the `<Link#N>` rows count, because the
@@ -125,7 +126,7 @@ CLI in both modes, and the gate's counters and loopback-only listener all have
 unit tests. The simulation is not extended. This change adds no admission rule,
 state or axis to `internal/scheduler`, so the corpus digests must not move.
 
-## Amendment 2026-11-05: a live guest is read while its job runs (issue #414)
+## Amendment 2026-11-05: a Tart guest is read from the host, never by exec (issues #414, #478)
 
 The first week measured about 3% of Tart jobs (macmini 17 of 672, macbook 19
 of 523 in 24 hours; podman about 99%), nearly all `exec_timeout` and
@@ -136,28 +137,88 @@ healthy trf- guest answered in 0.8 s, and against a stopped VM it fails in
 20 ms. ADR 0010 makes a Tart guest power itself off the moment its ephemeral
 runner exits, which is before the drain has deregistered the runner and
 confirmed its deletion, so the first-stop read finds a guest that is shutting
-down (the exec hangs: `exec_timeout`) or stopped (`exec_failed`). Observed on
-macmini: one guest's sample began at 04:36:56.5Z and timed out, and `tart
-list` showed that guest `stopped` at about 04:36:58Z. A podman container stays
-up until the daemon removes it, which is why those nodes measure.
+down (the exec hangs: `exec_timeout`) or stopped (`exec_failed`). A podman
+container stays up until the daemon removes it, which is why those nodes
+measure.
 
-**Decision.** Keep the end-of-job read and its 5-second deadline, and add a
-best-effort sweep while the job runs.
+**The constraint.** `tart exec` rides the guest's vsock device, and repeated
+vsock connections are what trap Virtualization.framework's VM helper
+(`EXC_BREAKPOINT` on `com.apple.virtualization.virtio.vsock-device:0`, issues
+#264 and #478). A probe every 5 s killed a scratch guest in 23 minutes, while
+an identical guest with no vsock traffic lived past 45. The Mini and MacBook
+run with `guestLivenessRefusals: -1` for that reason. So a fix that reads every
+live guest every few seconds with `tart exec` (the first version of this
+amendment) is rejected: it is new periodic vsock traffic on the hosts that
+cannot take it.
 
-- Every 15 seconds the daemon reads each live guest in `online_idle`,
-  `assigned` or `running` through the same `exec` path and keeps the latest
-  successful reading per instance in memory. Draining guests are not read.
-- At the end of the job, a successful read is the job's. If it fails, the last
-  kept reading is recorded as measured, with `sampledAt` the time of that
-  reading. Counters only grow, so it is a lower bound that misses at most the
-  traffic of the final interval, such as a closing cache upload.
-- The sweep runs in its own goroutine, bounded by the same deadline per read,
-  and touches neither the store nor the metrics. It cannot fail or hold a drain.
-- Readings are not persisted: a daemon restart forgets them, and those jobs are
-  recorded as before. They are dropped when the instance is recorded or is no
-  longer live.
-- Not done: lengthening the deadline (the guest is gone, so a longer wait only
-  holds teardown), and changing the guest image to delay its power-off.
+**What was evaluated, in order.**
+
+1. **A host-side counter: yes, and it is the decision.** Virtualization.framework
+   puts each running guest on its own `vmenetN` interface on the host's NAT
+   bridge (`bridge100`), and the host keeps byte counters for it. Read-only
+   checks on macmini (macOS 26.5, tart 2.32.1) and the MacBook (macOS 27.2)
+   showed it. `ifconfig bridge100` lists each guest's MAC in its address cache
+   against the `vmenet` port it was learned on, and each running guest's
+   `macAddress` in its `config.json` matched one entry. `netstat -ibn` has
+   one `<Link#N>` row per `vmenet`, and its `Obytes` (host to guest) was
+   the large number (1.8 GB against 32 MB of `Ibytes` on a 14-minute-old guest),
+   as expected of a runner that mostly downloads. No command
+   touched a guest.
+2. **The guest reports its counters as it goes down: not built.** The shutdown
+   is the bootstrap helper's supervisor script (`internal/guestbootstrap`),
+   which is compiled into `/usr/local/libexec/tart-runner-fleet-bootstrap` in
+   the immutable base image (ADR 0010): printing counters to the console before
+   `shutdown` needs a base image rebuild on both platforms. The fleet could
+   inject a watcher at launch with the one bootstrap `exec` it already makes,
+   but its output could go only to the serial console, which is opt-in
+   (`linuxSerialLogDirectory`, ADR 0046), exists only for Linux guests (the tart
+   adapter passes `--serial-path` for them alone), and would have to be parsed
+   back out of a log file racing a guest that is powering off. macOS guests
+   have no such channel. It is more machinery for a worse answer than (1).
+3. **Keep the old behaviour and report: not needed**, since (1) works.
+
+**Decision.** A Tart guest is measured from the host's counters for its virtual
+NIC. The daemon never execs into a Tart guest for traffic.
+
+- Every 5 seconds the daemon makes one host read for all live guests: `ifconfig
+  -l`, `ifconfig <bridge>` for each `bridge*`, and `netstat -ibn`, no guest
+  involved. A guest's MAC comes from its `config.json`, the file the fleet
+  already reads for its power reading. The guest's counters are the `vmenet` row
+  seen from the guest: receive is the host's `Obytes`, transmit its `Ibytes`.
+  Parsers are pure (`domain.ParseBridgeGuests`, `domain.ParseVirtualNICs`).
+- The latest reading per instance is kept in memory. When the drain records the
+  job it stores that reading as measured, with `sampledAt` the time of the
+  reading. The drain runs no command and reads no guest, so it can neither fail
+  nor wait on this. The interface disappears with the powered-off guest, so the
+  last reading is a lower bound that misses at most the final five seconds.
+- A host that cannot be read keeps the previous readings and is warned about
+  once, when it starts to fail and when it recovers. A guest the host never saw
+  (the job ended before the first read, or the daemon restarted mid-job) is
+  recorded as unmeasured with the new closed reason `no_reading`, never as zero.
+  No migration: the column is free text, and `fleet.v1` only gains a value.
+- Podman nodes are unchanged: a container is up until the daemon removes it, and
+  `podman exec` is not vsock, so the one end-of-job exec read stays.
+- Draining guests are read too (the interface may still be up); the drain's
+  skips (escalated stop, guest proved unresponsive) are unchanged and still leave
+  no row.
+
+**Limits.**
+
+- Counters are what crossed the NIC, so ARP, DHCP and bridge-flooded broadcasts
+  and the Ethernet headers are counted. That is a few kilobytes against jobs of
+  megabytes, and the guest's own `/proc/net/dev` counts headers too.
+- A job shorter than the first read, and a job running across a daemon restart,
+  are unmeasured. Readings are not persisted.
+- The mapping relies on `ifconfig`/`netstat` output and on the guest being on a
+  bridge. If either changes, the parsers refuse the output and every job is
+  unmeasured (one warning), never zero.
+- macOS Tart guests use the same NAT attachment and should appear the same way;
+  none was running on macmini when this was checked, so that is read from the
+  code, not observed.
+- Nothing about the guest image changes; no base image needs a rebuild.
+
+Not done: any periodic `tart exec`; lengthening the deadline (the guest is gone);
+a guest-image change to print counters before power-off (see above).
 
 ## Not built
 

@@ -66,9 +66,15 @@ type platform struct {
 	// because the question is not "has it booted yet" but "is it still there"
 	// (ADR 0040).
 	guestProbe func(config.Config) app.GuestProbe
-	// guestExec is the `exec <instance> ...` runner the guest probe and the
-	// end-of-job traffic sample share, or nil on a node with no guest (ADR 0080).
+	// guestExec is the `exec <instance> ...` runner the end-of-job traffic sample
+	// uses, or nil on a node that does not exec into its guests for traffic (ADR
+	// 0080).
 	guestExec func(config.Config) executor.CommandRunner
+	// hostTraffic reads a guest's traffic from the host's own counters for its
+	// virtual NIC, or is nil on a node without one. A Tart node uses it instead of
+	// guestExec: `tart exec` is vsock traffic, and a guest powers off before the
+	// drain could ask (ADR 0080, amendment 2026-11-05; issue #478).
+	hostTraffic func(config.Config) hostCounters
 }
 
 // platformFor reports the wiring goos implies. macOS is Tart and the `vm_stat`
@@ -116,7 +122,7 @@ func applePlatform() platform {
 		guestProbe: func(cfg config.Config) app.GuestProbe {
 			return execGuestProbe{Runner: tart.ExecRunner{}, Timeout: cfg.GuestLiveness.ProbeTimeout}
 		},
-		guestExec: func(config.Config) executor.CommandRunner { return tart.ExecRunner{} },
+		hostTraffic: func(config.Config) hostCounters { return tart.HostTraffic{} },
 	}
 }
 

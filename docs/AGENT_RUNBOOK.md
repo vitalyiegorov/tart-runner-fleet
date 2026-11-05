@@ -222,8 +222,8 @@ re-run.
 ## Analyze CI traffic
 
 To answer "which repo or workflow pulled the most bytes in the last 24 hours",
-run this on each node. Each eligible guest's own interface counters are read
-once at the end of its job ([ADR 0080](adr/0080-a-guest-reports-the-bytes-its-job-moved.md)).
+run this on each node. A podman guest's own interface counters are read once at
+the end of its job; a Tart guest's are read from the host while it runs ([ADR 0080](adr/0080-a-guest-reports-the-bytes-its-job-moved.md)).
 
 ```sh
 "$FLEET" traffic --endpoint "$ENDPOINT" --since 24h                  # totals, largest first
@@ -245,7 +245,8 @@ How to read the output:
   not a per-job one.
 - An `unmeasured` job has no bytes, which is not the same as zero bytes. Its
   guest was sampled but could not be read (`exec_failed`, `exec_timeout`,
-  `unreadable`, `no_command`).
+  `unreadable`, `no_command`), or, on Tart, the host never saw it (`no_reading`:
+  the job ended before the first read, or the daemon restarted mid-job).
 - Some jobs have no row at all. A guest is sampled only on its drain's first
   stop: a drain that reached only escalated stops, a guest already reclaimed
   as unresponsive, and a guest that died first are never sampled. So the job

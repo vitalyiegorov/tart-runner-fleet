@@ -13,6 +13,9 @@ const (
 	TrafficExecTimeout = "exec_timeout"
 	TrafficUnreadable  = "unreadable"
 	TrafficNoCommand   = "no_command"
+	// TrafficNoReading is a Tart guest the host never saw: the job ended before
+	// the first host read, or the daemon restarted mid-job (ADR 0080).
+	TrafficNoReading = "no_reading"
 )
 
 // TrafficSample is one instance's guest interface counters, read once at the
@@ -44,7 +47,7 @@ func (s TrafficSample) Valid() bool {
 		return s.Unmeasured == "" && s.ReceiveBytes >= 0 && s.TransmitBytes >= 0
 	}
 	switch s.Unmeasured {
-	case TrafficExecFailed, TrafficExecTimeout, TrafficUnreadable, TrafficNoCommand:
+	case TrafficExecFailed, TrafficExecTimeout, TrafficUnreadable, TrafficNoCommand, TrafficNoReading:
 		return s.ReceiveBytes == 0 && s.TransmitBytes == 0
 	default:
 		return false

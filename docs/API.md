@@ -27,7 +27,7 @@ monitoring, while the operator commands default to the Unix socket.
   (`instance`, `repo`, `platform`, `profile`, `scaleSetId`, `runId`,
   `workflowRef`, `job`, `startedAt`, `sampledAt`, `measured`, and either
   `receiveBytes`/`transmitBytes` or an `unmeasured` reason: `exec_failed`,
-  `exec_timeout`, `unreadable`, `no_command`). A daemon older than this route
+  `exec_timeout`, `unreadable`, `no_command`, `no_reading`). A daemon older than this route
   answers 404.
 
 All other methods return 405 and all unknown paths return 404. Responses are
