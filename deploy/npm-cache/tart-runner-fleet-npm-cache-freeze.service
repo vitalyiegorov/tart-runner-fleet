@@ -1,0 +1,17 @@
+# Freezes the npm cache when its prune failed in a way the script could not handle: killed at its
+# timeout, or never started (ADR 0093). It is started by the prune's OnFailure=, so it runs outside
+# that process, and it fails visibly if the directory is still writable. A frozen cache serves what
+# it holds and passes the rest to npmjs, and the next good prune thaws it. Install beside the prune.
+[Unit]
+Description=Freeze the npm cache after its limits could not be enforced (ADR 0093)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'chmod 0500 %h/.local/share/tart-runner-fleet-npm-cache/data && test ! -w %h/.local/share/tart-runner-fleet-npm-cache/data'
+TimeoutStartSec=60
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/tart-runner-fleet-npm-cache
+PrivateTmp=yes
+RestrictAddressFamilies=none

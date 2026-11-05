@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -203,7 +204,11 @@ func npmGate(t *testing.T, npm *url.URL, logs io.Writer, counters *Counters) (*h
 	t.Helper()
 	cache, _ := upstream(t)
 	results, resultsSeen := upstream(t)
-	gate := httptest.NewServer(countingHandler(cache, results, npm, logs, counters))
+	var route *npmCache
+	if npm != nil {
+		route = newNPMCache(filepath.Join(t.TempDir(), "data"), npm)
+	}
+	gate := httptest.NewServer(countingHandler(cache, results, route, logs, counters))
 	t.Cleanup(gate.Close)
 	return gate, cache, resultsSeen
 }
@@ -214,10 +219,9 @@ func TestTheNPMRouteStripsTheGatePrefixAndKeepsAScopesEncoding(t *testing.T) {
 	for path, want := range map[string]string{
 		"/npm/lodash":                    "/lodash",
 		"/npm/@types%2fnode":             "/@types%2fnode",
-		"/npm/@types%2Fnode":             "/@types%2Fnode",
-		"/npm/@types/node":               "/@types/node",
+		"/npm/@other%2Fnode":             "/@other%2Fnode",
+		"/npm/@third/node":               "/@third/node",
 		"/npm/lodash/-/lodash-1.0.0.tgz": "/lodash/-/lodash-1.0.0.tgz",
-		"/npm/-/ping":                    "/-/ping",
 	} {
 		resp, err := http.Get(gate.URL + path)
 		if err != nil {
@@ -229,7 +233,7 @@ func TestTheNPMRouteStripsTheGatePrefixAndKeepsAScopesEncoding(t *testing.T) {
 			t.Fatalf("%s: status=%d body=%q, want %q", path, resp.StatusCode, body, want)
 		}
 	}
-	if _, uris, _ := backend.seen(); len(uris) != 6 {
+	if _, uris, _ := backend.seen(); len(uris) != 5 {
 		t.Fatalf("uris = %q", uris)
 	}
 }
@@ -270,10 +274,8 @@ func TestTheNPMRouteForwardsNoGuestCredential(t *testing.T) {
 			t.Errorf("%s carried the credential to the backend", name)
 		}
 	}
-	host := strings.TrimPrefix(gate.URL, "http://")
-	want := http.Header{"Accept": {"application/vnd.npm.install-v1+json"}, "Accept-Encoding": {"gzip"},
-		"If-None-Match": {`"abc"`}, "If-Modified-Since": {"Mon, 02 Jan 2006 15:04:05 GMT"}, "Range": {"bytes=0-1"},
-		"If-Range": {`"abc"`}, "User-Agent": {"pnpm/11"}, "X-Forwarded-Host": {host}, "X-Forwarded-Proto": {"http"}}
+	host := target.Host
+	want := http.Header{"Accept": {npmAbbreviated}, "Accept-Encoding": {"gzip"}, "User-Agent": {npmUserAgent}}
 	for name := range requests[0].Header {
 		if _, ok := want[name]; !ok {
 			t.Errorf("unexpected header %s reached the backend", name)
@@ -285,7 +287,7 @@ func TestTheNPMRouteForwardsNoGuestCredential(t *testing.T) {
 		}
 	}
 	if requests[0].Host != host {
-		t.Errorf("host = %q, want the address the guest used, %q", requests[0].Host, host)
+		t.Errorf("host = %q, want the registry's own, %q", requests[0].Host, host)
 	}
 	if strings.Contains(logs.String(), secret) {
 		t.Fatalf("the gate logged the credential: %q", logs.String())
@@ -354,7 +356,7 @@ func TestTheNPMRouteLeavesEveryOtherRouteAlone(t *testing.T) {
 	backend, target := newNPMBackend(t)
 	cache, cacheSeen := upstream(t)
 	results, resultsSeen := upstream(t)
-	gate := httptest.NewServer(countingHandler(cache, results, target, io.Discard, &Counters{}))
+	gate := httptest.NewServer(countingHandler(cache, results, newNPMCache(filepath.Join(t.TempDir(), "data"), target), io.Discard, &Counters{}))
 	t.Cleanup(gate.Close)
 	for _, path := range []string{"/download/x", "/npmish/x", "/twirp/x/y", "/lodash"} {
 		resp, err := http.Get(gate.URL + path)
@@ -455,19 +457,25 @@ func TestCountersReportTheNPMRouteOnTheExistingShape(t *testing.T) {
 	}
 }
 
-func TestExecuteRefusesAnNPMUpstreamOffLoopback(t *testing.T) {
-	for _, npm := range []string{"http://192.168.1.64:3020", "http://localhost:3020", "https://registry.npmjs.org", "127.0.0.1:3020",
-		"http://127.0.0.1:3020/npm", "https://127.0.0.1:3020", "http://user:pass@127.0.0.1:3020"} {
+func TestExecuteRefusesAnUnusableNPMCacheOrRegistry(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"relative cache": {"--npm-cache", "data"},
+		"unclean cache":  {"--npm-cache", "/tmp/../data"},
+		"no scheme":      {"--npm-cache", "/data", "--npm-upstream", "127.0.0.1:3020"},
+		"other scheme":   {"--npm-cache", "/data", "--npm-upstream", "ftp://registry.example"},
+		"credentials":    {"--npm-cache", "/data", "--npm-upstream", "https://user:pass@registry.example"},
+		"a path":         {"--npm-cache", "/data", "--npm-upstream", "https://registry.example/npm"},
+		"unparseable":    {"--npm-cache", "/data", "--npm-upstream", "http://[::1"},
+	} {
 		var stderr bytes.Buffer
-		code := Execute(context.Background(), []string{"--listen", "127.0.0.1:0", "--upstream", "http://127.0.0.1:1", "--npm-upstream", npm},
-			io.Discard, &stderr)
-		if code != 2 || !strings.Contains(stderr.String(), "--npm-upstream") {
-			t.Fatalf("%s: code=%d stderr=%q", npm, code, stderr.String())
+		code := Execute(context.Background(), append([]string{"--listen", "127.0.0.1:0", "--upstream", "http://127.0.0.1:1"}, extra...), io.Discard, &stderr)
+		if code != 2 || !strings.Contains(stderr.String(), "--npm-cache") {
+			t.Fatalf("%s: code=%d stderr=%q", name, code, stderr.String())
 		}
 	}
 }
 
-func TestExecuteServesTheNPMRouteFromItsUpstream(t *testing.T) {
+func TestExecuteServesTheNPMRouteFromItsCache(t *testing.T) {
 	_, target := newNPMBackend(t)
 	address := freeAddress(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -476,9 +484,9 @@ func TestExecuteServesTheNPMRouteFromItsUpstream(t *testing.T) {
 	cache, _ := upstream(t)
 	go func() {
 		done <- Execute(ctx, []string{"--listen", address, "--upstream", cache.String(), "--results-upstream", cache.String(),
-			"--npm-upstream", target.String()}, &stdout, io.Discard)
+			"--npm-cache", filepath.Join(t.TempDir(), "data"), "--npm-upstream", target.String()}, &stdout, io.Discard)
 	}()
-	if body := waitFor(t, "http://"+address+"/npm/-/ping"); body != "npm:/-/ping" {
+	if body := waitFor(t, "http://"+address+"/npm/lodash"); body != "npm:/lodash" {
 		t.Fatalf("body = %q", body)
 	}
 	cancel()
@@ -487,6 +495,29 @@ func TestExecuteServesTheNPMRouteFromItsUpstream(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "npm "+target.Redacted()) {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+// TestARegistryWithNoCacheIsNoRoute: Omarchy's old drop-in passes --npm-upstream at a Verdaccio. A
+// gate restarted on it after the release must start, and must serve no npm route.
+func TestARegistryWithNoCacheIsNoRoute(t *testing.T) {
+	address := freeAddress(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	cache, _ := upstream(t)
+	go func() {
+		done <- Execute(ctx, []string{"--listen", address, "--upstream", cache.String(), "--results-upstream", cache.String(),
+			"--npm-upstream", "http://127.0.0.1:3020"}, io.Discard, io.Discard)
+	}()
+	waitFor(t, "http://"+address+"/health")
+	response, err := http.Get("http://" + address + "/npm/lodash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	cancel()
+	if code := <-done; code != 0 || response.StatusCode != http.StatusNotFound {
+		t.Fatalf("code=%d status=%d", code, response.StatusCode)
 	}
 }
 
@@ -533,7 +564,7 @@ func TestNPMReadyIsFalseWhenNothingAnswers(t *testing.T) {
 func TestAGateWithNoNPMCacheExportsNoNPMSeries(t *testing.T) {
 	_, target := newNPMBackend(t)
 	cache, _ := upstream(t)
-	for name, extra := range map[string][]string{"off": nil, "on": {"--npm-upstream", target.String()}} {
+	for name, extra := range map[string][]string{"off": nil, "on": {"--npm-cache", filepath.Join(t.TempDir(), "data"), "--npm-upstream", target.String()}} {
 		t.Run(name, func(t *testing.T) {
 			gateAddress, metricsAddress := freeAddress(t), freeAddress(t)
 			ctx, cancel := context.WithCancel(context.Background())

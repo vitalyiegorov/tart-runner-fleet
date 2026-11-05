@@ -2,19 +2,14 @@ package cachegate
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"regexp"
 	"strings"
 )
 
 // NPMPrefix is the one prefix a gate serves its npm read-through cache under
-// (ADR 0093). A guest's registry setting and the tarball URLs Verdaccio
-// advertises both end here.
+// (ADR 0093). A guest's registry setting ends here.
 const NPMPrefix = "/npm/"
 
 // NPMPingPath is what a node and a guest ask before trusting the route.
@@ -32,17 +27,16 @@ const (
 )
 
 // The route is an allowlist over the escaped path. Matching the escaped form means
-// no percent-encoding except a scope's slash can reach the backend, so the gate and
-// Verdaccio cannot read one request two ways. An unscoped name starts with a letter,
+// no percent-encoding except a scope's slash can reach the registry, so one request
+// cannot be read two ways, or name a cache key twice. An unscoped name starts with a letter,
 // digit or `~`, which keeps out `-` and `_session`. A scoped part may also start with
 // `_`, as `@_koi/react` does. Nothing may start with a dot, which keeps out dot segments.
 var (
 	npmName = `(?:@[A-Za-z0-9~_][A-Za-z0-9._~-]*(?:/|%2[fF])[A-Za-z0-9~_][A-Za-z0-9._~-]*|[A-Za-z0-9~][A-Za-z0-9._~-]*)`
 	// Metadata, one version or tag of it, or a tarball. A version starts with a letter or
 	// digit, which keeps out `-rev` and `-/`.
-	npmReads   = regexp.MustCompile(`^/npm/` + npmName + `(?:/[A-Za-z0-9][A-Za-z0-9._~-]*|/-/[A-Za-z0-9~_][A-Za-z0-9._~-]*\.tgz)?$`)
-	npmTags    = regexp.MustCompile(`^/npm/-/package/` + npmName + `/dist-tags$`)
-	npmHeaders = []string{"Accept", "Accept-Encoding", "If-Modified-Since", "If-None-Match", "If-Range", "Range", "User-Agent"}
+	npmReads = regexp.MustCompile(`^/npm/` + npmName + `(?:/[A-Za-z0-9][A-Za-z0-9._~-]*|/-/[A-Za-z0-9~_][A-Za-z0-9._~-]*\.tgz)?$`)
+	npmTags  = regexp.MustCompile(`^/npm/-/package/` + npmName + `/dist-tags$`)
 )
 
 // isNPMRoute reports whether a path belongs to this route rather than to Decide.
@@ -51,8 +45,7 @@ func isNPMRoute(path string) bool {
 }
 
 // DecideNPM judges one request to the npm route from its method, escaped path,
-// Host and headers alone. It decides independently of Verdaccio's own config, so a
-// mistake in that config cannot open a write path.
+// Host and headers alone. Nothing it refuses reaches the cache or the registry.
 func DecideNPM(method, escapedPath, host string, header http.Header) Verdict {
 	if method != http.MethodGet && method != http.MethodHead {
 		return Verdict{Status: http.StatusForbidden, Reason: npmRefused}
@@ -60,14 +53,14 @@ func DecideNPM(method, escapedPath, host string, header http.Header) Verdict {
 	if !directLANHost(host) || arrivedThroughCloudflare(header) {
 		return Verdict{Status: http.StatusForbidden, Reason: npmRefused}
 	}
-	if escapedPath != NPMPingPath && !npmReads.MatchString(escapedPath) && !npmTags.MatchString(escapedPath) {
+	if len(escapedPath) > npmMaxPath || (escapedPath != NPMPingPath && !npmReads.MatchString(escapedPath) && !npmTags.MatchString(escapedPath)) {
 		return Verdict{Status: http.StatusNotFound, Reason: npmNotFound}
 	}
 	return Verdict{Allow: true, Upstream: NPM}
 }
 
-// directLANHost is the Host a guest may address the route by. It is what Verdaccio
-// builds tarball URLs from, so it must never be a tunnel's hostname.
+// directLANHost is the Host a guest may address the route by, which must never be a
+// tunnel's hostname.
 func directLANHost(hostport string) bool {
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
@@ -103,58 +96,6 @@ func arrivedThroughCloudflare(header http.Header) bool {
 		}
 	}
 	return false
-}
-
-// npmProxy forwards an allowed read to Verdaccio. It forwards only the headers a
-// registry read needs, no query and no body, so a credential a client attached under
-// any name stops here. It keeps the Host the guest used, which is how one Verdaccio
-// advertises tarballs correctly to Tart guests at the LAN address and to Podman
-// guests at host.containers.internal.
-func npmProxy(target *url.URL) *httputil.ReverseProxy {
-	return &httputil.ReverseProxy{
-		Rewrite: func(r *httputil.ProxyRequest) {
-			escaped := strings.TrimPrefix(r.In.URL.EscapedPath(), strings.TrimSuffix(NPMPrefix, "/"))
-			r.Out.URL.Scheme, r.Out.URL.Host = target.Scheme, target.Host
-			// DecideNPM admitted only unreserved bytes and %2f, so this cannot fail.
-			r.Out.URL.Path, _ = url.PathUnescape(escaped)
-			r.Out.URL.RawPath, r.Out.URL.RawQuery = escaped, ""
-			r.Out.Body, r.Out.ContentLength = http.NoBody, 0
-			r.Out.Header = http.Header{"X-Forwarded-Host": {r.In.Host}, "X-Forwarded-Proto": {"http"}}
-			for _, name := range npmHeaders {
-				if values, ok := r.In.Header[name]; ok {
-					r.Out.Header[name] = values
-				}
-			}
-			r.Out.Host = r.In.Host
-		},
-		// No proxy, and no silent decompression of what the guest asked to receive
-		// compressed. Tarball bursts reuse connections to the loopback backend.
-		Transport: &http.Transport{DisableCompression: true, MaxIdleConnsPerHost: 64, IdleConnTimeout: idleTimeout},
-		ModifyResponse: func(response *http.Response) error {
-			if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest &&
-				response.StatusCode != http.StatusNotModified {
-				return errors.New("the npm cache answered with a redirect")
-			}
-			response.Header.Del("Set-Cookie")
-			return nil
-		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadGateway)
-			_ = json.NewEncoder(w).Encode(map[string]string{"code": "unavailable", "msg": "the npm cache is unavailable"})
-		},
-	}
-}
-
-// validNPMUpstream is a plain http URL on a literal loopback address, naming nothing
-// but a host and port: the backend must stay unreachable from guests, and the gate
-// is the only thing that talks to it.
-func validNPMUpstream(raw string) (*url.URL, bool) {
-	parsed, ok := absoluteURL(raw)
-	if !ok || parsed.Scheme != "http" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || !loopbackAddress(parsed.Host) {
-		return nil, false
-	}
-	return parsed, true
 }
 
 // NPMReady reports whether the gate's npm route answers now. It says nothing about

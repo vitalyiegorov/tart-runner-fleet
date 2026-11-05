@@ -16,6 +16,9 @@ import (
 // counter.
 type Counters struct {
 	toGuest, fromGuest [upstreamCount]atomic.Int64
+	// fromRegistry is what the npm cache really drew from npmjs, so an operator can
+	// compare it with what guests read (ADR 0093).
+	fromRegistry atomic.Int64
 	// npmEnabled exports the npm series, so a gate with no npm cache scrapes exactly
 	// the series it always did. countingHandler sets it before the gate serves.
 	npmEnabled bool
@@ -36,6 +39,9 @@ func (c *Counters) render() string {
 			upstream.name, c.toGuest[upstream.index].Load())
 		fmt.Fprintf(&output, "fleet_cache_gate_bytes_total{upstream=%q,direction=\"from_guest\"} %d\n",
 			upstream.name, c.fromGuest[upstream.index].Load())
+	}
+	if c.npmEnabled {
+		fmt.Fprintf(&output, "fleet_cache_gate_bytes_total{upstream=\"npm\",direction=\"from_registry\"} %d\n", c.fromRegistry.Load())
 	}
 	return output.String()
 }

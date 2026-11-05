@@ -84,7 +84,7 @@ func TestAnUnprovenGateClearsAnyRegistryAndLeavesTheResultsFallbackAlone(t *test
 }
 
 // TestAProvenGateWhoseNPMRouteIsDownSendsTheGuestDirect: a verified gate with a dead
-// Verdaccio would otherwise fail every npm install in the job.
+// route with no cache behind it would otherwise fail every npm install in the job.
 func TestAProvenGateWhoseNPMRouteIsDownSendsTheGuestDirect(t *testing.T) {
 	runner := &recordingRunner{}
 	bootstrap := StdinBootstrapper{Runner: runner, Gate: fixedGate(true), NPM: npmRoute(false)}
