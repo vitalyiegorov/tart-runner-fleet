@@ -1,9 +1,11 @@
 # Keeps the npm cache inside its limits (ADR 0093). Install beside its timer in
 # ~/.config/systemd/user/, and the script as
 # ~/.config/tart-runner-fleet-npm-cache/prune-npm-cache.py. A failed run means it stopped
-# the cache, or could not, because it could not enforce the limits: read its journal.
+# the cache, or could not, because it could not enforce the limits: read its journal. If it is
+# killed at its timeout or never starts, the script cannot act, so OnFailure= stops the cache.
 [Unit]
 Description=tart-runner-fleet npm cache limits (ADR 0093)
+OnFailure=tart-runner-fleet-npm-cache-stop.service
 
 [Service]
 Type=oneshot

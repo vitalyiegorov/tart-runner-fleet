@@ -206,19 +206,27 @@ and the gate cannot see that: it counts what guests read, not what the uplink ca
   `ProtectHome=read-only`, `ReadWritePaths=`).
 - **It spares what is active, because a running install has no fallback.** It never evicts a package
   touched in the last 15 minutes or holding any file but `package.json` and `*.tgz`, which covers
-  Verdaccio's `*.tmp*` files, and it looks again immediately before each delete. A window of
-  microseconds remains between that look and the delete, and a download starting in it fails.
+  Verdaccio's `*.tmp*` files, and it looks again immediately before each delete.
+- **A known limit, accepted.** A download can still start in the moment between that look and the
+  delete. That install fails and a rerun succeeds. It can only happen while evicting, which means
+  above 40 GiB or under the reserve. There is no locking with Verdaccio, because it would cost more
+  than this rare failure.
 - **It reports only what it measures.** It re-reads free space after evicting, allowing 60 s for
   btrfs to return it, and never credits what it deleted.
 - **Any failure to enforce stops the cache**, and it confirms the stop. New guests then go direct and
   the doctor row says `npm cache not ready`. Exit 1 is a confirmed stop and exit 3 means it could not
-  confirm one, and both read `failed`. Bringing the cache back is an operator's decision.
+  confirm one, and both read `failed`. If systemd kills the script at its 300 s timeout or never
+  starts it, the script cannot act, so the unit's `OnFailure=` starts
+  `tart-runner-fleet-npm-cache-stop.service`, which stops the cache and confirms it from outside. A
+  stop that cannot be confirmed leaves that unit `failed`. Bringing the cache back is an operator's
+  decision.
 
-**This bounds growth, and it is not a hard quota.** Between two runs the cache can pass the
-limit by five minutes of the uplink, under 3 GiB at the home site. A kernel-enforced cap needs
-root: the storage is its own btrfs subvolume on Omarchy so that a qgroup limit can be added
-later with no migration. The node's own disk and inode floors stay the backstop, and they stop
-admission, not the cache's growth.
+**It is not a hard quota, and growth between checks has no strict bound.** Runs about every five
+minutes and never overlap, so a slow run stretches the gap, and the cache can pass the limit by
+whatever the uplink delivers until the next check finishes. A kernel-enforced cap needs root: the
+storage is its own btrfs subvolume on Omarchy so that a qgroup limit can be added later with no
+migration. The node's own disk and inode floors stay the backstop, and they stop admission, not the
+cache's growth.
 
 ### 8. Git seeds: decided, and shipped later
 

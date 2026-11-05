@@ -16,7 +16,8 @@ Any enforcement failure stops the cache and exits 1, and exit 3 means it could n
 that stop. New guests then go direct and `fleet doctor` says `npm cache not ready`. Bringing
 the cache back is an operator's `systemctl --user start`.
 
-This bounds growth between runs, not a single write: only a kernel quota could do that.
+This checks growth between runs and has no strict bound on it: only a kernel quota could do that.
+If systemd kills this script or never starts it, the unit's OnFailure= stops the cache instead.
 """
 import argparse
 import errno

@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -88,7 +89,7 @@ class Fixture(unittest.TestCase):
         return self.calls.exists() and f"stop {SERVICE}" in self.calls.read_text()
 
     def verified_stop(self):
-        return self.calls.exists() and f"is-active {SERVICE}" in self.calls.read_text()
+        return self.calls.exists() and re.search(rf"is-active( --quiet)? {SERVICE}", self.calls.read_text()) is not None
 
 
 class Limits(Fixture):
@@ -323,6 +324,79 @@ class TellsTheTruth(Fixture):
     def test_nonsense_limits_are_refused(self):
         result = self.run_prune(high_kib=256, low_kib=512)
         self.assertNotEqual(result.returncode, 0)
+
+
+class OutsideTheTimedProcess(Fixture):
+    """If systemd kills or never starts the prune, nothing in the script can stop the cache."""
+
+    stop_unit = DEPLOY / "tart-runner-fleet-npm-cache-stop.service"
+
+    def run_stop_unit(self):
+        command = re.search(r"^ExecStart=/bin/sh -c '(.*)'$", self.stop_unit.read_text(), re.M).group(1)
+        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}"}
+        return subprocess.run(["sh", "-c", command], env=env, capture_output=True, text=True, check=False)
+
+    def test_a_failed_prune_hands_over_to_the_stop_unit(self):
+        prune = (DEPLOY / "tart-runner-fleet-npm-cache-prune.service").read_text()
+        self.assertIn(f"\nOnFailure={self.stop_unit.name}\n", prune.split("[Service]")[0])
+
+    def test_the_stop_unit_stops_the_cache_and_confirms_it(self):
+        result = self.run_stop_unit()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.stopped())
+        self.assertTrue(self.verified_stop())
+
+    def test_the_stop_unit_fails_visibly_if_the_cache_is_still_up(self):
+        self.stand_in_systemctl(stop_exit=1, still_active=True)
+        self.assertNotEqual(self.run_stop_unit().returncode, 0)
+        self.stand_in_systemctl(stop_exit=0, still_active=True)
+        self.assertNotEqual(self.run_stop_unit().returncode, 0, "a stop that reported success must still be confirmed")
+
+    def test_the_stop_unit_has_no_failure_handler_of_its_own(self):
+        self.assertNotIn("\nOnFailure=", self.stop_unit.read_text(), "a failing stop must not loop")
+
+
+class InstallAfterRollback(Fixture):
+    """Rollback leaves the storage in place, so the documented install must cope with it."""
+
+    def run_snippet(self, inode="256", filesystem="btrfs"):
+        operations = (DEPLOY.parent.parent / "docs" / "OPERATIONS.md").read_text()
+        snippet = re.search(r"^STORAGE=~/\.local/share/tart-runner-fleet-npm-cache\n.*?^fi$", operations, re.M | re.S).group(0)
+        for name, body in (("btrfs", f'echo "$@" >> {self.root}/btrfs.calls\nmkdir -p "$3"'),
+                           ("stat", f'case "$*" in *%T*) echo {filesystem} ;; *) echo {inode} ;; esac')):
+            stand_in = self.bin / name
+            stand_in.write_text(f"#!/bin/sh\n{body}\n")
+            stand_in.chmod(0o755)
+        env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": str(self.home)}
+        return subprocess.run(["bash", "-euc", snippet], env=env, capture_output=True, text=True, check=False)
+
+    def created(self):
+        return (self.root / "btrfs.calls").exists()
+
+    def test_a_first_install_creates_the_subvolume(self):
+        self.data.rmdir()
+        self.storage.rmdir()
+        result = self.run_snippet()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.created())
+
+    def test_an_install_after_rollback_reuses_the_subvolume_and_its_data(self):
+        kept = self.package("kept", age_days=1)
+        result = self.run_snippet()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.created())
+        self.assertTrue(kept.exists())
+
+    def test_anything_else_at_that_path_is_refused_untouched(self):
+        for inode, filesystem in (("12345", "btrfs"), ("256", "ext2/ext3")):
+            result = self.run_snippet(inode=inode, filesystem=filesystem)
+            self.assertNotEqual(result.returncode, 0, f"accepted inode {inode} on {filesystem}")
+            self.assertFalse(self.created())
+            self.assertIn("migrate", result.stderr)
+        self.data.rmdir()
+        self.storage.rmdir()
+        self.storage.symlink_to(self.outside, target_is_directory=True)
+        self.assertNotEqual(self.run_snippet().returncode, 0, "accepted a symlink")
 
 
 class Deploy(unittest.TestCase):

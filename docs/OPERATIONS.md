@@ -2224,7 +2224,8 @@ from home. Cache data never crosses cloudflared, which stays admin and health on
 | --- | --- | --- |
 | `tart-runner-fleet-npm-cache.service` | Verdaccio, pinned by digest, a rootless quadlet | `127.0.0.1:3020` only |
 | `tart-runner-fleet-cache-gate.service.d/npm-cache.conf` | gives the gate its `/npm/` route | the gate's existing `:3017` |
-| `tart-runner-fleet-npm-cache-prune.timer` | holds the storage to its limits, every five minutes | — |
+| `tart-runner-fleet-npm-cache-prune.timer` | holds the storage to its limits, about every five minutes | — |
+| `tart-runner-fleet-npm-cache-stop.service` | stops the cache if the prune is killed or never starts | — |
 | `cacheGate.npmRegistry` in a node's config | the registry that node's guests may be given, on each launch's proof | — |
 
 Nothing changes for a node until its config has `npmRegistry`. The first two pieces can
@@ -2241,10 +2242,19 @@ set -eu
 REPO=/path/to/a/clone/of/tart-runner-fleet
 mkdir -p ~/.config/containers/systemd ~/.config/tart-runner-fleet-npm-cache \
   ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.d
-# Its own btrfs subvolume, so that a qgroup limit can be added later with no migration.
-btrfs subvolume create ~/.local/share/tart-runner-fleet-npm-cache
+# Its own btrfs subvolume, so that a qgroup limit can be added later with no migration. A rollback
+# leaves it in place, and an install then reuses it. A subvolume's root is always inode 256, and
+# reading that needs no root, unlike `btrfs subvolume show`.
+STORAGE=~/.local/share/tart-runner-fleet-npm-cache
+if [ ! -e "$STORAGE" ] && [ ! -L "$STORAGE" ]; then
+  btrfs subvolume create "$STORAGE"
+elif [ -L "$STORAGE" ] || [ ! -d "$STORAGE" ] || [ "$(stat -c %i "$STORAGE")" != 256 ] || [ "$(stat -f -c %T "$STORAGE")" != btrfs ]; then
+  echo "$STORAGE exists and is not a btrfs subvolume: migrate it first (see below)" >&2
+  exit 1
+fi
 install -m 0755 "$REPO/deploy/npm-cache/prune-npm-cache.py" ~/.config/tart-runner-fleet-npm-cache/
 install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-prune.service" \
+  "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-stop.service" \
   "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-prune.timer" ~/.config/systemd/user/
 install -m 0644 "$REPO/deploy/npm-cache/verdaccio.yaml" ~/.config/tart-runner-fleet-npm-cache/config.yaml
 install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache.container" ~/.config/containers/systemd/
@@ -2261,6 +2271,16 @@ curl -fsS http://127.0.0.1:3017/npm/-/ping
 
 Restarting the gate interrupts Actions cache calls in flight, which those jobs treat as
 warnings, and artifact uploads, which they do not. Do it with no guest running.
+
+If the install refuses because `$STORAGE` is not a btrfs subvolume, move it aside and run the install
+again. The cache is rebuildable, so nothing needs copying. Do this with no guest naming the cache:
+
+```sh
+systemctl --user stop tart-runner-fleet-npm-cache.service
+mv ~/.local/share/tart-runner-fleet-npm-cache ~/.local/share/tart-runner-fleet-npm-cache.old
+```
+
+Delete the `.old` directory once the cache serves again.
 
 ### Enable a node
 
@@ -2316,7 +2336,7 @@ if the gate is still down. Do not read this as a cache fault to mask.
 ### Disk: limits and what enforces them
 
 **Verdaccio does not prune.** `tart-runner-fleet-npm-cache-prune.timer` holds the storage to
-its limits every five minutes:
+its limits about every five minutes:
 
 | Limit | Value | What happens |
 | --- | --- | --- |
@@ -2333,8 +2353,8 @@ an evicted package again.
 It deletes only in that exact directory, refuses a symlink or a mount on the way there, and the unit
 can write nowhere else.
 
-It is a timer, not a hard quota: between two runs the cache can pass the limit by five minutes
-of the uplink, under 3 GiB at the home site. A kernel-enforced cap needs root.
+It is a timer, not a hard quota. Runs never overlap, so a slow run stretches the gap, and growth
+past the limit between checks has no strict bound. A kernel-enforced cap needs root.
 
 ```sh
 systemctl --user list-timers tart-runner-fleet-npm-cache-prune.timer
@@ -2342,11 +2362,13 @@ journalctl --user -u tart-runner-fleet-npm-cache-prune.service -n 5 -o cat   # s
 ```
 
 **If the prune unit reads `failed`, read its journal first.** Exit 1 means it stopped the cache, so
-new guests go direct and `fleet doctor` says `npm cache not ready`. **Exit 3 means it could not confirm
-that stop, so the cache may still be growing, and needs you now.** Fix the cause, and then bring it back:
+new guests go direct and `fleet doctor` says `npm cache not ready`. If it was killed at its 300 s
+timeout or never started, `tart-runner-fleet-npm-cache-stop.service` stopped the cache instead. **Exit 3,
+or that stop unit reading `failed`, means the stop could not be confirmed, so the cache may still be
+growing, and needs you now.** Fix the cause, and then bring it back:
 
 ```sh
-systemctl --user reset-failed tart-runner-fleet-npm-cache-prune.service
+systemctl --user reset-failed tart-runner-fleet-npm-cache-prune.service tart-runner-fleet-npm-cache-stop.service
 systemctl --user start tart-runner-fleet-npm-cache.service
 ```
 
