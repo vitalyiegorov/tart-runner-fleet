@@ -50,6 +50,11 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodGet, "/npm/-/ping", 0},
 		{http.MethodGet, "/npm/-/package/lodash/dist-tags", 0},
 		{http.MethodGet, "/npm/-/package/@types%2fnode/dist-tags", 0},
+		// Attestations: where pnpm reads a publish time, before it falls back to a full document.
+		{http.MethodGet, "/npm/-/npm/v1/attestations/metro-runtime@0.87.1", 0},
+		{http.MethodHead, "/npm/-/npm/v1/attestations/metro-runtime@0.87.1", 0},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/@babel/core@7.0.0", 0},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/@babel%2fcore@7.0.0", 0},
 
 		// Every mutation, by method, whatever the path is.
 		{http.MethodPut, "/npm/lodash", http.StatusForbidden},                                  // publish
@@ -76,11 +81,26 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodPut, "/npm/-/_view/starredByUser", http.StatusForbidden},                   // legacy star
 		{http.MethodPost, "/npm/-/npm/v1/security/advisories/bulk?write=true", http.StatusForbidden},
 
+		// Attestations can be read and nothing else.
+		{http.MethodPost, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+		{http.MethodPut, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+		{http.MethodPatch, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+		{http.MethodDelete, "/npm/-/npm/v1/attestations/lodash@4.17.21", http.StatusForbidden},
+
 		// Reads that name an account, a token, or Verdaccio's own surface.
 		{http.MethodGet, "/npm/-/whoami", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/user/org.couchdb.user:eve", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/npm/v1/tokens", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/npm/v1/security/audits", http.StatusNotFound},
+		// Attestations are one package at one version, and nothing near them.
+		{http.MethodGet, "/npm/-/npm/v1/attestations", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash@", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash%404.17.21", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash@4.17.21/extra", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/../tokens", http.StatusNotFound},
+		{http.MethodGet, "/npm/-/npm/v1/attestations/lodash@4.17.21%2f..%2ftokens", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/v1/search", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/verdaccio/data/packages", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/web/detail/lodash", http.StatusNotFound},
@@ -305,6 +325,8 @@ func TestARefusedMutationNeverReachesTheBackendAndLeavesNoTokenInTheLog(t *testi
 		{http.MethodPut, "/npm/-/user/org.couchdb.user:" + secret},
 		{http.MethodPut, "/npm/lodash"},
 		{http.MethodPost, "/npm/-/npm/v1/security/advisories/bulk"},
+		{http.MethodPost, "/npm/-/npm/v1/attestations/lodash@4.17.21"},
+		{http.MethodDelete, "/npm/-/npm/v1/attestations/lodash@4.17.21"},
 	} {
 		req, _ := http.NewRequest(request.method, gate.URL+request.path, strings.NewReader("{}"))
 		req.Header.Set("Authorization", "Bearer "+secret)

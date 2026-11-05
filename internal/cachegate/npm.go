@@ -36,7 +36,9 @@ var (
 	// Metadata, one version or tag of it, or a tarball. A version starts with a letter or
 	// digit, which keeps out `-rev` and `-/`.
 	npmReads = regexp.MustCompile(`^/npm/` + npmName + `(?:/[A-Za-z0-9][A-Za-z0-9._~-]*|/-/[A-Za-z0-9~_][A-Za-z0-9._~-]*\.tgz)?$`)
-	npmTags  = regexp.MustCompile(`^/npm/-/package/` + npmName + `/dist-tags$`)
+	// `npm dist-tag ls`, and one version's attestations, where pnpm reads a publish time before it
+	// falls back to the whole document (ADR 0093).
+	npmDashReads = regexp.MustCompile(`^/npm/-/(?:package/` + npmName + `/dist-tags|npm/v1/attestations/` + npmName + `@[A-Za-z0-9][A-Za-z0-9._~-]*)$`)
 )
 
 // isNPMRoute reports whether a path belongs to this route rather than to Decide.
@@ -53,7 +55,7 @@ func DecideNPM(method, escapedPath, host string, header http.Header) Verdict {
 	if !directLANHost(host) || arrivedThroughCloudflare(header) {
 		return Verdict{Status: http.StatusForbidden, Reason: npmRefused}
 	}
-	if len(escapedPath) > npmMaxPath || (escapedPath != NPMPingPath && !npmReads.MatchString(escapedPath) && !npmTags.MatchString(escapedPath)) {
+	if len(escapedPath) > npmMaxPath || (escapedPath != NPMPingPath && !npmReads.MatchString(escapedPath) && !npmDashReads.MatchString(escapedPath)) {
 		return Verdict{Status: http.StatusNotFound, Reason: npmNotFound}
 	}
 	return Verdict{Allow: true, Upstream: NPM}

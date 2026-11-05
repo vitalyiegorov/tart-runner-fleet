@@ -25,9 +25,6 @@ const (
 	defaultNPMUpstream = "https://registry.npmjs.org"
 	// npmMetadataTTL is how long a document is served before it is revalidated.
 	npmMetadataTTL = 10 * time.Minute
-	// npmFetchDeadline bounds one fetch whatever it is doing. bodyStallTimeout cuts one that
-	// stops making progress long before this.
-	npmFetchDeadline = 15 * time.Minute
 	// npmHeaderLimit bounds an object's stored header, so a corrupt file costs one small read.
 	npmHeaderLimit = 4096
 	// npmMaxPath is well past npm's own 214-byte name limit plus a version or tarball name.
@@ -45,6 +42,10 @@ const (
 // npmMaxObject bounds what is stored. Past it an object is passed through instead, as a stream
 // that holds no memory. It is a variable so that a test need not write two gigabytes.
 var npmMaxObject int64 = 2 << 30
+
+// npmFetchDeadline bounds one upstream request whatever it is doing. bodyStallTimeout cuts one that
+// stops making progress long before this.
+var npmFetchDeadline = 15 * time.Minute
 
 var (
 	// errNPMRegistry means the registry did not deliver: stale metadata may answer instead.
@@ -87,8 +88,8 @@ type npmFlight struct {
 // npmObject is what one request is for. Accept and encoding are reduced to the few forms that are
 // really different documents, so a guest's spelling of a header cannot multiply the cache.
 type npmObject struct {
-	escaped, accept, encoding, file string
-	immutable                       bool
+	escaped, key, accept, encoding, file string
+	immutable                            bool
 }
 
 // npmEntry is the first line of a stored object.
@@ -165,7 +166,7 @@ func (c *npmCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (c *npmCache) object(r *http.Request) npmObject {
 	escaped := strings.TrimPrefix(r.URL.EscapedPath(), strings.TrimSuffix(NPMPrefix, "/"))
 	key := strings.NewReplacer("%2f", "/", "%2F", "/").Replace(escaped)
-	o := npmObject{escaped: escaped, immutable: strings.Contains(key, "/-/") && strings.HasSuffix(key, ".tgz")}
+	o := npmObject{escaped: escaped, key: key, immutable: strings.Contains(key, "/-/") && strings.HasSuffix(key, ".tgz")}
 	if !o.immutable {
 		o.accept = "application/json"
 		if strings.Contains(r.Header.Get("Accept"), "install-v1") {
@@ -175,9 +176,26 @@ func (c *npmCache) object(r *http.Request) npmObject {
 			o.encoding = "gzip"
 		}
 	}
-	sum := sha256.Sum256([]byte(key + "\x00" + o.accept + "\x00" + o.encoding))
-	o.file = filepath.Join(c.dir, hex.EncodeToString(sum[:]))
+	o.file = c.file(key, o.accept, o.encoding)
 	return o
+}
+
+func (c *npmCache) file(key, accept, encoding string) string {
+	sum := sha256.Sum256([]byte(key + "\x00" + accept + "\x00" + encoding))
+	return filepath.Join(c.dir, hex.EncodeToString(sum[:]))
+}
+
+// forget drops every form of a document the registry says is gone, so that no later failure can
+// serve it as stale. A frozen directory cannot unlink, but an empty file reads as not there.
+func (c *npmCache) forget(o npmObject) {
+	for _, accept := range []string{"application/json", npmAbbreviated} {
+		for _, encoding := range []string{"", "gzip"} {
+			file := c.file(o.key, accept, encoding)
+			if os.Remove(file) != nil {
+				_ = os.Truncate(file, 0)
+			}
+		}
+	}
 }
 
 // readNPMEntry reads a stored object's header. Anything unreadable is simply not there.
@@ -267,30 +285,47 @@ func (c *npmCache) request(ctx context.Context, method string, o npmObject) *htt
 func (c *npmCache) fetch(ctx context.Context, o npmObject) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), npmFetchDeadline)
 	defer cancel()
-	stalled := time.AfterFunc(bodyStallTimeout, cancel)
-	defer stalled.Stop()
 	request := c.request(ctx, http.MethodGet, o)
+	stored := false
 	if f, err := os.Open(o.file); err == nil {
-		entry, _, _ := readNPMEntry(f)
+		var entry npmEntry
+		entry, _, stored = readNPMEntry(f)
 		_ = f.Close()
 		if entry.ETag != "" {
 			request.Header.Set("If-None-Match", entry.ETag)
 		}
+	}
+	// A miss on a disk that cannot store goes straight to the pass-through, rather than sending a
+	// GET it could only abandon. A document it already holds still asks: a 304 renews it, and if
+	// the registry fails it is the stale copy.
+	tmp, err := os.CreateTemp(c.dir, ".tmp-")
+	if err == nil {
+		defer func() {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}()
+	} else if !stored {
+		return errNPMDisk
 	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		return errNPMRegistry
 	}
 	defer func() { _ = response.Body.Close() }()
+	stalled := time.AfterFunc(bodyStallTimeout, cancel)
+	defer stalled.Stop()
 	switch code := response.StatusCode; {
 	case code == http.StatusOK:
-		return c.store(o, response, stalled)
+		return c.store(o, tmp, response, stalled)
 	case code == http.StatusNotModified:
 		// A failure only means the next request asks again.
 		_ = os.Chtimes(o.file, now(), now())
 		return nil
 	case code < http.StatusBadRequest || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError:
 		return errNPMRegistry
+	case code == http.StatusNotFound || code == http.StatusGone:
+		c.forget(o)
+		return npmStatus(code)
 	default:
 		return npmStatus(code)
 	}
@@ -317,19 +352,11 @@ func (p *npmProgress) Read(b []byte) (int, error) {
 
 // store writes one object atomically: to a temp file, durably, and then by rename, so that a crash
 // at any point leaves the whole object or none of it.
-func (c *npmCache) store(o npmObject, response *http.Response, stalled *time.Timer) error {
+func (c *npmCache) store(o npmObject, tmp *os.File, response *http.Response, stalled *time.Timer) error {
 	line, _ := json.Marshal(npmEntry{response.Header.Get("Content-Type"), response.Header.Get("Content-Encoding"), response.Header.Get("ETag")})
-	if response.ContentLength > npmMaxObject || len(line) >= npmHeaderLimit {
+	if tmp == nil || response.ContentLength > npmMaxObject || len(line) >= npmHeaderLimit {
 		return errNPMDisk
 	}
-	tmp, err := os.CreateTemp(c.dir, ".tmp-")
-	if err != nil {
-		return errNPMDisk
-	}
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-	}()
 	body := &npmProgress{body: response.Body, stalled: stalled, counted: c.counters}
 	written, err := io.Copy(tmp, io.MultiReader(bytes.NewReader(append(line, '\n')), io.LimitReader(body, npmMaxObject+1)))
 	if body.err != nil {
@@ -347,14 +374,19 @@ func (c *npmCache) store(o npmObject, response *http.Response, stalled *time.Tim
 }
 
 // passThrough answers straight from the registry when the cache cannot help, as a stream, tied to
-// the guest's own request. It carries the guest's method, so a HEAD stays one.
+// the guest's own request and bounded as a fetch is. It carries the guest's method, so a HEAD stays
+// one. A cut stream aborts the connection, because a clean end would read as a whole object.
 func (c *npmCache) passThrough(w http.ResponseWriter, r *http.Request, o npmObject) {
-	response, err := c.client.Do(c.request(r.Context(), r.Method, o)) // #nosec G704 -- the configured registry, and a path DecideNPM allowed.
+	ctx, cancel := context.WithTimeout(r.Context(), npmFetchDeadline)
+	defer cancel()
+	response, err := c.client.Do(c.request(ctx, r.Method, o)) // #nosec G704 -- the configured registry, and a path DecideNPM allowed.
 	if err != nil {
 		npmFail(w, http.StatusBadGateway)
 		return
 	}
 	defer func() { _ = response.Body.Close() }()
+	stalled := time.AfterFunc(bodyStallTimeout, cancel)
+	defer stalled.Stop()
 	if response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
 		npmFail(w, http.StatusBadGateway)
 		return
@@ -365,7 +397,11 @@ func (c *npmCache) passThrough(w http.ResponseWriter, r *http.Request, o npmObje
 		}
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, countedBody{response.Body, &c.counters.fromRegistry})
+	body := &npmProgress{body: response.Body, stalled: stalled, counted: c.counters}
+	_, _ = io.Copy(w, body)
+	if body.err != nil {
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func npmFail(w http.ResponseWriter, status int) {

@@ -68,11 +68,12 @@ reach directly. `cachegate.DecideNPM` judges every request first:
 
 - **Only `GET` and `HEAD`.** Every other method gets 403, which covers publish,
   unpublish, login, adduser, token and audit writes, whatever the path.
-- **Only these reads:** metadata, one version or tag of it, tarballs, `-/ping` and
-  `-/package/NAME/dist-tags`. The single version is how pnpm 12 fetches its own binary
-  (`@pnpm/exe.linux-x64/12.16.1`), which the image's Corepack shim triggers on the first pnpm
-  call in a job, so refusing it fails that job.
-  Everything else gets 404, including `-/whoami`, `-/user/*`, `-/npm/v1/*`,
+- **Only these reads:** metadata, one version or tag of it, tarballs, `-/ping`,
+  `-/package/NAME/dist-tags` and `-/npm/v1/attestations/NAME@VERSION`. The single version is how pnpm 12 fetches its
+  own binary (`@pnpm/exe.linux-x64/12.16.1`), which the image's Corepack shim triggers on the first pnpm
+  call in a job, so refusing it fails that job. Attestations are where pnpm reads a publish time, and refusing them
+  costs a full document instead (see [Consequences](#consequences)).
+  Everything else gets 404, including `-/whoami`, `-/user/*`, the rest of `-/npm/v1/*`,
   `-/v1/*` and `_session`, and so does a path past 512 bytes.
 - **Matched on the escaped path.** No percent-encoding except a scope's `%2f` reaches
   the registry or a cache key, and a dot segment cannot match.
@@ -95,10 +96,17 @@ headers, then its bytes.
   renews the 10 minutes without moving a body. **Nothing parses a document**, so no request can cost more
   than a copy buffer, and trust evidence reaches the client exactly as npmjs wrote it.
 - **Stale metadata answers if npmjs fails**: an error, a `429` or `5xx`, a redirect, or a cut body.
+- **A `404` or `410` forgets the document**, in every form it is stored, so that no later failure can bring a removed
+  package back as stale. A frozen directory cannot unlink, so there the file is emptied, which reads as not there.
 - **A failed disk passes straight through to npmjs**, as a stream: a directory it cannot write, an object
-  past 2 GiB, or headers that do not fit.
+  past 2 GiB, or headers that do not fit. A miss on a directory it cannot write sends one request, the pass-through. A
+  document it already holds asks first, because a `304` renews it and a failure serves it, so only a document that
+  changed while the disk is frozen costs a second request.
 - **One upstream fetch per key.** The others wait for it, and it outlives the guest that asked, because the
-  next job wants those bytes too. A fetch that stops making progress is cut after 60 s.
+  next job wants those bytes too.
+- **Every upstream request is bounded**, a fill or a pass-through: cut after 60 s without progress and at 15 minutes
+  regardless, and a wait for a connection is not a stall. A cut pass-through aborts the guest's connection, so that a
+  truncated stream cannot read as a whole object, and it frees its slot.
 - **Writes are atomic.** Temp file, `fsync`, rename, so a crash leaves the whole object or none of it.
 - **Integrity stays with the client**, which checks what it receives against its lockfile.
 
@@ -210,8 +218,9 @@ About every five minutes `prune-npm-cache.py` holds the directory to these limit
   timer evicts even below the size limit.
 - **It evicts the least recently used files.** The next read fetches them again, and a reader that already
   has one open keeps its bytes, so eviction cannot fail a running install. That removes the race the
-  Verdaccio design had to accept. On a `relatime` mount such as Omarchy's, a repeat read moves a file's access time at
-  most once a day, so "recent" is that coarse. A wrong guess costs one refetch.
+  Verdaccio design had to accept. The order relies on access time. On a `relatime` mount such as Omarchy's, a repeat
+  read moves it at most once a day, so "recent" is that coarse, and on `noatime` the order is roughly age. A wrong guess
+  costs one refetch.
 - **It deletes only inside its pinned storage.** The path must be exactly the expected one, reached with no
   symlink and with no mount at or under it, and every delete is relative to a directory fd it has verified.
   Anything in that directory the gate did not write stops it. The unit can write only to that storage
@@ -285,24 +294,16 @@ that treats documents as opaque bytes has no such cost.
   `registry-url`, or sets both `NPM_CONFIG_REGISTRY` and `pnpm_config_registry`, because
   pnpm 11 and later ignore the first. rnw-community's release runs on `ubuntu-latest`
   and is unaffected.
-- **A job that resolves through the cache writes `tarball:` lines into its lockfile.** Metadata is the registry's own
-  bytes, so its tarball URLs name `registry.npmjs.org`, which differs from the configured registry, and pnpm records
-  that (4 lines in a 4-package project). They never name the gate. A later install would then take those tarballs from
-  npmjs directly, uncached: that follows from the URLs and was not measured.
-  A job that commits a lockfile must opt out, as one that needs the registry does. A frozen install is unaffected.
-- **A removed version leaves metadata within 10 minutes**, because the document is replaced whole. Its tarball stays
-  until evicted, and only a lockfile already pinning it can ask for it.
-- **pnpm fetches about 60 MB more metadata through the cache than direct, because the route refuses attestations.**
-  Under `minimumReleaseAge`, a frozen install needs the publish time of any package changed in the last day. pnpm's
-  `resolvePublishedAt` tries the abbreviated document, then local metadata, then `-/npm/v1/attestations/NAME@VERSION`,
-  and only then the full document. Section 3 refuses the third, so a package npmjs would answer in about 14 KB costs its
-  full document. One install run after the other, from empty, the same lockfile drew 690.6 MB (146 full documents,
-  65.2 MiB) as shipped, and 629.0 MB (151 full documents, 6.4 MiB) from a scratch binary that allowed that one read. It
-  costs this once per 10 minutes per document, not per install, and it changes no verdict: the full document carries the
-  same time. **The route stays refused here**, because this amendment leaves the read rules as they were; allowing it
-  is one read-only pattern, if the 60 MB matters. pnpm's `registrySupportsTimeField` has no effect on this path:
-  690.63 MB with it and without it. The 215 MB first reported was too high: it counted 55 MB of full `vite` and
-  `react-native` documents that the burst harness's own latency probe asked for.
+- **A removed version leaves metadata within 10 minutes**, because the document is replaced whole, and a removed package
+  goes at its next revalidation. Its tarball stays until evicted, and only a lockfile already pinning it can ask for it.
+- **The route serves attestations, because refusing them cost about 60 MB per cold fill.** Under `minimumReleaseAge`, a
+  frozen install needs the publish time of any package changed in the last day. pnpm's `resolvePublishedAt` tries the
+  abbreviated document, then local metadata, then `-/npm/v1/attestations/NAME@VERSION`, and only then the full document.
+  One install run after the other, from empty, the same lockfile drew 690.6 MB (146 full documents, 65.2 MiB) with the
+  route refused, and 629.0 MB (151 full documents, 6.4 MiB) with it allowed. A package with no attestation still gets a
+  `404`, which is not stored, and then costs its full document, once per 10 minutes. An attestation is as trustworthy as
+  the metadata beside it: both are the registry's own bytes over the same LAN hop. `registrySupportsTimeField` has no
+  effect on this path.
 - **A resolve can be up to 10 minutes stale**, so a just-published version may be
   invisible for that long.
 - **The traffic is plain HTTP on the LAN**, as ADR 0078's amendment records. A lockfile's
@@ -318,6 +319,12 @@ that treats documents as opaque bytes has no such cost.
   fails no health check, because guests going direct is working as designed.
 
 ## Rollout and rollback
+
+**Before step 3: a job that resolves through the cache writes `tarball:` lines into its lockfile.** Metadata is the
+registry's own bytes, so its tarball URLs name `registry.npmjs.org`, which differs from the configured registry, and pnpm
+records that (4 lines in a 4-package project). They never name the gate. A later install would then take those tarballs
+from npmjs directly, uncached: that follows from the URLs and was not measured. A job that commits a lockfile must opt out,
+as one that needs the registry does. A frozen install is unaffected.
 
 Each step leaves every node working, so a step can stop anywhere:
 
@@ -374,6 +381,9 @@ cache. `internal/cachegate` holds 100% coverage and passes under the race detect
 From the Verdaccio design, which is the only real CI this cache idea has seen: Omarchy's first hour served 3.59 GB against
 at least 369 MB drawn upstream.
 
+The bursts above ran before the route served attestations. The 629.0 MB under [Consequences](#consequences) came from a
+scratch binary with the same pattern, on one install, so expect a cold fill about 60 MB smaller than these tables.
+
 ## Not proven
 
 - **No real CI job has used this gate**, and no node has run it. The proxy stays off. All of the above is on
@@ -386,8 +396,10 @@ at least 369 MB drawn upstream.
 - **The limit of a large cold fill is an estimate.** See [Not built](#not-built).
 - **The prune has only run at small scale**: 719 MB with lowered limits, on btrfs. The 40 GiB limit has not been reached, and
   a run killed at its 300 s timeout was not exercised (one that never started was).
-- **Why equal cold runs fetched 146 or 161 full documents.** The difference is about 1 MiB, and is probably which packages
-  had changed in the last day.
+- **Why equal cold runs fetched 146 or 161 full documents, with attestations refused.** The difference was about 1 MiB, and
+  is probably which packages had changed in the last day.
+- **The burst, with attestations served and the later fixes.** The removal, the pass-through bounds and the single request
+  on a failed disk are proven by unit tests and the compatibility run, not by a repeat of the bursts.
 
 ## The three questions
 

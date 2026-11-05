@@ -2363,7 +2363,8 @@ Actions cache and artifact calls are not affected by anything in this path excep
 | Backstop | the node's own `disk reserve` and `inode reserve` (ADR 0083) | stops admission |
 
 Eviction needs no restart and no quiet moment. A reader with a file open keeps its bytes, the next read fetches the file
-again, and anything touched in the last 15 minutes is left alone.
+again, and anything touched in the last 15 minutes is left alone. The order relies on access time, so it is coarse on
+`relatime`, where a repeat read moves it at most once a day, and roughly age on `noatime`.
 
 It deletes only in that exact directory, refuses a symlink or a mount on the way there, and the unit can write nowhere
 else. Anything in that directory the gate did not write freezes the cache rather than being deleted.

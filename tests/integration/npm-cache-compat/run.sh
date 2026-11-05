@@ -152,7 +152,8 @@ note "node $(node --version), default npm $(npm --version), old npm $OLD_NPM"
 echo "== the gate's refusals"
 gate=http://127.0.0.1:$GATE
 for spec in "PUT /npm/evil-compat" "DELETE /npm/lodash/-rev/1" "PUT /npm/-/user/org.couchdb.user:eve" \
-    "POST /npm/-/npm/v1/security/advisories/bulk" "POST /npm/-/npm/v1/tokens" "DELETE /npm/-/user/token/$SECRET"; do
+    "POST /npm/-/npm/v1/security/advisories/bulk" "POST /npm/-/npm/v1/tokens" "DELETE /npm/-/user/token/$SECRET" \
+    "POST /npm/-/npm/v1/attestations/metro-runtime@0.87.1" "DELETE /npm/-/npm/v1/attestations/metro-runtime@0.87.1"; do
     read -r method path <<<"$spec"
     code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' -X "$method" -H "Authorization: Bearer $SECRET" -d '{}' "$gate$path")
     [ "$code" = 403 ] && pass "gate refuses $method ${path/$SECRET/<token>} (403)" || fail "gate answered $code for $method ${path/$SECRET/<token>}"
@@ -168,6 +169,11 @@ if grep -q "$SECRET" "$LOGS/gate.log"; then fail "the gate logged a token"; else
 # pnpm 12 fetches its own binary as name/version, which an install from npm never exercises.
 code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/@pnpm/exe.linux-x64/12.14.0")
 [ "$code" = 200 ] && pass "gate serves a single version, as pnpm 12's own bootstrap asks (200)" || fail "name/version answered $code"
+# pnpm reads a publish time here before it falls back to the whole document.
+code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/-/npm/v1/attestations/metro-runtime@0.87.1")
+[ "$code" = 200 ] && pass "gate serves a real attestation from npmjs (200)" || fail "attestations answered $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/-/npm/v1/tokens")
+[ "$code" = 404 ] && pass "gate does not forward the rest of -/npm/v1 (404)" || fail "-/npm/v1/tokens answered $code"
 
 echo "== the registry's own bytes, and real revalidation"
 tarball=$(curl -fsS --noproxy '*' "$gate/npm/is-odd" | python3 -c 'import json,sys; print(json.load(sys.stdin)["versions"]["3.0.1"]["dist"]["tarball"])')

@@ -349,8 +349,8 @@ func TestAFrozenCacheKeepsServingAndStopsGrowing(t *testing.T) {
 	}
 }
 
-// TestPassThroughFailsSafely: the store fails and the second request, the pass-through itself,
-// gets a redirect or a dead connection. The guest gets a bad gateway and no address to follow.
+// TestPassThroughFailsSafely: the pass-through gets a redirect or a dead connection. The guest gets
+// a bad gateway and no address to follow.
 func TestPassThroughFailsSafely(t *testing.T) {
 	for name, second := range map[string]func(http.ResponseWriter, *http.Request){
 		"a redirect": func(w http.ResponseWriter, r *http.Request) {
@@ -359,14 +359,7 @@ func TestPassThroughFailsSafely(t *testing.T) {
 		"a dead connection": func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			registry, target := newRegistryStub(t, nil)
-			registry.set(func(w http.ResponseWriter, r *http.Request) {
-				if registry.hits.Load() > 1 {
-					second(w, r)
-					return
-				}
-				_, _ = io.WriteString(w, "body")
-			})
+			_, target := newRegistryStub(t, second)
 			fixture := newNPMFixture(t, target)
 			fixture.breakDisk(t)
 			if status, _, header := fixture.get(t, testTarball); status != http.StatusBadGateway || header.Get("Location") != "" {
@@ -833,5 +826,286 @@ func TestCountersSeparateWhatGuestsReadFromWhatCameFromTheRegistry(t *testing.T)
 	fixture.get(t, testTarball)
 	if !strings.Contains(fixture.counters.render(), `direction="from_registry"} 20`) {
 		t.Fatalf("a pass-through was not counted:\n%s", fixture.counters.render())
+	}
+}
+
+func answerWith(code int) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) }
+}
+
+// Every form of one document the cache keeps apart.
+var npmRepresentations = [][]string{
+	{"Accept", npmAbbreviated, "Accept-Encoding", "gzip"},
+	{"Accept", npmAbbreviated, "Accept-Encoding", "identity"},
+	{"Accept", "application/json", "Accept-Encoding", "gzip"},
+	{"Accept", "application/json", "Accept-Encoding", "identity"},
+}
+
+func (f *npmFixture) freeze(t *testing.T) {
+	t.Helper()
+	if err := os.Chmod(f.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.dir, 0o700) })
+}
+
+// TestARemovedPackageDoesNotReappear: once the registry says a document is gone, a later registry
+// failure must not bring it back as stale metadata, in any form, even in a frozen cache.
+func TestARemovedPackageDoesNotReappear(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		gone   int
+		frozen bool
+	}{
+		{"a 404", http.StatusNotFound, false},
+		{"a 410", http.StatusGone, false},
+		{"a 404 in a frozen cache", http.StatusNotFound, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const stored = "removed later"
+			registry, target := newRegistryStub(t, answer(stored))
+			fixture := newNPMFixture(t, target)
+			for _, representation := range npmRepresentations {
+				fixture.get(t, testMetadata, representation...)
+			}
+			fixture.age(t, npmMetadataTTL+time.Minute)
+			if test.frozen {
+				fixture.freeze(t)
+			}
+			registry.set(answerWith(test.gone))
+			if status, _, _ := fixture.get(t, testMetadata, npmRepresentations[0]...); status != test.gone {
+				t.Fatalf("the removal: status=%d", status)
+			}
+			registry.set(answerWith(http.StatusServiceUnavailable))
+			for _, representation := range npmRepresentations {
+				if status, body, _ := fixture.get(t, testMetadata, representation...); status == http.StatusOK || strings.Contains(body, stored) {
+					t.Fatalf("%q came back: status=%d body=%q", representation, status, body)
+				}
+			}
+			if got := fixture.files(t); !test.frozen && len(got) != 0 {
+				t.Fatalf("left behind: %q", got)
+			}
+		})
+	}
+}
+
+// TestOnlyADefinitiveRemovalForgets: a refusal is no statement about the package, and a removal is
+// a statement about that one document.
+func TestOnlyADefinitiveRemovalForgets(t *testing.T) {
+	const other = "/npm/other"
+	registry, target := newRegistryStub(t, answer("kept"))
+	fixture := newNPMFixture(t, target)
+	for _, path := range []string{testMetadata, testTarball, other} {
+		fixture.get(t, path)
+	}
+	fixture.age(t, npmMetadataTTL+time.Minute)
+	registry.set(answerWith(http.StatusForbidden))
+	if status, _, _ := fixture.get(t, testMetadata); status != http.StatusForbidden {
+		t.Fatalf("the refusal: status=%d", status)
+	}
+	registry.set(answerWith(http.StatusServiceUnavailable))
+	if status, body, _ := fixture.get(t, testMetadata); status != http.StatusOK || body != "kept" {
+		t.Fatalf("after a refusal: status=%d body=%q", status, body)
+	}
+	registry.set(answerWith(http.StatusNotFound))
+	fixture.get(t, testMetadata)
+	registry.set(answerWith(http.StatusServiceUnavailable))
+	for _, path := range []string{testTarball, other} {
+		if status, body, _ := fixture.get(t, path); status != http.StatusOK || body != "kept" {
+			t.Fatalf("%s after another document's removal: status=%d body=%q", path, status, body)
+		}
+	}
+}
+
+// withStall shortens the stall timeout. The transport reads it when it is built, so this comes
+// before the fixture.
+func withStall(t *testing.T, stall time.Duration) {
+	t.Helper()
+	restore := bodyStallTimeout
+	bodyStallTimeout = stall
+	t.Cleanup(func() { bodyStallTimeout = restore })
+}
+
+// readCut reads one object as a guest would, and requires it to end in an error, soon, and the
+// request's slot to come back. Three seconds is how long it waits for a cut that never comes.
+func (f *npmFixture) readCut(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, f.gate.URL+testTarball, nil)
+	response, err := http.DefaultTransport.RoundTrip(request)
+	if err == nil {
+		defer func() { _ = response.Body.Close() }()
+		_, err = io.ReadAll(response.Body)
+	}
+	switch {
+	case err == nil:
+		t.Fatal("a cut stream looked like a whole object")
+	case errors.Is(err, context.DeadlineExceeded):
+		t.Fatal("the stream was never cut: it held its slot until the guest left")
+	}
+	for deadline := time.Now().Add(time.Second); len(f.cache.slots) != 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d slots still held", len(f.cache.slots))
+		}
+	}
+}
+
+func TestAStalledPassThroughIsCutAndFreesItsSlot(t *testing.T) {
+	for name, length := range map[string]string{"chunked": "", "with a length": "100000"} {
+		t.Run(name, func(t *testing.T) {
+			withStall(t, 100*time.Millisecond)
+			release := make(chan struct{})
+			_, target := newRegistryStub(t, func(w http.ResponseWriter, _ *http.Request) {
+				if length != "" {
+					w.Header().Set("Content-Length", length)
+				}
+				_, _ = w.Write(make([]byte, 1<<16)) // Past every buffer, so the guest has its headers.
+				w.(http.Flusher).Flush()
+				<-release
+			})
+			t.Cleanup(func() { close(release) })
+			fixture := newNPMFixture(t, target)
+			fixture.breakDisk(t)
+			fixture.readCut(t)
+		})
+	}
+}
+
+func TestAPassThroughThatNeverEndsIsCutAtTheDeadline(t *testing.T) {
+	restore := npmFetchDeadline
+	npmFetchDeadline = 200 * time.Millisecond
+	t.Cleanup(func() { npmFetchDeadline = restore })
+	_, target := newRegistryStub(t, func(w http.ResponseWriter, r *http.Request) {
+		for r.Context().Err() == nil {
+			_, _ = io.WriteString(w, "x")
+			w.(http.Flusher).Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+	fixture := newNPMFixture(t, target)
+	fixture.breakDisk(t)
+	fixture.readCut(t)
+}
+
+// slowToConnect stands for a request queued behind npmMaxConnections: it has not reached the
+// registry, so the time it waits is no stall.
+type slowToConnect struct {
+	wait time.Duration
+	next http.RoundTripper
+}
+
+func (s slowToConnect) RoundTrip(r *http.Request) (*http.Response, error) {
+	select {
+	case <-time.After(s.wait):
+		return s.next.RoundTrip(r)
+	case <-r.Context().Done():
+		return nil, r.Context().Err()
+	}
+}
+
+func TestWaitingForAConnectionIsNotAStall(t *testing.T) {
+	for name, breakDisk := range map[string]bool{"a fill": false, "a pass-through": true} {
+		t.Run(name, func(t *testing.T) {
+			withStall(t, 100*time.Millisecond)
+			_, target := newRegistryStub(t, answer("body"))
+			fixture := newNPMFixture(t, target)
+			if breakDisk {
+				fixture.breakDisk(t)
+			}
+			fixture.cache.client.Transport = slowToConnect{300 * time.Millisecond, fixture.cache.client.Transport}
+			if status, body, _ := fixture.get(t, testTarball); status != http.StatusOK || body != "body" {
+				t.Fatalf("status=%d body=%q", status, body)
+			}
+		})
+	}
+}
+
+// TestAMissOnADiskThatCannotStoreAsksTheRegistryOnce: no doomed GET before the one that answers.
+func TestAMissOnADiskThatCannotStoreAsksTheRegistryOnce(t *testing.T) {
+	for name, spoil := range map[string]func(*npmFixture, *testing.T){
+		"frozen": (*npmFixture).freeze,
+		"failed": (*npmFixture).breakDisk,
+	} {
+		t.Run(name, func(t *testing.T) {
+			registry, target := newRegistryStub(t, answer("body"))
+			fixture := newNPMFixture(t, target)
+			spoil(fixture, t)
+			if status, body, _ := fixture.get(t, testTarball); status != http.StatusOK || body != "body" {
+				t.Fatalf("status=%d body=%q", status, body)
+			}
+			if got := registry.hits.Load(); got != 1 {
+				t.Fatalf("%d upstream requests for one miss", got)
+			}
+		})
+	}
+}
+
+// TestAFrozenDocumentStillRevalidates: going straight to the registry on a frozen disk would lose
+// what the document is still good for, a 304 that renews it and a copy to serve if npmjs fails.
+func TestAFrozenDocumentStillRevalidates(t *testing.T) {
+	registry, target := newRegistryStub(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		_, _ = io.WriteString(w, "kept")
+	})
+	fixture := newNPMFixture(t, target)
+	fixture.get(t, testMetadata)
+	fixture.age(t, npmMetadataTTL+time.Minute)
+	if status, body, _ := fixture.get(t, testMetadata); status != http.StatusOK || body != "kept" {
+		t.Fatalf("a healthy 304: status=%d body=%q", status, body)
+	}
+	if got := fixture.files(t); len(got) != 1 {
+		t.Fatalf("a 304 left a temp file: %q", got)
+	}
+	fixture.age(t, npmMetadataTTL+time.Minute)
+	fixture.freeze(t)
+	hits := registry.hits.Load()
+	if status, body, _ := fixture.get(t, testMetadata); status != http.StatusOK || body != "kept" || registry.hits.Load() != hits+1 {
+		t.Fatalf("a frozen 304: status=%d body=%q hits=%d->%d", status, body, hits, registry.hits.Load())
+	}
+	if status, _, _ := fixture.get(t, testMetadata); status != http.StatusOK || registry.hits.Load() != hits+1 {
+		t.Fatalf("a 304 did not renew it: status=%d hits=%d->%d", status, hits, registry.hits.Load())
+	}
+	fixture.age(t, npmMetadataTTL+time.Minute)
+	registry.set(answerWith(http.StatusServiceUnavailable))
+	if status, body, _ := fixture.get(t, testMetadata); status != http.StatusOK || body != "kept" {
+		t.Fatalf("stale on a frozen disk: status=%d body=%q", status, body)
+	}
+}
+
+func TestAnAttestationIsAReadWithNoCredential(t *testing.T) {
+	const path = "/npm/-/npm/v1/attestations/@babel/core@7.0.0"
+	var asked atomic.Value
+	registry, target := newRegistryStub(t, func(w http.ResponseWriter, r *http.Request) {
+		asked.Store(r.URL.RequestURI())
+		answer("attested")(w, r)
+	})
+	fixture := newNPMFixture(t, target)
+	status, body, _ := fixture.get(t, path, "Authorization", "Bearer secret", "Cookie", "secret", "Npm-Otp", "secret")
+	if status != http.StatusOK || body != "attested" {
+		t.Fatalf("status=%d body=%q", status, body)
+	}
+	if got := asked.Load(); got != strings.TrimPrefix(path, "/npm") {
+		t.Fatalf("asked the registry for %q", got)
+	}
+	for _, name := range []string{"Authorization", "Cookie", "Npm-Otp"} {
+		if got := registry.lastHeader(t, name); got != "" {
+			t.Fatalf("%s reached the registry: %q", name, got)
+		}
+	}
+	if status, body, _ := fixture.get(t, path); status != http.StatusOK || body != "attested" || registry.hits.Load() != 1 {
+		t.Fatalf("a second read: status=%d body=%q hits=%d", status, body, registry.hits.Load())
+	}
+	// Most packages have none, which pnpm reads as "use the full document".
+	registry.set(answerWith(http.StatusNotFound))
+	if status, _, _ := fixture.get(t, "/npm/-/npm/v1/attestations/left-pad@1.3.0"); status != http.StatusNotFound {
+		t.Fatalf("no attestation: status=%d", status)
+	}
+	if got := fixture.files(t); len(got) != 1 {
+		t.Fatalf("a 404 was stored: %q", got)
 	}
 }
