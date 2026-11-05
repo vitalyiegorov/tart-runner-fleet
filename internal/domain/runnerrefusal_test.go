@@ -1,6 +1,10 @@
 package domain
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestParseRunnerRefusalReadsOnlyTheRunnersOwnLine(t *testing.T) {
 	version, ok := ParseRunnerRefusal([]byte("An error occurred: Runner version v2.336.0 is deprecated and cannot receive messages.\n"))
@@ -16,5 +20,24 @@ func TestParseRunnerRefusalReadsOnlyTheRunnersOwnLine(t *testing.T) {
 		if version, ok := ParseRunnerRefusal([]byte(line)); ok {
 			t.Fatalf("%q read as a refusal of %q", line, version)
 		}
+	}
+}
+
+func TestAHoldEndsOneProbeIntervalAfterTheRead(t *testing.T) {
+	at := time.Date(2026, 11, 5, 8, 54, 0, 0, time.UTC)
+	if got := (RunnerRefusal{At: at}).RetryAt(); !got.Equal(at.Add(30 * time.Minute)) {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// The command runs in a guest and takes no external value, and it must read the
+// file guestbootstrap writes.
+func TestTheRefusalCommandReadsTheBootstrapLogOnly(t *testing.T) {
+	command := RunnerRefusalLogCommand()
+	if len(command) != 3 || command[0] != "/bin/sh" || command[1] != "-c" {
+		t.Fatalf("got %q", command)
+	}
+	if !strings.Contains(command[2], `"$HOME/actions-runner/.tart-runner-fleet/runner.log"`) || !strings.HasPrefix(command[2], "grep -E ") {
+		t.Fatalf("got %q", command[2])
 	}
 }

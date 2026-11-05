@@ -130,9 +130,13 @@ const (
 // public, so this spends none of the App's budget, and one call per node per six
 // hours sits far inside the anonymous limit.
 func fetchRunnerReleases(ctx context.Context) ([]config.RunnerRelease, error) {
+	return fetchRunnerReleasesFrom(ctx, runnerReleasesURL)
+}
+
+func fetchRunnerReleasesFrom(ctx context.Context, url string) ([]config.RunnerRelease, error) {
 	attempt, cancel := context.WithTimeout(ctx, runnerReleasesTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(attempt, http.MethodGet, runnerReleasesURL, nil)
+	request, err := http.NewRequestWithContext(attempt, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

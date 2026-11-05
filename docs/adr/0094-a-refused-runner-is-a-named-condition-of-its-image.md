@@ -126,7 +126,7 @@ because each of many demands earns its own three strikes.
   not have helped the images this incident is about.
 - **No count across rotated request IDs.** A demand is one request ID. The incident's
   demand was preassigned, whose ID derives from the immutable job identity, and it
-  stayed one ID across all seven log lines that printed it. A loop GitHub re-offers
+  stayed one ID across all 14 log lines that printed it. A loop GitHub re-offers
   under a new ID each time would not back off. Nothing has measured one.
 - **No knob.** The bounds are constants, as `PowerCorroboration` is.
 

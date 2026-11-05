@@ -26,3 +26,32 @@ func TestAnEmptyExitBackoffIsNamedInTheStatusAndLeavesHealthAlone(t *testing.T) 
 		t.Fatal("nothing to report stays nil")
 	}
 }
+
+func TestAPublishedBackoffReachesTheSnapshotAndIsReplacedWhole(t *testing.T) {
+	health, err := NewHealth(emptyExitClock{}, HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.SetEmptyExitBackoffs([]EmptyExitBackoffMetric{{Demand: "o/r/1/1/7", Exits: 3}})
+	if rows := health.Snapshot().EmptyExitBackoffs; len(rows) != 1 {
+		t.Fatalf("got %+v", rows)
+	}
+	health.SetEmptyExitBackoffs(nil)
+	if rows := health.Snapshot().EmptyExitBackoffs; len(rows) != 0 {
+		t.Fatalf("got %+v", rows)
+	}
+}
+
+type emptyExitClock struct{}
+
+func (emptyExitClock) Now() time.Time { return time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC) }
+
+func TestARefusedVersionTheGrammarCannotCarryIsRefused(t *testing.T) {
+	health, err := NewHealth(emptyExitClock{}, HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := health.SetRunnerImages([]RunnerImageMetric{{Platform: "linux", VM: "base", Floor: "2.336.0", RefusedVersion: "not a version"}}); err == nil {
+		t.Fatal("a mangled version must not be published")
+	}
+}

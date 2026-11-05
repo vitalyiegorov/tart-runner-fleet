@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -155,4 +157,87 @@ func TestTheTickPublishesEmptyExitBackoffs(t *testing.T) {
 	if rows := health.Snapshot().EmptyExitBackoffs; len(rows) != 0 {
 		t.Fatalf("a demand that left the queue stops being reported: %+v", rows)
 	}
+}
+
+func TestReleasesAreFetchedAndAFailedAnswerIsAnError(t *testing.T) {
+	status, body := http.StatusOK, `[{"tag_name":"v2.338.2","published_at":"2026-10-26T14:45:12Z"}]`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(status)
+		_, _ = writer.Write([]byte(body))
+	}))
+	defer server.Close()
+	releases, err := fetchRunnerReleasesFrom(context.Background(), server.URL)
+	if err != nil || len(releases) != 1 || releases[0].Version != "2.338.2" {
+		t.Fatalf("got %+v, %v", releases, err)
+	}
+	status = http.StatusForbidden
+	if _, err := fetchRunnerReleasesFrom(context.Background(), server.URL); err == nil {
+		t.Fatal("a refused answer must not read as a calendar")
+	}
+	server.Close()
+	if _, err := fetchRunnerReleasesFrom(context.Background(), server.URL); err == nil {
+		t.Fatal("an unreachable calendar must be an error")
+	}
+	if _, err := fetchRunnerReleasesFrom(context.Background(), "http://bad host/"); err == nil {
+		t.Fatal("an invalid URL must be an error")
+	}
+}
+
+func TestAnInvalidInstanceNameIsNeverExecuted(t *testing.T) {
+	runner := &refusalRunner{}
+	guestRunnerRefusalReader{Runner: runner, Refusals: &app.RunnerRefusals{}}.ReadRunnerRefusal(context.Background(),
+		operations.Instance{ID: "bad name; rm -rf", Platform: domain.PlatformLinux})
+	if runner.args != nil {
+		t.Fatalf("executed %v", runner.args)
+	}
+}
+
+func TestANilReleaseStoreIsAnUnreadCalendar(t *testing.T) {
+	var releases *runnerReleases
+	if releases.load() != nil {
+		t.Fatal("no store has no calendar")
+	}
+}
+
+func TestAContainerNodeWhoseConfigRunsNoContainersHasNoReader(t *testing.T) {
+	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return nil }}
+	if node.runnerRefusalReader(config.Default(), &app.RunnerRefusals{}) != nil {
+		t.Fatal("no runner, no reader")
+	}
+}
+
+// The verdicts are said once per read and once per attempt, and a tick that cannot
+// publish says so rather than leaving the last answer standing silently.
+func TestTheTickSaysEachVerdictOnce(t *testing.T) {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	var logged strings.Builder
+	reporter := newFailureReporter(&logged, func() time.Time { return now })
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+	cfg := config.Default()
+	cfg.Linux.BaseVM = "base"
+	cfg.Linux.BaseImageRunnerVersion = "2.336.0"
+	ticker := engineTicker{health: health, runnerImages: cfg, reporter: reporter}
+	key := domain.DemandKey{Repo: "o/r", RunID: 1, Attempt: 1, JobID: 7}
+	refusal := domain.RunnerRefusal{Version: "2.336.0", Instance: "trf-linux-2x4-abc", At: now}
+	result := app.TickResult{At: now, RunnerRefusals: map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: refusal},
+		EmptyExitBackoffs: []app.EmptyExitBackoff{{Demand: key, Exits: 3, LastAt: now, RetryAt: now.Add(5 * time.Minute)}}}
+	for range 2 {
+		ticker.recordRunnerImages(result)
+		ticker.recordEmptyExitBackoffs(result)
+	}
+	output := logged.String()
+	if strings.Count(output, "runner image refused by GitHub") != 1 || strings.Count(output, "demand_empty_exit_backoff") != 1 {
+		t.Fatalf("got %q", output)
+	}
+
+	ticker.runnerImages.Linux.BaseVM = "not a valid name!"
+	ticker.recordRunnerImages(app.TickResult{At: now})
+	if !strings.Contains(logged.String(), "runner image verdicts were refused") {
+		t.Fatalf("got %q", logged.String())
+	}
+}
+
+func TestAReporterWithNoLoggerStaysSilent(t *testing.T) {
+	(&failureReporter{}).reportRunnerRefusal("linux", "base", domain.RunnerRefusal{})
+	(&failureReporter{}).reportEmptyExitBackoff(app.EmptyExitBackoff{})
 }

@@ -50,3 +50,22 @@ func TestEmptyExitsCountsDeletedIncarnationsOnly(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestEmptyExitsReportsARowItCannotReadAndAStoreItCannotQuery(t *testing.T) {
+	store := overdueStore(t)
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	// A text ID satisfies the >0 filter (SQLite orders text above numbers) and
+	// cannot be scanned, so the malformed row fails the read rather than vanishing.
+	if _, err := store.db.Exec(`INSERT INTO instances(id,state,version,drain_phase,ownership,scheduling_metadata,last_error,created_at,updated_at)
+		VALUES('bad',?,1,0,'{}','{"demand":{"Repo":"o/r","RunID":1,"Attempt":1,"JobID":"x"}}','',?,?)`,
+		operations.StateDeleted, now.UnixNano(), now.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EmptyExits(context.Background(), now.Add(-time.Hour)); err == nil {
+		t.Fatal("a row that cannot be read must not read as no exits")
+	}
+	_ = store.Close()
+	if _, err := store.EmptyExits(context.Background(), now.Add(-time.Hour)); err == nil {
+		t.Fatal("an unreadable store must not read as no exits")
+	}
+}
