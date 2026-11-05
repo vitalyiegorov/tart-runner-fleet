@@ -8,7 +8,7 @@ import (
 // CacheGateMetric is the last answer to "is the LAN cache gate really ours?"
 // (ADR 0078). An empty URL means this node configures no gate. Container says its
 // guests are containers, whose results URL no failed proof rewrites. An empty
-// NPMRegistry means no guest is given one (ADR 0092), and NPMReady is otherwise the
+// NPMRegistry means no guest is given one (ADR 0093), and NPMReady is otherwise the
 // latest answer from the gate's npm route.
 type CacheGateMetric struct {
 	URL         string

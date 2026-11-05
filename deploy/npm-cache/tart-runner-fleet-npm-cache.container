@@ -1,10 +1,10 @@
-# Quadlet unit for a node's npm read-through cache (ADR 0092), the same shape as
+# Quadlet unit for a node's npm read-through cache (ADR 0093), the same shape as
 # the Actions cache server beside it. Install as
 # ~/.config/containers/systemd/tart-runner-fleet-npm-cache.container; systemd
 # generates tart-runner-fleet-npm-cache.service from it. Home site only: Omarchy
 # runs this, and no other node does.
 [Unit]
-Description=tart-runner-fleet npm read-through cache (ADR 0092)
+Description=tart-runner-fleet npm read-through cache (ADR 0093)
 Wants=network-online.target
 After=network-online.target
 

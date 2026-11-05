@@ -1474,7 +1474,7 @@ curl -fsS http://127.0.0.1:3017/npm/-/ping # through the gate
 ```
 
 The second answering 404 means the gate has no `--npm-upstream`, so its drop-in is
-not installed. See [The npm read-through cache](#the-npm-read-through-cache-adr-0092).
+not installed. See [The npm read-through cache](#the-npm-read-through-cache-adr-0093).
 
 ### A dead guest with no console to leave behind
 
@@ -2131,7 +2131,7 @@ it. The shipped unit passes the flag, and `--identity-key` beside it. Install
 that unit only once the node's `fleet` release understands both; an older release
 exits with its usage text and systemd restarts it in a loop.
 `cache/to_guest` is what guests read from the LAN cache, and `npm/to_guest` what they
-read from the npm cache (ADR 0092). The npm series exist only on a gate with
+read from the npm cache (ADR 0093). The npm series exist only on a gate with
 `--npm-upstream`, so their absence means the route is off. Subtract both increases from `fleet traffic`'s
 receive bytes for the WAN estimate (see
 [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md#analyze-ci-traffic)).
@@ -2190,7 +2190,7 @@ sending is never interrupted.
    and `systemctl --user stop tart-runner-fleet-actions-cache.service`. The
    cache directory can stay; it is only read again when the image is.
 
-## The npm read-through cache (ADR 0092)
+## The npm read-through cache (ADR 0093)
 
 The home site only. Omarchy hosts it. Omarchy, the Mac mini and the MacBook read it over
 the home LAN. Ubuntu and the Mac Studio stay direct, and the MacBook goes direct away

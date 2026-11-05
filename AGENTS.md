@@ -47,7 +47,7 @@ all changes as safety critical.
 - `internal/operations`: durable operations, leases, retries, and workers.
 - `internal/discharge`: the one guarded operator mutation and its ordering rules.
 - `internal/cachegate`: `fleet cache-gate`, the write gate in front of a node's
-  LAN Actions cache (ADR 0078) and the read-only route to its npm cache (ADR 0092);
+  LAN Actions cache (ADR 0078) and the read-only route to its npm cache (ADR 0093);
   `deploy/actions-cache/` holds its units and the runner image recipe, and
   `deploy/npm-cache/` the npm cache's.
 - `internal/telemetry`: coherent status, health, readiness, and metrics.

@@ -13,7 +13,7 @@ import (
 // nobody has configured sends nothing to the WAN.
 //
 // NPMRegistry is the optional address a guest uses for the gate's npm cache (ADR
-// 0092). Empty, which is the default, means no guest is ever given a registry. It is
+// 0093). Empty, which is the default, means no guest is ever given a registry. It is
 // what makes a podman node able to configure a gate at all: its guests' results URL
 // is image ENV and needs no check, but a registry setting does.
 type CacheGate struct {
@@ -53,7 +53,7 @@ func (c Config) validateCacheGate() error {
 	return validateNPMRegistry(parsed, c.CacheGate.NPMRegistry, podman)
 }
 
-// validateNPMRegistry holds a guest's registry setting to the direct LAN (ADR 0092).
+// validateNPMRegistry holds a guest's registry setting to the direct LAN (ADR 0093).
 // The gate the node proves must be plain HTTP at an address, never a hostname a tunnel
 // could answer to, and the registry must be that same gate as this node's guests reach
 // it: the same address on Tart, and pasta's name for the host on podman, whose guests

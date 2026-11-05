@@ -388,7 +388,7 @@ func (s Status) EffectiveCacheGateCheck() Check {
 // CacheGate is the latest verification of a node's LAN cache gate. An empty URL
 // means the node configures none. NPMRegistry and NPMReady are additive fleet.v1
 // fields: what this node's guests are given while the gate's npm route answers, and
-// whether it last did (ADR 0092). Both are absent on a node that gives none.
+// whether it last did (ADR 0093). Both are absent on a node that gives none.
 type CacheGate struct {
 	URL         string    `json:"url,omitempty"`
 	Verified    bool      `json:"verified"`

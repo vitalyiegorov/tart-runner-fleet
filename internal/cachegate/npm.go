@@ -13,7 +13,7 @@ import (
 )
 
 // NPMPrefix is the one prefix a gate serves its npm read-through cache under
-// (ADR 0092). A guest's registry setting and the tarball URLs Verdaccio
+// (ADR 0093). A guest's registry setting and the tarball URLs Verdaccio
 // advertises both end here.
 const NPMPrefix = "/npm/"
 
@@ -93,7 +93,7 @@ func LoopbackAddress(host string) bool {
 }
 
 // arrivedThroughCloudflare catches a tunnel configured to rewrite Host: cloudflared
-// is for admin and health, and carries no cache data (ADR 0092).
+// is for admin and health, and carries no cache data (ADR 0093).
 func arrivedThroughCloudflare(header http.Header) bool {
 	for name := range header {
 		if strings.HasPrefix(name, "Cf-") || name == "Cdn-Loop" {

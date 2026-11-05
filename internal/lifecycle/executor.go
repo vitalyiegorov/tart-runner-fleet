@@ -951,7 +951,7 @@ type StdinBootstrapper struct {
 	// ours; anything else moves the guest to GitHub (ADR 0078).
 	Gate GateVerifier
 	// NPM is the gate's npm cache, which a guest uses only on that launch's proof
-	// (ADR 0092). Nil is the default: no guest is given a registry.
+	// (ADR 0093). Nil is the default: no guest is given a registry.
 	NPM *NPMRoute
 }
 

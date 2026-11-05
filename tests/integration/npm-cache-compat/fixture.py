@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local stand-ins for the npm cache compatibility run (ADR 0092).
+"""Local stand-ins for the npm cache compatibility run (ADR 0093).
 
 `registry PORT LOG` serves a registry whose packages exist to make a client's
 supply-chain check fire. It logs every request's method, path and whether it

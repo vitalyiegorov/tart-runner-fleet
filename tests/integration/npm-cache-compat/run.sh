@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A real compatibility run of the npm read-through cache (ADR 0092): the shipped
+# A real compatibility run of the npm read-through cache (ADR 0093): the shipped
 # Verdaccio config, the real gate binary, and the clients consumers actually pin.
 # It needs the network, Podman, Node and Python, so it is not part of `make ci`.
 #
@@ -115,7 +115,7 @@ guest_home() { # guest_home NAME: a HOME holding the file the launch script writ
     local home=$WORK/homes/$1
     rm -rf "$home"
     mkdir -p "$home"
-    printf '# tart-runner-fleet npm cache (ADR 0092)\nregistry=%s\nnoproxy=127.0.0.1\nno-proxy=127.0.0.1\n' "$REGISTRY" >"$home/.npmrc"
+    printf '# tart-runner-fleet npm cache (ADR 0093)\nregistry=%s\nnoproxy=127.0.0.1\nno-proxy=127.0.0.1\n' "$REGISTRY" >"$home/.npmrc"
     echo "$home"
 }
 

@@ -499,7 +499,7 @@ nothing is parked and is absent on older daemons.
 
 `cacheGate` is the latest answer to whether the gate this node's guests use proved it is
 ours (ADR 0078). An empty `url` means the node configures none. `npmRegistry` and
-`npmReady` are additive (ADR 0092): what this node's guests are given, and whether the
+`npmReady` are additive (ADR 0093): what this node's guests are given, and whether the
 gate's npm route last answered. Both are absent on a node that gives none, so an absent
 `npmReady` means *no npm cache here*, never *not ready*.
 

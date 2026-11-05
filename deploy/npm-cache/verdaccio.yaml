@@ -1,4 +1,4 @@
-# The hardened Verdaccio config of a node's npm read-through cache (ADR 0092).
+# The hardened Verdaccio config of a node's npm read-through cache (ADR 0093).
 # Install as ~/.config/tart-runner-fleet-npm-cache/config.yaml; the quadlet mounts
 # it read-only. `fleet cache-gate` is the only thing that talks to this server, and
 # it refuses every write on its own, so this file is the second lock, not the first.

@@ -35,7 +35,7 @@
 
 ## The npm read-through cache
 
-- A home-site guest may read public packages through the gate's `/npm/` route (ADR 0092).
+- A home-site guest may read public packages through the gate's `/npm/` route (ADR 0093).
   Nothing can write to it from a guest: the gate allows only `GET` and `HEAD` of
   metadata, tarballs, the ping and dist-tags, independently of Verdaccio's own config,
   which also refuses registration, publish and unpublish.

@@ -596,7 +596,7 @@ type Config struct {
 	// never touches a host, and a node's configuration is written, rendered, and
 	// checked on machines other than the one that will run it.
 	// CacheGate is the LAN cache gate this node's guests use, and the optional npm
-	// registry it gives them (ADR 0078, 0092). Empty on a node that checks none.
+	// registry it gives them (ADR 0078, 0093). Empty on a node that checks none.
 	CacheGate       CacheGate
 	GuestArch       string
 	Linux           Linux

@@ -66,7 +66,7 @@ const (
 	Results Upstream = iota
 	// CacheServer is the node's LAN cache server.
 	CacheServer
-	// NPM is the node's npm read-through cache (ADR 0092). DecideNPM routes here;
+	// NPM is the node's npm read-through cache (ADR 0093). DecideNPM routes here;
 	// Decide never does.
 	NPM
 	upstreamCount

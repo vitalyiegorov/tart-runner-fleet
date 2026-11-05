@@ -18,7 +18,7 @@
 `tests/integration/npm-cache-compat/run.sh` is not part of `make ci`, because it needs the
 network, Podman and real clients. It runs the shipped Verdaccio config behind the real gate
 with the npm, pnpm, Yarn and Bun versions consumers pin, and it is the evidence behind ADR
-0092's client table. Rerun it when one of those pins, the Verdaccio digest or the route
+0093's client table. Rerun it when one of those pins, the Verdaccio digest or the route
 changes.
 
 Release CI independently repeats the race and coverage gates, rejects invalid

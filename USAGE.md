@@ -419,7 +419,7 @@ see `docs/OPERATIONS.md`.
 ## The npm cache at the home site
 
 Omarchy, the Mac mini and the MacBook can read public npm packages through the gate
-([ADR 0092](docs/adr/0092-the-home-site-reads-npm-and-public-git-through-the-gate.md)),
+([ADR 0093](docs/adr/0093-the-home-site-reads-npm-and-public-git-through-the-gate.md)),
 which removes repeat downloads from the home uplink. It is off by default per node.
 Ubuntu and the Mac Studio never use it, and the MacBook goes direct away from home.
 
@@ -468,7 +468,7 @@ transparent fallback: the choice is made once, at launch. A rerun gets a fresh l
 
 Turning it off is removing `npmRegistry` from the node's `cacheGate` and restarting its
 daemon. Existing Actions-cache behaviour does not change. See
-[The npm read-through cache](docs/OPERATIONS.md#the-npm-read-through-cache-adr-0092).
+[The npm read-through cache](docs/OPERATIONS.md#the-npm-read-through-cache-adr-0093).
 
 ## Scheduling principles
 

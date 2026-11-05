@@ -24,7 +24,7 @@ grep -q '^ACTIONS_RESULTS_URL=' "$env" 2>/dev/null || exit 0
 sed -i 's|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/|' "$env"
 grep -qx 'ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/' "$env"`
 
-// NPMRoute is the gate's npm cache as this node's guests reach it (ADR 0092). A nil
+// NPMRoute is the gate's npm cache as this node's guests reach it (ADR 0093). A nil
 // route, the default, means no guest is ever given a registry. Ready says the route
 // answers now; it is asked only of a gate that has just proved itself.
 type NPMRoute struct {
@@ -36,7 +36,7 @@ type NPMRoute struct {
 const (
 	// npmMarker is the first line of the file this fleet owns, and the only thing
 	// that lets a later launch remove it. A file without it is the image's own.
-	npmMarker = "# tart-runner-fleet npm cache (ADR 0092)"
+	npmMarker = "# tart-runner-fleet npm cache (ADR 0093)"
 	// npmScriptName is the script's $0.
 	npmScriptName = "trf-npm-registry"
 	// npmWriteTimeout bounds the optional write within the launch's own deadline. It

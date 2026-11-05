@@ -358,7 +358,7 @@ operator actions described in [`OPERATIONS.md`](OPERATIONS.md).
 
 ## npm install fails at a home-site job
 
-A guest at the home site may be reading npm through the gate (ADR 0092). Read
+A guest at the home site may be reading npm through the gate (ADR 0093). Read
 `fleet doctor`'s `cache gate` row on that node first.
 
 - **`ECONNREFUSED` or a 5xx from `http://…:3017/npm/`, and the run started with the
