@@ -321,6 +321,11 @@ what clients send. Each client ran in a clean environment with explicit store di
   NAT reaching `192.168.1.64` is unproven, though the guest-side probe sends it direct
   if it cannot.
 - **Real savings.** No before-and-after measurement exists, because nothing is deployed.
+- **The extra `tart exec` calls on a Tart host.** A launch on a node with `npmRegistry` set
+  makes up to two more `exec` calls into the guest, one-shot and not periodic. Repeated vsock
+  connections are what trap Tart's VM helper (#478, ADR 0080's 2026-11-05 amendment), and the
+  reproduced crash took a probe every 5 s, so this should be far from it, but it has not been
+  measured.
 - **Long-term disk growth**, and whether the 40 GiB threshold suits real traffic.
 - **The installed quadlet.** The run started the image with the same user namespace,
   capabilities and mounts, but not through systemd or Quadlet.
