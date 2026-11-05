@@ -49,6 +49,9 @@ func (r guestTrafficRecorder) RecordGuestTraffic(ctx context.Context, instance o
 // drain: the sample is evidence, not a precondition.
 func storeGuestTraffic(ctx context.Context, store guestTrafficStore, metrics guestTrafficMetrics,
 	warn func(string, ...any), sample operations.TrafficSample) {
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
 	changed, err := store.RecordGuestTraffic(ctx, sample)
 	if err != nil {
 		warn("guest traffic sample was not stored", "instance", sample.InstanceID, "error", err)
@@ -107,12 +110,14 @@ func (r guestTrafficRecorder) warn(message string, args ...any) {
 // counters for the guest's virtual NIC (ADR 0080, amendment 2026-11-05). A
 // container node has no such NIC and keeps the end-of-job exec read.
 func (d dependencies) guestTraffic(store guestTrafficStore, metrics guestTrafficMetrics, cfg config.Config,
-	warn func(string, ...any)) (lifecycle.GuestTrafficRecorder, *hostTrafficRecorder) {
+	warn func(string, ...any)) (lifecycle.GuestTrafficRecorder, *lifecycle.HostTrafficRecorder) {
 	if d.hostTraffic != nil {
 		if host := d.hostTraffic(cfg); host != nil {
-			recorder := hostTrafficRecorder{Host: host, Timeout: guestTrafficTimeout, Store: store, Metrics: metrics,
-				Now: d.now, Warn: warn, Last: newGuestReadings()}
-			return recorder, &recorder
+			recorder := lifecycle.NewHostTrafficRecorder(host, guestTrafficTimeout,
+				func(ctx context.Context, sample operations.TrafficSample) {
+					storeGuestTraffic(ctx, store, metrics, warn, sample)
+				}, d.now, warn)
+			return recorder, recorder
 		}
 	}
 	if d.guestExec == nil {

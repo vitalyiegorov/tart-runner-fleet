@@ -367,7 +367,9 @@ moved on each profile. A podman container's own interface counters are read
 once, at the end of its job, through `exec`. A Tart VM is never asked: the daemon
 reads the host's byte counters for the VM's virtual network interface every few
 seconds while it runs (no `tart exec`, so no vsock traffic), and the last
-reading stands for the job. A guest that was sampled but could not be read, or
+reading stands for the job. Traffic after that last successful reading is
+omitted: normally up to one interval, with no fixed bound while host reads fail
+(`sampledAt` is the reading's time and shows its age). A guest that was sampled but could not be read, or
 that the host never saw, is reported as unmeasured, never as zero. A guest that was
 never sampled has no row at all: one whose drain reached only escalated stops,
 one already reclaimed as unresponsive, or one that died first. See

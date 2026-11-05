@@ -190,7 +190,14 @@ NIC. The daemon never execs into a Tart guest for traffic.
   job it stores that reading as measured, with `sampledAt` the time of the
   reading. The drain runs no command and reads no guest, so it can neither fail
   nor wait on this. The interface disappears with the powered-off guest, so the
-  last reading is a lower bound that misses at most the final five seconds.
+  last reading is a lower bound: traffic after the last successful reading is
+  omitted. Normally that is up to one 5-second interval. It has no fixed bound
+  while host reads fail, because the kept reading then ages; `sampledAt` is the
+  reading's time and shows how old it was.
+- The reading is kept until its instance is no longer live, not until the job is
+  recorded: a drain that retries after a failed store write, with the guest
+  already off, still finds it. The store keeps the first measured sample and
+  counts it once, so recording twice cannot double count.
 - A host that cannot be read keeps the previous readings and is warned about
   once, when it starts to fail and when it recovers. A guest the host never saw
   (the job ended before the first read, or the daemon restarted mid-job) is

@@ -496,7 +496,7 @@ type dependencies struct {
 	guestProbe func(config.Config) app.GuestProbe
 	guestExec  func(config.Config) executor.CommandRunner
 	// hostTraffic is the Tart node's host-side counter reader (ADR 0080).
-	hostTraffic func(config.Config) hostCounters
+	hostTraffic func(config.Config) lifecycle.HostCounters
 	now         func() time.Time
 	after       func(time.Duration) <-chan time.Time
 	leaseOwner  func(config.Config) string
@@ -1005,10 +1005,10 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			// drain (ADR 0080). It never touches a guest.
 			sweepCtx, stopSweep := context.WithCancel(runCtx)
 			sweepDone := make(chan struct{})
-			ticks := time.NewTicker(hostTrafficInterval)
+			ticks := time.NewTicker(lifecycle.HostTrafficInterval)
 			go func() {
 				defer close(sweepDone)
-				hostTrafficSweeper{Source: store, Recorder: *hostTraffic, Tick: ticks.C}.Run(sweepCtx)
+				lifecycle.HostTrafficSweeper{Source: store, Recorder: hostTraffic, Tick: ticks.C}.Run(sweepCtx)
 			}()
 			defer func() { stopSweep(); ticks.Stop(); <-sweepDone }()
 		}

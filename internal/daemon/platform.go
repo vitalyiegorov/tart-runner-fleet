@@ -74,7 +74,7 @@ type platform struct {
 	// virtual NIC, or is nil on a node without one. A Tart node uses it instead of
 	// guestExec: `tart exec` is vsock traffic, and a guest powers off before the
 	// drain could ask (ADR 0080, amendment 2026-11-05; issue #478).
-	hostTraffic func(config.Config) hostCounters
+	hostTraffic func(config.Config) lifecycle.HostCounters
 }
 
 // platformFor reports the wiring goos implies. macOS is Tart and the `vm_stat`
@@ -122,7 +122,7 @@ func applePlatform() platform {
 		guestProbe: func(cfg config.Config) app.GuestProbe {
 			return execGuestProbe{Runner: tart.ExecRunner{}, Timeout: cfg.GuestLiveness.ProbeTimeout}
 		},
-		hostTraffic: func(config.Config) hostCounters { return tart.HostTraffic{} },
+		hostTraffic: func(config.Config) lifecycle.HostCounters { return tart.HostTraffic{} },
 	}
 }
 
