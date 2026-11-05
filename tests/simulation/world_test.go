@@ -849,6 +849,10 @@ type world struct {
 	arrivalsStopped bool
 	// emptyExitNext arms the next job to arrive with issue #493's fault.
 	emptyExitNext int
+	// linuxRefused is how many more ticks the broker refuses Linux runners, and
+	// refusedRunners the guests whose log says so (ADR 0094).
+	linuxRefused   int
+	refusedRunners map[string]bool
 	// advertisement is the node-wide residual view its scale sets advertise
 	// from, fed by every tick exactly as the daemon feeds it.
 	advertisement app.ResidualAdvertisement
@@ -915,6 +919,7 @@ type simJob struct {
 	// emptyExits is how many more runners this job will waste before GitHub hands
 	// it to one, and exitedEmpty how many it has (issue #493).
 	emptyExits, exitedEmpty int
+	lastEmptyExit           time.Time
 }
 
 // simMessage is one scale-set message in flight.
@@ -967,7 +972,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		nextRunID: 1_000, nextReq: 500_000, nextMsgID: 1,
 		vms: map[string]bool{}, enteredAt: map[string]time.Time{}, createdAt: map[string]time.Time{},
 		claimed: map[string]*simOperation{}, delivered: map[int]*simMessage{},
-		stalledRunner: map[string]bool{}, wedgedDrain: map[string]int{},
+		stalledRunner: map[string]bool{}, refusedRunners: map[string]bool{}, wedgedDrain: map[string]int{},
 		unstoppableGuest: map[string]lifecycle.StopForce{}, stopAttempts: map[string]int{},
 		silentGuest: map[string]bool{}, guestDiedAt: map[string]int{}, saturatedGuest: map[string]bool{},
 		wedgedBootstrap: map[string]bool{},
@@ -990,7 +995,8 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
 		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority}
 	w.engine = app.Engine{
-		Store: store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,
+		Refusals: &app.RunnerRefusals{Now: func() time.Time { return w.now }},
+		Store:    store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,
 		ControllerID: simOwner, Mode: reconcile.Authority, Now: func() time.Time { return w.now },
 		Inventory: app.ProductionInventory{
 			Store: simInstances{world: w}, Executor: simTart{world: w}, Host: simHost{world: w},
@@ -1130,7 +1136,7 @@ func (w *world) reconcile() tickObservation {
 	}
 	return tickObservation{
 		Tick: w.tick, Now: w.now, Plan: result.Plan, Applied: result.Applied, Err: err,
-		Demands: result.Demands, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
+		Demands: result.Demands, EmptyExitBackoffs: result.EmptyExitBackoffs, RunnerRefusals: result.RunnerRefusals, Queued: queued, Instances: instances.Value, InstancesUsable: instances.Usable(),
 		Host: host.Value, HostUsable: host.Usable(), Headroom: result.Headroom,
 	}
 }
@@ -1386,6 +1392,12 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 		}
 		return operations.StateDeregistering, false
 	case operations.StateDeregistering:
+		// The read production performs beside the first stop (lifecycle.stopGuest).
+		// A guest that never logged a refusal reports nothing.
+		if w.refusedRunners[instance.ID] {
+			delete(w.refusedRunners, instance.ID)
+			w.engine.Refusals.Record(instance.Platform, simRefusedVersion, instance.ID)
+		}
 		// executor.go's deregistering arm: the runner is gone and its deletion is
 		// confirmed, so all that remains is to make the guest stop holding the
 		// host. A guest that will not do so is issue #233, and it is the one

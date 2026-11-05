@@ -359,6 +359,7 @@ type Snapshot struct {
 	Occupancy          []OccupancyMetric
 	GuestSilences      []GuestSilenceMetric
 	RunnerImages       []RunnerImageMetric
+	EmptyExitBackoffs  []EmptyExitBackoffMetric
 	// ImageToolsPublished separates "published, nothing drifted" from "never
 	// published", which ImageTools alone cannot (AGENTS.md rule 4).
 	ImageTools          []ImageToolsMetric
@@ -446,6 +447,7 @@ type Health struct {
 	occupancy           []OccupancyMetric
 	guestSilences       []GuestSilenceMetric
 	runnerImages        []RunnerImageMetric
+	emptyExitBackoffs   []EmptyExitBackoffMetric
 	imageTools          []ImageToolsMetric
 	imageToolsPublished bool
 	cacheGate           CacheGateMetric
@@ -1223,6 +1225,7 @@ func (h *Health) Snapshot() Snapshot {
 		Occupancy:                append([]OccupancyMetric(nil), h.occupancy...),
 		GuestSilences:            append([]GuestSilenceMetric(nil), h.guestSilences...),
 		RunnerImages:             append([]RunnerImageMetric(nil), h.runnerImages...),
+		EmptyExitBackoffs:        append([]EmptyExitBackoffMetric(nil), h.emptyExitBackoffs...),
 		GuestTraffic:             h.guestTrafficSeries(),
 		ImageTools:               append([]ImageToolsMetric(nil), h.imageTools...),
 		ImageToolsPublished:      h.imageToolsPublished,

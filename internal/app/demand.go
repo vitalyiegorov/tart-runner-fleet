@@ -54,6 +54,25 @@ type CompletedRunnerDrainStore interface {
 	DrainCompletedRunners(context.Context, int64) ([]string, error)
 }
 
+// EmptyExitStore reports the instances each demand has already spent. It is
+// optional for the reason the two stores above are: a store without it never holds
+// a demand back, which is the behaviour before issue #493.
+type EmptyExitStore interface {
+	EmptyExits(context.Context, time.Time) (map[domain.DemandKey]domain.EmptyExits, error)
+}
+
+// EmptyExitBackoff is one queued demand whose instances keep exiting without its
+// job. It is reported for as long as the demand stays over the bound, including
+// while an attempt is running, so the reason does not flicker with the attempts.
+type EmptyExitBackoff struct {
+	Demand  domain.DemandKey
+	Scope   string
+	Profile domain.ProfileID
+	Exits   int
+	LastAt  time.Time
+	RetryAt time.Time
+}
+
 type GitHubQueueSnapshot interface {
 	ObservedAt() time.Time
 	QueuedJobs() []githubscaleset.WorkflowJob
@@ -850,6 +869,32 @@ func (c DemandCoordinator) DrainCompletedRunners(ctx context.Context, bindings [
 		}
 	}
 	return drained, nil
+}
+
+// EmptyExits reads what the demand's spent instances say. Rows older than GitHub's
+// doubled job-start bound cannot name a queued demand, so they are not read at all.
+func (c DemandCoordinator) EmptyExits(ctx context.Context, now time.Time) (map[domain.DemandKey]domain.EmptyExits, error) {
+	store, ok := c.Store.(EmptyExitStore)
+	if !ok {
+		return nil, nil
+	}
+	return store.EmptyExits(ctx, now.Add(-overdueDemandTTL))
+}
+
+// emptyExitBackoffs judges one binding's queue against the policy. It reads the
+// whole queue rather than the plannable one, because a demand on its next attempt
+// is still over the bound. It decides only whether the demand is planned: the row,
+// the job at GitHub, the queue SLO and its age are all left exactly as they were.
+func emptyExitBackoffs(binding Binding, queued []domain.Demand, exits map[domain.DemandKey]domain.EmptyExits) []EmptyExitBackoff {
+	var backoffs []EmptyExitBackoff
+	for _, demand := range queued {
+		spent := exits[demand.Key]
+		if domain.EmptyExitBackoff.Exceeded(spent) {
+			backoffs = append(backoffs, EmptyExitBackoff{Demand: demand.Key, Scope: binding.Scope, Profile: binding.Profile.ID,
+				Exits: spent.Count, LastAt: spent.Last, RetryAt: domain.EmptyExitBackoff.RetryAt(spent)})
+		}
+	}
+	return backoffs
 }
 
 func containsFold(values []string, want string) bool {

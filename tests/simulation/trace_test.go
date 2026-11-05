@@ -205,13 +205,22 @@ const (
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
 	eventSiblingSubstitute eventKind = "sibling_substitute"
+	// Neither of the next two is in faultThisTick's draw yet: drawing them shifts the
+	// stream onto #494, which reproduces without them. They ship exercised by pinned
+	// traces, and the draw line lands with #494's fix (docs/TESTING.md).
+	//
 	// eventEmptyExit is issue #493: GitHub keeps the next job to arrive queued and
 	// corroborated by REST, while every runner the fleet provisions for it
 	// registers, takes nothing, and exits, so its guest powers itself off. Count is
 	// how many runners it wastes before GitHub finally hands it to one, which is
 	// what separates an empty exit that bounces from a job that was never lost.
-	eventEmptyExit    eventKind = "empty_exit"
-	eventStopArrivals eventKind = "stop_arrivals"
+	eventEmptyExit eventKind = "empty_exit"
+	// eventRunnerRefused is the 2026-11-05 cutoff (ADR 0094): for Count ticks the
+	// broker refuses every Linux runner as deprecated. A registered runner logs it,
+	// never receives a job, and idles until the assignment deadline reclaims it.
+	// macOS is left alone, because one image going stale says nothing about another.
+	eventRunnerRefused eventKind = "runner_refused"
+	eventStopArrivals  eventKind = "stop_arrivals"
 )
 
 func (t simTrace) String() string {
@@ -381,6 +390,10 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.substituteSiblings = true
 	case eventEmptyExit:
 		w.emptyExitNext = event.Count
+	case eventRunnerRefused:
+		// Scaled to the assignment deadline, so the generator reaches a refusal that
+		// outlasts a guest's own teardown, which is the only way the fleet learns of it.
+		w.linuxRefused = event.Count * 10
 	}
 }
 

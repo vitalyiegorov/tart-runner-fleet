@@ -33,6 +33,9 @@ type Engine struct {
 	ControllerID string
 	Mode         reconcile.Mode
 	Now          func() time.Time
+	// Refusals is what this node's guests have said about their images (ADR 0094).
+	// Nil reads no guest and holds nothing back.
+	Refusals *RunnerRefusals
 }
 
 type TickResult struct {
@@ -70,6 +73,12 @@ type TickResult struct {
 	// the envelope could not be computed, and a binding absent from it advertises
 	// its configured capacity: unknown is never zero.
 	Headroom []ScaleSetHeadroom
+	// EmptyExitBackoffs names the queued demand whose instances keep exiting
+	// without its job (issue #493). The demand stays in Queues and ScopeQueues,
+	// and is absent from Demands only while its hold lasts.
+	EmptyExitBackoffs []EmptyExitBackoff
+	// RunnerRefusals is the standing verdicts on this node's images (ADR 0094).
+	RunnerRefusals map[domain.Platform]domain.RunnerRefusal
 }
 
 // commitFailureReason names why a commit failed. A non-ready plan never reached
@@ -96,9 +105,9 @@ func commitFailureReason(status scheduler.PlanStatus, err error) string {
 }
 
 // plannableDemands drops every queued demand a live, non-terminal instance
-// already incarnates. It is the single seam where the scheduler's queue is
-// assembled, so every admission path downstream inherits the rule instead of
-// restating it (ADR 0027).
+// already incarnates, or that is waiting out an empty-exit hold. It is the single
+// seam where the scheduler's queue is assembled, so every admission path downstream
+// inherits the rule instead of restating it (ADR 0027).
 //
 // GitHub keeps a job Available until a runner acquires it, and production
 // acquires at the reachable -> registering edge, minutes after the spawn. For
@@ -117,10 +126,16 @@ func commitFailureReason(status scheduler.PlanStatus, err error) string {
 // choice ADR 0027 made for one tick's two passes: a demand already being served
 // must not be counted against slots, repository caps, or the residual envelope
 // either.
-func plannableDemands(queued []domain.Demand, liveIncarnations map[domain.DemandKey]bool) []domain.Demand {
+//
+// A demand on an empty-exit hold (issue #493, ADR 0094) leaves by the same door
+// and for the same reason: it must not be counted against anything while it costs
+// nothing, so the slot, the reservation and the repository cap all go to whatever
+// is next. A refused image's queue does too. Each queue summary is read from the
+// unfiltered queue, so withheld work stays visible.
+func plannableDemands(queued []domain.Demand, withheld map[domain.DemandKey]bool) []domain.Demand {
 	plannable := make([]domain.Demand, 0, len(queued))
 	for _, demand := range queued {
-		if liveIncarnations[demand.Key] {
+		if withheld[demand.Key] {
 			continue
 		}
 		plannable = append(plannable, demand)
@@ -199,10 +214,10 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	// Every admission path is bounded by this one fact: a demand a live instance
 	// already serves is not plannable work, whatever the broker still advertises
 	// and whatever the statistics still bound.
-	liveIncarnations := make(map[domain.DemandKey]bool, len(instances.Value))
+	withheld := make(map[domain.DemandKey]bool, len(instances.Value))
 	for _, instance := range instances.Value {
 		if instance.IncarnatesDemand() {
-			liveIncarnations[instance.Demand] = true
+			withheld[instance.Demand] = true
 		}
 	}
 	// Before demand is read: a row GitHub has already failed must not spend one
@@ -219,12 +234,26 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 	waiting := make([]domain.Demand, 0)
 	held := make(map[int64]int, len(e.Bindings))
 	undelivered := make(map[int64]int, len(e.Bindings))
+	emptyExits, err := coordinator.EmptyExits(ctx, now)
+	if err != nil {
+		return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
+	}
+	var backoffs []EmptyExitBackoff
+	refused := e.Refusals.Observe(instances.Value)
+	probing := probeInFlight(instances.Value)
 	for _, binding := range e.Bindings {
 		queued, err := coordinator.QueuedDemands(ctx, binding)
+		for _, backoff := range emptyExitBackoffs(binding, queued, emptyExits) {
+			backoffs = append(backoffs, backoff)
+			if now.Before(backoff.RetryAt) {
+				withheld[backoff.Demand] = true
+			}
+		}
+		withholdRefused(queued, refused, probing, withheld, now)
 		// One filter for every path: a demand whose VM is already cloning,
 		// booting, registering, assigned, running, or tearing down is not
 		// re-planned, and a terminal incarnation releases it again.
-		schedulable := plannableDemands(queued, liveIncarnations)
+		schedulable := plannableDemands(queued, withheld)
 		waiting = append(waiting, schedulable...)
 		held[binding.durableKey()] += len(schedulable)
 		if errors.Is(err, ErrDemandStatisticsUnavailable) {
@@ -280,6 +309,7 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 			ScopeInstances: ScaleSetInstances(e.Bindings, instances),
 			Instances:      append([]domain.Instance(nil), instances.Value...), HostMode: mode, Host: host.Value,
 			HostHealthy:    hostHealthy(host),
-			ExpiredOverdue: expiredOverdue, CompletedDrains: completedDrains, Headroom: headroom},
+			ExpiredOverdue: expiredOverdue, CompletedDrains: completedDrains, Headroom: headroom,
+			EmptyExitBackoffs: backoffs, RunnerRefusals: refused},
 		classifyTick(commitFailureReason(plan.Status, err), err)
 }

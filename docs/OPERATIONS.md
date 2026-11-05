@@ -1352,7 +1352,8 @@ fleet status --endpoint "$ENDPOINT" --output json | jq '.data.runnerImages'
 | `vm` | The base image that platform boots. |
 | `version` | The `actions/runner` release the image carries, as declared. Empty means nobody has vouched for it. |
 | `floor` | The version it is judged against: `runnerVersionFloor`, or 2.329.0. |
-| `belowFloor` | The verdict. |
+| `belowFloor` | The verdict: any failing `reason`, not only a version below the floor. |
+| `refusedVersion`, `refusedAt`, `nextProbeAt` | A guest's own log said GitHub refuses this runner, when that was read, and when one guest next launches to find out (ADR 0094). Only a container node can read this. |
 
 The check passes loudly as well as failing loudly: a passing `runner version`
 check still prints what each image carries, because the point is that the version
@@ -1380,10 +1381,28 @@ configuration to what was actually sealed. There is no runtime fix and no
 restart that helps.
 
 **Raising the floor is an operator action, not an automatic one.** When a new
-`actions/runner` release ships, a 30-day clock starts; set `runnerVersionFloor`
-to the new release on every node so the check goes red *before* GitHub does.
-Nothing in the fleet watches GitHub's release feed — the check makes staleness
+`actions/runner` release ships, a 30-day clock starts. The daemon reads GitHub's
+public release list every six hours, so the check fails on its own once the oldest
+release newer than an image is past that window, whatever the floor says. GitHub
+publishes no cutoff date, so the finding means "may be refused at any time", and it
+does not date the refusal. An unread list judges nothing. The check makes staleness
 visible, it does not make it self-correcting.
+
+**`runner_version_refused` means GitHub is refusing this image now** (ADR 0094). A
+guest's log said `Runner version vX is deprecated and cannot receive messages`. The
+node stops launching from that image, leaves running work alone, keeps the jobs
+visible in the queue, and launches one guest per half hour to find out whether the
+image works again. A job that starts on that platform clears the verdict at once.
+A Tart node cannot read this, because `tart exec` is vsock traffic (#478): there the
+symptom is `demand_empty_exit_backoff` beside this calendar finding. Rebuilding the
+image is the remedy; restarting the daemon only forgets the verdict.
+
+**`demand_empty_exit_backoff` means one queued job keeps costing instances** that
+leave without taking it. The first two are ordinary. From the third the fleet waits
+5, 10, 20, then at most 30 minutes after each exit before trying again, and other
+work has the slot in between. The job, its queue age and the queue SLO are untouched,
+and nothing is cancelled at GitHub. See `fleet doctor`'s `empty exits` row and
+`.data.emptyExitBackoffs`.
 
 **A daemon older than this check publishes no `runnerVersionCheck` at all**, and
 that renders as a pass with the detail `not reported by this daemon`. That is a

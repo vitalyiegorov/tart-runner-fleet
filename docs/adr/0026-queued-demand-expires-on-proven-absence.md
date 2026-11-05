@@ -8,6 +8,10 @@ rule, and completes the lifecycle-recovery class that
 [ADR 0016](0016-authoritative-runner-assignment.md) and the stalled-assignment
 and lingering-runner deadlines opened for instances.
 
+[ADR 0094](0094-a-refused-runner-is-a-named-condition-of-its-image.md) adds the case
+this rule cannot reach: a job REST keeps corroborating as queued that no runner of
+this fleet ever takes.
+
 ## Context
 
 The scale-set protocol is monotonic by construction. `runner_demands` only ever

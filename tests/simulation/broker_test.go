@@ -64,6 +64,7 @@ func (w *world) advancePhysics() {
 	w.swapResidue = decay(w.swapResidue)
 	w.swapThrash = decay(w.swapThrash)
 	w.tartUnavailable = decay(w.tartUnavailable)
+	w.linuxRefused = decay(w.linuxRefused)
 	for id, remaining := range w.wedgedDrain {
 		w.wedgedDrain[id] = decay(remaining)
 	}
@@ -94,6 +95,7 @@ func (w *world) exitEmptyRunners() {
 			w.vms[instance.ID] = false
 			job.emptyExits--
 			job.exitedEmpty++
+			job.lastEmptyExit = w.now
 		}
 	}
 }
@@ -115,6 +117,11 @@ func decay(remaining int) int {
 // ErrJobNotAcquired, the VM registers anyway, and the runner waits for work that
 // never comes -- the ghost runner of the 2026-08-01 incident.
 func (w *world) acquireJob(instance operations.Instance) {
+	if w.linuxRefused > 0 && instance.Platform == domain.PlatformLinux {
+		// The broker will not talk to this runner, however long it listens.
+		w.refusedRunners[instance.ID] = true
+		return
+	}
 	job := w.jobByRequest(instance.Demand.JobID)
 	if job == nil || job.status != jobQueued || job.silentCancel || job.emptyExits > 0 {
 		return

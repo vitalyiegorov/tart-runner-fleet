@@ -1,5 +1,7 @@
 package telemetry
 
+import "time"
+
 // RunnerImageMetric is one guest image's `actions/runner` version as the node
 // declared it, together with the floor it was judged against and the verdict.
 //
@@ -23,6 +25,12 @@ type RunnerImageMetric struct {
 	// Reason is empty when the image is compliant, and is the operator-facing
 	// explanation otherwise.
 	Reason string
+	// RefusedVersion is non-empty when a guest's own log says GitHub refuses this
+	// image's runner, with when that was read and when the next probe launches
+	// (ADR 0094). A separate fact from Reason, so a reader need not parse a sentence.
+	RefusedVersion string
+	RefusedAt      time.Time
+	NextProbeAt    time.Time
 }
 
 // runnerVersionPlatforms is the closed vocabulary of image platforms. It is
@@ -56,6 +64,9 @@ func (h *Health) SetRunnerImages(images []RunnerImageMetric) error {
 			return errInvalidMetric
 		}
 		if metric.Version != "" && !boundedResourceID.MatchString(metric.Version) {
+			return errInvalidMetric
+		}
+		if metric.RefusedVersion != "" && !boundedResourceID.MatchString(metric.RefusedVersion) {
 			return errInvalidMetric
 		}
 		seen[metric.Platform] = struct{}{}

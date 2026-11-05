@@ -124,8 +124,8 @@ func TestAJobThatBouncesTwiceIsNotBackedOff(t *testing.T) {
 		t.Fatalf("job should have run after %d empty exits: status=%s exited=%d", exits, job.status, job.exitedEmpty)
 	}
 	for _, observation := range w.observations {
-		if len(observation.EmptyExitHolds) > 0 {
-			t.Fatalf("t%03d backed off after an ordinary empty exit: %+v", observation.Tick, observation.EmptyExitHolds)
+		if len(observation.EmptyExitBackoffs) > 0 {
+			t.Fatalf("t%03d backed off after an ordinary empty exit: %+v", observation.Tick, observation.EmptyExitBackoffs)
 		}
 	}
 }
@@ -147,12 +147,12 @@ func TestABackedOffJobThatIsLaterAssignedStillRuns(t *testing.T) {
 	}
 	held := 0
 	for _, observation := range w.observations {
-		held += len(observation.EmptyExitHolds)
+		held += len(observation.EmptyExitBackoffs)
 	}
 	if held == 0 {
 		t.Fatal("the job was never held, so this trace proved nothing about a held job")
 	}
-	if last := w.observations[len(w.observations)-1]; len(last.EmptyExitHolds) != 0 {
-		t.Fatalf("a finished job must leave no hold behind: %+v", last.EmptyExitHolds)
+	if last := w.observations[len(w.observations)-1]; len(last.EmptyExitBackoffs) != 0 {
+		t.Fatalf("a finished job must leave no hold behind: %+v", last.EmptyExitBackoffs)
 	}
 }

@@ -12,6 +12,10 @@ capabilities of
 [ADR 0034's amendment 2026-08-04b](0034-a-node-serves-the-scale-sets-it-owns.md),
 and it is declared for the same reason: the daemon never opens the image.
 
+**Amended by [ADR 0094](0094-a-refused-runner-is-a-named-condition-of-its-image.md):**
+the check also reads GitHub's release calendar and a guest's own refusal, which
+closes the "recurring-staleness half" this ADR left open below.
+
 ## Context
 
 GitHub is enforcing a minimum `actions/runner` version on self-hosted runners.

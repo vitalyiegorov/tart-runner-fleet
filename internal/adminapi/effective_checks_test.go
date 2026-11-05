@@ -17,6 +17,7 @@ func TestEffectiveChecksTreatAnAbsentCheckAsAPass(t *testing.T) {
 		"admission":     older.EffectiveAdmissionCheck(),
 		"ingest":        older.EffectiveIngestCheck(),
 		"parked sets":   older.EffectiveParkedScaleSetCheck(),
+		"empty exits":   older.EffectiveEmptyExitCheck(),
 	} {
 		if !check.OK {
 			t.Fatalf("%s: an unpublished check failed", name)

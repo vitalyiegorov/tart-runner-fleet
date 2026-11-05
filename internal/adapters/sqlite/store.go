@@ -932,6 +932,36 @@ func (s *Store) SpawnGeneration(ctx context.Context, demand domain.DemandKey) (i
 	return generation, nil
 }
 
+// EmptyExits reports, per demand, the deleted instances still bound to it since
+// the given instant. A failed row is not counted, because a provisioning failure
+// never reached a runner and has its own retry path. Nothing here is new state:
+// these are the same terminal rows SpawnGeneration already counts, so the answer
+// survives a restart and cannot drift from what happened (issue #493).
+func (s *Store) EmptyExits(ctx context.Context, since time.Time) (map[domain.DemandKey]domain.EmptyExits, error) {
+	rows, err := s.dbQuery(ctx, "inbox.empty_exits", `SELECT json_extract(scheduling_metadata,'$.demand.Repo'),
+		json_extract(scheduling_metadata,'$.demand.RunID'),json_extract(scheduling_metadata,'$.demand.Attempt'),
+		json_extract(scheduling_metadata,'$.demand.JobID'),COUNT(*),MAX(updated_at)
+		FROM instances WHERE state=? AND updated_at>=? AND json_extract(scheduling_metadata,'$.demand.JobID')>0
+		GROUP BY 1,2,3,4`, operations.StateDeleted, since.UTC().UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("list empty exits: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	result := map[domain.DemandKey]domain.EmptyExits{}
+	for rows.Next() {
+		var key domain.DemandKey
+		var exits domain.EmptyExits
+		if err := rows.Scan(&key.Repo, &key.RunID, &key.Attempt, &key.JobID, &exits.Count, (*nanosTime)(&exits.Last)); err != nil {
+			return nil, fmt.Errorf("scan empty exits: %w", err)
+		}
+		result[key] = exits
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate empty exits: %w", err)
+	}
+	return result, nil
+}
+
 // DrainGeneration counts the instance's prior drain attempts that can no longer
 // act. It is the drain half of SpawnGeneration and exists for the same reason:
 // a drain identity is content-addressed from the scheduler's recovery decision

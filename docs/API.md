@@ -256,6 +256,14 @@ vocabulary. The measurement is exported as
 `fleet_instance_guest_unresponsive`, each labelled by profile and instance. Both
 fields are additive and absent on daemons that probed no guest at all (ADR 0040).
 
+`emptyExitBackoffs` names queued demand whose instances keep exiting without its
+job, and `emptyExitCheck` is the judgement `fleet doctor` renders as `empty exits`.
+Each row has `demand`, `scope`, `profile`, `exits`, `lastExitAt` and `retryAt`, and
+each reason starts `demand_empty_exit_backoff`. `runnerImages[]` gains `refusedVersion`,
+`refusedAt` and `nextProbeAt` when a guest's log says GitHub refuses that image, and
+its `reason` then starts `runner_version_refused`. All are additive, and absent on an
+older daemon. Neither affects `ready` or `healthy` (ADR 0094).
+
 `reservation` names the aged global-FIFO head the scheduler is standing capacity
 by for, and `reservationCheck` is the derived judgement `fleet doctor` renders:
 

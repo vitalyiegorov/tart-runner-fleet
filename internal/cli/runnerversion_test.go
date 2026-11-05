@@ -92,3 +92,25 @@ func TestDoctorPassesWhenTheDaemonPredatesTheCheck(t *testing.T) {
 		t.Fatalf("doctor must say so plainly:\n%s", out)
 	}
 }
+
+// A refused image and a held demand are each named in doctor and above the queues
+// in status, because the queue alone looks like a node that is merely busy (ADR 0094).
+func TestDoctorAndStatusNameARefusedImageAndAHeldDemand(t *testing.T) {
+	const refused = `runner_version_refused: linux base image "base": GitHub refuses actions/runner 2.336.0 as deprecated`
+	const held = "demand_empty_exit_backoff: o/r/1/1/7 (s/maestro): 3 instances exited without a job"
+	status := healthyStatus()
+	status.Data.RunnerImages = []adminapi.RunnerImage{{Platform: "linux", VM: "base", Version: "2.336.0", Floor: "2.336.0",
+		BelowFloor: true, Reason: refused, RefusedVersion: "2.336.0"}}
+	status.Data.RunnerVersionCheck = &adminapi.Check{Reasons: []string{refused}}
+	status.Data.EmptyExitCheck = &adminapi.Check{Reasons: []string{held}}
+	assertDoctorNames(t, status, "runner version", "runner_version_refused")
+	assertDoctorNames(t, status, "empty exits", "demand_empty_exit_backoff")
+
+	var output strings.Builder
+	renderStatus(&output, status)
+	for _, want := range []string{"WITHHELD", "runner_version_refused", "demand_empty_exit_backoff"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("status lacks %q:\n%s", want, output.String())
+		}
+	}
+}
