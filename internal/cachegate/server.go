@@ -61,6 +61,7 @@ func countingHandler(cache, results, npm *url.URL, logOutput io.Writer, counters
 	}
 	if npm != nil {
 		proxies[NPM] = npmProxy(npm)
+		counters.npmEnabled = true
 	}
 	limit := &refusalLog{logger: logger}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

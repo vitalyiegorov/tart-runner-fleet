@@ -518,3 +518,31 @@ func TestNPMReadyIsFalseWhenNothingAnswers(t *testing.T) {
 		t.Fatal("an unparseable target read as ready")
 	}
 }
+
+// TestAGateWithNoNPMCacheExportsNoNPMSeries keeps the off switch honest: a node that
+// never enabled the route scrapes exactly the series it always did.
+func TestAGateWithNoNPMCacheExportsNoNPMSeries(t *testing.T) {
+	_, target := newNPMBackend(t)
+	cache, _ := upstream(t)
+	for name, extra := range map[string][]string{"off": nil, "on": {"--npm-upstream", target.String()}} {
+		t.Run(name, func(t *testing.T) {
+			gateAddress, metricsAddress := freeAddress(t), freeAddress(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan int, 1)
+			args := append([]string{"--listen", gateAddress, "--upstream", cache.String(), "--results-upstream", cache.String(),
+				"--metrics-listen", metricsAddress}, extra...)
+			go func() { done <- Execute(ctx, args, io.Discard, io.Discard) }()
+			body := waitFor(t, "http://"+metricsAddress+"/metrics")
+			cancel()
+			if code := <-done; code != 0 {
+				t.Fatalf("code = %d", code)
+			}
+			if !strings.Contains(body, `upstream="cache"`) || !strings.Contains(body, `upstream="results"`) {
+				t.Fatalf("metrics = %q", body)
+			}
+			if got, want := strings.Contains(body, `upstream="npm"`), extra != nil; got != want {
+				t.Fatalf("npm series exported = %v, want %v:\n%s", got, want, body)
+			}
+		})
+	}
+}
