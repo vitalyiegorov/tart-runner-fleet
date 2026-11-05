@@ -416,6 +416,60 @@ goes, such as a laptop, and climbs a shorter ladder. The key requires
 authority mode. `fleet status` and `fleet doctor` report it as `membership`;
 see `docs/OPERATIONS.md`.
 
+## The npm cache at the home site
+
+Omarchy, the Mac mini and the MacBook can read public npm packages through the gate
+([ADR 0092](docs/adr/0092-the-home-site-reads-npm-and-public-git-through-the-gate.md)),
+which removes repeat downloads from the home uplink. It is off by default per node.
+Ubuntu and the Mac Studio never use it, and the MacBook goes direct away from home.
+
+A guest gets a `~/.npmrc` naming the cache only when that launch's gate proof succeeds.
+A job needs no change.
+
+| Client | Goes through the cache? |
+| --- | --- |
+| pnpm 11 and 12, with or without `--frozen-lockfile` | Yes. Integrity, `trustPolicy` and `minimumReleaseAge` still fail when they should, and the lockfile never names the gate |
+| `npm ci` | Yes. npm rewrites the lockfile's `registry.npmjs.org` URLs on its own |
+| `npm install` | Yes. A lockfile it **generates** names the gate |
+| `npx`, `npm exec`, `npm install --global` | Yes |
+| Modern Yarn, Bun | No, they go direct. No setting is added for them |
+| Yarn 1, Corepack | Not tested |
+
+Versions tested and evidence are in the ADR.
+
+**A job opts out** with a `registry=` line in the project's `.npmrc`, or with
+`setup-node`'s `registry-url`, or by setting both variables below, because pnpm 11 and later
+ignore `NPM_CONFIG_REGISTRY`:
+
+```yaml
+env:
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+  pnpm_config_registry: https://registry.npmjs.org/
+```
+
+A job must opt out to:
+
+- **publish**, or log in, which the cache refuses with a 403 if npm gets that far (without
+  a token for the gate, it stops first at `ENEEDAUTH`);
+- **run `npm audit` or `pnpm audit`**, which the cache refuses too, while `npm install`'s
+  own audit step only loses its summary;
+- **run `npm audit signatures`, `npm search`** or anything else that needs the registry
+  itself, which answers 404;
+- **commit a generated `package-lock.json`**, which would otherwise name the gate;
+- **read a version published in the last 10 minutes.**
+
+**Private packages keep working.** Give a private scope its own
+`@scope:registry=` and `//host/:_authToken=` lines, and neither its name nor its token
+reaches the gate. A private package on npmjs itself with no scope line gets a 404 here:
+give it `@scope:registry=https://registry.npmjs.org/`.
+
+**A gate lost mid-job fails the install, and the job needs a rerun.** There is no
+transparent fallback: the choice is made once, at launch. A rerun gets a fresh launch.
+
+Turning it off is removing `npmRegistry` from the node's `cacheGate` and restarting its
+daemon. Existing Actions-cache behaviour does not change. See
+[The npm read-through cache](docs/OPERATIONS.md#the-npm-read-through-cache-adr-0092).
+
 ## Scheduling principles
 
 1. Fresh observations are mandatory; unavailable data fails closed.

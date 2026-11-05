@@ -11,6 +11,9 @@ see [Amendment 2026-10-24](#amendment-2026-10-24-site-a-arm64-tart-guests-share-
 macOS guests remain out of scope. **Amended 2026-11-04 (issue #446):** a node
 proves the gate is ours before each guest launch; see
 [Amendment 2026-11-04](#amendment-2026-11-04-a-node-proves-the-gate-before-a-guest-trusts-it).
+**Revisited 2026-11-05 (issue #489):** [ADR 0092](0092-the-home-site-reads-npm-and-public-git-through-the-gate.md)
+adds a read-through npm cache behind this gate at the home site, on fresh measurements
+of option (b)'s registry, and lets a podman node configure a gate for that alone.
 
 ## Context
 

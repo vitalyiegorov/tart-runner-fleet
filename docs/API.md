@@ -484,6 +484,30 @@ stopped. `fleet update` discounts a parked resource from its quiescence gate and
 nothing else; a running VM always defers a release. The field is omitted while
 nothing is parked and is absent on older daemons.
 
+### The LAN cache gate
+
+```json
+"cacheGate": {
+  "url": "http://192.168.1.64:3017/",
+  "verified": true,
+  "probedAt": "2026-11-05T12:00:00Z",
+  "npmRegistry": "http://192.168.1.64:3017/npm/",
+  "npmReady": true
+},
+"cacheGateCheck": {"ok": true, "reasons": []}
+```
+
+`cacheGate` is the latest answer to whether the gate this node's guests use proved it is
+ours (ADR 0078). An empty `url` means the node configures none. `npmRegistry` and
+`npmReady` are additive (ADR 0092): what this node's guests are given, and whether the
+gate's npm route last answered. Both are absent on a node that gives none, so an absent
+`npmReady` means *no npm cache here*, never *not ready*.
+
+`cacheGateCheck` fails with `cache gate unreachable` or `npm cache not ready`, and no
+health or readiness check does, because guests going direct is working as designed.
+Both objects are absent on a daemon that has not published, which
+`EffectiveCacheGateCheck()` exists for.
+
 ## Guarded mutation
 
 ```
