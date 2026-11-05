@@ -415,7 +415,7 @@ func runnerImageRows(snapshot Snapshot) []adminapi.RunnerImage {
 	for _, metric := range snapshot.RunnerImages {
 		row := adminapi.RunnerImage{Platform: metric.Platform, VM: metric.VM, Version: metric.Version,
 			Floor: metric.Floor, BelowFloor: metric.BelowFloor, Reason: metric.Reason}
-		row.RefusedVersion, row.RefusedAt, row.NextProbeAt = metric.RefusedVersion, metric.RefusedAt, metric.NextProbeAt
+		row.RefusedVersion, row.RefusedAt = metric.RefusedVersion, metric.RefusedAt
 		rows = append(rows, row)
 	}
 	return rows

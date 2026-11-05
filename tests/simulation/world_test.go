@@ -21,7 +21,6 @@ package simulation_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -853,8 +852,13 @@ type world struct {
 	// linuxRefused is how many more ticks the broker refuses Linux runners, and
 	// refusedRunners the guests whose log says so (ADR 0094).
 	forgeRefusalNext bool
-	linuxRefused     int
-	refusedRunners   map[string]bool
+	// refusalUnreadable is a node that cannot read its guests' logs, as a Tart node
+	// cannot (ADR 0080): the refusal happens and nothing says so.
+	refusalUnreadable bool
+	// forgeEveryLog is every guest's log carrying the refusal line.
+	forgeEveryLog  bool
+	linuxRefused   int
+	refusedRunners map[string]bool
 	// advertisement is the node-wide residual view its scale sets advertise
 	// from, fed by every tick exactly as the daemon feeds it.
 	advertisement app.ResidualAdvertisement
@@ -1396,8 +1400,9 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 	case operations.StateDeregistering:
 		// The read production performs beside the first stop (lifecycle.stopGuest).
 		// A guest that never logged a refusal reports nothing.
-		app.RunnerRefusalReader{Evidence: w.store, Refusals: w.engine.Refusals, Read: w.readRunnerLog}.
-			ReadRunnerRefusal(w.ctx, instance)
+		if version, refused := domain.ParseRunnerRefusal(w.readRunnerLog(instance.ID)); refused {
+			w.engine.Refusals.Record(instance.Platform, version, instance.ID)
+		}
 		// executor.go's deregistering arm: the runner is gone and its deletion is
 		// confirmed, so all that remains is to make the guest stop holding the
 		// host. A guest that will not do so is issue #233, and it is the one
@@ -1422,13 +1427,13 @@ func (w *world) nextLifecycleState(instance operations.Instance) (operations.Sta
 	}
 }
 
-// readRunnerLog answers what a guest's runner.log says. What it may be asked, and
-// whether its answer counts, is the production reader's decision.
-func (w *world) readRunnerLog(_ context.Context, id string) ([]byte, error) {
-	if !w.refusedRunners[id] {
-		return nil, errors.New("exit status 1")
+// readRunnerLog answers what a guest's runner.log says, as production's teardown read
+// sees it.
+func (w *world) readRunnerLog(id string) []byte {
+	if (!w.refusedRunners[id] && !w.forgeEveryLog) || w.refusalUnreadable {
+		return nil
 	}
-	return []byte("An error occurred: Runner version v" + simRefusedVersion + " is deprecated and cannot receive messages.\n"), nil
+	return []byte("An error occurred: Runner version v" + simRefusedVersion + " is deprecated and cannot receive messages.\n")
 }
 
 // stopGuest performs one rung of the REAL escalation ladder against the

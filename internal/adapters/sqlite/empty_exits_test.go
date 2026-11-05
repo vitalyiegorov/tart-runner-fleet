@@ -78,43 +78,50 @@ func TestEmptyExitsReportsARowItCannotReadAndAStoreItCannotQuery(t *testing.T) {
 	}
 }
 
-// The evidence comes from the broker alone: a job can write neither fact.
-func TestInstanceTookJobReadsOnlyWhatTheBrokerSaid(t *testing.T) {
+// One job named on a row of this generation clears everything before it, on this
+// generation only, and launches are dated from every row whatever its state.
+func TestAnAssignmentOnAGenerationEndsItsUnassignedRun(t *testing.T) {
 	ctx := context.Background()
 	store := overdueStore(t)
-	took := func(id string) bool {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	queued := domain.DemandKey{Repo: "o/r", RunID: 1, Attempt: 1, JobID: 8}
+	seedInstanceRow(t, store, "a", operations.StateDeleted, now.Add(-time.Hour), queued, "base@1")
+	seedInstanceRow(t, store, "b", operations.StateDeleted, now.Add(-time.Minute), queued, "base@1")
+	seedInstanceRow(t, store, "c", operations.StateDeleted, now.Add(-time.Minute), queued, "base@2")
+	seedInstanceRow(t, store, "ran", operations.StateRunning, now.Add(-time.Second), domain.DemandKey{Repo: "o/r", RunID: 2, Attempt: 1, JobID: 9}, "base@1")
+	read := func() map[domain.EmptyExitKey]domain.EmptyExits {
 		t.Helper()
-		result, err := store.InstanceTookJob(ctx, id)
+		exits, err := store.EmptyExits(ctx, now.Add(-2*time.Hour))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return result
+		return exits
 	}
-	if _, err := store.db.Exec(`INSERT INTO transition_history(instance_id,from_state,to_state,version,created_at)
-		VALUES('assigned-only',?,?,1,1),('ran',?,?,2,1)`, operations.StateRegistering, operations.StateAssigned,
-		operations.StateAssigned, operations.StateRunning); err != nil {
+	before := read()[domain.EmptyExitKey{Demand: queued, Image: "base@1"}]
+	if before.Count != 2 || before.Unassigned != 2 || !before.Launched.Equal(now.Add(-time.Second)) {
+		t.Fatalf("got %+v", before)
+	}
+
+	store.clock = func() time.Time { return now.Add(-30 * time.Minute) }
+	started := demandEvent(operations.DemandJobStarted, 9)
+	started.RunnerName = "ran"
+	if _, err := store.ApplyDemandBatch(ctx, overdueScaleSet, 9, []operations.DemandEvent{started}); err != nil {
 		t.Fatal(err)
 	}
-	if took("assigned-only") {
-		t.Fatal("provisioning reaches Assigned with no job at all")
+	after := read()
+	if got := after[domain.EmptyExitKey{Demand: queued, Image: "base@1"}]; got.Count != 2 || got.Unassigned != 1 {
+		t.Fatalf("only the exit after the assignment still counts: %+v", got)
 	}
-	if !took("ran") {
-		t.Fatal("an instance that entered Running took a job")
+	if got := after[domain.EmptyExitKey{Demand: queued, Image: "base@2"}]; got.Unassigned != 1 {
+		t.Fatalf("an assignment on another generation clears nothing here: %+v", got)
 	}
-	assigned := demandEvent(operations.DemandJobAssigned, 7)
-	assigned.RunnerName = "named"
-	if _, err := store.ApplyDemandBatch(ctx, overdueScaleSet, 7, []operations.DemandEvent{assigned}); err != nil {
+
+	unnamed := demandEvent(operations.DemandJobAssigned, 10)
+	if _, err := store.ApplyDemandBatch(ctx, overdueScaleSet, 10, []operations.DemandEvent{unnamed}); err != nil {
 		t.Fatal(err)
 	}
-	if !took("named") {
-		t.Fatal("GitHub naming the runner on a job's row is a job, whatever the instance row says")
-	}
-	if took("stranger") {
-		t.Fatal("no evidence is no evidence")
-	}
-	_ = store.Close()
-	if _, err := store.InstanceTookJob(ctx, "ran"); err == nil {
-		t.Fatal("an unreadable store must not read as no job")
+	if got := read()[domain.EmptyExitKey{Demand: queued, Image: "base@1"}]; got.Unassigned != 1 {
+		t.Fatalf("a row naming no runner says nothing about a generation: %+v", got)
 	}
 }
 

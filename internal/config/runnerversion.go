@@ -57,8 +57,9 @@ type RunnerImage struct {
 	Version string
 	// Floor is the version Version is judged against, always populated.
 	Floor string
-	// Refusal is a guest's own log saying GitHub refuses this image's runner (ADR
-	// 0094). Nil is no such evidence, which a Tart node can never have.
+	// Refusal is a guest's log naming this image's runner as refused, set only while
+	// launches from the image are held on other evidence. It is advisory, because a
+	// job can write that log (ADR 0094). A Tart node never has one.
 	Refusal *domain.RunnerRefusal
 	// Releases and Now are the release calendar as measured. Without them the
 	// install window is not judged, because an unread calendar establishes nothing.
@@ -79,10 +80,10 @@ func (i RunnerImage) Compliant() bool { return i.Reason() == "" }
 // those are the three facts needed to decide whether to rebuild.
 func (i RunnerImage) Reason() string {
 	if i.Refusal != nil {
-		return fmt.Sprintf("runner_version_refused: %s base image %q: GitHub refuses actions/runner %s as deprecated, "+
-			"read from guest %s at %s; launches are held and the next probe is at %s; rebuild the image",
-			i.Platform, i.VM, i.Refusal.Version, i.Refusal.Instance, i.Refusal.At.UTC().Format(time.RFC3339),
-			i.Refusal.RetryAt().UTC().Format(time.RFC3339))
+		return fmt.Sprintf("runner_version_refused (advisory: a job can write the log this is read from): launches from "+
+			"%s base image %q are being held, and guest %s logged at %s that GitHub refuses actions/runner %s as deprecated; "+
+			"if that holds up, rebuild the image", i.Platform, i.VM, i.Refusal.Instance,
+			i.Refusal.At.UTC().Format(time.RFC3339), i.Refusal.Version)
 	}
 	if i.Version == "" {
 		return fmt.Sprintf("%s base image %q declares no runner version, so its brownout compliance "+

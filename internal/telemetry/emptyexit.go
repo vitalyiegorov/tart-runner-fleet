@@ -10,9 +10,9 @@ import (
 // EmptyExitBackoffMetric is one queued demand whose instances keep exiting without
 // its job (issue #493, ADR 0094).
 type EmptyExitBackoffMetric struct {
-	Demand, Scope, Profile string
-	Exits                  int
-	LastExitAt, RetryAt    time.Time
+	Demand, Scope, Profile, Image string
+	Demands, Exits                int
+	LastExitAt, RetryAt           time.Time
 }
 
 // SetEmptyExitBackoffs publishes the whole set, so a demand that left the queue
@@ -30,6 +30,13 @@ func (h *Health) SetEmptyExitBackoffs(backoffs []EmptyExitBackoffMetric) {
 func emptyExitResult(backoffs []EmptyExitBackoffMetric) HealthResult {
 	reasons := make([]string, 0, len(backoffs))
 	for _, backoff := range backoffs {
+		if backoff.Demand == "" {
+			reasons = append(reasons, fmt.Sprintf("image_empty_exit_backoff: %s: %d instances across %d queued demands exited "+
+				"without a job since this image last had one; the last at %s; next launch no earlier than %s",
+				backoff.Image, backoff.Exits, backoff.Demands, backoff.LastExitAt.UTC().Format(time.RFC3339),
+				backoff.RetryAt.UTC().Format(time.RFC3339)))
+			continue
+		}
 		reasons = append(reasons, fmt.Sprintf("demand_empty_exit_backoff: %s (%s/%s): %d instances exited without a job, "+
 			"the last at %s; next attempt no earlier than %s; the job at GitHub is untouched",
 			backoff.Demand, backoff.Scope, backoff.Profile, backoff.Exits,
@@ -45,7 +52,7 @@ func emptyExitRows(snapshot Snapshot) []adminapi.EmptyExitBackoff {
 	rows := make([]adminapi.EmptyExitBackoff, 0, len(snapshot.EmptyExitBackoffs))
 	for _, backoff := range snapshot.EmptyExitBackoffs {
 		rows = append(rows, adminapi.EmptyExitBackoff{Demand: backoff.Demand, Scope: backoff.Scope, Profile: backoff.Profile,
-			Exits: backoff.Exits, LastExitAt: backoff.LastExitAt, RetryAt: backoff.RetryAt})
+			Image: backoff.Image, Demands: backoff.Demands, Exits: backoff.Exits, LastExitAt: backoff.LastExitAt, RetryAt: backoff.RetryAt})
 	}
 	return rows
 }

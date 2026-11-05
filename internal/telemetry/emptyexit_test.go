@@ -27,6 +27,14 @@ func TestAnEmptyExitBackoffIsNamedInTheStatusAndLeavesHealthAlone(t *testing.T) 
 	}
 }
 
+func TestAnImageHoldIsNamedAsSuch(t *testing.T) {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	result := emptyExitResult([]EmptyExitBackoffMetric{{Image: "base@2.336.0", Demands: 3, Exits: 4, LastExitAt: now, RetryAt: now.Add(5 * time.Minute)}})
+	if result.OK || !strings.HasPrefix(result.Reasons[0], "image_empty_exit_backoff: base@2.336.0: 4 instances across 3 queued demands") {
+		t.Fatalf("got %+v", result)
+	}
+}
+
 func TestAPublishedBackoffReachesTheSnapshotAndIsReplacedWhole(t *testing.T) {
 	health, err := NewHealth(emptyExitClock{}, HealthConfig{})
 	if err != nil {

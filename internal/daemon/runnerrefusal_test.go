@@ -28,30 +28,31 @@ func (r *refusalRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 	return r.output, r.err
 }
 
-type noJobEvidence struct{}
-
-func (noJobEvidence) InstanceTookJob(context.Context, string) (bool, error) { return false, nil }
-
-// The production read addresses the guest by argument vector, refuses a name the
-// grammar does not admit, and feeds the shared gate.
-func TestATeardownReadRunsTheFixedCommandAgainstTheGuest(t *testing.T) {
+func TestATeardownReadRecordsAReadingAndNothingElse(t *testing.T) {
 	refusals := &app.RunnerRefusals{}
 	runner := &refusalRunner{output: []byte("An error occurred: Runner version v2.336.0 is deprecated and cannot receive messages.\n")}
 	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return runner }}
-	reader := node.runnerRefusalReader(config.Default(), noJobEvidence{}, refusals)
-	for _, id := range []string{"trf-linux-2x4-abc", "trf-linux-2x4-def"} {
-		reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: id, Platform: domain.PlatformLinux})
+	reader := node.runnerRefusalReader(config.Default(), refusals)
+	reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux})
+	if refusal := refusals.Observe(nil)[domain.PlatformLinux]; refusal.Version != "2.336.0" || refusal.Instance != "trf-linux-2x4-abc" {
+		t.Fatalf("got %+v", refusal)
 	}
-	if refusals.Observe(nil)[domain.PlatformLinux].Version != "2.336.0" {
-		t.Fatalf("two fresh guests make a verdict: %+v", refusals.Observe(nil))
-	}
-	if runner.args[0] != "exec" || runner.args[1] != "trf-linux-2x4-def" {
+	if runner.args[0] != "exec" || runner.args[1] != "trf-linux-2x4-abc" {
 		t.Fatalf("got %v", runner.args[:2])
 	}
 	runner.args = nil
 	reader.ReadRunnerRefusal(context.Background(), operations.Instance{ID: "bad name; rm -rf", Platform: domain.PlatformLinux})
 	if runner.args != nil {
 		t.Fatalf("executed %v", runner.args)
+	}
+	for name, other := range map[string]*refusalRunner{"no such line": {err: errors.New("exit status 1")},
+		"other text": {output: []byte("An error occurred: something else\n")}} {
+		fresh := &app.RunnerRefusals{}
+		guestRunnerRefusalReader{Runner: other, Refusals: fresh}.ReadRunnerRefusal(context.Background(),
+			operations.Instance{ID: "trf-linux-2x4-abc", Platform: domain.PlatformLinux})
+		if len(fresh.Observe(nil)) != 0 {
+			t.Fatalf("%s produced a reading", name)
+		}
 	}
 }
 
@@ -80,14 +81,14 @@ func TestAnImageGenerationMovesWithTheReferenceAndTheDeclaredVersion(t *testing.
 func TestATartNodeHasNoRefusalReader(t *testing.T) {
 	cfg := config.Default()
 	tartNode := dependencies{guestExec: applePlatform().guestExec, hostTraffic: applePlatform().hostTraffic}
-	if reader := tartNode.runnerRefusalReader(cfg, noJobEvidence{}, &app.RunnerRefusals{}); reader != nil {
+	if reader := tartNode.runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader != nil {
 		t.Fatal("a Tart node must not exec into a guest for this")
 	}
 	containerNode := dependencies{guestExec: func(config.Config) executor.CommandRunner { return &refusalRunner{} }}
-	if reader := containerNode.runnerRefusalReader(cfg, noJobEvidence{}, &app.RunnerRefusals{}); reader == nil {
+	if reader := containerNode.runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader == nil {
 		t.Fatal("a container node reads its guest")
 	}
-	if reader := (dependencies{}).runnerRefusalReader(cfg, noJobEvidence{}, &app.RunnerRefusals{}); reader != nil {
+	if reader := (dependencies{}).runnerRefusalReader(cfg, &app.RunnerRefusals{}); reader != nil {
 		t.Fatal("a node with no way to exec has no reader")
 	}
 }
@@ -146,19 +147,28 @@ func TestTheTickRejudgesEachImage(t *testing.T) {
 	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
 	releases := &runnerReleases{}
 	ticker := engineTicker{health: health, runnerImages: cfg, releases: releases}
+	reading := map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: {Version: "2.336.0", Instance: "trf-linux-2x4-abc", At: now}}
 
 	ticker.recordRunnerImages(app.TickResult{At: now})
 	if result := health.RunnerVersions(); !result.OK {
-		t.Fatalf("an unread calendar and no refusal must pass: %v", result.Reasons)
+		t.Fatalf("an unread calendar and no reading must pass: %v", result.Reasons)
 	}
-
+	// A log line alone reaches no check: a job could have written it.
+	ticker.recordRunnerImages(app.TickResult{At: now, RunnerRefusals: reading})
+	if result := health.RunnerVersions(); !result.OK {
+		t.Fatalf("a log line with no hold behind it failed a check: %v", result.Reasons)
+	}
+	// Behind a hold from evidence a job cannot produce, it names the reason.
 	calendar := []config.RunnerRelease{{Version: "2.337.0", PublishedAt: now.AddDate(0, -2, 0)}}
 	releases.current.Store(&calendar)
-	refusal := domain.RunnerRefusal{Version: "2.336.0", Instance: "trf-linux-2x4-abc", At: now}
-	ticker.recordRunnerImages(app.TickResult{At: now, RunnerRefusals: map[domain.Platform]domain.RunnerRefusal{domain.PlatformLinux: refusal}})
+	ticker.recordRunnerImages(app.TickResult{At: now, RunnerRefusals: reading,
+		EmptyExitBackoffs: []app.EmptyExitBackoff{{Platform: domain.PlatformLinux, Image: "base@2.336.0", Exits: 4, Demands: 2}}})
 	reasons := strings.Join(health.RunnerVersions().Reasons, "\n")
-	if !strings.Contains(reasons, "runner_version_refused") || !strings.Contains(reasons, "macOS base image") {
-		t.Fatalf("the Linux image is refused and the macOS one past its window: %s", reasons)
+	if !strings.Contains(reasons, "runner_version_refused (advisory") || !strings.Contains(reasons, "macOS base image") {
+		t.Fatalf("the Linux image names its advisory reason and the macOS one its window: %s", reasons)
+	}
+	if rows := health.Snapshot().RunnerImages; rows[0].RefusedVersion != "2.336.0" || rows[0].BelowFloor {
+		t.Fatalf("got %+v", rows[0])
 	}
 }
 
@@ -211,13 +221,29 @@ func TestANilReleaseStoreIsAnUnreadCalendar(t *testing.T) {
 
 func TestAContainerNodeWhoseConfigRunsNoContainersHasNoReader(t *testing.T) {
 	node := dependencies{guestExec: func(config.Config) executor.CommandRunner { return nil }}
-	if node.runnerRefusalReader(config.Default(), noJobEvidence{}, &app.RunnerRefusals{}) != nil {
+	if node.runnerRefusalReader(config.Default(), &app.RunnerRefusals{}) != nil {
 		t.Fatal("no runner, no reader")
 	}
 }
 
 // The verdicts are said once per read and once per attempt, and a tick that cannot
 // publish says so rather than leaving the last answer standing silently.
+func TestAnImageHoldIsPublishedWithoutADemand(t *testing.T) {
+	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
+	var logged strings.Builder
+	health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+	ticker := engineTicker{health: health, reporter: newFailureReporter(&logged, func() time.Time { return now })}
+	ticker.recordEmptyExitBackoffs(app.TickResult{EmptyExitBackoffs: []app.EmptyExitBackoff{
+		{Image: "base@2.336.0", Platform: domain.PlatformLinux, Exits: 4, Demands: 2, LastAt: now, RetryAt: now.Add(5 * time.Minute)}}})
+	rows := health.Snapshot().EmptyExitBackoffs
+	if len(rows) != 1 || rows[0].Demand != "" || rows[0].Image != "base@2.336.0" || rows[0].Demands != 2 {
+		t.Fatalf("got %+v", rows)
+	}
+	if !strings.Contains(logged.String(), "image_empty_exit_backoff") {
+		t.Fatalf("got %q", logged.String())
+	}
+}
+
 func TestTheTickSaysEachVerdictOnce(t *testing.T) {
 	now := time.Date(2026, 11, 5, 9, 0, 0, 0, time.UTC)
 	var logged strings.Builder
@@ -236,7 +262,7 @@ func TestTheTickSaysEachVerdictOnce(t *testing.T) {
 		ticker.recordEmptyExitBackoffs(result)
 	}
 	output := logged.String()
-	if strings.Count(output, "runner image refused by GitHub") != 1 || strings.Count(output, "demand_empty_exit_backoff") != 1 {
+	if strings.Count(output, "runner_version_refused") != 1 || strings.Count(output, "demand_empty_exit_backoff") != 1 {
 		t.Fatalf("got %q", output)
 	}
 
@@ -279,11 +305,11 @@ func TestAStandingVerdictAndHoldAreSaidOnceHoweverLongTheyLast(t *testing.T) {
 		tick(now, now)
 		clock = clock.Add(3 * time.Minute)
 	}
-	if refusals, holds := count("runner image refused by GitHub"), count("demand_empty_exit_backoff"); refusals != 1 || holds != 1 {
+	if refusals, holds := count("runner_version_refused"), count("demand_empty_exit_backoff"); refusals != 1 || holds != 1 {
 		t.Fatalf("said %d and %d times across one half-hour hold:\n%s", refusals, holds, logged.String())
 	}
 	tick(clock, clock)
-	if refusals, holds := count("runner image refused by GitHub"), count("demand_empty_exit_backoff"); refusals != 2 || holds != 2 {
+	if refusals, holds := count("runner_version_refused"), count("demand_empty_exit_backoff"); refusals != 2 || holds != 2 {
 		t.Fatalf("a new reading and a new exit are news: %d and %d", refusals, holds)
 	}
 }

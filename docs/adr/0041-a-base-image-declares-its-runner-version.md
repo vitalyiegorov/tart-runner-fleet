@@ -13,8 +13,8 @@ capabilities of
 and it is declared for the same reason: the daemon never opens the image.
 
 **Amended by [ADR 0094](0094-a-refused-runner-is-a-named-condition-of-its-image.md):**
-the check also reads GitHub's release calendar and a guest's own refusal, which
-closes the "recurring-staleness half" this ADR left open below.
+the check also reads GitHub's release calendar, which closes the "recurring-staleness
+half" this ADR left open below, and can carry a guest's log as an advisory reason.
 
 ## Context
 

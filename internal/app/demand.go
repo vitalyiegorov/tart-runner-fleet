@@ -62,15 +62,19 @@ type EmptyExitStore interface {
 }
 
 // EmptyExitBackoff is one queued demand whose instances keep exiting without its
-// job. It is reported for as long as the demand stays over the bound, including
-// while an attempt is running, so the reason does not flicker with the attempts.
+// job, or, with a zero Demand and Demands set, one whole image generation. It is
+// reported for as long as it stays over the bound, including while an attempt is
+// running, so the reason does not flicker with the attempts.
 type EmptyExitBackoff struct {
-	Demand  domain.DemandKey
-	Scope   string
-	Profile domain.ProfileID
-	Exits   int
-	LastAt  time.Time
-	RetryAt time.Time
+	Demand   domain.DemandKey
+	Image    string
+	Platform domain.Platform
+	Demands  int
+	Scope    string
+	Profile  domain.ProfileID
+	Exits    int
+	LastAt   time.Time
+	RetryAt  time.Time
 }
 
 type GitHubQueueSnapshot interface {
@@ -892,7 +896,7 @@ func emptyExitBackoffs(binding Binding, queued []domain.Demand, exits map[domain
 	for _, demand := range queued {
 		spent := exits[domain.EmptyExitKey{Demand: demand.Key, Image: images[demand.Platform]}]
 		if domain.EmptyExitBackoff.Exceeded(spent) {
-			backoffs = append(backoffs, EmptyExitBackoff{Demand: demand.Key, Scope: binding.Scope, Profile: binding.Profile.ID,
+			backoffs = append(backoffs, EmptyExitBackoff{Demand: demand.Key, Platform: demand.Platform, Scope: binding.Scope, Profile: binding.Profile.ID,
 				Exits: spent.Count, LastAt: spent.Last, RetryAt: domain.EmptyExitBackoff.RetryAt(spent)})
 		}
 	}

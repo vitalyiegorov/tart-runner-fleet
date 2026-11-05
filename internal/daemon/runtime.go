@@ -36,7 +36,6 @@ import (
 )
 
 type runtimeStore interface {
-	app.RunnerJobEvidence
 	operations.Store
 	app.EngineStore
 	app.LiveInstanceStore
@@ -994,7 +993,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, store, refusals)},
+					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, refusals)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -2036,7 +2035,7 @@ type failureReporter struct {
 	// refusals and emptyExits date what was last said about a hold that outlasts
 	// admit's window (ADR 0094).
 	refusals   map[string]time.Time
-	emptyExits map[domain.DemandKey]time.Time
+	emptyExits map[string]time.Time
 	now        func() time.Time
 	window     time.Duration
 	logger     *slog.Logger

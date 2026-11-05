@@ -52,162 +52,155 @@ GitHub publishes no cutoff, so this ADR relies on neither as a date.
 
 ## Decision
 
-**A runner the broker refuses is a fact about its image: the fleet names it, stops
-launching from that image, and probes it on a bound. Where the fleet cannot read
-that fact, it still bounds the loop and says what it can see.**
+**Only evidence a job cannot produce may hold work. A log a job can write may name a
+reason, and nothing else.**
 
-### 1. Read the refusal where reading is safe, and only where a job cannot forge it
+An earlier version of this ADR let the refusal line hold a platform once two guests
+agreed. Review reproduced two jobs forging it: evidence that a guest took a job can
+arrive after the read, and missing broker events defeat the check on both guests. That
+design is gone rather than patched.
 
-Beside the first stop of a teardown, a container node reads the one fixed line from
-the guest's `runner.log`. Only a version matching the grammar leaves the read, so no
-other guest text reaches a log or a status document. A read that fails is no
-evidence. A Tart node has no reader at all (#478, ADR 0080).
+### 1. Bound the image on never-assigned exits
 
-That log is writable by the user that runs jobs, so a pull request from a fork could
-append the line. A job must not be able to stop a node, so two rules stand between
-the text and a hold:
+A demand's deleted incarnations are counted from the durable rows, per image generation.
+While it is still queued, that count is exactly the instances that left without its job:
+demand rank only moves forward (ADR 0026), and `alignRunnerDemand` rebinds a runner to
+whatever GitHub actually handed it. **A job cannot manufacture one, because running a job
+means being assigned.** A broker event that went missing can at worst slow launches a
+little, and the next job to bind clears the hold.
 
-- **A guest that ever took a job is not asked.** A real refusal never receives one.
-  "Took a job" is read from what only the broker can write: the instance entered
-  Running, or a job's own row names it as the runner. If that cannot be read, the
-  guest counts for nothing.
-- **A verdict takes two distinct guests**, naming one version, within an hour. One
-  guest is only a witness. This covers the one hole left by the first rule, a job
-  whose broker messages were lost, because a job can only write to its own guest.
+Two bounds read that count:
 
-Under a standing verdict one probe's reading renews it, because only one probe runs
-at a time. A job that started after a reading clears it, witness or verdict.
+- **Per demand**: tolerates 2 exits, then waits 5, 10, 20, then 30 minutes after each
+  exit, named `demand_empty_exit_backoff`. It is the bound on one job no runner will take
+  while the image is fine, and on a node with a single job queued.
+- **Per image generation**: exits since that generation last had a job assigned, summed
+  across queued demands. At 4 exits across at least 2 demands the whole queue on that image
+  waits 15, then 30 minutes, named `image_empty_exit_backoff`. A refused image charges each
+  of many demands one exit at a time, so the per-demand bound alone still launched 28 guests
+  after a first batch of 4.
 
-The verdict lives per platform, in process, like `GuestLivenessTracker`. A rebuilt
-image only reaches a daemon through a restart, so a verdict cannot outlive the image
-it names. A restart forgets it and later teardowns learn it again, which costs a few
-launches and can never hold back a working image.
+Both are a retry cadence: they slow a failing queue and do not cap its total. They end by
+time alone, so neither can strand a job. A job GitHub starts dispatching again waits at
+most 30 minutes.
 
-### 2. Hold launches, and probe
+**What does not trigger it.** An exit on a job no longer queued is absent from the sum, so
+another runner taking the job first, or a cancellation, counts for nothing. Fewer than 4
+exits, or exits on one demand alone, hold no other job.
 
-While a verdict stands, `plannableDemands` receives that platform's whole queue as
-withheld. Rows, queue age, the SLO and the job at GitHub are untouched; running work
-is left alone; nothing is cancelled. After `RunnerRefusalProbeInterval` (30 minutes)
-one guest launches, because enforcement began as brownouts (ADR 0041), so a refusal is
-never taken as permanent.
+**What clears it.** GitHub naming a runner of that generation on a job's row ends the run
+at once: the next tick has nothing to sum. A bare `JobAssigned` names no runner, so it
+waits for the `JobStarted` that does. Exits on another generation never count, so a rebuilt
+image starts clean on the first tick after its restart. A generation is the image reference
+plus its declared runner version, stamped on the instance row. A rebuild under the same
+reference and declared version looks like the same generation, which is the declaration's
+one way to lie (ADR 0041), and its hold still ends within 30 minutes. Rows older than the
+field are an empty generation no node asks about, so upgrading can only forget a hold.
 
-A probe is due only if no guest on that platform can already answer, meaning none is
-live, job-less and outside teardown. A guest in cleanup can never answer, and a stuck
-cleanup or parked dead letter can stay that way indefinitely.
+### 2. Retries are the probes, and nothing else is needed
 
-Which demand probes is the scheduler's decision. Each candidate is offered to
-`PlanTick`, oldest first, and the first plan that actually spawns it is kept, so an
-unschedulable head cannot hold the allowance. Nothing is spent until a spawn is
-selected.
+Once a held image's time comes, one guest launches. Which demand is the scheduler's
+decision: each candidate is offered to `PlanTick`, the job that has cost the least first,
+so one that keeps failing cannot take every retry from one a runner would take, and a job
+that cannot fit never blocks one that can.
 
-Only a job that **started after** the reading clears it. One already running at the
-cutoff says nothing about the image today.
+The launch spends the interval by itself, because the hold is dated from the later of the
+last exit and the generation's last launch, both durable. So a guest that never reports
+cannot let another through a minute later. No instance state is read, so nothing stranded
+can suppress a launch: a `Planned` row that never became a guest keeps its own demand out of
+the queue and nothing else, and its age runs out like any other launch's.
 
-### 3. Name it through the existing check
+### 3. The refusal line is advisory
 
-`config.RunnerImage.Reason` stays the one statement of the rule, and now reads
-`runner_version_refused: ...` first. `runnerVersionCheck` carries it, and
-`runnerImages[]` gains `refusedVersion`, `refusedAt` and `nextProbeAt`. `belowFloor` and
-`fleet_runner_image_below_floor` stay the floor verdict alone, so a refused image the
-floor clears reads as what it is. It never
-touches `ready` or `healthy` (ADR 0052): a release may be what ends the condition.
+Beside the first stop of a teardown, a container node reads the one fixed, complete line
+from the guest's `runner.log`. Only a version matching the grammar leaves the read, so no
+other guest text reaches a log or a status document. A Tart node has no reader (#478, ADR
+0080).
+
+**A job runs as the user that owns that log and can write this line, so no plan reads it.**
+A reading changes no launch decision, delays nothing, suppresses nothing, and never touches
+`ready` or `healthy`. It is logged once per reading as advisory. Only while launches from
+that platform's image are already held does it reach `runnerVersionCheck`, as
+`runner_version_refused (advisory: a job can write the log this is read from): ...`, and
+`runnerImages[]` as `refusedVersion` and `refusedAt`. On its own, forged or not, it reaches
+no check. `belowFloor` and `fleet_runner_image_below_floor` stay the floor verdict alone.
 
 ### 4. Read the calendar
 
-The same predicate fails once the oldest stable release newer than an image is past
-GitHub's stated 30-day window. On the incident's image that is 2026-09-25, 41 days
-before the refusal, at a floor that said nothing. The daemon reads GitHub's public
-release list every six hours, anonymously, so it spends none of the App's budget. A
-draft or prerelease starts no clock, a failed read keeps the last answer, and a list
-never read judges nothing. The finding says "may refuse at any time", not a date.
-The floor keeps its meaning, a hard bar an operator states.
-
-### 5. Keep the empty-exit backoff, because Tart needs it
-
-A demand's deleted incarnations are counted from the durable rows. While it is still
-queued, that count is exactly the instances that left without its job: demand rank
-only moves forward (ADR 0026), and `alignRunnerDemand` rebinds a runner to whatever
-GitHub actually handed it. No new state or migration. The first two are tolerated,
-which covers a sibling taking the job first or a guest crashing once; from the third
-the demand waits 5, 10, 20, then at most 30 minutes after its last exit, and is named
-`demand_empty_exit_backoff` under a new `empty exits` doctor check.
-
-Exits count against one demand on one **image generation**, stamped on the instance
-row as the image reference and its declared runner version. A rebuilt image owes
-nothing for its predecessor's exits, so the operator's remedy works on the first launch
-after the restart. A rebuild under the same reference and declared version looks like
-the same generation, which is the declaration's one way to lie (ADR 0041), and such a
-hold still ends within 30 minutes. Rows older than the field are an empty generation no
-node asks about, so upgrading can only forget a hold.
-
-A hold ends by time alone, so it cannot strand a job: a job GitHub starts dispatching
-again waits at most the cap. It is the only bound on a Tart node, and the only bound
-anywhere on a job that one runner after another will not take while the image is fine.
-It is not enough alone: the replay below still boots 28 guests on a refused image,
-because each of many demands earns its own three strikes.
+`runnerVersionCheck` also fails once the oldest stable release newer than an image is past
+GitHub's stated 30-day window. On the incident's image that is 2026-09-25, 41 days before
+the refusal, at a floor that said nothing. The daemon reads GitHub's public release list
+every six hours, anonymously, so it spends none of the App's budget. A draft or prerelease
+starts no clock, a failed read keeps the last answer, and a list never read judges nothing.
+The finding says "may refuse at any time", not a date. The floor keeps its meaning, a hard
+bar an operator states.
 
 ## What was deliberately not built
 
-- **Nothing stops a refused node attracting work.** Its sets keep advertising, so
-  GitHub may keep assigning jobs a sibling could run. Session yield (ADR 0047) is the
-  natural tool, but it is node-wide and a refusal is per image. It is the next step
-  if this recurs, and it is not guessed at here.
-- **No read of a stopped Tart disk**, which ADR 0041 did by hand. Attaching a VM's
-  disk on every teardown is too heavy a mechanism for what the calendar and the
-  backoff already say.
-- **No guest-side report.** The bootstrap helper is sealed in each image, so it could
-  not have helped the images this incident is about.
+- **No verdict from the log, however many guests agree**, for the reason above.
+- **No in-flight or probe-allowance state.** Time and durable launch dates do its job,
+  without the failures it had: a stranded row suppressing probes, and a probe that spent
+  nothing.
+- **Nothing stops a refused node attracting work.** Its sets keep advertising, so GitHub may
+  keep assigning jobs a sibling could run. Session yield (ADR 0047) is the natural tool, but
+  it is node-wide and a hold is per image. It is the next step if this recurs.
+- **No read of a stopped Tart disk**, which ADR 0041 did by hand. Attaching a VM's disk on
+  every teardown is too heavy a mechanism for a sentence that is only advisory.
+- **No guest-side report.** The bootstrap helper is sealed in each image, so it could not
+  have helped the images this incident is about.
 - **No count across rotated request IDs.** A demand is one request ID. The incident's
-  demand was preassigned, whose ID derives from the immutable job identity, and it
-  stayed one ID across all 14 log lines that printed it. A loop GitHub re-offers
-  under a new ID each time would not back off. Nothing has measured one.
+  demand was preassigned, whose ID derives from the immutable job identity, and it stayed
+  one ID across all 14 log lines that printed it. A job GitHub re-offers under a new ID each
+  time starts its own demand's count, though it still adds to the image's.
 - **No knob.** The bounds are constants, as `PowerCorroboration` is.
 
 ## Testability
 
-`tests/simulation/empty_exit_test.go` and `runner_refused_test.go` replay both. Red
-before the fix: one job booted 24 VMs in two hours and held a slot for 183 of 240
-ticks; a refused image launched 28 guests after a first batch of 4. Review of the first
-version added four more, each red first: two jobs forging the line stopped a node, a
-stuck cleanup blocked every probe, an unschedulable demand held the only allowance, and
-a rebuilt image waited out its predecessor's hold. Property (w),
-`launch_hold`, judges every plan against the hold. It counts empty exits from the
-world, so a query that lost rows would be caught rather than agreed with.
+`tests/simulation/empty_exit_test.go`, `runner_refused_test.go` and
+`internal/app/image_hold_test.go` replay all of it, red first: one job booting 24 VMs in two
+hours and holding a slot for 183 of 240 ticks; a refused image launching 28 guests across 12
+jobs, now 9, of which at most 3 while held; a forged line moving the plan, now byte-identical
+to a world with no line; a stranded `Planned` row suppressing launches; and a swap waiting
+out the old generation. Property (w), `launch_hold`, judges every plan against the holds. It
+counts a demand's empty exits from the world, so a query that lost rows would be caught
+rather than agreed with.
 
 Corpus over 32 seeds at 200 ticks, spawns and findings per arm:
 
 | Arm | Merge base | Branch, faults out of the draw | Branch, faults in the draw |
 | --- | --- | --- | --- |
-| `m4-mac-mini` | 1157, 0 | 1153, 0 | 944, 0 |
-| `geekom-linux-amd64` | 1266, 0 | 1264, 0 | 897, 0 |
+| `m4-mac-mini` | 1157, 0 | 1153, 0 | 1012, 1 |
+| `geekom-linux-amd64` | 1266, 0 | 1264, 0 | 1030, 0 |
 | `federated-maestro-scope` | 683, 0 | 684, 0 | 662, 0 |
-| `tiered-release-priority` | 1132, 0 | 1134, 0 | 926, 0 |
-| `sequence-reset-linux-large` | 1048, 0 | 1049, 0 | 746, 0 |
+| `tiered-release-priority` | 1132, 0 | 1134, 0 | 1016, 0 |
+| `sequence-reset-linux-large` | 1048, 0 | 1049, 0 | 869, 0 |
 | `mac-mini-macos-only` | 607, 0 | 607, 0 | 543, 0 |
 | `mac-studio-4x10-budget` | 307, 0 | 307, 0 | 271, 0 |
 
-The middle column is a real behaviour change and its digests differ in five of the
-seven arms: existing faults such as a stalled runner already reach three empty exits
-on one demand, and those demands now back off.
+The middle column is a real behaviour change, and its digests differ in five of the seven arms:
+existing faults such as a stalled runner already reach three empty exits on one demand, and those
+demands now back off. The image bound never fires there, so these digests do not depend on it.
 
-**Both faults are in `faultThisTick`'s draw**, the sweep being green with them at the
-gate's 80 seeds, per `docs/TESTING.md`. The first version of this change was not: one
-seed reached
-[#494](https://github.com/vitalyiegorov/tart-runner-fleet/issues/494), a liveness wedge
-whose shrunk trace contains neither fault and reproduces on the merge base. Requiring
-two witnesses changed what that seed's full trace does, so the stream no longer reaches
-it. **#494 itself is unfixed**, and its shrunk trace still fails.
+**The faults ship out of `faultThisTick`'s draw**, per `docs/TESTING.md`. Drawn, every arm is
+clean at the gate's 80 seeds except seed 19 of `m4-mac-mini`, whose wedge is the state of
+[#494](https://github.com/vitalyiegorov/tart-runner-fleet/issues/494): a `builder` Mac handoff
+with a feasible `maestro` behind it, both in the plan and neither withheld. #494's own trace
+contains neither fault and reproduces on the merge base. A hold only removes the Linux
+admissions that used to reset property (a)'s counter. The draw line lands with #494's fix.
 
 ## Consequences
 
-A node serving a refused image reads as what it is, not as busy. Learning it takes two
-teardowns, so a one-slot node may take a second assignment deadline to hold. On a
-container node it then spends one guest per half hour instead of every slot, and can reach quiescence for
-an update while it waits. On a Tart node the loop falls from about forty VMs an hour
-to a retry cadence of two an hour per job (it slows a failing demand and does not cap
-its total), and `doctor` shows the backoff beside the calendar finding,
-but the fleet never asserts a refusal it did not read.
+A node serving a refused image reads as what it is, not as busy. Reaching the hold takes four
+exits, so x86 nodes launch a first batch and a refill first, up to about 30 minutes. They then
+retry one guest at a time, at most two an hour, and can reach quiescence for an update
+between retries. On a Tart node the same bound applies with no sentence naming the reason:
+`doctor` shows the holds and, when present, the calendar finding, and the fleet never asserts a
+refusal it did not read.
 
-Once deployed, `fleet doctor` will fail `runner version` on any node whose image is
-past the window, even if that image still works. That is intended: it is the warning
-this incident lacked. The remedy is a rebuild (`docs/OPERATIONS.md`).
+A job can do no more with the log than change a sentence on a node already held. A missed
+broker event can slow launches on a healthy image, up to the 30-minute cap, if four exits
+across two queued jobs also land before any job binds.
+
+Once deployed, `fleet doctor` will fail `runner version` on any node whose image is past the
+window, even if that image still works. That is intended: it is the warning this incident
+lacked. The remedy is a rebuild (`docs/OPERATIONS.md`).

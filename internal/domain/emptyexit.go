@@ -14,6 +14,11 @@ import "time"
 type EmptyExits struct {
 	Count int
 	Last  time.Time
+	// Unassigned is the part of Count since this generation last had a job assigned,
+	// and Launched when it last launched any instance at all. Both are the image-wide
+	// bound's, not this demand's.
+	Unassigned int
+	Launched   time.Time
 }
 
 // EmptyExitKey is what exits are counted against: one demand on one image generation.
@@ -45,6 +50,24 @@ type EmptyExitPolicy struct {
 // the 2026-11-05 incident's roughly forty VMs an hour this settles to a retry cadence of
 // two an hour per job. It slows a failing demand and does not cap its total.
 var EmptyExitBackoff = EmptyExitPolicy{Tolerated: 2, Base: 5 * time.Minute, Cap: 30 * time.Minute}
+
+// ImageEmptyExitBackoff bounds one image generation across its whole queue. A demand's
+// own bound cannot: a refused image charges each of many demands one exit at a time, so
+// it runs through every slot long before any one demand earns a hold.
+//
+// It reads only what a job cannot produce. Running a job means being assigned, so a job
+// cannot manufacture an exit that counts. A broker event that went missing can at worst
+// slow launches a little, and the next job to bind clears the hold at once. It tolerates
+// more than a demand's bound does, and needs ImageHoldMinDemands behind it, so that a
+// host restart or one job no runner will take never holds back the rest of the queue.
+//
+// Its first hold is the assignment deadline's default, because a retry on a guest that
+// idles until reclaimed cannot report back any sooner, and a shorter hold would launch
+// the next one before the last had answered.
+var ImageEmptyExitBackoff = EmptyExitPolicy{Tolerated: 3, Base: 15 * time.Minute, Cap: 30 * time.Minute}
+
+// ImageHoldMinDemands is how many queued demands must share those exits.
+const ImageHoldMinDemands = 2
 
 // Exceeded reports that these exits are no longer ordinary.
 func (p EmptyExitPolicy) Exceeded(exits EmptyExits) bool {

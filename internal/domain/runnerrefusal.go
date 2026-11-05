@@ -5,27 +5,17 @@ import (
 	"time"
 )
 
-// RunnerRefusal is a guest's own log saying the broker refuses its runner version:
-// which version, which guest said so, and when the fleet read it (ADR 0094).
+// RunnerRefusal is a guest's log naming its runner version as refused by the broker:
+// which version, which guest, and when the fleet read it (ADR 0094).
+//
+// It is advisory and nothing else. A job runs as the user that owns that log and can
+// write this line, so it may explain a hold the fleet has from other evidence, and it
+// may never cause, lengthen or shorten one.
 type RunnerRefusal struct {
 	Version  string
 	Instance string
 	At       time.Time
 }
-
-// RunnerRefusalProbeInterval is how long a refused image launches nothing before
-// one guest is spent finding out whether it still works. GitHub's enforcement began
-// as four-hour brownouts (ADR 0041), so a refusal is never taken as permanent, and
-// no job GitHub would now accept waits longer than this for the fleet to notice.
-const RunnerRefusalProbeInterval = 30 * time.Minute
-
-// RunnerRefusalWitnessWindow is how close together two distinct guests must say so
-// before a node stops launching. One guest's word is never enough, because its log is
-// writable by whatever ran in it. Two readings this far apart are not the same event.
-const RunnerRefusalWitnessWindow = 2 * RunnerRefusalProbeInterval
-
-// RetryAt is when a probe may next launch from the refused image.
-func (r RunnerRefusal) RetryAt() time.Time { return r.At.Add(RunnerRefusalProbeInterval) }
 
 // runnerRefusalLine is the complete line the runner prints, valid in both POSIX ERE
 // and Go's syntax so the guest's grep and the host's matcher can never disagree. Matching

@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestParseRunnerRefusalReadsOnlyTheRunnersOwnLine(t *testing.T) {
@@ -23,13 +22,6 @@ func TestParseRunnerRefusalReadsOnlyTheRunnersOwnLine(t *testing.T) {
 		if version, ok := ParseRunnerRefusal([]byte(line)); ok {
 			t.Fatalf("%q read as a refusal of %q", line, version)
 		}
-	}
-}
-
-func TestAHoldEndsOneProbeIntervalAfterTheRead(t *testing.T) {
-	at := time.Date(2026, 11, 5, 8, 54, 0, 0, time.UTC)
-	if got := (RunnerRefusal{At: at}).RetryAt(); !got.Equal(at.Add(30 * time.Minute)) {
-		t.Fatalf("got %s", got)
 	}
 }
 

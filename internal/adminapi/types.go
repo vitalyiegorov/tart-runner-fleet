@@ -368,22 +368,24 @@ type RunnerImage struct {
 	BelowFloor bool `json:"belowFloor"`
 	// Reason is empty when the image is compliant.
 	Reason string `json:"reason,omitempty"`
-	// RefusedVersion is non-empty when a guest's own log says GitHub refuses this
-	// image's runner, RefusedAt when that was read, and NextProbeAt when one guest
-	// next launches to find out whether it still does (ADR 0094). A node that cannot
-	// read its guests never sets them, which is absence of evidence, not of refusal.
+	// RefusedVersion is non-empty when launches from this image are held and a guest's
+	// log names its runner as refused, and RefusedAt is when that was read. It is
+	// advisory, because a job can write that log, and it never affects a launch or
+	// readiness (ADR 0094). A node that cannot read its guests never sets it.
 	RefusedVersion string    `json:"refusedVersion,omitempty"`
 	RefusedAt      time.Time `json:"refusedAt,omitzero"`
-	NextProbeAt    time.Time `json:"nextProbeAt,omitzero"`
 }
 
-// EmptyExitBackoff is one queued demand whose instances keep exiting without its
-// job (issue #493, ADR 0094). Exits is how many; RetryAt is when it may next be
-// planned, which has already passed while an attempt is running.
+// EmptyExitBackoff is one queued demand whose instances keep exiting without its job,
+// or, with no Demand and Image and Demands set, a whole image generation (issue #493,
+// ADR 0094). Exits is how many; RetryAt is when it may next launch, which has already
+// passed while an attempt is running.
 type EmptyExitBackoff struct {
-	Demand     string    `json:"demand"`
-	Scope      string    `json:"scope"`
-	Profile    string    `json:"profile"`
+	Demand     string    `json:"demand,omitempty"`
+	Scope      string    `json:"scope,omitempty"`
+	Profile    string    `json:"profile,omitempty"`
+	Image      string    `json:"image,omitempty"`
+	Demands    int       `json:"demands,omitempty"`
 	Exits      int       `json:"exits"`
 	LastExitAt time.Time `json:"lastExitAt"`
 	RetryAt    time.Time `json:"retryAt"`

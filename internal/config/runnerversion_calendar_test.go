@@ -65,7 +65,7 @@ func TestARefusalOutranksEveryOtherReasonAndIsNamed(t *testing.T) {
 	refusal := domain.RunnerRefusal{Version: "2.336.0", Instance: "trf-linux-2x4-abc",
 		At: time.Date(2026, 11, 5, 8, 54, 0, 0, time.UTC)}
 	reason := RunnerImage{Platform: "linux", VM: "base", Floor: "2.336.0", Refusal: &refusal}.Reason()
-	for _, want := range []string{"runner_version_refused", "2.336.0", "trf-linux-2x4-abc", "2026-11-05T09:24:00Z"} {
+	for _, want := range []string{"runner_version_refused", "advisory", "a job can write", "2.336.0", "trf-linux-2x4-abc", "2026-11-05T08:54:00Z"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("reason %q lacks %q", reason, want)
 		}

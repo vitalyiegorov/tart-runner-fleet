@@ -28,12 +28,11 @@ type RunnerImageMetric struct {
 	// Reason is empty when the image is compliant, and is the operator-facing
 	// explanation otherwise.
 	Reason string
-	// RefusedVersion is non-empty when a guest's own log says GitHub refuses this
-	// image's runner, with when that was read and when the next probe launches
-	// (ADR 0094). A separate fact from Reason, so a reader need not parse a sentence.
+	// RefusedVersion is non-empty when launches from this image are held and a guest's
+	// log names its runner as refused, with when that was read. It is advisory, because
+	// a job can write that log (ADR 0094).
 	RefusedVersion string
 	RefusedAt      time.Time
-	NextProbeAt    time.Time
 }
 
 // runnerVersionPlatforms is the closed vocabulary of image platforms. It is
