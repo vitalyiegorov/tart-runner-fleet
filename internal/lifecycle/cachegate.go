@@ -39,36 +39,50 @@ const (
 	npmMarker = "# tart-runner-fleet npm cache (ADR 0092)"
 	// npmScriptName is the script's $0.
 	npmScriptName = "trf-npm-registry"
-	// npmWriteTimeout bounds the setting within the launch's own deadline. It covers
-	// a login shell and the guest's own three-second probe.
+	// npmWriteTimeout bounds the optional write within the launch's own deadline. It
+	// covers a login shell and the guest's own three-second probe.
 	npmWriteTimeout = 5 * time.Second
 )
 
-// npmRegistryScript is the guest's half of the choice. With no arguments it removes
-// a setting this fleet wrote, which a launch retried on the same guest may have left.
-// With a registry and its host, it first asks the route from inside the guest, because
-// the host's proof says nothing about the guest's network and no client falls back
-// once its registry is set. Then it writes ~/.npmrc atomically, so the file is whole or
-// absent, and absent means npmjs. The user level is deliberate: a project's .npmrc,
-// a job's NPM_CONFIG_REGISTRY and setup-node's registry-url all still win. Both proxy
-// spellings are needed, because npm reads noproxy and pnpm 11 reads only no-proxy.
-const npmRegistryScript = `set -eu
+// npmClearScript removes a setting this fleet wrote, which a launch retried on the same
+// guest may have left, and which may name a gate this launch did not prove. It leaves an
+// image's own file alone, and that guest stays direct, because nothing merges a file this
+// fleet did not write. It fails when it cannot show the old setting is gone: a file it
+// cannot read is not a file without the marker, so grep's status 1 and its errors differ.
+const npmClearScript = `set -eu
 rc=$HOME/.npmrc
-if [ -e "$rc" ]; then
-  grep -qxF '` + npmMarker + `' "$rc" || exit 0
-  rm -f "$rc"
-fi
-[ "$#" -eq 2 ] || exit 0
-curl --silent --fail --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null "$1-/ping" || exit 0
+[ -e "$rc" ] || exit 0
+status=0
+grep -qxF '` + npmMarker + `' "$rc" || status=$?
+case "$status" in
+  0) rm -f "$rc" ;;
+  1) exit 0 ;;
+  *) exit 1 ;;
+esac`
+
+// npmWriteScript gives the guest its registry, after npmClearScript. It first asks the
+// route from inside the guest, because the host's proof says nothing about the guest's
+// network and no client falls back once its registry is set. Only a 200 counts, as for
+// the host's own probe: with no --location, curl calls a redirect success, and a guest
+// behind a redirecting intermediary must not be sent to a route it cannot use. The file
+// is written atomically, so it is whole or absent, and absent means npmjs. The user level
+// is deliberate: a project's .npmrc, a job's registry variables and setup-node's
+// registry-url all still win. Both proxy spellings are needed, because npm reads noproxy
+// and pnpm 11 reads only no-proxy.
+const npmWriteScript = `set -eu
+rc=$HOME/.npmrc
+[ ! -e "$rc" ] || exit 0
+status=$(curl --silent --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null --write-out '%{http_code}' "$1-/ping") || exit 0
+[ "$status" = 200 ] || exit 0
 tmp=$(mktemp "$rc.XXXXXX")
 printf '%s\nregistry=%s\nnoproxy=%s\nno-proxy=%s\n' '` + npmMarker + `' "$1" "$2" "$2" >"$tmp"
 mv -f "$tmp" "$rc"`
 
 // selectGate is one launch's choice, on one fresh proof. An unproven gate moves the
-// guest's results to GitHub and takes any registry away. A proven gate whose npm route
-// answers gives the guest its registry, and a failure writing that costs only a cold
-// job, because no setting means npmjs. A guest that may still name an unproven gate
-// does not start.
+// guest's results to GitHub. Then any registry an earlier attempt left is removed, and a
+// failure there stops the runner: that guest may still name a gate this launch did not
+// prove. Only after that, a proven gate whose npm route answers gives the guest its
+// registry. A failure writing it costs only a cold job, because no setting means npmjs.
 func (b StdinBootstrapper) selectGate(ctx context.Context, name string) error {
 	if b.Gate == nil {
 		return nil
@@ -82,13 +96,15 @@ func (b StdinBootstrapper) selectGate(ctx context.Context, name string) error {
 	if b.NPM == nil {
 		return nil
 	}
+	if err := b.guestScript(ctx, name, "npm registry clear failed", npmClearScript, npmScriptName); err != nil {
+		return err
+	}
 	if verified && b.NPM.Ready.Verified(ctx) {
 		writeCtx, cancel := context.WithTimeout(ctx, npmWriteTimeout)
 		defer cancel()
-		_ = b.guestScript(writeCtx, name, "", npmRegistryScript, npmScriptName, b.NPM.Registry, b.NPM.Host)
-		return nil
+		_ = b.guestScript(writeCtx, name, "", npmWriteScript, npmScriptName, b.NPM.Registry, b.NPM.Host)
 	}
-	return b.guestScript(ctx, name, "npm registry clear failed", npmRegistryScript, npmScriptName)
+	return nil
 }
 
 func (b StdinBootstrapper) guestScript(ctx context.Context, name, failure string, script ...string) error {

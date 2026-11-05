@@ -35,7 +35,9 @@ func npmRoute(ready bool) *NPMRoute {
 	return &NPMRoute{Registry: testNPMRegistry, Host: "192.168.1.64", Ready: fixedGate(ready)}
 }
 
-func isNPMCall(args []string) bool { return len(args) > 4 && args[4] == npmRegistryScript }
+func isNPMCall(args []string) bool {
+	return len(args) > 4 && (args[4] == npmClearScript || args[4] == npmWriteScript)
+}
 
 func TestAProvenGateGivesTheGuestItsRegistryBeforeTheRunnerStarts(t *testing.T) {
 	runner := &recordingRunner{}
@@ -43,15 +45,19 @@ func TestAProvenGateGivesTheGuestItsRegistryBeforeTheRunnerStarts(t *testing.T) 
 	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 {
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %q", runner.calls)
 	}
-	want := []string{"exec", "trf-small-1", "bash", "-lc", npmRegistryScript, npmScriptName, testNPMRegistry, "192.168.1.64"}
-	if strings.Join(runner.calls[0], "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("first call = %q", runner.calls[0])
+	clear := []string{"exec", "trf-small-1", "bash", "-lc", npmClearScript, npmScriptName}
+	if strings.Join(runner.calls[0], "\x00") != strings.Join(clear, "\x00") {
+		t.Fatalf("first call = %q, want the cleanup", runner.calls[0])
 	}
-	if runner.calls[1][3] != bootstrapHelper {
-		t.Fatalf("the runner did not start after the setting: %q", runner.calls[1])
+	write := []string{"exec", "trf-small-1", "bash", "-lc", npmWriteScript, npmScriptName, testNPMRegistry, "192.168.1.64"}
+	if strings.Join(runner.calls[1], "\x00") != strings.Join(write, "\x00") {
+		t.Fatalf("second call = %q, want the write", runner.calls[1])
+	}
+	if runner.calls[2][3] != bootstrapHelper {
+		t.Fatalf("the runner did not start after the setting: %q", runner.calls[2])
 	}
 }
 
@@ -69,9 +75,8 @@ func TestAnUnprovenGateClearsAnyRegistryAndLeavesTheResultsFallbackAlone(t *test
 	if runner.calls[0][4] != resultsFallbackScript {
 		t.Fatalf("first call = %q", runner.calls[0])
 	}
-	want := []string{"exec", "trf-small-1", "bash", "-lc", npmRegistryScript, npmScriptName}
-	if strings.Join(runner.calls[1], "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("second call = %q, want a clear with no registry argument", runner.calls[1])
+	if runner.calls[1][4] != npmClearScript {
+		t.Fatalf("second call = %q, want a clear", runner.calls[1])
 	}
 	if runner.calls[2][3] != bootstrapHelper {
 		t.Fatalf("calls = %q", runner.calls)
@@ -86,7 +91,7 @@ func TestAProvenGateWhoseNPMRouteIsDownSendsTheGuestDirect(t *testing.T) {
 	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || !isNPMCall(runner.calls[0]) || len(runner.calls[0]) != 6 || runner.calls[1][3] != bootstrapHelper {
+	if len(runner.calls) != 2 || runner.calls[0][4] != npmClearScript || runner.calls[1][3] != bootstrapHelper {
 		t.Fatalf("calls = %q", runner.calls)
 	}
 }
@@ -132,15 +137,16 @@ func TestANodeWithNoNPMRouteNeverTouchesAGuestsNpmConfig(t *testing.T) {
 	}
 }
 
-// TestAFailedRegistryWriteStillStartsTheRunner: the file is written atomically and
-// its absence means npmjs, so this failure costs a cold job and not a job.
+// TestAFailedRegistryWriteStillStartsTheRunner: the cleanup has already succeeded, the
+// file is written atomically, and its absence means npmjs, so this failure, even a lost
+// exec, costs a cold job and not a job.
 func TestAFailedRegistryWriteStillStartsTheRunner(t *testing.T) {
 	runner := &recordingRunner{failOn: testNPMRegistry}
 	bootstrap := StdinBootstrapper{Runner: runner, Gate: fixedGate(true), NPM: npmRoute(true)}
 	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || runner.calls[1][3] != bootstrapHelper {
+	if len(runner.calls) != 3 || runner.calls[1][4] != npmWriteScript || runner.calls[2][3] != bootstrapHelper {
 		t.Fatalf("calls = %q", runner.calls)
 	}
 }
@@ -148,10 +154,13 @@ func TestAFailedRegistryWriteStillStartsTheRunner(t *testing.T) {
 // TestAFailedClearNeverStartsTheRunner holds the same line the results fallback does:
 // a guest that may still name an unproven gate does not run.
 func TestAFailedClearNeverStartsTheRunner(t *testing.T) {
-	for name, gate := range map[string]GateVerifier{"unproven gate": fixedGate(false), "npm route down": fixedGate(true)} {
-		runner := &failingRunner{failOn: npmRegistryScript}
+	for name, launch := range map[string]struct {
+		gate  GateVerifier
+		ready bool
+	}{"unproven gate": {fixedGate(false), true}, "npm route down": {fixedGate(true), false}, "proven gate": {fixedGate(true), true}} {
+		runner := &failingRunner{failOn: npmClearScript}
 		secret := jitSecret()
-		bootstrap := StdinBootstrapper{Runner: runner, Gate: gate, NPM: npmRoute(false)}
+		bootstrap := StdinBootstrapper{Runner: runner, Gate: launch.gate, NPM: npmRoute(launch.ready)}
 		if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", secret, nil); err == nil {
 			t.Fatalf("%s: a guest that may name an unproven gate was started", name)
 		}
@@ -189,18 +198,18 @@ func TestAContainerGuestTakesTheSameSelection(t *testing.T) {
 	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 2 || !isNPMCall(runner.calls[0]) || runner.calls[0][6] != "http://host.containers.internal:3017/npm/" ||
-		runner.calls[0][7] != "host.containers.internal" {
+	if len(runner.calls) != 3 || runner.calls[0][4] != npmClearScript || runner.calls[1][4] != npmWriteScript ||
+		runner.calls[1][6] != "http://host.containers.internal:3017/npm/" || runner.calls[1][7] != "host.containers.internal" {
 		t.Fatalf("calls = %q", runner.calls)
 	}
 }
 
 // runNPMScript runs the real script in a throwaway HOME with a stand-in curl.
-func runNPMScript(t *testing.T, existing string, curlExit int, args ...string) (string, []string, string, error) {
+func runNPMScript(t *testing.T, script, existing string, curlExit int, args ...string) (string, []string, string, error) {
 	t.Helper()
 	home, bin := t.TempDir(), t.TempDir()
 	recorded := filepath.Join(bin, "curl.args")
-	curl := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + recorded + "\nexit " + strconv.Itoa(curlExit) + "\n"
+	curl := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + recorded + "\nprintf 200\nexit " + strconv.Itoa(curlExit) + "\n"
 	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(curl), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +219,7 @@ func runNPMScript(t *testing.T, existing string, curlExit int, args ...string) (
 			t.Fatal(err)
 		}
 	}
-	command := exec.Command("bash", append([]string{"-c", npmRegistryScript, npmScriptName}, args...)...)
+	command := exec.Command("bash", append([]string{"-c", script, npmScriptName}, args...)...)
 	command.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + os.Getenv("PATH")}
 	runErr := command.Run()
 	raw, _ := os.ReadFile(rc)
@@ -226,7 +235,7 @@ func runNPMScript(t *testing.T, existing string, curlExit int, args ...string) (
 }
 
 func TestTheScriptWritesTheRegistryOnlyAfterAskingDirectly(t *testing.T) {
-	got, curlArgs, leftovers, err := runNPMScript(t, "", 0, testNPMRegistry, "192.168.1.64")
+	got, curlArgs, leftovers, err := runNPMScript(t, npmWriteScript, "", 0, testNPMRegistry, "192.168.1.64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +247,7 @@ func TestTheScriptWritesTheRegistryOnlyAfterAskingDirectly(t *testing.T) {
 		t.Fatalf("left behind %q", leftovers)
 	}
 	joined := strings.Join(curlArgs, " ")
-	for _, flag := range []string{"--noproxy *", "--max-redirs 0", "--proto =http", "--fail", testNPMRegistry + "-/ping"} {
+	for _, flag := range []string{"--noproxy *", "--max-redirs 0", "--proto =http", "--write-out %{http_code}", testNPMRegistry + "-/ping"} {
 		if !strings.Contains(joined, flag) {
 			t.Fatalf("curl %q lacks %q", joined, flag)
 		}
@@ -249,7 +258,7 @@ func TestTheScriptWritesTheRegistryOnlyAfterAskingDirectly(t *testing.T) {
 // own network. A guest on a NAT or an isolated network must not be sent there blind,
 // since no client falls back once its registry is set.
 func TestAGuestThatCannotReachTheRouteGetsNoRegistry(t *testing.T) {
-	got, _, leftovers, err := runNPMScript(t, "", 7, testNPMRegistry, "192.168.1.64")
+	got, _, leftovers, err := runNPMScript(t, npmWriteScript, "", 7, testNPMRegistry, "192.168.1.64")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,24 +271,22 @@ func TestAGuestThatCannotReachTheRouteGetsNoRegistry(t *testing.T) {
 // direct, because nothing merges a file this fleet did not write.
 func TestTheScriptClearsOnlyItsOwnFile(t *testing.T) {
 	mine := npmMarker + "\nregistry=" + testNPMRegistry + "\nnoproxy=192.168.1.64\n"
-	got, curlArgs, _, err := runNPMScript(t, mine, 0)
+	got, curlArgs, _, err := runNPMScript(t, npmClearScript, mine, 0)
 	if err != nil || got != "" || len(curlArgs) != 0 {
 		t.Fatalf("clear: .npmrc = %q, curl = %q, err = %v", got, curlArgs, err)
 	}
 	theirs := "registry=https://npm.example/\n"
-	for name, args := range map[string][]string{"clear": nil, "write": {testNPMRegistry, "192.168.1.64"}} {
-		got, curlArgs, _, err := runNPMScript(t, theirs, 0, args...)
-		if err != nil || got != theirs || len(curlArgs) != 0 {
-			t.Fatalf("%s: .npmrc = %q, curl = %q, err = %v", name, got, curlArgs, err)
-		}
+	got, curlArgs, _, err = runNPMScript(t, npmClearScript, theirs, 0)
+	if err != nil || got != theirs || len(curlArgs) != 0 {
+		t.Fatalf("clear: .npmrc = %q, curl = %q, err = %v", got, curlArgs, err)
 	}
-	got, _, _, err = runNPMScript(t, "", 0)
+	got, curlArgs, _, err = runNPMScript(t, npmWriteScript, theirs, 0, testNPMRegistry, "192.168.1.64")
+	if err != nil || got != theirs || len(curlArgs) != 0 {
+		t.Fatalf("write: .npmrc = %q, curl = %q, err = %v", got, curlArgs, err)
+	}
+	got, _, _, err = runNPMScript(t, npmClearScript, "", 0)
 	if err != nil || got != "" {
 		t.Fatalf("clear with nothing there: .npmrc = %q, err = %v", got, err)
-	}
-	rewritten, _, _, err := runNPMScript(t, mine, 0, "http://10.0.0.2:3017/npm/", "10.0.0.2")
-	if err != nil || !strings.Contains(rewritten, "registry=http://10.0.0.2:3017/npm/") || strings.Contains(rewritten, "192.168.1.64") {
-		t.Fatalf("rewrite: .npmrc = %q, err = %v", rewritten, err)
 	}
 }
 
