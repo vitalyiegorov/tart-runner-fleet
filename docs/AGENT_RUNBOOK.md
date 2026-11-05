@@ -256,9 +256,9 @@ How to read the output:
   `fleet_cache_gate_bytes_total{upstream="cache",direction="to_guest"}` and
   `{upstream="npm",direction="to_guest"}`
   (`curl -fsS http://127.0.0.1:3019/metrics`). That is a node-wide estimate,
-  not a per-job one. A npm cache miss also crossed the WAN once between Verdaccio
-  and npmjs, which no counter here sees, and the gate serves other nodes' guests,
-  so subtract only across the nodes it serves.
+  not a per-job one. What the npm cache really drew from npmjs is
+  `{upstream="npm",direction="from_registry"}`, so add that back. The gate serves other
+  nodes' guests, so subtract only across the nodes it serves.
 - An `unmeasured` job has no bytes, which is not the same as zero bytes. Its
   guest was sampled but could not be read (`exec_failed`, `exec_timeout`,
   `unreadable`, `no_command`), or, on Tart, the host never saw it (`no_reading`:
@@ -375,16 +375,19 @@ operator actions described in [`OPERATIONS.md`](OPERATIONS.md).
 A guest at the home site may be reading npm through the gate (ADR 0093). Read
 `fleet doctor`'s `cache gate` row on that node first.
 
-- **`ECONNREFUSED` or a 5xx from `http://…:3017/npm/`, and the run started with the
-  gate up.** The gate or Verdaccio was lost mid-job. There is no fallback, by design. Rerun
-  the job: a fresh launch goes direct if it is still down. Then see
+- **`ECONNREFUSED` from `http://…:3017/npm/`, and the run started with the gate up.** The
+  gate was down for longer than pnpm's retries, about 70 s. There is no fallback, by design.
+  Rerun the job: a fresh launch goes direct if it is still down. Then see
   `npm cache not ready` in [`OPERATIONS.md`](OPERATIONS.md).
+- **`502` from `/npm/`.** npmjs failed with nothing cached to answer from, or the route
+  caught a panic, which it logs as `npm cache request panicked`. Rerun the job.
+- **`503` from `/npm/`.** The route is at its 1024-request bound. pnpm retries this.
 - **`403` naming a read-only cache.** The job tried to publish, log in or audit. That is
   not a cache fault. The job needs to opt out, as
   [`USAGE.md`](../USAGE.md#the-npm-cache-at-the-home-site) shows.
 - **`404` for a package that exists.** It is private, so the job's repository needs
   `@scope:registry` for it. The cache has no credentials and never will.
-- **A `package-lock.json` naming the gate.** A job generated it through the cache. Regenerate
+- **A `pnpm-lock.yaml` gaining `tarball:` lines.** A job resolved through the cache. Regenerate
   it with the same opt-out.
 
 Do not edit a guest's `~/.npmrc` by hand. Rollback is removing `npmRegistry` from the node's config, which needs operator approval

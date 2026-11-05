@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# A real compatibility run of the npm read-through cache (ADR 0093): the shipped
-# Verdaccio config, the real gate binary, and the clients consumers actually pin.
-# It needs the network, Podman, Node and Python, so it is not part of `make ci`.
+# A real compatibility run of the npm read-through cache (ADR 0093): the real gate binary,
+# the real registry, and the clients consumers actually pin. It needs the network, Node and
+# Python, so it is not part of `make ci`.
 #
 #   FLEET=/path/to/fleet nice -n 15 tests/integration/npm-cache-compat/run.sh WORKDIR
 #
-# WORKDIR must be empty or absent. It runs on an unprivileged account, uses its own
-# ports, and removes its container on exit. It never touches trf-* or
-# fleet-actions-cache. The caller removes WORKDIR and, if it wants, the image.
+# WORKDIR must be empty or absent. It runs on an unprivileged account and uses its own
+# ports. It starts no containers. The caller removes WORKDIR.
 #
 # A line starting PASS or FAIL is a claim. A line starting NOTE is an observed
 # behaviour that the docs state and that neither passes nor fails. The exit status is
@@ -20,25 +19,23 @@ WORK=${1:?usage: run.sh WORKDIR}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../../.." && pwd)
 FLEET=${FLEET:?set FLEET to a fleet binary built from this tree}
-IMAGE=$(sed -n 's/^Image=//p' "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache.container")
-USERNS=$(sed -n 's/^UserNS=//p' "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache.container")
 PNPM_VERSIONS=${PNPM_VERSIONS:-11.22.0 11.28.3 12.14.0}
 OLD_NPM=${OLD_NPM:-10.9.2}
 YARN_VERSION=${YARN_VERSION:-4.17.1}
 BUN_VERSION=${BUN_VERSION:-1.3.1}
 BASE_PORT=${BASE_PORT:-43100}
-GATE=$((BASE_PORT + 1)) BACKEND=$((BASE_PORT + 2)) METRICS=$((BASE_PORT + 3))
+GATE=$((BASE_PORT + 1)) METRICS=$((BASE_PORT + 3))
 RECORDER=$((BASE_PORT + 4)) FIXTURE=$((BASE_PORT + 5)) PRIVATE=$((BASE_PORT + 6))
-BACKEND_FIXTURE=$((BASE_PORT + 7)) GATE_FIXTURE=$((BASE_PORT + 8))
-CONTAINER=npmcompat-$$
-CONTAINER_FIXTURE=npmcompat-fixture-$$
+GATE_FIXTURE=$((BASE_PORT + 8))
 REGISTRY=http://127.0.0.1:$RECORDER/npm/
+NPMJS=https://registry.npmjs.org
 SECRET=compat-S3CRET-token-$$
 FAILS=0 PIDS=()
 
 mkdir -p "$WORK" && WORK=$(cd "$WORK" && pwd)
 LOGS=$WORK/logs
-mkdir -p "$LOGS" "$WORK/conf" "$WORK/storage" "$WORK/tools"
+mkdir -p "$LOGS" "$WORK/tools"
+CACHE=$WORK/cache/data
 NODE_DIR=$(dirname "$(node -p 'process.execPath')")
 CLEAN_PATH=$NODE_DIR:/usr/bin:/bin
 
@@ -53,7 +50,6 @@ check() { # check DESCRIPTION CONDITION...
 
 cleanup() {
     for pid in "${PIDS[@]:-}"; do [ -n "$pid" ] && kill "$pid" 2>/dev/null; done
-    podman rm -f "$CONTAINER" "$CONTAINER_FIXTURE" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
@@ -74,26 +70,20 @@ wait_http() { # wait_http URL
     return 1
 }
 
-start_verdaccio() { # start_verdaccio NAME PORT CONF STORAGE [HOST_LOOPBACK_PORT]
-    local network=pasta _
-    # Maps a port of the host's loopback into the container, for the fixture uplink.
-    [ -n "${5:-}" ] && network=pasta:-T,$5
-    podman rm -f "$1" >/dev/null 2>&1
-    # The old pasta can hold the port for a moment after its container is gone.
-    for _ in $(seq 1 40); do
-        curl -s -m 1 --noproxy '*' -o /dev/null "http://127.0.0.1:$2/" || [ $? = 28 ] || break
-        sleep 0.5
-    done
-    podman run -d --name "$1" --userns="$USERNS" --cap-drop=all --security-opt=no-new-privileges --memory=1024m \
-        --network="$network" -p "127.0.0.1:$2:4873" -v "$3:/verdaccio/conf:ro,Z" -v "$4:/verdaccio/storage:Z" "$IMAGE" >/dev/null
-    wait_http "http://127.0.0.1:$2/-/ping"
-}
-
-start_gate() { # start_gate LISTEN BACKEND LOG; sets GATE_PID
-    background "$3" "$FLEET" cache-gate --listen "127.0.0.1:$1" --upstream http://127.0.0.1:1 \
-        --metrics-listen "127.0.0.1:$METRICS" --npm-upstream "http://127.0.0.1:$2"
+start_gate() { # start_gate LISTEN CACHE REGISTRY METRICS LOG; sets GATE_PID
+    background "$5" "$FLEET" cache-gate --listen "127.0.0.1:$1" --upstream http://127.0.0.1:1 \
+        --metrics-listen "127.0.0.1:$4" --npm-cache "$2" --npm-upstream "$3"
     GATE_PID=$LAST_PID
     wait_http "http://127.0.0.1:$1/npm/-/ping"
+}
+
+metric_from_registry() {
+    curl -fsS --noproxy '*' "http://127.0.0.1:$METRICS/metrics" |
+        sed -n 's/^fleet_cache_gate_bytes_total{upstream="npm",direction="from_registry"} //p'
+}
+
+age_cache() { # Past the ten minutes, without waiting for them.
+    find "$CACHE" -type f -exec touch -d '-1 hour' {} +
 }
 
 metric_to_guest() {
@@ -139,11 +129,8 @@ JSON
 
 ############################################################################
 echo "== setup"
-cp "$REPO/deploy/npm-cache/verdaccio.yaml" "$WORK/conf/config.yaml"
 touch "$LOGS/recorder.log" "$LOGS/fixture.log" "$LOGS/private.log"
-check "the pinned Verdaccio starts from the shipped config, rootless, with no capabilities" \
-    start_verdaccio "$CONTAINER" "$BACKEND" "$WORK/conf" "$WORK/storage"
-check "the gate serves the npm route" start_gate "$GATE" "$BACKEND" "$LOGS/gate.log"
+check "the gate serves the npm route" start_gate "$GATE" "$CACHE" "$NPMJS" "$METRICS" "$LOGS/gate.log"
 MAIN_GATE_PID=$GATE_PID
 background "$LOGS/recorder.out" python3 "$HERE/fixture.py" record "$RECORDER" "127.0.0.1:$GATE" "$LOGS/recorder.log"
 background "$LOGS/private.out" python3 "$HERE/fixture.py" registry "$PRIVATE" "$LOGS/private.log"
@@ -159,21 +146,10 @@ done
 npm i --silent --no-audit --no-fund --prefix "$WORK/tools/npm-$OLD_NPM" "npm@$OLD_NPM" >/dev/null 2>&1
 npm i --silent --no-audit --no-fund --prefix "$WORK/tools/yarn" "@yarnpkg/cli-dist@$YARN_VERSION" >/dev/null 2>&1
 npm i --silent --no-audit --no-fund --prefix "$WORK/tools/bun" "bun@$BUN_VERSION" >/dev/null 2>&1
-note "node $(node --version), default npm $(npm --version), old npm $OLD_NPM, verdaccio image ${IMAGE##*@}"
+note "node $(node --version), default npm $(npm --version), old npm $OLD_NPM"
 
 ############################################################################
-echo "== the backend's own locks (the shipped config, with the gate out of the way)"
-backend=http://127.0.0.1:$BACKEND
-publish=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' -X PUT -H 'Content-Type: application/json' \
-    --data '{"name":"evil-compat","versions":{},"_attachments":{}}' "$backend/evil-compat")
-[ "$publish" -ge 400 ] && pass "Verdaccio refuses an anonymous publish ($publish)" || fail "Verdaccio accepted a publish ($publish)"
-adduser=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' -X PUT -H 'Content-Type: application/json' \
-    --data '{"name":"eve","password":"evepassword"}' "$backend/-/user/org.couchdb.user:eve")
-[ "$adduser" -ge 400 ] && pass "Verdaccio refuses registration ($adduser)" || fail "Verdaccio registered a user ($adduser)"
-web=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' "$backend/-/verdaccio/data/packages")
-note "Verdaccio's own web API answers $web directly; the gate never forwards it"
-
-echo "== the gate's refusals, with the real backend behind it"
+echo "== the gate's refusals"
 gate=http://127.0.0.1:$GATE
 for spec in "PUT /npm/evil-compat" "DELETE /npm/lodash/-rev/1" "PUT /npm/-/user/org.couchdb.user:eve" \
     "POST /npm/-/npm/v1/security/advisories/bulk" "POST /npm/-/npm/v1/tokens" "DELETE /npm/-/user/token/$SECRET"; do
@@ -193,13 +169,17 @@ if grep -q "$SECRET" "$LOGS/gate.log"; then fail "the gate logged a token"; else
 code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/@pnpm/exe.linux-x64/12.14.0")
 [ "$code" = 200 ] && pass "gate serves a single version, as pnpm 12's own bootstrap asks (200)" || fail "name/version answered $code"
 
-for host in 192.168.1.64:3017 host.containers.internal:3017; do
-    tarball=$(curl -fsS --noproxy '*' -H "Host: $host" "$gate/npm/is-odd" |
-        python3 -c 'import json,sys; print(json.load(sys.stdin)["versions"]["3.0.1"]["dist"]["tarball"])')
-    [ "$tarball" = "http://$host/npm/is-odd/-/is-odd-3.0.1.tgz" ] &&
-        pass "a tarball is advertised behind the gate at the address the guest used: $tarball" ||
-        fail "advertised tarball for $host: $tarball"
-done
+echo "== the registry's own bytes, and real revalidation"
+tarball=$(curl -fsS --noproxy '*' "$gate/npm/is-odd" | python3 -c 'import json,sys; print(json.load(sys.stdin)["versions"]["3.0.1"]["dist"]["tarball"])')
+[ "$tarball" = "$NPMJS/is-odd/-/is-odd-3.0.1.tgz" ] && pass "metadata reaches a client as npmjs wrote it: $tarball" || fail "metadata was rewritten: $tarball"
+before=$(metric_from_registry)
+curl -fsS --noproxy '*' -o /dev/null "$gate/npm/is-odd"
+[ "$(metric_from_registry)" = "$before" ] && pass "fresh metadata is answered from disk (0 bytes upstream)" || fail "fresh metadata went upstream"
+age_cache
+curl -fsS --noproxy '*' -o "$WORK/revalidated.json" "$gate/npm/is-odd"
+moved=$(( $(metric_from_registry) - before ))
+[ -s "$WORK/revalidated.json" ] && [ "$moved" = 0 ] && pass "real npmjs answers an expired document's ETag with a 304 (0 body bytes), and the cached bytes are served" ||
+    fail "revalidation moved $moved bytes"
 
 ############################################################################
 for version in $PNPM_VERSIONS; do
@@ -236,6 +216,13 @@ for version in $PNPM_VERSIONS; do
     else
         fail "pnpm $version warm --frozen-lockfile: $(tail -n 3 "$LOGS/pnpm-$version-warm.log")"
     fi
+
+    # A lockfile made through the cache, as a job that resolves would make one.
+    fresh=$WORK/pnpm-$version-fresh
+    project "$fresh"
+    (cd "$fresh" && client "$home" "$PNPM" install --no-frozen-lockfile --store-dir "$WORK/stores/$version-fresh" >"$LOGS/pnpm-$version-fresh.log" 2>&1)
+    if grep -qE "127\.0\.0\.1|$RECORDER" "$fresh/pnpm-lock.yaml"; then fail "a lockfile made through the cache names the gate (pnpm $version)"; else pass "a lockfile made through the cache does not name the gate (pnpm $version)"; fi
+    note "pnpm $version writes $(grep -c 'tarball:' "$fresh/pnpm-lock.yaml") tarball: lines into a lockfile made through the cache"
 
     # The integrity the lockfile pins is checked against what the cache serves.
     rm -rf "$dir/node_modules"
@@ -288,16 +275,8 @@ PY
 done
 
 ############################################################################
-echo "== the supply-chain checks, through Verdaccio, from a fixture uplink"
-mkdir -p "$WORK/conf-fixture" "$WORK/storage-fixture"
-sed "s|url: https://registry.npmjs.org/|url: http://127.0.0.1:$FIXTURE/|; s|maxage: 10m|maxage: 1s|" \
-    "$REPO/deploy/npm-cache/verdaccio.yaml" >"$WORK/conf-fixture/config.yaml"
-# Only the uplink differs. The shipped config's uplink is the run's other half.
-start_verdaccio "$CONTAINER_FIXTURE" "$BACKEND_FIXTURE" "$WORK/conf-fixture" "$WORK/storage-fixture" "$FIXTURE" || fail "fixture Verdaccio did not start"
-METRICS_SAVED=$METRICS
-METRICS=$((BASE_PORT + 9))
-start_gate "$GATE_FIXTURE" "$BACKEND_FIXTURE" "$LOGS/gate-fixture.log" || fail "fixture gate did not start"
-METRICS=$METRICS_SAVED
+echo "== the supply-chain checks, through the cache, from a fixture registry"
+start_gate "$GATE_FIXTURE" "$WORK/cache-fixture/data" "http://127.0.0.1:$FIXTURE" "$((BASE_PORT + 9))" "$LOGS/gate-fixture.log" || fail "fixture gate did not start"
 
 supply_chain() { # supply_chain PNPM VERSION PACKAGE PIN SETTING EXPECTED_CODE
     local pnpm=$1 version=$2 package=$3 pin=$4 setting=$5 expected=$6 route registry home dir log
@@ -594,34 +573,47 @@ version=${PNPM_VERSIONS%% *}
 PNPM=$WORK/tools/pnpm-$version/node_modules/.bin/pnpm
 dir=$WORK/pnpm-$version
 home=$(guest_home warm-offline)
-sed -i 's|url: https://registry.npmjs.org/|url: http://127.0.0.1:1/|' "$WORK/conf/config.yaml"
-start_verdaccio "$CONTAINER" "$BACKEND" "$WORK/conf" "$WORK/storage" || fail "Verdaccio did not restart with no uplink"
-code=$(curl -s -m 60 -o /dev/null -w '%{http_code}' --noproxy '*' "http://127.0.0.1:$BACKEND/never-cached-compat-package")
-[ "$code" != 200 ] && pass "with no uplink, a package never seen cannot be read ($code), so the uplink is really gone" ||
-    fail "a package never seen was served with no uplink"
+kill "$MAIN_GATE_PID" 2>/dev/null
+wait "$MAIN_GATE_PID" 2>/dev/null
+note "cache after this run: $(du -sh "$CACHE" | cut -f1), $(find "$CACHE" -type f | wc -l) files"
+age_cache
+start_gate "$GATE" "$CACHE" http://127.0.0.1:1 "$METRICS" "$LOGS/gate-offline.log" || fail "the gate did not start with no registry"
+MAIN_GATE_PID=$GATE_PID
+code=$(curl -s -m 60 -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/never-cached-compat-package")
+[ "$code" = 502 ] && pass "with no registry, a package never seen is a bad gateway ($code), so the registry is really gone" ||
+    fail "a package never seen answered $code with no registry"
+code=$(curl -s -m 60 -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/is-odd")
+[ "$code" = 200 ] && pass "with no registry, expired metadata is served stale (200)" || fail "stale metadata answered $code"
 rm -rf "$dir/node_modules"
 if (cd "$dir" && client "$home" "$PNPM" install --frozen-lockfile --store-dir "$WORK/stores/offline" >"$LOGS/offline.log" 2>&1); then
-    pass "a warm cache serves pnpm's frozen install with no uplink at all, so those bytes never crossed the WAN"
+    pass "a warm cache serves pnpm's frozen install with no registry at all, so those bytes never crossed the WAN"
 else
-    fail "warm cache with no uplink: $(tail -n 3 "$LOGS/offline.log")"
+    fail "warm cache with no registry: $(tail -n 3 "$LOGS/offline.log")"
 fi
-cp "$REPO/deploy/npm-cache/verdaccio.yaml" "$WORK/conf/config.yaml"
-start_verdaccio "$CONTAINER" "$BACKEND" "$WORK/conf" "$WORK/storage" || fail "Verdaccio did not restart with its uplink"
-note "cache after this run: $(du -sh "$WORK/storage" | cut -f1), $(find "$WORK/storage" | wc -l) inodes, npm to_guest $(metric_to_guest) bytes"
-find "$WORK/storage" -name 'is-odd-*.tgz' -delete
+kill "$MAIN_GATE_PID" 2>/dev/null
+wait "$MAIN_GATE_PID" 2>/dev/null
+start_gate "$GATE" "$CACHE" "$NPMJS" "$METRICS" "$LOGS/gate-online.log" || fail "the gate did not restart with its registry"
+MAIN_GATE_PID=$GATE_PID
+
+echo "== a frozen cache, and eviction"
+chmod 0500 "$CACHE"
+files=$(find "$CACHE" -type f | wc -l)
+rm -rf "$dir/node_modules"
+if (cd "$dir" && client "$home" "$PNPM" install --frozen-lockfile --store-dir "$WORK/stores/frozen-hit" >"$LOGS/frozen-hit.log" 2>&1); then
+    pass "a frozen cache still serves what it holds"
+else
+    fail "frozen cache, hits: $(tail -n 3 "$LOGS/frozen-hit.log")"
+fi
+code=$(curl -s -m 60 -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/lodash")
+[ "$code" = 200 ] && pass "a frozen cache passes a miss straight through (200)" || fail "frozen cache, miss: $code"
+[ "$(find "$CACHE" -type f | wc -l)" = "$files" ] && pass "a frozen cache did not grow" || fail "a frozen cache grew"
+chmod 0700 "$CACHE"
+find "$CACHE" -type f -delete
 rm -rf "$dir/node_modules"
 if (cd "$dir" && client "$home" "$PNPM" install --frozen-lockfile --store-dir "$WORK/stores/pruned" >"$LOGS/pruned.log" 2>&1); then
-    pass "deleting cached tarballs is safe: the next read fetches them again"
+    pass "deleting every cached file is safe: the next read fetches them again"
 else
-    fail "after pruning a tarball: $(tail -n 3 "$LOGS/pruned.log")"
-fi
-find "$WORK/storage" -mindepth 2 -maxdepth 2 -name 'left-pad' -exec rm -rf {} + 2>/dev/null
-find "$WORK/storage/data" -maxdepth 1 -name 'left-pad' -exec rm -rf {} + 2>/dev/null
-rm -rf "$dir/node_modules"
-if (cd "$dir" && client "$home" "$PNPM" install --frozen-lockfile --store-dir "$WORK/stores/pruned2" >"$LOGS/pruned2.log" 2>&1); then
-    pass "deleting a whole package directory is safe too"
-else
-    fail "after pruning a package: $(tail -n 3 "$LOGS/pruned2.log")"
+    fail "after pruning: $(tail -n 3 "$LOGS/pruned.log")"
 fi
 
 ############################################################################
@@ -636,7 +628,7 @@ if (cd "$dir" && client "$home" "$PNPM" install --frozen-lockfile --store-dir "$
 else
     pass "a lost gate fails the install after $((SECONDS - started))s, with no fallback to npmjs"
 fi
-start_gate "$GATE" "$BACKEND" "$LOGS/gate2.log"
+start_gate "$GATE" "$CACHE" "$NPMJS" "$METRICS" "$LOGS/gate2.log"
 rm -rf "$dir/node_modules"
 if (cd "$dir" && client "$home" "$PNPM" install --frozen-lockfile --store-dir "$WORK/stores/lost" >"$LOGS/rerun.log" 2>&1); then
     pass "the rerun succeeds once the gate is back"

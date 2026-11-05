@@ -16,10 +16,9 @@
 - shuffled race detection and native build.
 
 `tests/integration/npm-cache-compat/run.sh` is not part of `make ci`, because it needs the
-network, Podman and real clients. It runs the shipped Verdaccio config behind the real gate
-with the npm, pnpm, Yarn and Bun versions consumers pin, and it is the evidence behind ADR
-0093's client table. Rerun it when one of those pins, the Verdaccio digest or the route
-changes.
+network and real clients. It runs the real gate against the real registry with the npm, pnpm, Yarn
+and Bun versions consumers pin, and it is the evidence behind ADR 0093's client table. Rerun it when
+one of those pins or the route changes.
 
 Release CI independently repeats the race and coverage gates, rejects invalid
 versions, rebuilds both macOS ARM64 binaries twice, compares their bytes, and

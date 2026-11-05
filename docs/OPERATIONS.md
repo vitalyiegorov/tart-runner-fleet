@@ -1492,12 +1492,10 @@ launched since go straight to npmjs. At home it is a fault, because every npm by
 back on the uplink and this row is the only signal. Check Omarchy:
 
 ```sh
-systemctl --user status tart-runner-fleet-npm-cache.service
-curl -fsS http://127.0.0.1:3020/-/ping    # the server
-curl -fsS http://127.0.0.1:3017/npm/-/ping # through the gate
+curl -fsS http://127.0.0.1:3017/npm/-/ping
 ```
 
-The second answering 404 means the gate has no `--npm-upstream`, so its drop-in is
+Answering 404 means the gate has no `--npm-cache`, so its drop-in is
 not installed. See [The npm read-through cache](#the-npm-read-through-cache-adr-0093).
 
 ### A dead guest with no console to leave behind
@@ -2155,8 +2153,8 @@ it. The shipped unit passes the flag, and `--identity-key` beside it. Install
 that unit only once the node's `fleet` release understands both; an older release
 exits with its usage text and systemd restarts it in a loop.
 `cache/to_guest` is what guests read from the LAN cache, and `npm/to_guest` what they
-read from the npm cache (ADR 0093). The npm series exist only on a gate with
-`--npm-upstream`, so their absence means the route is off. Subtract both increases from `fleet traffic`'s
+read from the npm cache (ADR 0093), and `npm/from_registry` what that cache really drew from
+npmjs. The npm series exist only on a gate with `--npm-cache`, so their absence means the route is off. Subtract both increases from `fleet traffic`'s
 receive bytes for the WAN estimate (see
 [`AGENT_RUNBOOK.md`](AGENT_RUNBOOK.md#analyze-ci-traffic)).
 
@@ -2222,26 +2220,25 @@ from home. Cache data never crosses cloudflared, which stays admin and health on
 
 | Piece | What it is | Where it listens |
 | --- | --- | --- |
-| `tart-runner-fleet-npm-cache.service` | Verdaccio, pinned by digest, a rootless quadlet | `127.0.0.1:3020` only |
-| `tart-runner-fleet-cache-gate.service.d/npm-cache.conf` | gives the gate its `/npm/` route | the gate's existing `:3017` |
+| `tart-runner-fleet-cache-gate.service.d/npm-cache.conf` | gives the gate its `/npm/` route and cache directory | the gate's existing `:3017` |
 | `tart-runner-fleet-npm-cache-prune.timer` | holds the storage to its limits, about every five minutes | — |
-| `tart-runner-fleet-npm-cache-stop.service` | stops the cache if the prune is killed or never starts | — |
+| `tart-runner-fleet-npm-cache-freeze.service` | freezes the cache if the prune is killed or never starts | — |
 | `cacheGate.npmRegistry` in a node's config | the registry that node's guests may be given, on each launch's proof | — |
 
-Nothing changes for a node until its config has `npmRegistry`. The first two pieces can
-run for days beforehand with no guest using them.
+Nothing changes for a node until its config has `npmRegistry`. The drop-in and the timer can
+run for days beforehand with no guest using them. There is no separate server: the gate is the
+cache, and only the gate reads or writes its directory.
 
 ### Install on Omarchy
 
 Do this between rollouts, never during another node update or drain. The `fleet` release
-must understand `--npm-upstream`, because an older one exits with its usage text and
-systemd restarts it in a loop.
+must understand `--npm-cache`, because an older one exits with its usage text and systemd
+restarts it in a loop.
 
 ```sh
 set -eu
 REPO=/path/to/a/clone/of/tart-runner-fleet
-mkdir -p ~/.config/containers/systemd ~/.config/tart-runner-fleet-npm-cache \
-  ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.d
+mkdir -p ~/.config/tart-runner-fleet-npm-cache ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.d
 # Its own btrfs subvolume, so that a qgroup limit can be added later with no migration. A rollback
 # leaves it in place, and an install then reuses it. A subvolume's root is always inode 256, and
 # reading that needs no root, unlike `btrfs subvolume show`.
@@ -2254,17 +2251,13 @@ elif [ -L "$STORAGE" ] || [ ! -d "$STORAGE" ] || [ "$(stat -c %i "$STORAGE")" !=
 fi
 install -m 0755 "$REPO/deploy/npm-cache/prune-npm-cache.py" ~/.config/tart-runner-fleet-npm-cache/
 install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-prune.service" \
-  "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-stop.service" \
+  "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-freeze.service" \
   "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache-prune.timer" ~/.config/systemd/user/
-install -m 0644 "$REPO/deploy/npm-cache/verdaccio.yaml" ~/.config/tart-runner-fleet-npm-cache/config.yaml
-install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-npm-cache.container" ~/.config/containers/systemd/
 install -m 0644 "$REPO/deploy/npm-cache/tart-runner-fleet-cache-gate.service.d/npm-cache.conf" \
   ~/.config/systemd/user/tart-runner-fleet-cache-gate.service.d/
 systemctl --user daemon-reload
 # The limits go on before the cache can take any traffic.
 systemctl --user enable --now tart-runner-fleet-npm-cache-prune.timer
-systemctl --user start tart-runner-fleet-npm-cache.service
-curl -fsS http://127.0.0.1:3020/-/ping
 systemctl --user restart tart-runner-fleet-cache-gate.service
 curl -fsS http://127.0.0.1:3017/npm/-/ping
 ```
@@ -2276,11 +2269,31 @@ If the install refuses because `$STORAGE` is not a btrfs subvolume, move it asid
 again. The cache is rebuildable, so nothing needs copying. Do this with no guest naming the cache:
 
 ```sh
-systemctl --user stop tart-runner-fleet-npm-cache.service
 mv ~/.local/share/tart-runner-fleet-npm-cache ~/.local/share/tart-runner-fleet-npm-cache.old
 ```
 
 Delete the `.old` directory once the cache serves again.
+
+### Moving a node off Verdaccio
+
+Omarchy still has what the first design installed. It is idle, because no guest names it. Remove it before
+installing the above, with no guest naming the cache, so that nothing can read a half-removed cache:
+
+```sh
+systemctl --user disable --now tart-runner-fleet-npm-cache-prune.timer
+systemctl --user stop tart-runner-fleet-npm-cache.service
+rm -f ~/.config/containers/systemd/tart-runner-fleet-npm-cache.container
+rm -f ~/.config/tart-runner-fleet-npm-cache/config.yaml
+rm -f ~/.config/systemd/user/tart-runner-fleet-npm-cache-stop.service
+systemctl --user daemon-reload
+podman rmi docker.io/verdaccio/verdaccio@sha256:8fc9be34bc675ccc96f7c68c7999911fdac8019158a9f79239b68776507d8e5b
+rm -rf ~/.local/share/tart-runner-fleet-npm-cache/data
+```
+
+The last line matters: the prune refuses, and freezes, a directory holding anything the gate did not write. The
+subvolume itself stays, and the install above reuses it. Until the new drop-in is in place, the old one is harmless: a
+gate restarted on it starts normally and answers `/npm/` with 404, because `--npm-upstream` names a registry and the
+route needs `--npm-cache`.
 
 ### Enable a node
 
@@ -2326,71 +2339,68 @@ must not bake a `~/.npmrc`: a guest with its own is left alone and goes direct.
 [USAGE.md](../USAGE.md#the-npm-cache-at-the-home-site) says what each client does and how
 a job opts out.
 
-### A lost gate fails an install
+### What happens when something fails
 
-**A gate lost mid-job fails an npm install, and that needs a rerun.** No client falls back
-once its registry is set, and the choice is made once, at launch. pnpm retries for about
-three and a half minutes and then fails. A rerun gets a fresh launch, which goes direct
-if the gate is still down. Do not read this as a cache fault to mask.
+| What failed | What a job sees |
+| --- | --- |
+| npmjs, with metadata cached | Stale metadata, and no error |
+| npmjs, with nothing cached | A `502`, which pnpm retries, as a direct install would fail too |
+| The disk, or the cache frozen | Nothing: hits serve and misses pass straight through to npmjs |
+| The gate restarted or killed | Retries, and about a minute lost at worst. `kill -9` mid-burst left 4 installs of 4 green |
+| The gate down past about 70 s | **The install fails and needs a rerun.** There is no fallback mid-job: no client can change its registry. The rerun gets a fresh launch, which goes direct |
+
+Actions cache and artifact calls are not affected by anything in this path except the gate process itself going down.
 
 ### Disk: limits and what enforces them
 
-**Verdaccio does not prune.** `tart-runner-fleet-npm-cache-prune.timer` holds the storage to
-its limits about every five minutes:
+`tart-runner-fleet-npm-cache-prune.timer` holds the gate's cache directory to its limits about every five minutes:
 
 | Limit | Value | What happens |
 | --- | --- | --- |
-| Size | 40 GiB in `~/.local/share/tart-runner-fleet-npm-cache/data` | evicts whole packages, least recently used first, down to 32 GiB |
+| Size | 40 GiB in `~/.local/share/tart-runner-fleet-npm-cache/data` | evicts the least recently used files, down to 32 GiB |
 | Reserve | 100 GiB free on the filesystem (`minFreeDiskGb` plus 40 GiB) | evicts even below the size limit |
-| Cannot get back inside either, or cannot enforce at all | | stops the cache and confirms it, and the prune unit reads `failed` |
+| Cannot get back inside either, or cannot enforce at all | | freezes the cache and confirms it, and the prune unit reads `failed` |
 | Backstop | the node's own `disk reserve` and `inode reserve` (ADR 0083) | stops admission |
 
-Eviction removes a package's metadata with its tarballs, because metadata is the larger part of
-this cache. It needs no restart and no quiet moment: it never touches a package read in the last 15
-minutes or holding a temp file, and it looks again just before each delete. The next read fetches
-an evicted package again.
+Eviction needs no restart and no quiet moment. A reader with a file open keeps its bytes, the next read fetches the file
+again, and anything touched in the last 15 minutes is left alone.
 
-It deletes only in that exact directory, refuses a symlink or a mount on the way there, and the unit
-can write nowhere else.
+It deletes only in that exact directory, refuses a symlink or a mount on the way there, and the unit can write nowhere
+else. Anything in that directory the gate did not write freezes the cache rather than being deleted.
 
-It is a timer, not a hard quota. Runs never overlap, so a slow run stretches the gap, and growth
-past the limit between checks has no strict bound. A kernel-enforced cap needs root.
+It is a timer, not a hard quota. Runs never overlap, so a slow run stretches the gap, and growth past the limit between
+checks has no strict bound. A kernel-enforced cap needs root.
 
 ```sh
 systemctl --user list-timers tart-runner-fleet-npm-cache-prune.timer
 journalctl --user -u tart-runner-fleet-npm-cache-prune.service -n 5 -o cat   # size, free, evicted
 ```
 
-**If the prune unit reads `failed`, read its journal first.** Exit 1 means it stopped the cache, so
-new guests go direct and `fleet doctor` says `npm cache not ready`. If it was killed at its 300 s
-timeout or never started, `tart-runner-fleet-npm-cache-stop.service` stopped the cache instead. **Exit 3,
-or that stop unit reading `failed`, means the stop could not be confirmed, so the cache may still be
-growing, and needs you now.** Fix the cause, and then bring it back:
+**A frozen cache is safe, and needs no rush.** With no write permission on its directory, the gate serves what it holds
+and passes every miss straight to npmjs, so jobs keep working and only the saving is lost. The next run that gets back
+inside the limits thaws it by itself.
+
+**If the prune unit reads `failed`, read its journal.** Exit 1 means it froze the cache. If it was killed at its 300 s
+timeout or never started, `tart-runner-fleet-npm-cache-freeze.service` froze the cache instead. **Exit 3, or that freeze
+unit reading `failed`, means the freeze could not be confirmed, so the cache may still be growing, and needs you now.**
+Clear the failed state once the cause is fixed:
 
 ```sh
-systemctl --user reset-failed tart-runner-fleet-npm-cache-prune.service tart-runner-fleet-npm-cache-stop.service
-systemctl --user start tart-runner-fleet-npm-cache.service
+systemctl --user reset-failed tart-runner-fleet-npm-cache-prune.service tart-runner-fleet-npm-cache-freeze.service
 ```
 
-To empty the cache by hand, do it with no guest running, because a guest running at that moment
-fails its next install while the cache is down:
+To empty the cache by hand, at any time, since running installs just fetch again:
 
 ```sh
-systemctl --user stop tart-runner-fleet-npm-cache.service
-rm -rf ~/.local/share/tart-runner-fleet-npm-cache/data
-systemctl --user start tart-runner-fleet-npm-cache.service
+find ~/.local/share/tart-runner-fleet-npm-cache/data -type f -delete
 ```
 
-### Purge one package
+### A bad package
 
-A version npmjs removed stays cached until it is pruned, and a non-frozen install can
-still resolve it. To remove a bad package at once:
-
-```sh
-rm -rf ~/.local/share/tart-runner-fleet-npm-cache/data/NAME   # or data/@scope/NAME
-```
-
-The next read fetches what npmjs says now.
+A version npmjs removed leaves metadata within 10 minutes, because the document is replaced whole. Its tarball stays until
+evicted, and only a lockfile already pinning that version can ask for it, which then fails its integrity check only if the
+bytes changed. To remove everything at once, empty the cache as above: objects are stored under a hash, so a single package
+has no path of its own.
 
 ### Roll back
 
@@ -2398,10 +2408,9 @@ The next read fetches what npmjs says now.
    setting. **Existing Actions-cache behaviour is unchanged**, because nothing else moved.
    On a podman node remove the whole `cacheGate` key, since it exists only for this.
 2. Wait until that node's running guests end: they still name the gate.
-3. Then, if wanted, on Omarchy remove the drop-in, `systemctl --user daemon-reload`,
-   restart the gate, and `systemctl --user stop tart-runner-fleet-npm-cache.service`. Then
-   `systemctl --user disable --now tart-runner-fleet-npm-cache-prune.timer`, because the prune
-   has nothing left to hold. The data directory can stay.
+3. Then, if wanted, on Omarchy remove the drop-in, `systemctl --user daemon-reload`, restart the gate, and
+   `systemctl --user disable --now tart-runner-fleet-npm-cache-prune.timer`. The route then answers 404, and the prune has
+   nothing left to hold. The data directory can stay.
 
 ## Recovery
 

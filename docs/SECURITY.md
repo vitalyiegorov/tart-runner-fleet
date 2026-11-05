@@ -37,13 +37,15 @@
 
 - A home-site guest may read public packages through the gate's `/npm/` route (ADR 0093).
   Nothing can write to it from a guest: the gate allows only `GET` and `HEAD` of
-  metadata, a single version, tarballs, the ping and dist-tags, independently of Verdaccio's own config,
-  which also refuses registration, publish and unpublish.
-- The gate forwards seven read headers and no query or body, so a credential a client
-  attaches under any name stops there, and a refusal never quotes the path. That is a
-  backstop. The guarantee is that a private scope's `@scope:registry` and
-  `//host/:_authToken` bind its name and token to their own host. Verdaccio's uplink is
-  anonymous, so a private package answers 404.
+  metadata, a single version, tarballs, the ping and dist-tags, and nothing else in the gate can
+  put an object in the cache.
+- The gate builds every upstream request from scratch and forwards no guest header, query or
+  body, so a credential a client attaches under any name stops there, and a refusal never quotes
+  the path. That is a backstop. The guarantee is that a private scope's `@scope:registry` and
+  `//host/:_authToken` bind its name and token to their own host. The gate holds no credential,
+  so a private package answers 404.
+- The gate never parses or rewrites what it caches: metadata reaches a client as npmjs wrote it,
+  so a client's trust and integrity checks judge the registry's own bytes.
 - A guest gets the setting only on that launch's proof, and validation holds the
   addresses to the direct LAN. The gate refuses a tunnel hostname and any request carrying
   Cloudflare's headers. **Cache data never crosses cloudflared.**
