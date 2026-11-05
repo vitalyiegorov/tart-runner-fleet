@@ -243,6 +243,9 @@ type tickObservation struct {
 	// this tick. app.plannableDemands has already dropped every demand a live
 	// instance incarnates, so it answers "what work is still unserved".
 	Demands []domain.Demand
+	// EmptyExitHolds is the queued work this tick withheld from planning because
+	// its instances kept exiting without a job (issue #493).
+	EmptyExitHolds []struct{}
 	// Queued is the DURABLE queue depth across every binding -- the number the
 	// SLO monitor reads. It answers a different question ("what does the fleet
 	// still believe it has to do"), and a demand whose runner is already booting

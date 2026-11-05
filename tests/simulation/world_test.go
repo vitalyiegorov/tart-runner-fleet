@@ -847,6 +847,8 @@ type world struct {
 	// arrivalsStopped marks the tick after which no new job may be created, which
 	// is what makes property (f) meaningful.
 	arrivalsStopped bool
+	// emptyExitNext arms the next job to arrive with issue #493's fault.
+	emptyExitNext int
 	// advertisement is the node-wide residual view its scale sets advertise
 	// from, fed by every tick exactly as the daemon feeds it.
 	advertisement app.ResidualAdvertisement
@@ -910,6 +912,9 @@ type simJob struct {
 	// silentCancel models the ADR 0026 ghost: GitHub cancelled the run server
 	// side and never sent a terminal message, so the broker keeps advertising it.
 	silentCancel bool
+	// emptyExits is how many more runners this job will waste before GitHub hands
+	// it to one, and exitedEmpty how many it has (issue #493).
+	emptyExits, exitedEmpty int
 }
 
 // simMessage is one scale-set message in flight.

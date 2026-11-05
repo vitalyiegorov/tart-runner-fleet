@@ -73,7 +73,29 @@ func (w *world) advancePhysics() {
 	w.armLatchedGuestFaults()
 	w.crossSiblingAssignments()
 	w.substituteQueuedSibling()
+	w.exitEmptyRunners()
 	w.progressJobs()
+}
+
+// exitEmptyRunners is the guest side of issue #493. A registered runner bound to
+// a job GitHub will not hand it exits, and ADR 0010's supervisor powers the guest
+// off behind it. Nothing tells the fleet: no broker message names the runner, the
+// job stays queued in GitHub's view, and the only trace is the VM's own power.
+func (w *world) exitEmptyRunners() {
+	instances, err := w.store.LiveInstances(w.ctx)
+	if err != nil {
+		return
+	}
+	for _, instance := range instances {
+		if instance.State != operations.StateAssigned || !w.vms[instance.ID] {
+			continue
+		}
+		if job := w.jobByRequest(instance.Demand.JobID); job != nil && job.emptyExits > 0 && job.status == jobQueued {
+			w.vms[instance.ID] = false
+			job.emptyExits--
+			job.exitedEmpty++
+		}
+	}
 }
 
 func decay(remaining int) int {
@@ -94,7 +116,7 @@ func decay(remaining int) int {
 // never comes -- the ghost runner of the 2026-08-01 incident.
 func (w *world) acquireJob(instance operations.Instance) {
 	job := w.jobByRequest(instance.Demand.JobID)
-	if job == nil || job.status != jobQueued || job.silentCancel {
+	if job == nil || job.status != jobQueued || job.silentCancel || job.emptyExits > 0 {
 		return
 	}
 	job.status = jobAcquired
@@ -559,7 +581,8 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 	w.nextReq++
 	job := &simJob{requestID: w.nextReq, runID: w.nextRunID, repo: repo, owner: owner, name: name,
 		binding: binding, event: event, queuedAt: w.now, status: jobQueued,
-		announced: map[operations.DemandEventKind]bool{}}
+		announced: map[operations.DemandEventKind]bool{}, emptyExits: w.emptyExitNext}
+	w.emptyExitNext = 0
 	w.jobs = append(w.jobs, job)
 	return job
 }

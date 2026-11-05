@@ -205,7 +205,13 @@ const (
 	// sibling instead of the request its own VM acquired, and that request goes
 	// back to the queue with nobody to run it.
 	eventSiblingSubstitute eventKind = "sibling_substitute"
-	eventStopArrivals      eventKind = "stop_arrivals"
+	// eventEmptyExit is issue #493: GitHub keeps the next job to arrive queued and
+	// corroborated by REST, while every runner the fleet provisions for it
+	// registers, takes nothing, and exits, so its guest powers itself off. Count is
+	// how many runners it wastes before GitHub finally hands it to one, which is
+	// what separates an empty exit that bounces from a job that was never lost.
+	eventEmptyExit    eventKind = "empty_exit"
+	eventStopArrivals eventKind = "stop_arrivals"
 )
 
 func (t simTrace) String() string {
@@ -373,6 +379,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.reassignSiblings = true
 	case eventSiblingSubstitute:
 		w.substituteSiblings = true
+	case eventEmptyExit:
+		w.emptyExitNext = event.Count
 	}
 }
 
