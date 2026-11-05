@@ -48,11 +48,11 @@ func TestAProvenGateGivesTheGuestItsRegistryBeforeTheRunnerStarts(t *testing.T) 
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %q", runner.calls)
 	}
-	clear := []string{"exec", "trf-small-1", "bash", "-lc", npmClearScript, npmScriptName}
+	clear := []string{"exec", "trf-small-1", "bash", "-c", npmClearScript, npmScriptName}
 	if strings.Join(runner.calls[0], "\x00") != strings.Join(clear, "\x00") {
 		t.Fatalf("first call = %q, want the cleanup", runner.calls[0])
 	}
-	write := []string{"exec", "trf-small-1", "bash", "-lc", npmWriteScript, npmScriptName, testNPMRegistry, "192.168.1.64"}
+	write := []string{"exec", "trf-small-1", "bash", "-c", npmWriteScript, npmScriptName, testNPMRegistry, "192.168.1.64"}
 	if strings.Join(runner.calls[1], "\x00") != strings.Join(write, "\x00") {
 		t.Fatalf("second call = %q, want the write", runner.calls[1])
 	}
@@ -299,7 +299,7 @@ func TestAnUnverifiedGateRewritesTheGuestBeforeTheRunnerStarts(t *testing.T) {
 	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %q", runner.calls)
 	}
-	want := []string{"exec", "trf-small-1", "bash", "-lc", resultsFallbackScript}
+	want := []string{"exec", "trf-small-1", "bash", "-c", resultsFallbackScript}
 	if strings.Join(runner.calls[0], "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("first call = %q", runner.calls[0])
 	}

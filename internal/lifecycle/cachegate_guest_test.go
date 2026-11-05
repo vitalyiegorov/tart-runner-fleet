@@ -31,7 +31,8 @@ func (g *guestShell) Run(ctx context.Context, _ io.Reader, args ...string) error
 		g.started = true
 		return nil
 	}
-	// -c and not -lc: a login shell's profile could reset PATH past the stand-ins.
+	// Always -c, whatever was asked, because a login shell's profile could reset PATH past the
+	// stand-ins. loginGuestShell keeps the flags for the case that depends on them.
 	command := exec.CommandContext(ctx, "bash", append([]string{"-c"}, args[4:]...)...)
 	command.Env = []string{"HOME=" + g.home, "PATH=" + g.bin + ":" + os.Getenv("PATH")}
 	return command.Run()
@@ -196,4 +197,47 @@ func TestTheGuestProbeRequiresExactly200(t *testing.T) {
 			t.Fatalf(".npmrc = %q", guest.npmrc())
 		}
 	})
+}
+
+// loginGuestShell runs each script exactly as a launch asks, flags included. Stock Ubuntu's
+// ~/.bash_logout runs clear_console, which fails with no terminal, and a non-interactive login
+// shell reads that file on the exit builtin, so `bash -lc 'exit 0'` exits 1 in the real image.
+// guestShell's -c hid this.
+type loginGuestShell struct{ *guestShell }
+
+func (g loginGuestShell) Run(ctx context.Context, _ io.Reader, args ...string) error {
+	if len(args) < 5 || args[2] != "bash" {
+		g.started = true
+		return nil
+	}
+	command := exec.CommandContext(ctx, "bash", args[3:]...)
+	command.Env = []string{"HOME=" + g.home, "PATH=" + g.bin + ":" + os.Getenv("PATH")}
+	return command.Run()
+}
+
+func TestAGuestImagesLogoutFileDoesNotFailTheLaunch(t *testing.T) {
+	registry, _ := npmFixture(t, http.StatusOK)
+	for name, launch := range map[string]func(*guestShell) StdinBootstrapper{
+		"proven gate with no old file": func(g *guestShell) StdinBootstrapper {
+			b := provenLaunch(g, registry)
+			b.Runner = loginGuestShell{g}
+			return b
+		},
+		"unproven gate, whose results fallback exits early": func(g *guestShell) StdinBootstrapper {
+			return StdinBootstrapper{Runner: loginGuestShell{g}, Gate: fixedGate(false), NPM: npmRoute(true)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			guest := newGuestShell(t)
+			if err := os.WriteFile(filepath.Join(guest.home, ".bash_logout"), []byte("false\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := launch(guest).Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
+				t.Fatalf("a logout file failed the launch: %v", err)
+			}
+			if !guest.started {
+				t.Fatal("the runner never started")
+			}
+		})
+	}
 }

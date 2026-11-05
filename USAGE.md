@@ -433,7 +433,8 @@ A job needs no change.
 | `npm install` | Yes. A lockfile it **generates** names the gate |
 | `npx`, `npm exec`, `npm install --global` | Yes |
 | Modern Yarn, Bun | No, they go direct. No setting is added for them |
-| Yarn 1, Corepack | Not tested |
+| Corepack | Its own fetch of pnpm goes direct. pnpm 12's self-bootstrap then uses the cache |
+| Yarn 1 | Not tested |
 
 Versions tested and evidence are in the ADR.
 

@@ -37,7 +37,7 @@
 
 - A home-site guest may read public packages through the gate's `/npm/` route (ADR 0093).
   Nothing can write to it from a guest: the gate allows only `GET` and `HEAD` of
-  metadata, tarballs, the ping and dist-tags, independently of Verdaccio's own config,
+  metadata, a single version, tarballs, the ping and dist-tags, independently of Verdaccio's own config,
   which also refuses registration, publish and unpublish.
 - The gate forwards seven read headers and no query or body, so a credential a client
   attaches under any name stops there, and a refusal never quotes the path. That is a

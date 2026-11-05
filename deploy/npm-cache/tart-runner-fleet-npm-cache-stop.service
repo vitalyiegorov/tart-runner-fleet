@@ -1,0 +1,15 @@
+# Stops the npm cache when its prune failed in a way the script could not handle: killed at its
+# timeout, or never started (ADR 0093). It is started by the prune's OnFailure=, so it runs outside
+# that process, and it fails visibly if the cache is still up. Install beside the prune unit.
+[Unit]
+Description=Stop the npm cache after its limits could not be enforced (ADR 0093)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'systemctl --user stop tart-runner-fleet-npm-cache.service; ! systemctl --user is-active --quiet tart-runner-fleet-npm-cache.service'
+TimeoutStartSec=300
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX

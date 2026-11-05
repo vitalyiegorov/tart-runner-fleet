@@ -71,7 +71,10 @@ mistake there cannot open a write path:
 
 - **Only `GET` and `HEAD`.** Every other method gets 403, which covers publish,
   unpublish, login, adduser, token and audit writes, whatever the path.
-- **Only these reads:** metadata, tarballs, `-/ping` and `-/package/NAME/dist-tags`.
+- **Only these reads:** metadata, one version or tag of it, tarballs, `-/ping` and
+  `-/package/NAME/dist-tags`. The single version is how pnpm 12 fetches its own binary
+  (`@pnpm/exe.linux-x64/12.16.1`), which the image's Corepack shim triggers on the first pnpm
+  call in a job, so refusing it fails that job.
   Everything else gets 404, including `-/whoami`, `-/user/*`, `-/npm/v1/*`,
   `-/v1/*`, `-/verdaccio/*` and `_session`.
 - **Matched on the escaped path.** No percent-encoding except a scope's `%2f` reaches
@@ -109,6 +112,11 @@ launch, with the proof ADR 0078's amendment introduced:
    `--location`, curl calls a redirect success. The host's proof says nothing about the
    guest's network, such as a NAT, and no client falls back once its registry is set.
 5. Only then does it write `~/.npmrc`, atomically and marked as ours.
+
+These scripts run under `bash -c`, not `bash -lc`. Stock Ubuntu's `~/.bash_logout` runs
+`clear_console`, which fails with no terminal, and a non-interactive login shell reads that
+file on the `exit` builtin, so under `-l` a script's `exit 0` exits 1. That failed every launch
+in the first real attempt on Omarchy (2026-11-05), which was rolled back with no job failed.
 
 Anything else leaves no setting, and no setting means npmjs. Removal and write are separate
 scripts so that their failures cannot be confused: the removal has already succeeded by the
@@ -158,7 +166,8 @@ Proven by `tests/integration/npm-cache-compat/run.sh`:
 | `npm install --global` | Yes | Fetches through the cache |
 | Yarn 4.17.1 | **No, direct** | It ignores `~/.npmrc`, and no fleet setting is added for it |
 | Bun 1.3.1 | **No, direct** | It ignored `~/.npmrc`, and no fleet setting is added for it |
-| Yarn 1, Corepack | Not tested | Treat as unknown |
+| Corepack | Its own fetch of pnpm goes direct | Observed on the real image: it downloads from `registry.npmjs.org`, and pnpm 12's self-bootstrap then comes through the cache |
+| Yarn 1 | Not tested | Treat as unknown |
 
 **Private scopes keep going direct and send the gate nothing.** A scope's
 `@scope:registry` and its `//host/:_authToken` are bound to that host by npm and by every
@@ -180,23 +189,44 @@ and the gate cannot see that: it counts what guests read, not what the uplink ca
 
 ### 7. Disk
 
-**The shipped deployment neither caps nor prunes this storage.** Verdaccio does not prune,
-the quadlet sets no size limit, and any job can make it cache any public package. Left
-alone it grows until admission's reserves refuse guests (ADR 0083). The figures below are
-**operational thresholds an operator acts on, not limits anything enforces**:
+**Verdaccio does not prune**, and any job can make it cache any public package, so
+`deploy/npm-cache/` ships an enforcement timer. Every five minutes
+`prune-npm-cache.py` holds the storage to these limits:
 
-- **Threshold: 40 GiB on Omarchy.** A full wipe costs one cold round, about what one hour
-  of CI already downloads, so the figure is deliberately small beside the node's disk.
-- **Reserve: prune at that threshold, or when free space falls below the node's
-  `minFreeDiskGb` plus 40 GiB.** The node's own disk and inode floors stay the backstop,
-  and they stop admission, not the cache's growth.
-- **Pruning** deletes old tarballs weekly and, past either limit, the whole `data`
-  directory. The run proved both are safe: the next read fetches again. Weekly pruning
-  reclaims only part of it, because metadata is the larger half: three real lockfiles left
-  1.56 GiB of metadata beside 0.93 GiB of tarballs. Only the wipe reclaims that.
+- **40 GiB, evicting down to 32 GiB.** A full refill costs about one cold round, about what
+  one hour of CI already downloads, so the limit is deliberately small beside the node's disk.
+- **A reserve of 100 GiB free on the filesystem**, which is `minFreeDiskGb` (60) plus 40 GiB.
+  Under it, the timer evicts even below the size limit.
+- **It evicts whole packages, least recently used first.** Metadata is the larger part of this
+  cache: three real lockfiles left 1.56 GiB of metadata beside 0.93 GiB of tarballs. A
+  tarball-only prune would never reclaim it. The next read fetches an evicted package again.
+- **It deletes only inside its pinned storage.** The path must be exactly the expected one, reached
+  with no symlink and with no mount at or under it, and every delete is relative to a directory
+  fd it has verified. The unit can write only to that storage (`ProtectSystem=strict`,
+  `ProtectHome=read-only`, `ReadWritePaths=`).
+- **It spares what is active, because a running install has no fallback.** It never evicts a package
+  touched in the last 15 minutes or holding any file but `package.json` and `*.tgz`, which covers
+  Verdaccio's `*.tmp*` files, and it looks again immediately before each delete.
+- **A known limit, accepted.** A download can still start in the moment between that look and the
+  delete. That install fails and a rerun succeeds. It can only happen while evicting, which means
+  above 40 GiB or under the reserve. There is no locking with Verdaccio, because it would cost more
+  than this rare failure.
+- **It reports only what it measures.** It re-reads free space after evicting, allowing 60 s for
+  btrfs to return it, and never credits what it deleted.
+- **Any failure to enforce stops the cache**, and it confirms the stop. New guests then go direct and
+  the doctor row says `npm cache not ready`. Exit 1 is a confirmed stop and exit 3 means it could not
+  confirm one, and both read `failed`. If systemd kills the script at its 300 s timeout or never
+  starts it, the script cannot act, so the unit's `OnFailure=` starts
+  `tart-runner-fleet-npm-cache-stop.service`, which stops the cache and confirms it from outside. A
+  stop that cannot be confirmed leaves that unit `failed`. Bringing the cache back is an operator's
+  decision.
 
-The recipe is in `docs/OPERATIONS.md`. Scheduling it is an operational step of the rollout,
-and no unit ships for it here, so until someone does, nothing watches these figures.
+**It is not a hard quota, and growth between checks has no strict bound.** Runs about every five
+minutes and never overlap, so a slow run stretches the gap, and the cache can pass the limit by
+whatever the uplink delivers until the next check finishes. A kernel-enforced cap needs root: the
+storage is its own btrfs subvolume on Omarchy so that a qgroup limit can be added later with no
+migration. The node's own disk and inode floors stay the backstop, and they stop admission, not the
+cache's growth.
 
 ### 8. Git seeds: decided, and shipped later
 
@@ -320,13 +350,16 @@ what clients send. Each client ran in a clean environment with explicit store di
   header, not from a guest on those networks. In particular, a macOS guest behind Tart's
   NAT reaching `192.168.1.64` is unproven, though the guest-side probe sends it direct
   if it cannot.
+- **The launch fix on a real guest.** `bash -c` and the name/version route were validated in a
+  non-fleet container from the real image with the same `--init` and network, with pnpm running
+  through the gate, but not yet in a fleet launch, because they need a release first.
 - **Real savings.** No before-and-after measurement exists, because nothing is deployed.
 - **The extra `tart exec` calls on a Tart host.** A launch on a node with `npmRegistry` set
   makes up to two more `exec` calls into the guest, one-shot and not periodic. Repeated vsock
   connections are what trap Tart's VM helper (#478, ADR 0080's 2026-11-05 amendment), and the
   reproduced crash took a probe every 5 s, so this should be far from it, but it has not been
   measured.
-- **Long-term disk growth**, and whether the 40 GiB threshold suits real traffic.
+- **Long-term disk growth**, and whether the 40 GiB limit suits real traffic.
 - **The installed quadlet.** The run started the image with the same user namespace,
   capabilities and mounts, but not through systemd or Quadlet.
 
@@ -345,8 +378,8 @@ what clients send. Each client ran in a clean environment with explicit store di
 ## Not built
 
 - **Git seeds**, here. See section 8.
-- **A storage cap or a pruning unit.** The recipe is documented and scheduling it is a
-  rollout step. Nothing enforces the 40 GiB threshold.
+- **A kernel-enforced storage cap.** It needs root. The timer in section 7 bounds growth
+  instead.
 - **Yarn and Bun settings beyond what section 5 states.**
 - **Per-job attribution of cache bytes**, for the reason ADR 0080 gives.
 - **A cache at the office site**, where the uplink is not the bottleneck.

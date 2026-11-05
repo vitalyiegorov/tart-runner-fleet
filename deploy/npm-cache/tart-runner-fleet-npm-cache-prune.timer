@@ -1,0 +1,12 @@
+# About every five minutes. Runs never overlap, so a slow run stretches the gap, and growth past
+# the limit between checks has no strict bound. It is not a hard quota, which needs root.
+[Unit]
+Description=tart-runner-fleet npm cache limits, about every five minutes (ADR 0093)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

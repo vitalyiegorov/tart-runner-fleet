@@ -37,8 +37,10 @@ const (
 // digit or `~`, which keeps out `-` and `_session`. A scoped part may also start with
 // `_`, as `@_koi/react` does. Nothing may start with a dot, which keeps out dot segments.
 var (
-	npmName    = `(?:@[A-Za-z0-9~_][A-Za-z0-9._~-]*(?:/|%2[fF])[A-Za-z0-9~_][A-Za-z0-9._~-]*|[A-Za-z0-9~][A-Za-z0-9._~-]*)`
-	npmReads   = regexp.MustCompile(`^/npm/` + npmName + `(?:/-/[A-Za-z0-9~_][A-Za-z0-9._~-]*\.tgz)?$`)
+	npmName = `(?:@[A-Za-z0-9~_][A-Za-z0-9._~-]*(?:/|%2[fF])[A-Za-z0-9~_][A-Za-z0-9._~-]*|[A-Za-z0-9~][A-Za-z0-9._~-]*)`
+	// Metadata, one version or tag of it, or a tarball. A version starts with a letter or
+	// digit, which keeps out `-rev` and `-/`.
+	npmReads   = regexp.MustCompile(`^/npm/` + npmName + `(?:/[A-Za-z0-9][A-Za-z0-9._~-]*|/-/[A-Za-z0-9~_][A-Za-z0-9._~-]*\.tgz)?$`)
 	npmTags    = regexp.MustCompile(`^/npm/-/package/` + npmName + `/dist-tags$`)
 	npmHeaders = []string{"Accept", "Accept-Encoding", "If-Modified-Since", "If-None-Match", "If-Range", "Range", "User-Agent"}
 )
