@@ -48,19 +48,23 @@ const shutdownGrace = 20 * time.Second
 // GitHub's results service, and answers every other one itself. Refusals are
 // logged with the reason, which names the scope; the token is never logged.
 func Handler(cache, results *url.URL, logOutput io.Writer) http.Handler {
-	return countingHandler(cache, results, logOutput, &Counters{})
+	return countingHandler(cache, results, nil, logOutput, &Counters{})
 }
 
 // countingHandler is Handler counting the bytes of every request it proxies.
-func countingHandler(cache, results *url.URL, logOutput io.Writer, counters *Counters) http.Handler {
+// A nil npm means this gate has no npm cache, and its route answers 404.
+func countingHandler(cache, results, npm *url.URL, logOutput io.Writer, counters *Counters) http.Handler {
 	logger := slog.New(slog.NewTextHandler(logOutput, nil))
 	proxies := map[Upstream]*httputil.ReverseProxy{
 		CacheServer: httputil.NewSingleHostReverseProxy(cache),
 		Results:     resultsProxy(results),
 	}
+	if npm != nil {
+		proxies[NPM] = npmProxy(npm)
+	}
 	limit := &refusalLog{logger: logger}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		verdict := Decide(r.URL.Path, r.Header)
+		verdict, logged := route(r, npm != nil)
 		if verdict.Allow {
 			r.Body = &progressBody{ReadCloser: countedBody{r.Body, &counters.fromGuest[verdict.Upstream]},
 				control: http.NewResponseController(w)}
@@ -68,12 +72,24 @@ func countingHandler(cache, results *url.URL, logOutput io.Writer, counters *Cou
 			return
 		}
 		if verdict.Status == http.StatusForbidden {
-			limit.refused(r.URL.Path, verdict.Reason)
+			limit.refused(logged, verdict.Reason)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(verdict.Status)
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": twirpCode(verdict.Status), "msg": verdict.Reason})
 	})
+}
+
+// route judges one request and names the path a refusal may log. The npm route
+// logs only its prefix, because `npm logout` carries its token in the path.
+func route(r *http.Request, npmConfigured bool) (Verdict, string) {
+	if !isNPMRoute(r.URL.Path) {
+		return Decide(r.URL.Path, r.Header), r.URL.Path
+	}
+	if !npmConfigured {
+		return Verdict{Status: http.StatusNotFound, Reason: npmNotFound}, NPMPrefix
+	}
+	return DecideNPM(r.Method, r.URL.EscapedPath(), r.Host, r.Header), NPMPrefix
 }
 
 // refusalLog writes at most refusalLogBurst refusals per refusalLogWindow and
@@ -150,14 +166,20 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	resultsRaw := flags.String("results-upstream", defaultResults, "absolute URL of GitHub's results service")
 	metricsListen := flags.String("metrics-listen", "", "optional loopback host:port serving /metrics byte counters")
 	identityKey := flags.String("identity-key", "", "optional file holding the key the gate proves itself with, created if absent")
+	npmRaw := flags.String("npm-upstream", "", "optional loopback URL of the npm read-through cache served under /npm/")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 	cache, cacheOK := absoluteURL(*cacheRaw)
 	results, resultsOK := absoluteURL(*resultsRaw)
-	if flags.NArg() != 0 || *listen == "" || !cacheOK || !resultsOK || (*metricsListen != "" && !loopbackAddress(*metricsListen)) {
+	var npm *url.URL
+	npmOK := true
+	if *npmRaw != "" {
+		npm, npmOK = validNPMUpstream(*npmRaw)
+	}
+	if flags.NArg() != 0 || *listen == "" || !cacheOK || !resultsOK || !npmOK || (*metricsListen != "" && !loopbackAddress(*metricsListen)) {
 		_, _ = fmt.Fprintln(stderr, "usage: fleet cache-gate --listen host:port --upstream http://127.0.0.1:port "+
-			"[--results-upstream url] [--metrics-listen 127.0.0.1:port] [--identity-key path]")
+			"[--results-upstream url] [--metrics-listen 127.0.0.1:port] [--identity-key path] [--npm-upstream http://127.0.0.1:port]")
 		return 2
 	}
 	var identity ed25519.PrivateKey
@@ -177,7 +199,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	counters := &Counters{}
-	server := newServer(identityHandler(identity, countingHandler(cache, results, stdout, counters)))
+	server := newServer(identityHandler(identity, countingHandler(cache, results, npm, stdout, counters)))
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
 	if *metricsListen != "" {
@@ -192,6 +214,9 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		defer func() { _ = metrics.Close() }()
 	}
 	_, _ = fmt.Fprintf(stdout, "cache-gate: serving %s, cache %s, results %s\n", listener.Addr(), cache.Redacted(), results.Redacted())
+	if npm != nil {
+		_, _ = fmt.Fprintf(stdout, "cache-gate: npm %s under %s\n", npm.Redacted(), NPMPrefix)
+	}
 	select {
 	case err := <-served:
 		// Serve only returns early when accepting fails; exit non-zero so the
