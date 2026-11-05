@@ -1,0 +1,13 @@
+# Keeps the npm cache inside its limits (ADR 0093). Install beside its timer in
+# ~/.config/systemd/user/, and the script as
+# ~/.config/tart-runner-fleet-npm-cache/prune-npm-cache.py. A failed run means it stopped
+# the cache because it could not get back inside the limits: read its journal.
+[Unit]
+Description=tart-runner-fleet npm cache limits (ADR 0093)
+
+[Service]
+Type=oneshot
+# 40 GiB limit, 32 GiB after eviction, and a reserve of minFreeDiskGb (60) plus 40 GiB.
+ExecStart=/usr/bin/python3 -I %h/.config/tart-runner-fleet-npm-cache/prune-npm-cache.py --data %h/.local/share/tart-runner-fleet-npm-cache/data --high-gib 40 --low-gib 32 --reserve-gib 100
+Nice=15
+IOSchedulingClass=idle

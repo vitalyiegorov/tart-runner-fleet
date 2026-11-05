@@ -1,0 +1,12 @@
+# Every five minutes, so growth past the limit is bounded by five minutes of the uplink:
+# under 3 GiB at the home site's 9 MB/s. It is not a hard quota, which needs root.
+[Unit]
+Description=tart-runner-fleet npm cache limits, every five minutes (ADR 0093)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

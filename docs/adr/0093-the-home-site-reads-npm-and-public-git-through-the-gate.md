@@ -180,23 +180,28 @@ and the gate cannot see that: it counts what guests read, not what the uplink ca
 
 ### 7. Disk
 
-**The shipped deployment neither caps nor prunes this storage.** Verdaccio does not prune,
-the quadlet sets no size limit, and any job can make it cache any public package. Left
-alone it grows until admission's reserves refuse guests (ADR 0083). The figures below are
-**operational thresholds an operator acts on, not limits anything enforces**:
+**Verdaccio does not prune**, and any job can make it cache any public package, so
+`deploy/npm-cache/` ships an enforcement timer. Every five minutes
+`prune-npm-cache.py` holds the storage to these limits:
 
-- **Threshold: 40 GiB on Omarchy.** A full wipe costs one cold round, about what one hour
-  of CI already downloads, so the figure is deliberately small beside the node's disk.
-- **Reserve: prune at that threshold, or when free space falls below the node's
-  `minFreeDiskGb` plus 40 GiB.** The node's own disk and inode floors stay the backstop,
-  and they stop admission, not the cache's growth.
-- **Pruning** deletes old tarballs weekly and, past either limit, the whole `data`
-  directory. The run proved both are safe: the next read fetches again. Weekly pruning
-  reclaims only part of it, because metadata is the larger half: three real lockfiles left
-  1.56 GiB of metadata beside 0.93 GiB of tarballs. Only the wipe reclaims that.
+- **40 GiB, evicting down to 32 GiB.** A full refill costs about one cold round, about what
+  one hour of CI already downloads, so the limit is deliberately small beside the node's disk.
+- **A reserve of 100 GiB free on the filesystem**, which is `minFreeDiskGb` (60) plus 40 GiB.
+  Under it, the timer evicts even below the size limit.
+- **It evicts whole packages, least recently used first.** Metadata is the larger part of this
+  cache: three real lockfiles left 1.56 GiB of metadata beside 0.93 GiB of tarballs. A
+  tarball-only prune would never reclaim it. The run proved eviction is safe with the server
+  up: the next read fetches again. Anything touched in the last 15 minutes is left alone,
+  because it may be mid-download.
+- **If it cannot get back inside the limits it stops the cache**, rather than let it fill the
+  disk. New guests then go direct and the doctor row says `npm cache not ready`. Bringing it back
+  is an operator's decision.
 
-The recipe is in `docs/OPERATIONS.md`. Scheduling it is an operational step of the rollout,
-and no unit ships for it here, so until someone does, nothing watches these figures.
+**This bounds growth, and it is not a hard quota.** Between two runs the cache can pass the
+limit by five minutes of the uplink, under 3 GiB at the home site. A kernel-enforced cap needs
+root: the storage is its own btrfs subvolume on Omarchy so that a qgroup limit can be added
+later with no migration. The node's own disk and inode floors stay the backstop, and they stop
+admission, not the cache's growth.
 
 ### 8. Git seeds: decided, and shipped later
 
@@ -326,7 +331,7 @@ what clients send. Each client ran in a clean environment with explicit store di
   connections are what trap Tart's VM helper (#478, ADR 0080's 2026-11-05 amendment), and the
   reproduced crash took a probe every 5 s, so this should be far from it, but it has not been
   measured.
-- **Long-term disk growth**, and whether the 40 GiB threshold suits real traffic.
+- **Long-term disk growth**, and whether the 40 GiB limit suits real traffic.
 - **The installed quadlet.** The run started the image with the same user namespace,
   capabilities and mounts, but not through systemd or Quadlet.
 
@@ -345,8 +350,8 @@ what clients send. Each client ran in a clean environment with explicit store di
 ## Not built
 
 - **Git seeds**, here. See section 8.
-- **A storage cap or a pruning unit.** The recipe is documented and scheduling it is a
-  rollout step. Nothing enforces the 40 GiB threshold.
+- **A kernel-enforced storage cap.** It needs root. The timer in section 7 bounds growth
+  instead.
 - **Yarn and Bun settings beyond what section 5 states.**
 - **Per-job attribution of cache bytes**, for the reason ADR 0080 gives.
 - **A cache at the office site**, where the uplink is not the bottleneck.
