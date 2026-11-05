@@ -24,10 +24,16 @@ func TestDoctorStatesTheCacheGatePostureOnAPass(t *testing.T) {
 	verified := healthyStatus()
 	verified.Data.CacheGate = &adminapi.CacheGate{URL: "http://192.168.1.64:3017/", Verified: true}
 	verified.Data.CacheGateCheck = &adminapi.Check{OK: true}
+	ready := true
+	npm := healthyStatus()
+	npm.Data.CacheGate = &adminapi.CacheGate{URL: "http://192.168.1.64:3017/", Verified: true,
+		NPMRegistry: "http://192.168.1.64:3017/npm/", NPMReady: &ready}
+	npm.Data.CacheGateCheck = &adminapi.Check{OK: true}
 	for want, status := range map[string]adminapi.StatusEnvelope{
-		"not reported by this daemon":        notReported,
-		"no gate configured":                 none,
-		"verified http://192.168.1.64:3017/": verified,
+		"not reported by this daemon":             notReported,
+		"no gate configured":                      none,
+		"verified http://192.168.1.64:3017/":      verified,
+		"npm cache http://192.168.1.64:3017/npm/": npm,
 	} {
 		if out := doctorTable(t, status, exitSuccess); !strings.Contains(out, want) {
 			t.Fatalf("want %q:\n%s", want, out)

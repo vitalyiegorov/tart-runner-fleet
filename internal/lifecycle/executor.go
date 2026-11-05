@@ -947,9 +947,12 @@ type StdinBootstrapper struct {
 	// the guest cannot be left to infer it, because a container image can carry
 	// both binaries and still have no init system (issue #273).
 	ContainerGuest bool
-	// Gate is asked before each launch whether the guest's baked LAN cache gate
-	// is really ours; anything else moves the guest to GitHub (ADR 0078).
+	// Gate is asked before each launch whether the guest's LAN cache gate is really
+	// ours; anything else moves the guest to GitHub (ADR 0078).
 	Gate GateVerifier
+	// NPM is the gate's npm cache, which a guest uses only on that launch's proof
+	// (ADR 0092). Nil is the default: no guest is given a registry.
+	NPM *NPMRoute
 }
 
 func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret,
@@ -975,13 +978,8 @@ func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *g
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if b.Gate != nil && !b.Gate.Verified(commandCtx) {
-		if err := b.Runner.Run(commandCtx, strings.NewReader(""), "exec", name, "bash", "-lc", resultsFallbackScript); err != nil {
-			if commandCtx.Err() != nil {
-				return commandCtx.Err()
-			}
-			return errors.New("results fallback failed")
-		}
+	if err := b.selectGate(commandCtx, name); err != nil {
+		return err
 	}
 	if err := b.Runner.Run(commandCtx, strings.NewReader(encoded+"\n"), args...); err != nil {
 		if commandCtx.Err() != nil {
