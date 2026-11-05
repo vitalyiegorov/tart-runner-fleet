@@ -189,6 +189,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' -H 'Cf-Connecting-Ip
 [ "$code" = 403 ] && pass "gate refuses a request carrying Cloudflare's headers (403)" || fail "Cf request answered $code"
 if grep -q "$SECRET" "$LOGS/gate.log"; then fail "the gate logged a token"; else pass "no token in the gate's log"; fi
 
+# pnpm 12 fetches its own binary as name/version, which an install from npm never exercises.
+code=$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' "$gate/npm/@pnpm/exe.linux-x64/12.14.0")
+[ "$code" = 200 ] && pass "gate serves a single version, as pnpm 12's own bootstrap asks (200)" || fail "name/version answered $code"
+
 for host in 192.168.1.64:3017 host.containers.internal:3017; do
     tarball=$(curl -fsS --noproxy '*' -H "Host: $host" "$gate/npm/is-odd" |
         python3 -c 'import json,sys; print(json.load(sys.stdin)["versions"]["3.0.1"]["dist"]["tarball"])')

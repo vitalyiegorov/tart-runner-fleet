@@ -2322,11 +2322,16 @@ its limits every five minutes:
 | --- | --- | --- |
 | Size | 40 GiB in `~/.local/share/tart-runner-fleet-npm-cache/data` | evicts whole packages, least recently used first, down to 32 GiB |
 | Reserve | 100 GiB free on the filesystem (`minFreeDiskGb` plus 40 GiB) | evicts even below the size limit |
-| Cannot get back inside either | | stops the cache, and the prune unit reads `failed` |
+| Cannot get back inside either, or cannot enforce at all | | stops the cache and confirms it, and the prune unit reads `failed` |
 | Backstop | the node's own `disk reserve` and `inode reserve` (ADR 0083) | stops admission |
 
-Eviction removes a package's metadata with its tarballs, because metadata is the larger part
-of this cache. The next read fetches them again, so it needs no restart and no quiet moment.
+Eviction removes a package's metadata with its tarballs, because metadata is the larger part of
+this cache. It needs no restart and no quiet moment: it never touches a package read in the last 15
+minutes or holding a temp file, and it looks again just before each delete. The next read fetches
+an evicted package again.
+
+It deletes only in that exact directory, refuses a symlink or a mount on the way there, and the unit
+can write nowhere else.
 
 It is a timer, not a hard quota: between two runs the cache can pass the limit by five minutes
 of the uplink, under 3 GiB at the home site. A kernel-enforced cap needs root.
@@ -2336,8 +2341,9 @@ systemctl --user list-timers tart-runner-fleet-npm-cache-prune.timer
 journalctl --user -u tart-runner-fleet-npm-cache-prune.service -n 5 -o cat   # size, free, evicted
 ```
 
-**If the prune unit reads `failed`, the cache is stopped.** New guests go direct and `fleet
-doctor` says `npm cache not ready`. Read its journal, make space, and then bring it back:
+**If the prune unit reads `failed`, read its journal first.** Exit 1 means it stopped the cache, so
+new guests go direct and `fleet doctor` says `npm cache not ready`. **Exit 3 means it could not confirm
+that stop, so the cache may still be growing, and needs you now.** Fix the cause, and then bring it back:
 
 ```sh
 systemctl --user reset-failed tart-runner-fleet-npm-cache-prune.service

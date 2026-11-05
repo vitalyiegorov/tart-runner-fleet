@@ -39,6 +39,12 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodGet, "/npm/lodash/-/lodash-4.17.21.tgz", 0},
 		{http.MethodGet, "/npm/@types/node/-/node-22.0.0.tgz", 0},
 		{http.MethodGet, "/npm/@types%2fnode/-/node-22.0.0.tgz", 0},
+		// One version or tag: how pnpm 12 fetches its own binary, which the image's Corepack
+		// shim runs before anything else, so refusing this fails the job's first pnpm call.
+		{http.MethodGet, "/npm/@pnpm/exe.linux-x64/12.16.1", 0},
+		{http.MethodGet, "/npm/@pnpm%2Fexe.linux-x64/12.16.1", 0},
+		{http.MethodGet, "/npm/lodash/latest", 0},
+		{http.MethodGet, "/npm/lodash/4.17.21", 0},
 		// The readiness probe, and `npm dist-tag ls`.
 		{http.MethodGet, "/npm/-/ping", 0},
 		{http.MethodGet, "/npm/-/package/lodash/dist-tags", 0},
@@ -97,7 +103,10 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 		{http.MethodGet, "/npm/%6codash", http.StatusNotFound},
 		{http.MethodGet, "/npm/lodash/-/../../-/whoami", http.StatusNotFound},
 		{http.MethodGet, "/npm/lodash/-/lodash-4.17.21.tar", http.StatusNotFound},
-		{http.MethodGet, "/npm/lodash/latest", http.StatusNotFound},
+		{http.MethodGet, "/npm/lodash/-rev", http.StatusNotFound},
+		{http.MethodGet, "/npm/lodash/.hidden", http.StatusNotFound},
+		{http.MethodGet, "/npm/lodash/1.0.0/extra", http.StatusNotFound},
+		{http.MethodGet, "/npm/lodash/1.0.0%2f..", http.StatusNotFound},
 		{http.MethodGet, "/npm/-/package/lodash/dist-tags/latest", http.StatusNotFound},
 	} {
 		path, _, _ := strings.Cut(test.path, "?")

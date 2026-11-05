@@ -108,7 +108,10 @@ func (b StdinBootstrapper) selectGate(ctx context.Context, name string) error {
 }
 
 func (b StdinBootstrapper) guestScript(ctx context.Context, name, failure string, script ...string) error {
-	args := append([]string{"exec", name, "bash", "-lc"}, script...)
+	// -c and not -lc. Stock Ubuntu's ~/.bash_logout runs clear_console, which fails with no
+	// terminal, and a non-interactive login shell reads that file on the exit builtin, so under
+	// -l these scripts' `exit 0` exits 1 and every launch fails. They need only base tools.
+	args := append([]string{"exec", name, "bash", "-c"}, script...)
 	if err := b.Runner.Run(ctx, strings.NewReader(""), args...); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
