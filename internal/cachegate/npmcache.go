@@ -349,7 +349,7 @@ func (c *npmCache) store(o npmObject, response *http.Response, stalled *time.Tim
 // passThrough answers straight from the registry when the cache cannot help, as a stream, tied to
 // the guest's own request. It carries the guest's method, so a HEAD stays one.
 func (c *npmCache) passThrough(w http.ResponseWriter, r *http.Request, o npmObject) {
-	response, err := c.client.Do(c.request(r.Context(), r.Method, o))
+	response, err := c.client.Do(c.request(r.Context(), r.Method, o)) // #nosec G704 -- the configured registry, and a path DecideNPM allowed.
 	if err != nil {
 		npmFail(w, http.StatusBadGateway)
 		return

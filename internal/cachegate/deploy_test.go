@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
 )
 
@@ -15,16 +14,6 @@ func deployFile(t *testing.T, parts ...string) string {
 		t.Fatal(err)
 	}
 	return string(raw)
-}
-
-func uncommented(text string) string {
-	var kept []string
-	for line := range strings.SplitSeq(text, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
-			kept = append(kept, line)
-		}
-	}
-	return strings.Join(kept, "\n")
 }
 
 // TestTheDropInIsTheShippedGateCommandAndOneFlag: a gate that drifted here would run

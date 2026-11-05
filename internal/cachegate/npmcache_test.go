@@ -679,7 +679,10 @@ func TestALeaderWhoLeavesStillFinishesTheDownload(t *testing.T) {
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, fixture.gate.URL+testTarball, nil)
 	done := make(chan error, 1)
 	go func() {
-		_, err := http.DefaultClient.Do(request)
+		response, err := http.DefaultClient.Do(request)
+		if err == nil {
+			_ = response.Body.Close()
+		}
 		done <- err
 	}()
 	for fixture.cache.inFlight() != 1 {
@@ -736,7 +739,9 @@ func TestAnAbortStaysAnAbort(t *testing.T) {
 	fixture := newNPMFixture(t, target)
 	fixture.cache.client.Transport = panickingTransport{http.ErrAbortHandler}
 	request, _ := http.NewRequest(http.MethodGet, fixture.gate.URL+testTarball, nil)
-	if _, err := http.DefaultTransport.RoundTrip(request); err == nil {
+	response, err := http.DefaultTransport.RoundTrip(request)
+	if err == nil {
+		_ = response.Body.Close()
 		t.Fatal("an aborted handler answered")
 	}
 	if status, _, _ := fixture.get(t, "/download/x"); status != http.StatusOK {

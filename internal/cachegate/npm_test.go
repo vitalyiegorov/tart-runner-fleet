@@ -18,7 +18,7 @@ import (
 const lanGate = "192.168.1.64:3017"
 
 // TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds is the route's whole policy,
-// stated independently of what Verdaccio would do with the request.
+// stated independently of what the registry would do with the request.
 func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 	for _, test := range []struct {
 		method, path string
@@ -125,8 +125,7 @@ func TestDecideNPMAllowsOnlyTheReadRoutesAClientNeeds(t *testing.T) {
 }
 
 // TestDecideNPMRefusesAnythingButADirectLANAddress pins cloudflared to admin and
-// health: the tarball URLs Verdaccio advertises are built from this Host, so a
-// tunnel hostname here would both move cache data over it and advertise it.
+// health: a tunnel hostname here would move cache data over it.
 func TestDecideNPMRefusesAnythingButADirectLANAddress(t *testing.T) {
 	for host, allowed := range map[string]bool{
 		"192.168.1.64:3017":             true,
@@ -159,7 +158,7 @@ func TestDecideNPMRefusesAnythingButADirectLANAddress(t *testing.T) {
 	}
 }
 
-// npmBackend records what reaches the npm cache and answers like Verdaccio does.
+// npmBackend records what reaches the npm cache and answers like a registry does.
 type npmBackend struct {
 	*httptest.Server
 	mu       sync.Mutex
@@ -239,7 +238,7 @@ func TestTheNPMRouteStripsTheGatePrefixAndKeepsAScopesEncoding(t *testing.T) {
 }
 
 // TestTheNPMRouteForwardsNoGuestCredential: nothing a guest attaches reaches
-// Verdaccio except the short list of read headers a registry needs, so a header
+// the registry except the short list of read headers it needs, so a header
 // nobody thought of is refused by default.
 func TestTheNPMRouteForwardsNoGuestCredential(t *testing.T) {
 	const secret = "npm_S3CRET-token"
