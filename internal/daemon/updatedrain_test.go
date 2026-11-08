@@ -12,6 +12,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
@@ -298,5 +299,77 @@ func TestUpdateDrainDatesAFutureMaterialisationFromItsOwnTick(t *testing.T) {
 	controller.Observe(drainAt, 1)
 	if got := controller.Metric().PendingSince; !got.Equal(drainAt) || controller.Draining() {
 		t.Fatalf("pendingSince = %v draining=%v, want %v and not draining", got, controller.Draining(), drainAt)
+	}
+}
+
+// drainNode is a node's configuration reduced to what tells it apart from its
+// siblings: the scale sets it alone owns (ADR 0034 §2).
+func drainNode(scope string, sets ...config.ScaleSet) config.Config {
+	cfg := config.Default()
+	cfg.GitHub.Scopes = []config.GitHubScope{{Name: scope, ScaleSets: sets}}
+	return cfg
+}
+
+// Issue #500. Every node takes a release at the same moment, so a per-node
+// PendingFor alone made every node cross it together: on 2026-11-08 four nodes
+// entered update drain within twelve seconds and the fleet admitted nothing
+// while 54 jobs queued. Two nodes that materialise the same release at the
+// same instant must not start refusing admission on the same tick, and neither
+// may wait longer than PendingFor plus one MaxWait to start.
+func TestUpdateDrainStaggersNodesThatTakeTheSameRelease(t *testing.T) {
+	nodes := []config.Config{
+		drainNode("acme", config.ScaleSet{Profile: "linux-small", Name: "trf-ubuntu-vitalii-linux", ID: 11}),
+		drainNode("acme", config.ScaleSet{Profile: "macos-ui", Name: "trf-macmini-macos", ID: 12}),
+		drainNode("acme", config.ScaleSet{Profile: "linux-small", Name: "trf-omarchy-linux", ID: 13}),
+		drainNode("acme", config.ScaleSet{Profile: "linux-small", Name: "trf-macbook-linux", ID: 14}),
+	}
+	materialised := drainAt
+	started := map[time.Time]int{}
+	for index, cfg := range nodes {
+		policy := updateDrainPolicy(cfg)
+		read := func(string) ([]string, error) { return []string{"v0.1.879+main.a", "v0.1.880+main.b"}, nil }
+		controller := newUpdateDrainController(policy, "/root", "v0.1.879+main.a", read, nil)
+		controller.modTime = func(string) (time.Time, error) { return materialised, nil }
+		bound := cfg.UpdateDrain.PendingFor + cfg.UpdateDrain.MaxWait
+		var start time.Time
+		for at := materialised; !at.After(materialised.Add(bound)); at = at.Add(time.Minute) {
+			controller.Observe(at, 2)
+			if controller.Draining() {
+				start = at
+				break
+			}
+		}
+		if start.IsZero() {
+			t.Fatalf("node %d never drained within PendingFor+MaxWait (%s)", index, bound)
+		}
+		started[start]++
+	}
+	for at, count := range started {
+		if count > 1 {
+			t.Errorf("%d of %d nodes started draining together at %s", count, len(nodes), at.Sub(materialised))
+		}
+	}
+}
+
+// The stagger only lengthens the wait: MaxWait and Cooldown are untouched, the
+// node's place does not depend on the order its scale sets are written in, and
+// a node owning no scale set waits exactly the configured PendingFor.
+func TestUpdateDrainPolicyStaggersOnlyThePendingWait(t *testing.T) {
+	first := config.ScaleSet{Profile: "linux-small", Name: "trf-a", ID: 1}
+	second := config.ScaleSet{Profile: "macos-ui", Name: "trf-b", ID: 2}
+	forward, reversed := drainNode("acme", first, second), drainNode("acme", second, first)
+	policy := updateDrainPolicy(forward)
+	if policy != updateDrainPolicy(reversed) {
+		t.Fatal("scale-set file order moved the node's place in the rollout")
+	}
+	if policy.MaxWait != forward.UpdateDrain.MaxWait || policy.Cooldown != forward.UpdateDrain.Cooldown ||
+		policy.Enabled != forward.UpdateDrain.Enabled {
+		t.Fatalf("stagger changed more than PendingFor: %+v", policy)
+	}
+	if extra := policy.PendingFor - forward.UpdateDrain.PendingFor; extra < 0 || extra >= forward.UpdateDrain.MaxWait {
+		t.Fatalf("stagger %s outside [0, MaxWait)", extra)
+	}
+	if bare := config.Default(); updateDrainPolicy(bare).PendingFor != bare.UpdateDrain.PendingFor {
+		t.Fatal("a node owning no scale set was staggered")
 	}
 }

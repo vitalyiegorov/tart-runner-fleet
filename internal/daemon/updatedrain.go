@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
@@ -29,6 +33,29 @@ type updateDrainController struct {
 	report       func(action, version string, instances int)
 	pendingSince time.Time
 	candidate    string
+}
+
+// updateDrainPolicy is the drain policy this node's configuration declares,
+// with the node's own stagger added to PendingFor so siblings that take the
+// same release do not all stop admitting work on the same minute (issue #500).
+func updateDrainPolicy(cfg config.Config) autoupdate.DrainPolicy {
+	stagger := autoupdate.StaggerOffset(updateDrainIdentity(cfg), cfg.UpdateDrain.MaxWait)
+	return autoupdate.DrainPolicy{Enabled: cfg.UpdateDrain.Enabled, PendingFor: cfg.UpdateDrain.PendingFor + stagger,
+		MaxWait: cfg.UpdateDrain.MaxWait, Cooldown: cfg.UpdateDrain.Cooldown}
+}
+
+// updateDrainIdentity names this node by the scale sets it owns. ADR 0034 §2
+// gives each (scope, scale set) pair exactly one owning node, so the set of them
+// tells siblings apart without any new configuration, and file order does not
+// change it.
+func updateDrainIdentity(cfg config.Config) string {
+	sets := cfg.ScopedScaleSets()
+	names := make([]string, 0, len(sets))
+	for _, scoped := range sets {
+		names = append(names, fmt.Sprintf("%s/%s/%d", scoped.ScopeName, scoped.Name(), scoped.ScaleSet.ID))
+	}
+	sort.Strings(names)
+	return strings.Join(names, "\n")
 }
 
 func newUpdateDrainController(policy autoupdate.DrainPolicy, root, running string,

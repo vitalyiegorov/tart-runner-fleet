@@ -376,3 +376,31 @@ func TestReleaseModTimeDatesTheDirectory(t *testing.T) {
 		t.Fatal("an absent release was dated")
 	}
 }
+
+// Issue #500: the stagger must be a pure function of the node, so a restarted
+// daemon keeps its place in the rollout, and must never exceed the window, so a
+// busy node still drains within PendingFor plus one MaxWait.
+func TestStaggerOffsetIsStableAndBounded(t *testing.T) {
+	window := 2 * time.Hour
+	for _, identity := range []string{"macmini", "macbook", "omarchy", "ubuntu-vitalii", "macstudio"} {
+		offset := StaggerOffset(identity, window)
+		if offset != StaggerOffset(identity, window) {
+			t.Fatalf("%s: offset is not deterministic", identity)
+		}
+		if offset < 0 || offset >= window || offset%time.Second != 0 {
+			t.Fatalf("%s: offset %s is not whole seconds inside [0, %s)", identity, offset, window)
+		}
+	}
+}
+
+// No identity or no window is no stagger: the policy exactly as configured.
+func TestStaggerOffsetIsZeroWithoutAnIdentityOrWindow(t *testing.T) {
+	for _, tc := range []struct {
+		identity string
+		window   time.Duration
+	}{{"", time.Hour}, {"macmini", 0}, {"macmini", -time.Hour}, {"macmini", time.Millisecond}} {
+		if got := StaggerOffset(tc.identity, tc.window); got != 0 {
+			t.Fatalf("StaggerOffset(%q, %s) = %s, want 0", tc.identity, tc.window, got)
+		}
+	}
+}
