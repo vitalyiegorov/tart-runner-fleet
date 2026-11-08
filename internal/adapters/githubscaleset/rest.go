@@ -175,32 +175,52 @@ func (o *Observer) fetch(ctx context.Context) (s *Snapshot, err error) {
 			}
 		}
 		if o.includeRunners {
-			var runnerPage struct {
-				Runners []struct {
-					ID           int64 `json:"id"`
-					Name, Status string
-					Busy         bool
-					Labels       []struct {
-						Name string `json:"name"`
-					} `json:"labels"`
-				} `json:"runners"`
-			}
-			if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runners?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runnerPage, func() {
-				for _, r := range runnerPage.Runners {
-					labels := make([]string, len(r.Labels))
-					for i, l := range r.Labels {
-						labels[i] = l.Name
-					}
-					s.runners[r.ID] = Runner{ID: r.ID, Repository: repo, Name: r.Name, Status: r.Status, Busy: r.Busy, Labels: labels}
-				}
-				runnerPage.Runners = nil
-			}); err != nil {
-				return nil, fmt.Errorf("list runners for %s/%s: %w", repo.Owner, repo.Name, err)
+			if err := o.listRunners(ctx, repo, func(r Runner) { s.runners[r.ID] = r }); err != nil {
+				return nil, err
 			}
 		}
 	}
 	sort.Slice(s.queued, func(i, j int) bool { return s.queued[i] < s.queued[j] })
 	return s, nil
+}
+
+// Runners lists one repository's self-hosted runners. It is the on-demand half
+// of the runner inventory: the reconcile asks only when a queued job matches no
+// local set and no other proof, so the steady poll spends nothing on it (issue
+// #498). Like Refresh it bounds each request, and it must be called from the
+// observer's own ingest loop, which is what keeps the page cache unlocked.
+func (o *Observer) Runners(ctx context.Context, repo Repository) ([]Runner, error) {
+	var runners []Runner
+	if err := o.listRunners(ctx, repo, func(r Runner) { runners = append(runners, r) }); err != nil {
+		return nil, err
+	}
+	return runners, nil
+}
+
+func (o *Observer) listRunners(ctx context.Context, repo Repository, consume func(Runner)) error {
+	var runnerPage struct {
+		Runners []struct {
+			ID           int64 `json:"id"`
+			Name, Status string
+			Busy         bool
+			Labels       []struct {
+				Name string `json:"name"`
+			} `json:"labels"`
+		} `json:"runners"`
+	}
+	if err := o.pages(ctx, fmt.Sprintf("/repos/%s/%s/actions/runners?per_page=100", url.PathEscape(repo.Owner), url.PathEscape(repo.Name)), &runnerPage, func() {
+		for _, r := range runnerPage.Runners {
+			labels := make([]string, len(r.Labels))
+			for i, l := range r.Labels {
+				labels[i] = l.Name
+			}
+			consume(Runner{ID: r.ID, Repository: repo, Name: r.Name, Status: r.Status, Busy: r.Busy, Labels: labels})
+		}
+		runnerPage.Runners = nil
+	}); err != nil {
+		return fmt.Errorf("list runners for %s/%s: %w", repo.Owner, repo.Name, err)
+	}
+	return nil
 }
 
 var activeRunStatuses = [...]string{"queued", "in_progress", "pending", "waiting", "requested"}

@@ -244,3 +244,51 @@ func TestObserverRejectsResponseThatCannotBeClosed(t *testing.T) {
 		t.Fatalf("Refresh() error = %v", observation.Err)
 	}
 }
+
+// TestObserverRunnersListsOneRepositoryOnDemand covers the on-demand runner
+// listing of issue #498: it pages through one repository's runners with their
+// labels, and a refusal is an error, never an empty listing.
+func TestObserverRunnersListsOneRepositoryOnDemand(t *testing.T) {
+	repo := Repository{Owner: "vitalyiegorov", Name: "knee-doctor"}
+	tokens := TokenSourceFunc(func(context.Context) (string, error) { return "app-token", nil })
+	listed := doerFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path + "?" + r.URL.RawQuery {
+		case "/repos/vitalyiegorov/knee-doctor/actions/runners?per_page=100":
+			return response(200, `{"runners":[{"id":1,"name":"macmini-webkit","status":"online","busy":true,"labels":[{"name":"self-hosted"},{"name":"ARM64"},{"name":"macOS"},{"name":"webkit"}]}]}`,
+				`<https://api.test/repos/vitalyiegorov/knee-doctor/actions/runners?page=2&per_page=100>; rel="next"`), nil
+		case "/repos/vitalyiegorov/knee-doctor/actions/runners?page=2&per_page=100":
+			return response(200, `{"runners":[{"id":2,"name":"trf-linux-2x4-42934b716d1037bd","status":"online","busy":true,"labels":[]}]}`, ""), nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+			return nil, nil
+		}
+	})
+	o, err := NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{repo}, HTTP: listed, Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runners, err := o.Runners(context.Background(), repo)
+	if err != nil || len(runners) != 2 {
+		t.Fatalf("Runners() = %+v, %v", runners, err)
+	}
+	if webkit := runners[0]; webkit.Name != "macmini-webkit" || webkit.Status != "online" || webkit.Repository != repo ||
+		strings.Join(webkit.Labels, ",") != "self-hosted,ARM64,macOS,webkit" {
+		t.Fatalf("standalone runner = %+v", webkit)
+	}
+	if len(runners[1].Labels) != 0 {
+		t.Fatalf("scale-set runner gained labels: %+v", runners[1])
+	}
+
+	refused := doerFunc(func(*http.Request) (*http.Response, error) {
+		return response(403, `{"message":"Resource not accessible by integration"}`, ""), nil
+	})
+	o, err = NewObserver(ObserverConfig{BaseURL: "https://api.test", Repositories: []Repository{repo}, HTTP: refused, Tokens: tokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runners, err = o.Runners(context.Background(), repo)
+	var api *APIError
+	if runners != nil || !errors.As(err, &api) || api.Kind != Authorization {
+		t.Fatalf("refused listing = %+v, %v; want an authorization error and no runners", runners, err)
+	}
+}

@@ -81,8 +81,15 @@ func TestSiblingPinnedJobPreservesLocalInventory(t *testing.T) {
 type selectorClock struct{ at time.Time }
 
 // oneRunObserver is a REST observer over one repository holding one queued run
-// whose jobs are the given JSON array.
+// whose jobs are the given JSON array, and no standalone runner.
 func oneRunObserver(t *testing.T, now time.Time, repo githubscaleset.Repository, createdAt, jobs string) *githubscaleset.Observer {
+	t.Helper()
+	return oneRunObserverWithRunners(t, now, repo, createdAt, jobs, http.StatusOK, `{"runners":[]}`)
+}
+
+// oneRunObserverWithRunners also answers the repository runner listing with
+// the given status and body.
+func oneRunObserverWithRunners(t *testing.T, now time.Time, repo githubscaleset.Repository, createdAt, jobs string, status int, runners string) *githubscaleset.Observer {
 	t.Helper()
 	base := "/repos/" + repo.Owner + "/" + repo.Name + "/actions/runs"
 	observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test", Clock: selectorClock{now}, Repositories: []githubscaleset.Repository{repo},
@@ -92,6 +99,10 @@ func oneRunObserver(t *testing.T, now time.Time, repo githubscaleset.Repository,
 				return runtimeResponse(`{"workflow_runs":[{"id":10,"run_attempt":1,"status":"queued","created_at":"` + createdAt + `"}]}`), nil
 			case base + "/10/jobs":
 				return runtimeResponse(`{"jobs":` + jobs + `}`), nil
+			case "/repos/" + repo.Owner + "/" + repo.Name + "/actions/runners":
+				response := runtimeResponse(runners)
+				response.StatusCode = status
+				return response, nil
 			default:
 				t.Fatalf("unexpected request %s", r.URL.Path)
 				return nil, nil

@@ -1766,6 +1766,13 @@ type queueObserver interface {
 	Refresh(context.Context, *githubscaleset.Snapshot) githubscaleset.Observation
 }
 
+// runnerLister is the observer's on-demand repository runner listing. An
+// observer without one leaves a job only a standalone runner serves uncertain,
+// exactly as before issue #498.
+type runnerLister interface {
+	Runners(context.Context, githubscaleset.Repository) ([]githubscaleset.Runner, error)
+}
+
 func (r *restQueueIngester) Ingest(ctx context.Context) error {
 	_, err := r.IngestChanged(ctx)
 	return err
@@ -1805,6 +1812,9 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	r.previous = observation.Snapshot
 	coordinator := r.coordinator
 	coordinator.ForeignSelectors = r.foreignSelectors(now)
+	if lister, ok := r.observer.(runnerLister); ok {
+		coordinator.Runners = lister.Runners
+	}
 	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
 	// Classified before recording, so the observation detail and the loop
 	// failure reason are always the same closed reason (issue #458).
