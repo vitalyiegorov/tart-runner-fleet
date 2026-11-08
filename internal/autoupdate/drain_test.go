@@ -380,9 +380,8 @@ func TestReleaseModTimeDatesTheDirectory(t *testing.T) {
 // Issue #500: the stagger must be a pure function of the node, so a restarted
 // daemon keeps its place in the rollout, and must never exceed the window, so a
 // busy node still drains within PendingFor plus one MaxWait.
-func TestStaggerOffsetIsStableBoundedAndSpread(t *testing.T) {
+func TestStaggerOffsetIsStableAndBounded(t *testing.T) {
 	window := 2 * time.Hour
-	seen := map[time.Duration]string{}
 	for _, identity := range []string{"macmini", "macbook", "omarchy", "ubuntu-vitalii", "macstudio"} {
 		offset := StaggerOffset(identity, window)
 		if offset != StaggerOffset(identity, window) {
@@ -391,10 +390,6 @@ func TestStaggerOffsetIsStableBoundedAndSpread(t *testing.T) {
 		if offset < 0 || offset >= window || offset%time.Second != 0 {
 			t.Fatalf("%s: offset %s is not whole seconds inside [0, %s)", identity, offset, window)
 		}
-		if other, ok := seen[offset]; ok {
-			t.Fatalf("%s and %s share offset %s", identity, other, offset)
-		}
-		seen[offset] = identity
 	}
 }
 

@@ -1807,7 +1807,7 @@ therefore the earliest newer release directory's arrival on disk, not the
 daemon's start; when several newer releases are present it can predate the
 `candidate` it names, which is the newest.
 
-Nodes that take the same release do not drain together. Each node waits
+Nodes that take the same release no longer all drain together. Each node waits
 `updateDrainPendingForSeconds` plus its own fixed stagger before it starts. The
 stagger is a hash of the scale sets the node owns, in whole seconds, and is
 always less than `updateDrainMaxWaitSeconds`. On the defaults, a busy node starts
@@ -1817,8 +1817,14 @@ the same across restarts and changes only when the node's scale sets change. A
 node that owns no scale set has no stagger. Before this rule every node crossed
 the same 30 minutes together, and on 2026-11-08 four nodes stopped admitting
 work within twelve seconds of each other while 54 jobs were queued (issue #500,
-ADR 0048 amendment 2026-11-08). The stagger is not published. To see where a
-node falls, compare its `UPDATE DRAIN` `since` with `pendingSince`.
+ADR 0048 amendment 2026-11-08). The stagger makes simultaneous drains less
+likely but does not prevent them: two nodes can still get nearby offsets. The
+stagger is not published. For a draining node, compare `data.updateDrain.since`
+with `data.updateDrain.pendingSince` in `fleet status --output json` to see when
+the drain began relative to the pending release. To roll an urgent release out
+faster, lower `updateDrainMaxWaitSeconds`: the stagger is always less than it,
+so a smaller value narrows the spread (lowering `updateDrainPendingForSeconds`
+alone does not).
 
 An operator who needs the capacity back immediately can set
 `updateDrainDisabled: true` and restart — a draining node resumes admission
