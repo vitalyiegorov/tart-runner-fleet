@@ -746,6 +746,10 @@ type world struct {
 	// owedHistory is how much work the scope owed at each tick so far, which is
 	// what a conservation bound over lagging evidence has to be measured against.
 	owedHistory []int
+	// standaloneRunners are the repositories' own non-fleet runners, as GitHub's
+	// runner listing reports them (issue #498). A job only such a runner serves
+	// shares the REST snapshot with the fleet's work and is nobody's demand here.
+	standaloneRunners []githubscaleset.Runner
 
 	// vms is the simulated hypervisor: name -> powered on.
 	vms map[string]bool
@@ -999,7 +1003,8 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 	}
 	w.store = store
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
-		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority}
+		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority,
+		Runners: w.listRunners}
 	w.engine = app.Engine{
 		Refusals: &app.RunnerRefusals{Now: func() time.Time { return w.now }},
 		Store:    store, Demand: w.demand, Config: cfg.Scheduler, Bindings: cfg.Bindings,

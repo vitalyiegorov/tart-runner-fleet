@@ -190,6 +190,11 @@ type DemandCoordinator struct {
 	GhostAbsence     time.Duration
 	StrictJobRouting bool
 	ForeignSelectors []ForeignScaleSetSelector
+	// Runners lists a repository's self-hosted runners as GitHub reports them
+	// (issue #498). It is consulted only for a self-hosted job no local set and
+	// no other proof routes, at most once per repository per reconcile. Nil, or
+	// a listing that fails, proves nothing, so the job stays uncertain.
+	Runners func(context.Context, githubscaleset.Repository) ([]githubscaleset.Runner, error)
 	// Priority classifies a demand into the tier configuration declared for it
 	// (issue #224). The zero policy leaves every demand in the default tier,
 	// which is what keeps a fleet that declares no tier on pure aged FIFO.
@@ -479,13 +484,15 @@ func (c DemandCoordinator) ReconcileQueuedJobs(ctx context.Context, bindings []B
 		}
 		observations[binding.durableKey()] = nil
 	}
+	standalone := standaloneRunners{list: c.Runners}
 	for _, job := range snapshot.QueuedJobs() {
 		matched, err := matchingBindings(bindings, job)
 		if err != nil {
 			return false, reconcileStage(ReconcileStageRouting, err)
 		}
 		if len(matched) == 0 {
-			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedCapability(bindings, job) && !c.jobSelectsForeignSet(bindings, job) {
+			if c.StrictJobRouting && containsFold(job.Labels, "self-hosted") && !jobRequiresUnservedCapability(bindings, job) &&
+				!c.jobSelectsForeignSet(bindings, job) && !standalone.serve(ctx, job) {
 				return false, reconcileStage(ReconcileStageRouting,
 					fmt.Errorf("self-hosted GitHub job %d matches no configured scale set: %w", job.ID, operations.ErrUncertain))
 			}
@@ -546,6 +553,49 @@ func (c DemandCoordinator) jobSelectsForeignSet(bindings []Binding, job githubsc
 			}
 		}
 		if accepted && !local {
+			return true
+		}
+	}
+	return false
+}
+
+// standaloneRunners memoizes one reconcile's runner listings, so a burst of
+// jobs a standalone runner holds costs one GitHub request per repository per
+// poll, and a poll whose jobs all route costs none.
+type standaloneRunners struct {
+	list   func(context.Context, githubscaleset.Repository) ([]githubscaleset.Runner, error)
+	listed map[githubscaleset.Repository]standaloneListing
+}
+
+type standaloneListing struct {
+	runners  []githubscaleset.Runner
+	observed bool
+}
+
+// serve reports whether an online standalone runner of the job's own
+// repository advertises every label the job requests (issue #498). GitHub lists
+// a scale-set runner with no labels and a standalone one with `self-hosted`, so
+// requiring that label keeps every fleet runner, local or sibling, out of the
+// proof. A listing that failed proves nothing.
+func (s *standaloneRunners) serve(ctx context.Context, job githubscaleset.WorkflowJob) bool {
+	if s.list == nil {
+		return false
+	}
+	listing, seen := s.listed[job.Repository]
+	if !seen {
+		runners, err := s.list(ctx, job.Repository)
+		listing = standaloneListing{runners: runners, observed: err == nil}
+		if s.listed == nil {
+			s.listed = map[githubscaleset.Repository]standaloneListing{}
+		}
+		s.listed[job.Repository] = listing
+	}
+	if !listing.observed {
+		return false
+	}
+	for _, runner := range listing.runners {
+		if strings.EqualFold(runner.Status, "online") && containsFold(runner.Labels, "self-hosted") &&
+			advertisesEveryRoutingLabel(runner.Labels, job.Labels) {
 			return true
 		}
 	}

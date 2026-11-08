@@ -2465,6 +2465,16 @@ errors. Do not add a sibling's selector to this node or remove an intentional
 workflow selector to make readiness green. This classification neither moves
 existing assignments nor grants authority over a foreign scale set.
 
+A queued job that a standalone runner of the same repository serves (one that
+is not a fleet scale-set runner, such as `macmini-webkit` on
+`[self-hosted, macOS, webkit]`) is excluded the same way under ADR 0095, while
+that runner is online and advertises every label of the job. The node reads the
+repository's runner list only for such a job. If the GitHub App cannot read it
+(no Administration read on the repository), the job stays uncertain; check
+`gh api repos/OWNER/REPO/actions/runners` to confirm a runner serves it before
+granting that permission. Do not register a fleet set with the job's labels to
+make readiness green.
+
 ### A provisioning VM is missing from inventory
 
 A successful backend enumeration that cannot find a Cloning, Booting or Reachable
