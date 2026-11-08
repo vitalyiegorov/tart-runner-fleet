@@ -18,6 +18,11 @@ the one state no release could ever be installed from (#320). Everything else
 here — the drain, its bounds, its cooldown, and what still defers activation —
 is unchanged.
 
+**Amended 2026-11-08 by issue
+[#500](https://github.com/vitalyiegorov/tart-runner-fleet/issues/500)** in one
+clause: `PendingFor` is the shortest wait before a node drains, not the same
+wait on every node. See *Staggered start* below.
+
 ## Context
 
 ADR 0011 refuses to swap a generation out from under running work, and lists
@@ -121,14 +126,47 @@ after the drain's original start, and serves out the rest of a cooldown it was
 in. A materialisation time it cannot read, or one ahead of its own clock, dates
 the wait from its first tick, as before.
 
+### Staggered start
+
+*Amendment 2026-11-08 (issue #500):* the rule above is correct for one node, but
+the updater on every node materialises a release within one poll of the others.
+Every node therefore crossed `PendingFor` together. On 2026-11-08 four nodes
+entered update drain within twelve seconds of each other while the fleet had 54
+jobs queued, and none of them admitted work until its own jobs finished. The
+cooldown keeps a drain that cannot finish from becoming permanent half capacity.
+Nothing kept a drain that can finish from removing admission on every node at
+once.
+
+Each node now waits `PendingFor` plus its own stagger. The stagger is a hash of
+the `(scope, scale set, id)` pairs the node owns, in whole seconds, and is less
+than one `MaxWait`. ADR 0034 §2 gives each pair exactly one owning node, so the
+pairs tell nodes apart without any new configuration. The window is `MaxWait`
+because that is the longest one drain may last. Spreading the starts over that
+window spreads the drains over it too, and the window grows or shrinks with the
+bound an operator already tunes.
+
+The stagger changes the wait only. `MaxWait`, `Cooldown`, the restart resumption
+above and what defers activation are unchanged. The stagger is constant for a
+node, so a restarted daemon resumes the same schedule as before. A busy node now
+installs within `PendingFor + MaxWait + job duration` at worst, instead of
+`PendingFor + job duration`. An idle node never drains, so it is unaffected. A
+node that owns no scale set has no stagger.
+
+A hash does not guarantee that two nodes are far apart. Two siblings may land
+close together. That is a smaller loss than every node landing on the same
+minute, and it is not worth coordination to remove. A node that holds off while
+a fresh sibling of the same scope reports `fleet_update_drain_active` would
+remove it, but that needs membership data this node does not have, and it adds a
+failure mode in which a stale sibling report blocks an update. It is not built.
+
 Every unreadable input — an unreadable directory, an unparseable version, no
 configuration path — reports nothing pending. A node must never refuse
 admission on the strength of a fact it could not establish.
 
 ## Consequences
 
-A busy node now installs its own fixes within roughly `PendingFor + job
-duration`, instead of never. The cost is a bounded window of reduced admission
+A busy node now installs its own fixes within roughly `PendingFor + stagger +
+job duration`, instead of never, where the stagger is less than one `MaxWait`. The cost is a bounded window of reduced admission
 per pending release, taken deliberately and once.
 
 A drain grows the queue it is draining behind. That is expected, not evidence

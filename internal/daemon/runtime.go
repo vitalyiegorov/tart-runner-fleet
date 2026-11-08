@@ -781,10 +781,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	// Consulted by the scheduler's host observation on every tick: a node
 	// draining toward its own update refuses admission while the instances it is
 	// waiting on finish, which is how quiescence becomes reachable at all.
-	updateDrain := newUpdateDrainController(autoupdate.DrainPolicy{Enabled: cfg.UpdateDrain.Enabled,
-		PendingFor: cfg.UpdateDrain.PendingFor, MaxWait: cfg.UpdateDrain.MaxWait,
-		Cooldown: cfg.UpdateDrain.Cooldown}, installationRoot(opts.ExecutablePath, opts.ConfigPath), opts.Version,
-		autoupdate.ReleaseDirNames, reporter)
+	updateDrain := newUpdateDrainController(updateDrainPolicy(cfg),
+		installationRoot(opts.ExecutablePath, opts.ConfigPath), opts.Version, autoupdate.ReleaseDirNames, reporter)
 	reporter.counter = health
 	// What runner version each base image carries is a fact about the
 	// configuration this process started with, and configuration does not change

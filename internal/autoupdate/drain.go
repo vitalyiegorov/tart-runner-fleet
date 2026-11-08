@@ -1,6 +1,7 @@
 package autoupdate
 
 import (
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"time"
@@ -55,6 +56,28 @@ type DrainPolicy struct {
 	// Cooldown is how long a node serves normally after abandoning a drain,
 	// so an unreachable quiescence cannot become a permanent half-capacity node.
 	Cooldown time.Duration
+}
+
+// StaggerOffset is how much longer than PendingFor this node lets a candidate
+// wait before it drains: a fixed fraction of window, in whole seconds, chosen by
+// the node's identity alone.
+//
+// Every node receives a release within one updater poll of every other, so a
+// PendingFor shared by the whole fleet made every node drain on the same minute
+// and the fleet admitted nothing at all (issue #500). Spreading the start over
+// one MaxWait, the longest a drain may last, needs no coordination: each node
+// derives its own offset, the same one on every restart, and never more than
+// window. An empty identity or window is no offset, which is the policy as it
+// was.
+func StaggerOffset(identity string, window time.Duration) time.Duration {
+	seconds := int64(window / time.Second)
+	if identity == "" || seconds <= 0 {
+		return 0
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(identity))
+	offset := hash.Sum64() % uint64(seconds)
+	return time.Duration(offset) * time.Second // #nosec G115 -- offset < seconds, itself a positive int64.
 }
 
 // DrainFacts is one tick's view of whether this node needs, and can reach, the
