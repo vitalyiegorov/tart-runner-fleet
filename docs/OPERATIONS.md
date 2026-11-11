@@ -270,7 +270,10 @@ stays gated for this purpose until admission has been allowed continuously for
 seconds between refusals offers no slot and no residual
 ([ADR 0096](adr/0096-a-gate-reopens-only-once-it-has-held-open.md), issue
 #483). If every matching node is behind such a gate, no matching set offers a slot and the
-job can stay assigned to no set until a gate opens. An
+job is assigned to no set. A gate that opens later does not reliably place it:
+ADR 0082 records jobs that stayed queued for over 90 minutes after capacity
+returned. If the job is still queued once a matching node has been admitting for
+a few minutes, re-run it. An
 `update drain` keeps the slot. On a node that also runs macOS guests, a Linux
 set keeps the slot only if its vector could start here once every Linux guest
 and queued Linux job on the node has finished. macOS guests and queued macOS
