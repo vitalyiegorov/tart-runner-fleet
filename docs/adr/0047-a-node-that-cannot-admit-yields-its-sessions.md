@@ -31,7 +31,7 @@ containers held the node over the ceilings that made it yield. A binding with
 no client at all — closed, or never opened — reports
 `runner_admin_unavailable`.
 
-Amended 2026-11-03 by [ADR 0091](0091-a-gate-reopens-only-once-it-has-held-open.md)
+Amended 2026-11-03 by [ADR 0096](0096-a-gate-reopens-only-once-it-has-held-open.md)
 (issue #483): the blocked bound is no longer restarted by a brief opening. A
 refusal ends only after `sessionYieldHealthyForSeconds` of continuous
 admission, the bound the rejoin side already used, so a gate that opens for a

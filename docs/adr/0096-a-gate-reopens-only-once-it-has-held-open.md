@@ -1,4 +1,4 @@
-# ADR 0091: A gate reopens only once it has held open
+# ADR 0096: A gate reopens only once it has held open
 
 ## Status
 

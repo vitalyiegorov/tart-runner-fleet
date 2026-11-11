@@ -268,7 +268,7 @@ job goes to a sibling whose matching set advertises room
 stays gated for this purpose until admission has been allowed continuously for
 `sessionYieldHealthyForSeconds` (default 120), so a gate that reopens for a few
 seconds between refusals offers no slot and no residual
-([ADR 0091](adr/0091-a-gate-reopens-only-once-it-has-held-open.md), issue
+([ADR 0096](adr/0096-a-gate-reopens-only-once-it-has-held-open.md), issue
 #483). If every matching node is behind such a gate, no matching set offers a slot and the
 job can stay assigned to no set until a gate opens. An
 `update drain` keeps the slot. On a node that also runs macOS guests, a Linux
@@ -1881,7 +1881,7 @@ It withdraws once admission has been refused for
 shorter than `sessionYieldHealthyForSeconds` do not restart that clock, so a
 gate that flaps still withdraws an idle node; a node with live guests keeps its
 sessions and instead advertises only what it holds
-([ADR 0091](adr/0091-a-gate-reopens-only-once-it-has-held-open.md)).
+([ADR 0096](adr/0096-a-gate-reopens-only-once-it-has-held-open.md)).
 `sessionYield.since` in `fleet status --output json` dates a refusal from its
 first refused tick. It rejoins by itself once admission has been allowed
 continuously for `sessionYieldHealthyForSeconds` (default 120). The operator's job is the cause,
