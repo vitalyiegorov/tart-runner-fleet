@@ -264,9 +264,16 @@ rather than in no set at all
 `swap pressure`, `cpu pressure`, `disk reserve` or `inode reserve` in the status
 `admissionReason`) keeps no free slot and advertises only what it holds, so the
 job goes to a sibling whose matching set advertises room
-([ADR 0084](adr/0084-a-gated-node-keeps-no-standing-offer.md), issue #428). If
-every matching node is behind such a gate, no matching set offers a slot and the
-job can stay assigned to no set until a gate opens. An
+([ADR 0084](adr/0084-a-gated-node-keeps-no-standing-offer.md), issue #428). It
+stays gated for this purpose until admission has been allowed continuously for
+`sessionYieldHealthyForSeconds` (default 120), so a gate that reopens for a few
+seconds between refusals offers no slot and no residual
+([ADR 0096](adr/0096-a-gate-reopens-only-once-it-has-held-open.md), issue
+#483). If every matching node is behind such a gate, no matching set offers a slot and the
+job is assigned to no set. A gate that opens later does not reliably place it:
+ADR 0082 records jobs that stayed queued for over 90 minutes after capacity
+returned. If the job is still queued once a matching node has been admitting for
+a few minutes, re-run it. An
 `update drain` keeps the slot. On a node that also runs macOS guests, a Linux
 set keeps the slot only if its vector could start here once every Linux guest
 and queued Linux job on the node has finished. macOS guests and queued macOS
@@ -1872,8 +1879,15 @@ reason — and released the sessions behind its scale sets so GitHub binds new
 jobs to a sibling advertising the same labels instead of to a node that will
 not run them ([ADR 0047](adr/0047-a-node-that-cannot-admit-yields-its-sessions.md)).
 
-It rejoins by itself once admission has been allowed for
-`sessionYieldHealthyForSeconds` (default 120). The operator's job is the cause,
+It withdraws once admission has been refused for
+`sessionYieldBlockedForSeconds` (default 600) while it ran nothing. Openings
+shorter than `sessionYieldHealthyForSeconds` do not restart that clock, so a
+gate that flaps still withdraws an idle node; a node with live guests keeps its
+sessions and instead advertises only what it holds
+([ADR 0096](adr/0096-a-gate-reopens-only-once-it-has-held-open.md)).
+`sessionYield.since` in `fleet status --output json` dates a refusal from its
+first refused tick. It rejoins by itself once admission has been allowed
+continuously for `sessionYieldHealthyForSeconds` (default 120). The operator's job is the cause,
 not the withdrawal: read `admission` in `HOST PRESSURE` and clear whatever it
 names, usually free disk against `minFreeDiskGb`, free inodes against
 `minFreeInodePercent`, or load against

@@ -8,6 +8,12 @@ standing free slot is withheld while the node's own guardrails refuse admission
 for host pressure. Nothing else in ADR 0082 or
 [ADR 0073](0073-scale-sets-advertise-the-residual-envelope.md) changes.
 
+Amended 2026-11-03 by [ADR 0096](0096-a-gate-reopens-only-once-it-has-held-open.md)
+(issue #483): a set stays gated until admission has held open for
+`sessionYieldHealthyForSeconds`, so a gate that opens for a few seconds between
+refusals offers nothing, and a gated set advertises exactly what it holds:
+`min(configured, held)`, no longer the `held + fit` given below.
+
 ## Context
 
 ADR 0082 gave every bound scale set a standing free slot,

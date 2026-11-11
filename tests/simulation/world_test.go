@@ -155,6 +155,11 @@ type worldConfig struct {
 	// #422), so the world counts it as unassigned. It needs
 	// BrokerHonorsAdvertisedCapacity, the only broker that can refuse a job.
 	SiblingsFull bool
+	// AdmissionReopen is how long the node's guardrails must admit again,
+	// continuously, before a gated node's sets are offered more than they hold
+	// (issue #483). Production passes sessionYieldHealthyForSeconds. Zero follows
+	// the gate tick by tick, which is every world before it.
+	AdmissionReopen time.Duration
 }
 
 // simOccupancyBudget is the per-profile ceiling on how long ONE instance may
@@ -1002,6 +1007,7 @@ func newWorld(t testingT, cfg worldConfig, trace simTrace) *world {
 		t.Fatalf("open simulated store: %v", err)
 	}
 	w.store = store
+	w.advertisement.Reopen = cfg.AdmissionReopen
 	w.demand = app.DemandCoordinator{Store: store, Now: func() time.Time { return w.now },
 		StatisticsMaxAge: 2 * time.Minute, GhostAbsence: 15 * time.Minute, Priority: cfg.Priority,
 		Runners: w.listRunners}
