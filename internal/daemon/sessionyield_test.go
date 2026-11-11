@@ -67,6 +67,25 @@ func TestSessionYieldWithdrawsThroughBriefGateOpenings(t *testing.T) {
 	t.Fatal("a gate refusing 60 s of every 65 s for 15 minutes never withdrew an idle node's sessions")
 }
 
+// TestSessionYieldNeverWithdrawsARecoveredNode pins the edge the gate-reopen
+// episode opened (ADR 0096). An idle node is refused for just over eight minutes and
+// then recovers for good. While it earns HealthyFor the episode still stands, so the
+// blocked bound passes on a tick whose gate is open. Withdrawing there closes
+// the sessions of a node that has already recovered and reopens them one tick
+// later: the back-to-back session churn HealthyFor exists to prevent.
+func TestSessionYieldNeverWithdrawsARecoveredNode(t *testing.T) {
+	start := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	state := newSessionYieldState(yieldPolicy())
+	for elapsed := time.Duration(0); elapsed <= 20*time.Minute; elapsed += 5 * time.Second {
+		recovered := 8*time.Minute + 5*time.Second
+		allowed := elapsed >= recovered
+		facts := sessionYieldFacts{At: start.Add(elapsed), AdmissionAllowed: allowed}
+		if action := state.Observe(facts); action != sessionYieldNone {
+			t.Fatalf("at +%s (gate open=%t) a node that recovered at +8m5s acted on its sessions: %s", elapsed, allowed, action)
+		}
+	}
+}
+
 // TestSessionYieldKeepsABusyFlappingNodesSessions is #483's other half. The
 // same flapping gate on a node with live guests must not cut the sessions they
 // report completion and deregistration through (#432); the residual

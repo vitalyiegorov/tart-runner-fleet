@@ -307,6 +307,37 @@ func TestResidualAdvertisementHoldsTheGateThroughBriefOpenings(t *testing.T) {
 	}
 }
 
+// TestResidualAdvertisementAnEmptyHeadroomDoesNotMoveTheGate covers a tick
+// that planned but measured no set at all, as when every binding's statistics
+// read fails. Such a tick says nothing about the host's guardrails. Counting it
+// as an open tick let two minutes of statistics outage end a refusal that was
+// still standing, and put the standing offer back on the first opening after
+// the outage. A node never widens what it advertises on a fact it could not
+// establish (ADR 0096).
+func TestResidualAdvertisementAnEmptyHeadroomDoesNotMoveTheGate(t *testing.T) {
+	start := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	advertisement := ResidualAdvertisement{Reopen: 2 * time.Minute}
+	observe := func(at time.Duration, rows []ScaleSetHeadroom) {
+		advertisement.Observe(TickResult{At: start.Add(at), Plan: scheduler.Plan{Status: scheduler.PlanReady}, Headroom: rows}, nil)
+	}
+	gated := []ScaleSetHeadroom{{StoreKey: 7, Held: 2, Placed: 2, Gated: true}}
+	open := []ScaleSetHeadroom{{StoreKey: 7, Held: 2, Placed: 2, Fit: 3}}
+	observe(0, gated)
+	// Three minutes with no row at all: longer than the reopen bound.
+	for at := 5 * time.Second; at <= 3*time.Minute; at += 5 * time.Second {
+		observe(at, []ScaleSetHeadroom{})
+	}
+	if got := advertisement.Capacity(7, 8); got != 2 {
+		t.Fatalf("after an outage of rows: advertised %d, want the 2 it holds", got)
+	}
+	// The first measured tick lands in a brief opening of a gate that never
+	// stayed open.
+	observe(3*time.Minute+5*time.Second, open)
+	if got := advertisement.Capacity(7, 8); got != 2 {
+		t.Fatalf("on the first opening after the outage: advertised %d, want the 2 it holds", got)
+	}
+}
+
 // TestRefusalEpisodeEndsOnlyAfterContinuousAdmission pins the hysteresis both
 // the advertisement and session yield read: a refusal outlives openings
 // shorter than Reopen, and a clock correction earns no elapsed time.
