@@ -65,9 +65,9 @@ type ScaleSetHeadroom struct {
 // what the free slot attracts, and a job assigned to it waits there while a
 // sibling serving the same labels may be idle. It advertises exactly what it
 // holds, so nothing GitHub already gave it is taken away and nothing more is
-// invited. On a tick the gate itself refuses, Fit is already zero; on a tick
-// the gate is held through a brief opening (issue #483), the residual that
-// opening measured is not offered either.
+// invited. That holds for its residual share too: a guardrail that leaves
+// memory free still measures a Fit, and neither that nor the residual a brief
+// opening measured (issue #483) is offered while the node is gated.
 //
 // Nor does a set whose vector this node could not start even once all its
 // Linux work has drained (issue #439, ADR 0085). The standing offer promises a
@@ -124,7 +124,8 @@ type ResidualAdvertisement struct {
 // a few seconds between refusals neither restarts the episode nor ends it.
 //
 // It is the one definition of "this node can admit again" that the residual
-// advertisement and session yield (ADR 0047) both read. The zero value is a
+// advertisement and session yield (ADR 0047) both read. They feed it different
+// gates: yield counts an update drain as a refusal, the advertisement does not. The zero value is a
 // host in no episode, which is what a fresh daemon assumes.
 type RefusalEpisode struct {
 	// Reopen is how long admission must be allowed, continuously, before the
@@ -162,14 +163,16 @@ func (e *RefusalEpisode) Observe(at time.Time, refused bool) bool {
 // Since is when the current episode began; zero when the host is in none.
 func (e *RefusalEpisode) Since() time.Time { return e.since }
 
-// Observe records one tick. Only a tick that produced a ready plan and a
-// headroom replaces the view, and only such a tick moves the gate. Any other
+// Observe records one tick. Only a tick that produced a ready plan and measured
+// at least one scale set replaces the view, and only such a tick moves the gate.
+// A tick with no row, as when every binding's statistics read fails, says
+// nothing about the host's guardrails. Any other
 // tick keeps the last view: a node that cannot plan cannot start what it is
 // offered either, and dropping the view used to advertise every set's
 // configured maximum exactly when the node was least able to run it (issue
 // #397).
 func (a *ResidualAdvertisement) Observe(result TickResult, err error) {
-	if a == nil || err != nil || result.Plan.Status != scheduler.PlanReady || result.Headroom == nil {
+	if a == nil || err != nil || result.Plan.Status != scheduler.PlanReady || len(result.Headroom) == 0 {
 		return
 	}
 	// Every row carries the same node-wide gate (hostHealthy), so any one of

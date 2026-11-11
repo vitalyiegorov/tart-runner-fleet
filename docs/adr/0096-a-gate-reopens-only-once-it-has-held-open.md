@@ -57,16 +57,24 @@ and both tools read it:
 - **The advertisement.** `ResidualAdvertisement` folds each ready tick's gate
   (`hostHealthy`, unchanged) into one episode and marks every set gated while
   the episode lasts. A gated set advertises exactly `min(configured, held)`:
-  no standing slot and no share of a residual measured in a brief opening. On
-  a tick the gate itself refuses, the residual is already zero, so this is the
-  value ADR 0084 gave. An update drain still is not a gate.
+  no standing slot and no share of the residual. This also changes a steadily
+  gated set: ADR 0084 took away only the standing slot, so a set gated by a
+  guardrail that leaves memory free (disk, inodes, CPU) still advertised
+  `held + fit`. It now advertises `held`. An update drain still is not a gate.
 - **Session yield.** The episode replaces the continuous-refusal streak. An idle
   node withdraws once the episode, less any time with work in flight, reaches
-  `BlockedFor`. Live instances and retrying operations still hold the sessions
+  `BlockedFor`, and only on a tick the gate actually refuses. The episode
+  outlives the last refusal by `HealthyFor`, so without that condition a node
+  that had just recovered would close its sessions and reopen them a tick later. Live instances and retrying operations still hold the sessions
   and restart that clock, exactly as before. A withdrawn node still rejoins
   after `HealthyFor` of continuous admission, which was already the rejoin rule.
   `sessionYield.since` now dates a refusal from its first refused tick, not
   from the last flap.
+
+The two tools share the episode type, not its input. Yield feeds it the
+admission gate, which an update drain closes. The advertisement feeds it
+`hostHealthy`, which an update drain does not. That difference predates this
+ADR and is kept.
 
 The bound is `sessionYieldHealthyForSeconds`, not a new knob. It already means
 "how long admission must hold before this node competes for work again"; the
@@ -79,13 +87,26 @@ not session yield is enabled.
   (#432). A busy pressured node stops attracting work through its
   advertisement, not by losing its sessions.
 - A node never withdraws, or stops advertising, on a fact it could not
-  establish. Only a ready tick with a fresh host observation moves the
-  advertisement's gate (ADR 0073's fail-open rule stands), and yield still
-  folds only ticks whose operation count was readable.
+  establish. Only a ready tick with a fresh host observation and at least one
+  measured scale set moves the advertisement's gate (ADR 0073's fail-open rule
+  stands), and yield still folds only ticks whose operation count was
+  readable.
 - A node that is truly healthy rejoins after `HealthyFor`, and its sets regain
   the standing offer and their residual share after the same bound.
 
 ## Consequences
+
+- The episode is in memory only. A daemon restart starts with none, so a node
+  whose gate is flapping offers its standing slot and residual again if its
+  first ready tick lands in an opening, for up to one long poll. Starting every
+  daemon inside an episode would instead withhold offers for `HealthyFor` after
+  each restart, including a fleet-wide update, on nodes that are healthy; that
+  cost is the larger one.
+- `TestSessionYieldNeverWithdrawsARecoveredNode`: an idle node refused for
+  8m5s and healthy from then on never acts on its sessions.
+- `TestResidualAdvertisementAnEmptyHeadroomDoesNotMoveTheGate`: three minutes
+  of ticks with no measured set neither end a refusal nor change what the set
+  advertises.
 
 - `TestSessionYieldWithdrawsThroughBriefGateOpenings`: a gate refusing 60 s of
   every 65 s withdraws an idle node exactly at `BlockedFor`. It never withdrew

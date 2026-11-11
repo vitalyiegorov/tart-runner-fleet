@@ -11,7 +11,8 @@ for host pressure. Nothing else in ADR 0082 or
 Amended 2026-11-03 by [ADR 0096](0096-a-gate-reopens-only-once-it-has-held-open.md)
 (issue #483): a set stays gated until admission has held open for
 `sessionYieldHealthyForSeconds`, so a gate that opens for a few seconds between
-refusals offers nothing, and a gated set advertises exactly what it holds.
+refusals offers nothing, and a gated set advertises exactly what it holds:
+`min(configured, held)`, no longer the `held + fit` given below.
 
 ## Context
 

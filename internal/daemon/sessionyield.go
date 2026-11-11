@@ -155,7 +155,11 @@ func (s *sessionYieldState) Observe(facts sessionYieldFacts) sessionYieldAction 
 	if busy || s.idleSince.IsZero() || facts.At.Before(s.idleSince) {
 		s.idleSince = facts.At
 	}
-	if !busy && facts.At.Sub(s.idleSince) >= s.policy.BlockedFor {
+	// Withdraw only on a tick the gate actually refuses. The episode outlives
+	// the gate's last refusal by HealthyFor, so the bound can pass while the
+	// node is already admitting again; withdrawing there would close sessions
+	// the next tick reopens.
+	if !busy && !facts.AdmissionAllowed && facts.At.Sub(s.idleSince) >= s.policy.BlockedFor {
 		s.yielded = true
 		s.withdrawnAt = facts.At
 		return sessionYieldWithdraw
