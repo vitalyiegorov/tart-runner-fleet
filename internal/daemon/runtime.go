@@ -1822,17 +1822,21 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}); ok {
 			retired, completionErr := coordinator.RetireCompletedRuns(ctx, r.bindings, observation.Snapshot, observer.CompletedRuns)
 			changed = changed || retired > 0
-			// Pace again from when the lookups finished and on the budget they
-			// left, never earlier than the refresh already asked for: a slow
-			// batch must not eat into a Retry-After, and lookups that pushed the
-			// budget into its reserve must defer the next poll.
+			// Only lookups that asked for more than the interval re-pace, from
+			// when they finished and on the budget they left, never earlier than
+			// the refresh already asked for: a slow batch must not eat into a
+			// Retry-After, and lookups that pushed the budget into its reserve
+			// must defer the next poll. A healthy batch keeps the refresh's own
+			// pacing, so a slow poll does not stretch the polling period.
 			budget := observation.Budget
 			if b, ok := r.observer.(interface{ Budget() githubscaleset.Budget }); ok && b.Budget().Observed {
 				budget = b.Budget()
 			}
-			after := r.now().UTC()
-			if next := after.Add(r.pace(after, githubscaleset.Observation{Err: completionErr, Budget: budget})); next.After(r.next) {
-				r.next = next
+			if completionErr != nil || budget.Scarce() {
+				after := r.now().UTC()
+				if next := after.Add(r.pace(after, githubscaleset.Observation{Err: completionErr, Budget: budget})); next.After(r.next) {
+					r.next = next
+				}
 			}
 			if completionErr != nil {
 				if r.reporter != nil {
