@@ -2518,3 +2518,18 @@ registered or running VMs still block inventory. Never delete state rows or
 fabricate a replacement VM. An older incumbent that cannot expose the row to
 recovery also cannot pass the updater's healthy-generation gate; preserve the
 failure evidence and use a separately validated operational recovery path.
+
+### Completed-run demand after a node outage (#405)
+
+A returning node may retain uncorroborated queued demand or started demand whose
+completion message was lost. After REST queue reconciliation, demand at least
+15 minutes old is eligible for a bounded terminal-run check (at most ten distinct
+run identities per REST poll, rotating across polls). Positive `completed`
+evidence retires the demand without waiting for the 48-hour overdue bound.
+Known attempts are checked individually; an unknown attempt requires the latest
+run to be completed. Missing, unknown, or failed REST evidence retires nothing.
+
+Started/assigned demand remains active while a nonterminal local instance names
+its runner or scheduling identity. This path never deletes or drains instances,
+changes authority mode, or bypasses update quiescence. Inspect the versioned
+status/queues/instances interface; do not delete demand rows manually.

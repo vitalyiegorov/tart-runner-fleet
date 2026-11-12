@@ -1816,6 +1816,18 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		coordinator.Runners = lister.Runners
 	}
 	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	if err == nil {
+		if observer, ok := r.observer.(interface {
+			CompletedRuns(context.Context, []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error)
+		}); ok {
+			var retired int64
+			retired, err = coordinator.RetireCompletedRuns(ctx, r.bindings, observer.CompletedRuns)
+			changed = changed || retired > 0
+			if err != nil {
+				err = &app.ReconcileStageError{Stage: app.ReconcileStageExpiry, Err: err}
+			}
+		}
+	}
 	// Classified before recording, so the observation detail and the loop
 	// failure reason are always the same closed reason (issue #458).
 	err = classifyReconcileFailure(err)

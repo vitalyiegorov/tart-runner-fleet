@@ -24,13 +24,11 @@ import (
 // job on when no set here advertises room for it (`toSibling`), which is the
 // other half of the incident: the job is not lost, it is run elsewhere.
 //
-// It is exercised by the pinned traces below and not yet by a seed sweep: its
-// seed stream reaches issue #405 -- a demand silently cancelled before REST ever
-// saw it never expires -- at seed 1, a defect reproduced on main in every world
-// and not this change's own. The arm lands with that fix, so the sweep is never
-// knowingly red (docs/TESTING.md). Property (t) is swept meanwhile wherever two
-// sets share a profile: the federated scope's 24 seeds catch the per-set offer
-// this record removes.
+// It is exercised by the pinned traces below. Its earlier seed-stream blocker,
+// issue #405 (silent cancellation before REST corroboration), is pinned separately
+// in regression405_test.go and now retires through positive terminal-run evidence.
+// Property (t) is also swept wherever two sets share a profile: the federated
+// scope's 24 seeds catch the per-set offer this record removes.
 func sharedLabelWorld() worldConfig {
 	cfg := macOSOnlyNodeWorld()
 	cfg.Name = "mac-studio-shared-labels"
