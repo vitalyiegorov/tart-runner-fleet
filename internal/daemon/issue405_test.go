@@ -20,7 +20,7 @@ import (
 )
 
 func TestIssue405RESTIngesterRetiresCompletedRun(t *testing.T) {
-	for _, mode := range []string{"completed", "unavailable", "mixed", "active", "limited403", "limited429", "slow429", "scarce"} {
+	for _, mode := range []string{"completed", "unavailable", "mixed", "active", "limited403", "limited429", "slow429", "scarce", "slowok"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
@@ -57,6 +57,11 @@ func TestIssue405RESTIngesterRetiresCompletedRun(t *testing.T) {
 						resp.StatusCode = 429
 						resp.Header.Set("Retry-After", "90")
 						return resp, nil
+					}
+					if mode == "slowok" {
+						// A slow, healthy batch: nothing asked for more than the interval.
+						elapsed = time.Minute
+						return runtimeResponse(`{"id":77,"run_attempt":1,"status":"completed"}`), nil
 					}
 					if mode == "scarce" {
 						resp := runtimeResponse(`{"id":77,"run_attempt":1,"status":"completed"}`)
@@ -109,6 +114,9 @@ func TestIssue405RESTIngesterRetiresCompletedRun(t *testing.T) {
 			if mode == "slow429" && ingester.next.Sub(now) != time.Minute+90*time.Second {
 				t.Fatalf("backoff must count from the failure, got %v", ingester.next.Sub(now))
 			}
+			if mode == "slowok" && ingester.next.Sub(now) != time.Second {
+				t.Fatalf("a healthy poll must keep the refresh's own pacing, got %v", ingester.next.Sub(now))
+			}
 			if mode == "scarce" && ingester.next.Sub(now) != 20*time.Minute {
 				t.Fatalf("completion requests that left the budget scarce must defer the next poll, got %v", ingester.next.Sub(now))
 			}
@@ -120,7 +128,7 @@ func TestIssue405RESTIngesterRetiresCompletedRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := 0
-			if mode != "completed" && mode != "scarce" {
+			if mode != "completed" && mode != "scarce" && mode != "slowok" {
 				want = 1
 			}
 			if len(active) != want {
