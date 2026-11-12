@@ -41,6 +41,16 @@ type DrainAbort struct {
 	Evidence AbortEvidence
 }
 
+// GuestStop is one guest a drain stopped: the instance row (identity, profile,
+// repository, resources, demand key — never JIT configuration or an operation
+// payload), the phase that decided the drain, and the rung of the stop ladder
+// that ended the guest. Every rung is a closed vocabulary.
+type GuestStop struct {
+	Instance operations.Instance
+	Phase    string
+	Rung     string
+}
+
 // DrainPhaseName renders a durable drain phase for a diagnostic. Unknown phases
 // say so rather than borrowing a neighbour's name.
 func DrainPhaseName(phase int) string {

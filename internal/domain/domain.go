@@ -564,6 +564,10 @@ type HostPressure struct {
 	// filesystem with no fixed inode limit, such as btrfs.
 	FreeInodes  int64
 	TotalInodes int64
+	// PhysicalMemoryMB is the machine's real memory, zero when unobserved. It
+	// decides nothing here; it lets a refusal be read against what the guests
+	// hold (knee-doctor#1352).
+	PhysicalMemoryMB int64
 }
 
 type Reservation struct {

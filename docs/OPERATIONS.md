@@ -120,10 +120,13 @@ tiny value such as `0.001`. `fleet config policy` shows the effective value as
 
 The daemon logs each edge of the admission gate once on stderr, never once per
 tick (issue #436). The lines look like this:
-`admission gate closed reason="swap pressure" openFor=1h10m0s`,
-`admission gate closed reason="disk reserve" after="swap pressure" closedFor=1m0s`
+`admission gate closed reason="swap pressure" guests=3 guestMemoryMiB=16384 hostMemoryMiB=24576 availableMemoryMiB=1210 swapUsedMiB=3072 openFor=1h10m0s`,
+`admission gate closed reason="disk reserve" guests=3 ... after="swap pressure" closedFor=1m0s`
 (the refusal reason changed while the gate stayed closed), and
-`admission gate opened after="swap pressure" closedFor=10m0s`. The reason can be
+`admission gate opened after="swap pressure" closedFor=10m0s`. A closure names
+the live guests and the memory they reserve beside the host's physical and
+available memory and its swap, so a refusal can be read against overcommit
+(`hostMemoryMiB=0` is a total the probe did not read). The reason can be
 any refusal in the table above, or `update drain`. A daemon that starts with
 the gate closed logs the closure, and one that starts with it open logs
 nothing. A tick on which the host could not be observed is not an edge.
@@ -1076,6 +1079,32 @@ same instance repeats a plan and abort pair, the planning evidence and the
 runner evidence disagree for that instance. Compare
 `fleet instances --output json` with the instance's demand rows before you
 change anything. Never deregister such a runner by hand.
+
+### Every guest the fleet stopped
+
+Every stop rung that powers a guest off is logged once, whatever decided the
+drain (knee-doctor#1352):
+
+```sh
+grep 'instance guest stopped' fleet-authority.stderr.log
+```
+
+```text
+level=WARN msg="instance guest stopped" instance=trf-macos-2x4-0a1b2c3d4e5f6a7b profile=macos-2x4 repo=owner/pony cause=lingering_runner rung=graceful state=deregistering memoryMiB=4096 runId=17 jobId=41
+```
+
+`cause=` is the drain phase: `event` (the job the VM was spawned for
+completed), `lingering_runner` and `stalled_assignment` (an idle runner
+reclaimed), `inactive_recovery` (the runner was gone from GitHub),
+`stopped_recovery` (the VM was already powered off by something other than the
+fleet), `occupancy_budget` and `guest_unresponsive` (a running job ended on
+purpose; these two stop before deregistering, so they log in `state=draining`
+and again in `state=deregistering`), and `provision_stalled`. `rung=` is
+`graceful`, `forced` or `destructive` (ADR 0039). `jobId` is the job of the
+demand the VM was spawned for; GitHub may have brokered another job to it
+(ADR 0074). A runner that reported `The runner has received a shutdown signal`
+with no line naming it was not stopped by this fleet: look at the host and the
+guest.
 
 ### A completed job drain re-derived on the tick
 
