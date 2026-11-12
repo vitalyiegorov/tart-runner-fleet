@@ -89,3 +89,36 @@ func TestCompletedRunsBoundsAndRotatesRequests(t *testing.T) {
 		t.Fatal("authentication failure hidden")
 	}
 }
+
+// Completion lookups are optional work: they must never spend the reserve the
+// inventory and every other caller of this installation depend on.
+func TestCompletedRunsStopsAtTheBudgetReserve(t *testing.T) {
+	requests := 0
+	o, _ := NewObserver(ObserverConfig{BaseURL: "https://api.test", HTTP: doerFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		resp := response(200, `{"id":1,"status":"in_progress","run_attempt":1}`, "")
+		resp.Header.Set("X-RateLimit-Limit", "5000")
+		resp.Header.Set("X-RateLimit-Remaining", "400")
+		resp.Header.Set("X-RateLimit-Reset", "4102444800")
+		return resp, nil
+	}), Tokens: TokenSourceFunc(func(context.Context) (string, error) { return "", nil })})
+	candidates := []WorkflowRun{}
+	for i := int64(1); i <= 5; i++ {
+		candidates = append(candidates, WorkflowRun{ID: i, Repository: Repository{"o", "r"}})
+	}
+	if _, err := o.CompletedRuns(context.Background(), candidates); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("an answer that left the budget scarce must stop the batch: requests=%d", requests)
+	}
+	if _, err := o.CompletedRuns(context.Background(), candidates); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("a scarce budget must not be spent at all: requests=%d", requests)
+	}
+	if got := o.Budget(); !got.Scarce() {
+		t.Fatalf("budget=%+v", got)
+	}
+}
