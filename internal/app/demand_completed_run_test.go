@@ -28,11 +28,10 @@ func TestCompletedRunGhostLeavesQueue(t *testing.T) {
 	}
 	binding := app.Binding{ScaleSetID: 1, Profile: domain.Profile{ID: "linux", Route: "linux", Platform: domain.PlatformLinux}}
 	c := app.DemandCoordinator{Store: store, Now: func() time.Time { return now }}
-	n, err := c.RetireCompletedRuns(ctx, []app.Binding{binding}, func(_ context.Context, runs []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error) {
+	n, err := c.RetireCompletedRuns(ctx, []app.Binding{binding}, nil, func(_ context.Context, runs []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error) {
 		if len(runs) != 1 {
 			t.Fatalf("candidates=%v", runs)
 		}
-		runs[0].Status = "completed"
 		return runs, nil
 	})
 	if err != nil || n != 1 {

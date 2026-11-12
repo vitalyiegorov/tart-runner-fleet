@@ -21,6 +21,8 @@ func TestCompletedRunsRequiresPositiveExactEvidence(t *testing.T) {
 		{"missing attempt", `{"id":77,"status":"completed"}`, 200, 2, 0},
 		{"unknown", `{}`, 200, 2, 0},
 		{"bad json", `{`, 200, 2, 0},
+		{"gone", `{}`, 410, 2, 0},
+		{"server", `{}`, 500, 2, 0},
 		{"not found", `{}`, 404, 2, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

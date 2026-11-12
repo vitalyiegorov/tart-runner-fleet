@@ -3,6 +3,7 @@ package githubscaleset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -31,7 +32,11 @@ func (o *Observer) CompletedRuns(ctx context.Context, candidates []WorkflowRun) 
 		endpoint, _ := o.resolve(path)
 		page, err := o.page(ctx, endpoint.String())
 		if err != nil {
-			return nil, err
+			var api *APIError
+			if errors.As(err, &api) && api.Kind != Authentication && api.Kind != Authorization && api.Kind != RateLimited {
+				continue
+			}
+			return completed, err
 		}
 		var answer struct {
 			ID      int64
@@ -39,12 +44,11 @@ func (o *Observer) CompletedRuns(ctx context.Context, candidates []WorkflowRun) 
 			Attempt int `json:"run_attempt"`
 		}
 		if err := json.Unmarshal(page.body, &answer); err != nil {
-			return nil, err
+			continue
 		}
 		// An unknown broker attempt uses the latest run: completed there proves all
 		// older attempts terminal too. A known attempt always requires an exact match.
 		if answer.ID == run.ID && answer.Status == "completed" && answer.Attempt > 0 && (run.Attempt == 0 || answer.Attempt == run.Attempt) {
-			run.Status = "completed"
 			completed = append(completed, run)
 		}
 	}

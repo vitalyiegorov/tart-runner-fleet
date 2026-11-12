@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
@@ -20,7 +19,7 @@ func TestCompletedRunRetiresUncorroboratedAndOrphanStartedDemand(t *testing.T) {
 				t.Fatal(err)
 			}
 			now := time.Now()
-			run := githubscaleset.WorkflowRun{ID: 77, Repository: githubscaleset.Repository{Owner: "owner", Name: "repo"}, Status: "completed"}
+			run := operations.RunIdentity{RunID: 77, Owner: "owner", Repository: "repo"}
 			n, err := store.ExpireCompletedRunDemands(context.Background(), overdueScaleSet, now, run)
 			if err != nil || n != 1 {
 				t.Fatalf("retired=%d err=%v", n, err)
@@ -36,7 +35,7 @@ func TestCompletedRunRetiresUncorroboratedAndOrphanStartedDemand(t *testing.T) {
 func TestCompletedRunExpiryGuards(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
-	run := githubscaleset.WorkflowRun{ID: 77, Repository: githubscaleset.Repository{Owner: "owner", Name: "repo"}, Status: "completed"}
+	run := operations.RunIdentity{RunID: 77, Owner: "owner", Repository: "repo"}
 	for _, live := range []bool{false, true} {
 		for _, kind := range []operations.DemandEventKind{operations.DemandJobAvailable, operations.DemandJobStarted} {
 			t.Run(fmt.Sprintf("live=%v/%s", live, kind), func(t *testing.T) {
@@ -69,16 +68,16 @@ func TestCompletedRunExpiryGuards(t *testing.T) {
 	}
 	store := clockedStore(t, func() time.Time { return now })
 	seedQueuedDemand(t, store, 1, now.Add(-time.Hour))
-	for _, other := range []githubscaleset.WorkflowRun{
-		{ID: 78, Repository: run.Repository, Status: "completed"},
-		{ID: 77, Repository: run.Repository, Attempt: 2, Status: "completed"},
-		{ID: 77, Repository: githubscaleset.Repository{Owner: "else", Name: "repo"}, Status: "completed"},
+	for _, other := range []operations.RunIdentity{
+		{RunID: 78, Owner: run.Owner, Repository: run.Repository},
+		{RunID: 77, Owner: run.Owner, Repository: run.Repository, Attempt: 2},
+		{RunID: 77, Owner: "else", Repository: "repo"},
 	} {
 		if n, err := store.ExpireCompletedRunDemands(ctx, overdueScaleSet, now, other); err != nil || n != 0 {
 			t.Fatalf("wrong identity retired: %d %v", n, err)
 		}
 	}
-	for _, bad := range []githubscaleset.WorkflowRun{{}, {ID: 77, Repository: run.Repository, Status: "queued"}} {
+	for _, bad := range []operations.RunIdentity{{}, {RunID: 77, Owner: run.Owner, Repository: run.Repository, Attempt: -1}} {
 		if _, err := store.ExpireCompletedRunDemands(ctx, overdueScaleSet, now, bad); !errors.Is(err, operations.ErrInvalid) {
 			t.Fatalf("invalid: %v", err)
 		}

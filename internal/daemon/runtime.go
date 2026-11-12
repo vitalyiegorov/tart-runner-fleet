@@ -1820,11 +1820,13 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		if observer, ok := r.observer.(interface {
 			CompletedRuns(context.Context, []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error)
 		}); ok {
-			var retired int64
-			retired, err = coordinator.RetireCompletedRuns(ctx, r.bindings, observer.CompletedRuns)
+			retired, completionErr := coordinator.RetireCompletedRuns(ctx, r.bindings, observation.Snapshot, observer.CompletedRuns)
 			changed = changed || retired > 0
-			if err != nil {
-				err = &app.ReconcileStageError{Stage: app.ReconcileStageExpiry, Err: err}
+			if completionErr != nil {
+				r.next = now.Add(r.pace(now, githubscaleset.Observation{Err: completionErr, Budget: observation.Budget}))
+				if r.reporter != nil {
+					r.reporter.reportReconcile(r.observation, app.FailureReasonOf(classifyReconcileFailure(completionErr)), app.ReconcileStageExpiry)
+				}
 			}
 		}
 	}
@@ -1910,7 +1912,7 @@ func (r *restQueueIngester) pace(now time.Time, observation githubscaleset.Obser
 		deferral = observation.Budget.Reset.Sub(now)
 	}
 	var api *githubscaleset.APIError
-	if errors.As(observation.Err, &api) && api.Kind == githubscaleset.RateLimited {
+	if errors.As(observation.Err, &api) && (api.Kind == githubscaleset.RateLimited || (api.Kind == githubscaleset.Authorization && api.RetryAfter > 0)) {
 		deferral = max(deferral, api.RetryAfter)
 	}
 	return max(r.interval, min(deferral, restBudgetDeferralMax))

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -74,7 +75,8 @@ func TestIssue405RESTIngesterRetiresCompletedRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			health, _ := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{CriticalObservations: []string{"rest"}})
-			ingester := restQueueIngester{health: health, observation: "rest", observer: observer, interval: time.Second, now: func() time.Time { return now }, coordinator: app.DemandCoordinator{Store: store, Now: func() time.Time { return now }}, bindings: []app.Binding{{ScaleSetID: 1, Profile: domain.Profile{ID: "linux", Route: "linux", Platform: domain.PlatformLinux}}}}
+			var reported bytes.Buffer
+			ingester := restQueueIngester{reporter: newFailureReporter(&reported, func() time.Time { return now }), health: health, observation: "rest", observer: observer, interval: time.Second, now: func() time.Time { return now }, coordinator: app.DemandCoordinator{Store: store, Now: func() time.Time { return now }}, bindings: []app.Binding{{ScaleSetID: 1, Profile: domain.Profile{ID: "linux", Route: "linux", Platform: domain.PlatformLinux}}}}
 			_, err = ingester.IngestChanged(ctx)
 			if err != nil {
 				t.Fatalf("err=%v", err)
@@ -87,6 +89,9 @@ func TestIssue405RESTIngesterRetiresCompletedRun(t *testing.T) {
 			}
 			if strings.HasPrefix(mode, "limited") && ingester.next.Sub(now) != 90*time.Second {
 				t.Fatalf("backoff=%v", ingester.next.Sub(now))
+			}
+			if (mode == "unavailable" || strings.HasPrefix(mode, "limited")) && reported.Len() == 0 {
+				t.Fatal("completion failure not reported")
 			}
 			active, err := store.ActiveDemands(ctx, 1)
 			if err != nil {

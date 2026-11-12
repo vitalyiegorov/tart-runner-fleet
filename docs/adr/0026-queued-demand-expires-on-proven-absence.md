@@ -124,12 +124,19 @@ capacity ahead of real work, and block update quiescence.
 
 After a successful REST queue reconciliation, the same observer checks at most
 ten distinct run identities whose demand has waited at least fifteen minutes.
-It rotates deterministically through candidates across polls. A known attempt
-uses the run-attempt endpoint and requires the same run ID and attempt with
+Runs present in the fresh active REST snapshot are skipped when the recorded
+attempt is unknown or matches that snapshot. Only absent runs and older attempts
+need a GET. The observer rotates deterministically through candidates across
+polls. A known attempt uses the run-attempt endpoint and requires the same run ID and attempt with
 status exactly `completed`. When the broker row has no attempt, the latest-run
 endpoint must positively report a completed run with a valid attempt: earlier
 attempts of that run are terminal as well. Active, missing, malformed, mismatched,
-or unreadable evidence retires nothing; a failed batch commits no retirements.
+or unreadable evidence retires nothing for that run. Missing/deleted runs and
+malformed answers do not discard terminal evidence for other candidates.
+Authentication, rate-limit, and transport failures stop the batch, preserving
+already gathered evidence. Completion retirement errors are reported separately
+and never invalidate successful queue reconciliation or its critical REST
+observation. Rate limits feed the existing bounded poll pacing.
 
 The store atomically rechecks repository, run, recorded attempt, active status,
 and that the row has not changed after the observation began. Available demand

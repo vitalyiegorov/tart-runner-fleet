@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/lifecycle"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -1123,8 +1122,8 @@ func (s *Store) QueuedGitHubJobs(ctx context.Context, scaleSetID int64) ([]opera
 // ExpireCompletedRunDemands retracts a terminal run's demand without changing
 // instance or runner lifecycle. For assigned/started rows, the execution-time
 // guard preserves demand associated with a live runner or live incarnation.
-func (s *Store) ExpireCompletedRunDemands(ctx context.Context, scaleSetID int64, now time.Time, run githubscaleset.WorkflowRun) (int64, error) {
-	if scaleSetID <= 0 || now.IsZero() || run.ID <= 0 || run.Attempt < 0 || run.Repository.Owner == "" || run.Repository.Name == "" || run.Status != "completed" {
+func (s *Store) ExpireCompletedRunDemands(ctx context.Context, scaleSetID int64, now time.Time, run operations.RunIdentity) (int64, error) {
+	if scaleSetID <= 0 || now.IsZero() || run.RunID <= 0 || run.Attempt < 0 || run.Owner == "" || run.Repository == "" {
 		return 0, operations.ErrInvalid
 	}
 	result, err := s.dbExec(ctx, "inbox.completedrun.expire", `UPDATE runner_demands SET expired_at=?,updated_at=?
@@ -1136,7 +1135,7 @@ func (s *Store) ExpireCompletedRunDemands(ctx context.Context, scaleSetID int64,
  AND json_extract(i.scheduling_metadata,'$.demand.RunID')=runner_demands.workflow_run_id
  AND json_extract(i.scheduling_metadata,'$.demand.JobID')=runner_demands.runner_request_id
  AND json_extract(i.scheduling_metadata,'$.demand.Attempt')=MAX(1,runner_demands.run_attempt)))))`,
-		now.UnixNano(), now.UnixNano(), scaleSetID, run.Repository.Owner, run.Repository.Name, run.ID, run.Attempt,
+		now.UnixNano(), now.UnixNano(), scaleSetID, run.Owner, run.Repository, run.RunID, run.Attempt,
 		demandRank(operations.DemandJobAvailable), demandRank(operations.DemandJobAssigned), demandRank(operations.DemandJobStarted), now.UnixNano(),
 		demandRank(operations.DemandJobAvailable), operations.StateDeleted, operations.StateFailed)
 	if err != nil {
