@@ -446,6 +446,10 @@ type DrainExecutor struct {
 	// to Running is durable, so a report never describes an abort that did not
 	// happen. Nil reports nothing.
 	OnAbort func(DrainAbort)
+	// OnStop, when set, is told about every stop rung that succeeded, so each
+	// guest the fleet powers off is named with the phase that decided it
+	// (knee-doctor#1352). A failed rung reports nothing. Nil reports nothing.
+	OnStop func(GuestStop)
 	// Traffic, when set, reads the guest's network counters once, just before
 	// its first stop, which is the end of its one job (ADR 0080). Nil records
 	// nothing. It cannot fail the drain: it returns nothing.
@@ -784,7 +788,8 @@ func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instan
 		}
 	}
 	var stopErr error
-	switch force := StopEscalation(StopAttempts(operation)); force {
+	force := StopEscalation(StopAttempts(operation))
+	switch force {
 	case StopGraceful:
 		stopErr = e.VM.Stop(ctx, instance.ID, instance.Ownership)
 	case StopForced:
@@ -796,14 +801,19 @@ func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instan
 		// superstition, and an operation that retries forever is one an operator
 		// cannot discharge, so the drain reports a failure the worker must park
 		// rather than repeat.
+		// A destructive rung can power the guest off and still fail its delete,
+		// so a guest found idle here was ended by this drain and is reported
+		// under the exhausted rung.
 		power, err := e.VM.Power(ctx, instance.ID)
 		if err != nil || !power.ProvenIdle() {
 			return exhaustedError(StageStop)
 		}
-		return nil
 	}
 	if stopErr != nil {
 		return stageError{stage: StageStop, stopAttempts: StopAttempts(operation) + 1}
+	}
+	if e.OnStop != nil {
+		e.OnStop(GuestStop{Instance: instance, Phase: DrainPhaseName(instance.DrainPhase), Rung: force.String()})
 	}
 	return nil
 }

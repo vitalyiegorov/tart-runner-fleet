@@ -994,7 +994,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
 					ConfirmationMaxAge: deletionConfirmationMaxAge, Guest: d.guestProbe(cfg), Now: d.now,
-					OnAbort: reporter.reportDrainAbort, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, store, refusals)},
+					OnAbort: reporter.reportDrainAbort, OnStop: reporter.reportGuestStop, Traffic: traffic, Refusal: d.runnerRefusalReader(cfg, store, refusals)},
 			},
 			Retry: operations.RetryPolicy{Maximum: provisionRetryMaximum, MaxAttempts: lifecycleRetryMaxAttempts},
 			RetryByKind: map[string]operations.RetryPolicy{
@@ -2175,7 +2175,10 @@ func (r *failureReporter) reportSessionYield(action, reason string, failures int
 // #436). It is not rate limited: the gate tracker already emits only edges, and
 // dropping one would leave a closure without its opening. The reason comes from
 // the guardrails' closed vocabulary, never from free text.
-func (r *failureReporter) reportAdmissionGate(edge admissionTransition) {
+//
+// A closure also carries the memory the live guests hold beside the host's own
+// figures, so a refusal can be read against overcommit (knee-doctor#1352).
+func (r *failureReporter) reportAdmissionGate(edge admissionTransition, result app.TickResult) {
 	if r == nil || r.logger == nil {
 		return
 	}
@@ -2185,7 +2188,17 @@ func (r *failureReporter) reportAdmissionGate(edge admissionTransition) {
 	}
 	var attributes []any
 	if !edge.Allowed {
-		attributes = append(attributes, "reason", edge.Reason)
+		guests, guestMemory := 0, 0
+		for _, instance := range result.Instances {
+			if instance.ConsumesHostResources() {
+				guests++
+				guestMemory += instance.Resources.MemoryMB
+			}
+		}
+		pressure := result.Host.Pressure
+		attributes = append(attributes, "reason", edge.Reason, "guests", guests, "guestMemoryMiB", guestMemory,
+			"hostMemoryMiB", pressure.PhysicalMemoryMB, "availableMemoryMiB", pressure.AvailableMemoryMB,
+			"swapUsedMiB", pressure.SwapUsedMB)
 	}
 	if edge.Previous != "" {
 		if !edge.PreviousAllowed {
@@ -2384,6 +2397,25 @@ func (r *failureReporter) reportDrainAbort(abort lifecycle.DrainAbort) {
 		"phase", abort.Phase, "evidence", string(abort.Evidence),
 		"runId", abort.Instance.Demand.RunID, "jobId", abort.Instance.Demand.JobID,
 		"outcome", "the instance returned to running; nothing was deregistered")
+}
+
+// reportGuestStop names every guest the fleet powered off: the instance, the
+// drain phase that decided it, the stop rung, the memory it held, and the job it
+// was spawned for (knee-doctor#1352). A runner that received a shutdown signal
+// with no such line was stopped by something other than this fleet.
+//
+// The job id is the spawning demand's. GitHub may have brokered a different job
+// to the runner (ADR 0074), so it identifies the binding, not necessarily the
+// job that was interrupted. It is never rate limited: each line is one stop the
+// drain issued. The occupancy-budget and guest-unresponsive phases repeat it on
+// every deregistration retry, so the first line for an instance is the stop.
+// The instance row carries no secret.
+func (r *failureReporter) reportGuestStop(stop lifecycle.GuestStop) {
+	r.logger.Warn("instance guest stopped", "instance", stop.Instance.ID,
+		"profile", string(stop.Instance.Profile), "repo", stop.Instance.Repo,
+		"cause", stop.Phase, "rung", stop.Rung, "state", string(stop.Instance.State),
+		"memoryMiB", stop.Instance.Resources.MemoryMB,
+		"runId", stop.Instance.Demand.RunID, "jobId", stop.Instance.Demand.JobID)
 }
 
 // reportRetractedPremise says out loud that the fleet has contradicted itself
@@ -2817,7 +2849,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 	e.recordCompletedDrains(result)
 	pressure := result.Host.Pressure
 	if edge, changed := e.gate.Observe(result.At, pressure.AdmissionAllowed, pressure.AdmissionReason); changed {
-		e.reporter.reportAdmissionGate(edge)
+		e.reporter.reportAdmissionGate(edge, result)
 	}
 	if pressure.AdmissionReason != "" {
 		_ = e.health.SetHostPressure(telemetry.HostPressureMetric{AvailableMemoryMiB: pressure.AvailableMemoryMB,
