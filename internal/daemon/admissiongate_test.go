@@ -141,7 +141,7 @@ func TestAdmissionGateIsOptional(t *testing.T) {
 		t.Fatalf("a gateless ticker logged %q or dated the gate", buffer.String())
 	}
 	var absent *failureReporter
-	absent.reportAdmissionGate(admissionTransition{Reason: "swap pressure"})
+	absent.reportAdmissionGate(admissionTransition{Reason: "swap pressure"}, app.TickResult{})
 	var unset *admissionGate
 	if _, changed := unset.Observe(gateClock, false, "swap pressure"); changed || !unset.Since().IsZero() {
 		t.Fatal("a nil gate must observe nothing")
