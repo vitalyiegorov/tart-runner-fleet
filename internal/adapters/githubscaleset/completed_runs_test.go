@@ -41,8 +41,8 @@ func TestCompletedRunsRequiresPositiveExactEvidence(t *testing.T) {
 			if len(got) != tc.want {
 				t.Fatalf("got=%v err=%v", got, err)
 			}
-			if (tc.status == 404 || tc.name == "bad json") && err == nil {
-				t.Fatal("missing error")
+			if err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
