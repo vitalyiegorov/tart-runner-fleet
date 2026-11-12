@@ -114,3 +114,46 @@ The release gate is unchanged. A queued job still defers an update, always;
 what changed is that the queue now tells the truth. Narrowing quiescence itself
 would weaken the invariant on the same evidence that this decision already
 corrects at its source.
+
+## Amendment 2026-11-12: positive terminal-run evidence (#405)
+
+The absence rule above is unchanged. A separate positive-evidence path retires
+old demand even when no queued REST snapshot ever corroborated it. A returning
+node can otherwise hold yesterday's completed run as its oldest demand, reserve
+capacity ahead of real work, and block update quiescence.
+
+After a successful REST queue reconciliation, the same observer checks at most
+ten distinct run identities whose demand has waited at least fifteen minutes.
+Runs present in the fresh active REST snapshot are skipped when the recorded
+attempt is unknown or matches that snapshot. Only absent runs and older attempts
+need a GET. The observer rotates deterministically through candidates across
+polls. A known attempt uses the run-attempt endpoint and requires the same run ID and attempt with
+status exactly `completed`. When the broker row has no attempt, the latest-run
+endpoint must positively report a completed run with a valid attempt: earlier
+attempts of that run are terminal as well. Active, missing, malformed, mismatched,
+or unreadable evidence retires nothing for that run. Missing/deleted runs and
+malformed answers do not discard terminal evidence for other candidates.
+Authentication, rate-limit, and transport failures stop the batch, preserving
+already gathered evidence. Completion retirement errors are reported separately
+and never invalidate successful queue reconciliation or its critical REST
+observation. Rate limits feed the existing bounded poll pacing. The lookups are
+optional work: none is made once the installation budget is in its reserve (the
+same one tenth `Budget.Scarce` reports for the inventory), and the next poll is
+paced from when the lookups finished, on the budget they left, never earlier
+than the refresh itself asked for.
+
+The store atomically rechecks repository, run, recorded attempt, active status,
+and that the row has not changed after the observation began. Available demand
+is expired as before, without changing an instance. Assigned or started demand
+can also be expired, but only if neither its runner name nor its scheduling
+identity belongs to a nonterminal instance. Failed and deleted instances are
+terminal. This does not complete, drain, or delete a runner. Runner busy checks
+remain conservative and unchanged. Expiry retains the full row and remains
+revocable on newer broker or REST evidence.
+
+There is no new state, schema, configuration knob, or authority permission.
+The old absence and overdue paths remain useful when terminal evidence cannot
+be obtained. Unit tests cover the commit predicate and observer failure modes;
+the deterministic simulation supplies terminal evidence independently of queued
+snapshots and pins a cancellation before corroboration that previously violated
+eventual quiescence. This was a fleet defect, not a property or world-model defect.

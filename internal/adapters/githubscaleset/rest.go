@@ -28,13 +28,14 @@ type ObserverConfig struct {
 }
 
 type Observer struct {
-	base           *url.URL
-	repos          []Repository
-	http           Doer
-	tokens         TokenSource
-	clock          Clock
-	timeout        time.Duration
-	includeRunners bool
+	base             *url.URL
+	repos            []Repository
+	http             Doer
+	tokens           TokenSource
+	clock            Clock
+	timeout          time.Duration
+	includeRunners   bool
+	completionCursor string
 
 	// cache holds every page of the last inventory keyed by request URL so the
 	// next refresh can revalidate it. GitHub does not bill a 304 against the

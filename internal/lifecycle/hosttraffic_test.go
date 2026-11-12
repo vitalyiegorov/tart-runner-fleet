@@ -301,9 +301,12 @@ func TestHostTrafficSweeperSweepsOnEachTickAndStopsWithItsContext(t *testing.T) 
 	go func() { HostTrafficSweeper{Source: source, Recorder: recorder, Tick: ticks}.Run(ctx); close(stopped) }()
 
 	ticks <- c.now()
-	waitFor(t, "the first sweep to read the host", func() bool { return host.reads() == 1 })
-	if _, ok := recorder.last.get(instance.ID); !ok {
-		t.Fatal("the first tick must have kept a reading")
+	// The host counts the read inside Read, but Sweep keeps the reading only
+	// after Read returns: wait for the kept reading itself, not the count
+	// (issue #508).
+	waitFor(t, "the first tick to keep a reading", func() bool { _, ok := recorder.last.get(instance.ID); return ok })
+	if host.reads() != 1 {
+		t.Fatalf("the first tick must have read the host once, read %d times", host.reads())
 	}
 
 	source.set(nil, errors.New("store closed"))

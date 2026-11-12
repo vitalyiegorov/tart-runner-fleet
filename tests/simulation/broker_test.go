@@ -46,6 +46,15 @@ type simSnapshotView struct{ snapshot *simSnapshot }
 
 func (v simSnapshotView) ObservedAt() time.Time { return v.snapshot.at }
 
+func (v simSnapshotView) Run(id int64) (githubscaleset.WorkflowRun, bool) {
+	for _, job := range v.snapshot.jobs {
+		if job.RunID == id {
+			return githubscaleset.WorkflowRun{ID: id, Repository: job.Repository, Attempt: job.RunAttempt}, true
+		}
+	}
+	return githubscaleset.WorkflowRun{}, false
+}
+
 func (v simSnapshotView) QueuedJobs() []githubscaleset.WorkflowJob {
 	return append([]githubscaleset.WorkflowJob(nil), v.snapshot.jobs...)
 }
@@ -551,6 +560,9 @@ func (w *world) deliverSnapshots() {
 		// EVERY one of its jobs matches BOTH scale sets, so it is also the
 		// observation two unbounded attributions would double (#153).
 		w.restCommitted = snapshot
+		if _, err := w.demand.RetireCompletedRuns(w.ctx, w.cfg.Bindings, simSnapshotView{snapshot: snapshot}, w.completedRuns); err != nil {
+			w.record(findingStoreError, fmt.Sprintf("completed runs: %v", err))
+		}
 		if _, err := w.demand.ReconcileQueuedJobs(w.ctx, w.cfg.Bindings, simSnapshotView{snapshot: snapshot}); err != nil {
 			w.record(findingStoreError, fmt.Sprintf("reconcile REST snapshot: %v", err))
 		}
@@ -666,4 +678,19 @@ func (w *world) advertisedCapacity(binding int) int {
 		configured = w.cfg.Scheduler.LinuxCapacity.Slots
 	}
 	return w.advertisement.Capacity(w.cfg.Bindings[binding].StoreKey, configured)
+}
+
+// completedRuns is GitHub's terminal run-attempt view, independent of whether
+// the queued-job listing ever corroborated a demand.
+func (w *world) completedRuns(_ context.Context, candidates []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error) {
+	var completed []githubscaleset.WorkflowRun
+	for _, run := range candidates[:min(10, len(candidates))] {
+		for _, job := range w.jobs {
+			if job.runID == run.ID && job.owner == run.Repository.Owner && job.name == run.Repository.Name && (job.status == jobDone || job.status == jobCancelled || job.silentCancel) {
+				completed = append(completed, run)
+				break
+			}
+		}
+	}
+	return completed, nil
 }

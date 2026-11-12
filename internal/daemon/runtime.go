@@ -1816,6 +1816,35 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		coordinator.Runners = lister.Runners
 	}
 	changed, err := coordinator.ReconcileQueuedJobs(ctx, r.bindings, observation.Snapshot)
+	if err == nil {
+		if observer, ok := r.observer.(interface {
+			CompletedRuns(context.Context, []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error)
+		}); ok {
+			retired, completionErr := coordinator.RetireCompletedRuns(ctx, r.bindings, observation.Snapshot, observer.CompletedRuns)
+			changed = changed || retired > 0
+			// Only lookups that asked for more than the interval re-pace, from
+			// when they finished and on the budget they left, never earlier than
+			// the refresh already asked for: a slow batch must not eat into a
+			// Retry-After, and lookups that pushed the budget into its reserve
+			// must defer the next poll. A healthy batch keeps the refresh's own
+			// pacing, so a slow poll does not stretch the polling period.
+			budget := observation.Budget
+			if b, ok := r.observer.(interface{ Budget() githubscaleset.Budget }); ok && b.Budget().Observed {
+				budget = b.Budget()
+			}
+			if completionErr != nil || budget.Scarce() {
+				after := r.now().UTC()
+				if next := after.Add(r.pace(after, githubscaleset.Observation{Err: completionErr, Budget: budget})); next.After(r.next) {
+					r.next = next
+				}
+			}
+			if completionErr != nil {
+				if r.reporter != nil {
+					r.reporter.reportReconcile(r.observation, app.FailureReasonOf(classifyReconcileFailure(completionErr)), app.ReconcileStageExpiry)
+				}
+			}
+		}
+	}
 	// Classified before recording, so the observation detail and the loop
 	// failure reason are always the same closed reason (issue #458).
 	err = classifyReconcileFailure(err)
@@ -1898,7 +1927,7 @@ func (r *restQueueIngester) pace(now time.Time, observation githubscaleset.Obser
 		deferral = observation.Budget.Reset.Sub(now)
 	}
 	var api *githubscaleset.APIError
-	if errors.As(observation.Err, &api) && api.Kind == githubscaleset.RateLimited {
+	if errors.As(observation.Err, &api) && (api.Kind == githubscaleset.RateLimited || (api.Kind == githubscaleset.Authorization && api.RetryAfter > 0)) {
 		deferral = max(deferral, api.RetryAfter)
 	}
 	return max(r.interval, min(deferral, restBudgetDeferralMax))
