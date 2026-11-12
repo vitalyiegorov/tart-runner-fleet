@@ -1822,8 +1822,19 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}); ok {
 			retired, completionErr := coordinator.RetireCompletedRuns(ctx, r.bindings, observation.Snapshot, observer.CompletedRuns)
 			changed = changed || retired > 0
+			// Pace again from when the lookups finished and on the budget they
+			// left, never earlier than the refresh already asked for: a slow
+			// batch must not eat into a Retry-After, and lookups that pushed the
+			// budget into its reserve must defer the next poll.
+			budget := observation.Budget
+			if b, ok := r.observer.(interface{ Budget() githubscaleset.Budget }); ok && b.Budget().Observed {
+				budget = b.Budget()
+			}
+			after := r.now().UTC()
+			if next := after.Add(r.pace(after, githubscaleset.Observation{Err: completionErr, Budget: budget})); next.After(r.next) {
+				r.next = next
+			}
 			if completionErr != nil {
-				r.next = now.Add(r.pace(now, githubscaleset.Observation{Err: completionErr, Budget: observation.Budget}))
 				if r.reporter != nil {
 					r.reporter.reportReconcile(r.observation, app.FailureReasonOf(classifyReconcileFailure(completionErr)), app.ReconcileStageExpiry)
 				}

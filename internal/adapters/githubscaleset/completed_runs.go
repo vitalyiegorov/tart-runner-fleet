@@ -10,8 +10,11 @@ import (
 )
 
 // CompletedRuns shares the observer's authenticated, deadline-bound transport.
-// At most ten run attempts are read per poll. Rotation prevents an active oldest
-// run from starving later candidates. No response body is logged or persisted.
+// At most ten run attempts are read per poll, and none once the installation
+// budget has fallen into its reserve: this is optional work and must not spend
+// what the inventory and the sibling nodes depend on. Rotation prevents an
+// active oldest run from starving later candidates. No response body is logged
+// or persisted.
 func (o *Observer) CompletedRuns(ctx context.Context, candidates []WorkflowRun) ([]WorkflowRun, error) {
 	sort.Slice(candidates, func(i, j int) bool { return runOrder(candidates[i]) < runOrder(candidates[j]) })
 	start := sort.Search(len(candidates), func(i int) bool { return runOrder(candidates[i]) > o.completionCursor })
@@ -20,6 +23,9 @@ func (o *Observer) CompletedRuns(ctx context.Context, candidates []WorkflowRun) 
 	}
 	var completed []WorkflowRun
 	for i := 0; i < min(10, len(candidates)); i++ {
+		if o.budget.Scarce() {
+			break
+		}
 		run := candidates[(start+i)%len(candidates)]
 		o.completionCursor = runOrder(run)
 		if run.ID <= 0 || run.Attempt < 0 || run.Repository.Owner == "" || run.Repository.Name == "" {
@@ -54,6 +60,11 @@ func (o *Observer) CompletedRuns(ctx context.Context, candidates []WorkflowRun) 
 	}
 	return completed, nil
 }
+
+// Budget is the installation budget as the latest answer of any request
+// through this observer reported it, so a caller pacing its next poll after
+// completion lookups paces on what those lookups left.
+func (o *Observer) Budget() Budget { return o.budget }
 
 func runOrder(run WorkflowRun) string {
 	return fmt.Sprintf("%s/%s/%020d/%010d", run.Repository.Owner, run.Repository.Name, run.ID, run.Attempt)

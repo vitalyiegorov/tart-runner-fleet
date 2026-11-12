@@ -136,7 +136,11 @@ malformed answers do not discard terminal evidence for other candidates.
 Authentication, rate-limit, and transport failures stop the batch, preserving
 already gathered evidence. Completion retirement errors are reported separately
 and never invalidate successful queue reconciliation or its critical REST
-observation. Rate limits feed the existing bounded poll pacing.
+observation. Rate limits feed the existing bounded poll pacing. The lookups are
+optional work: none is made once the installation budget is in its reserve (the
+same one tenth `Budget.Scarce` reports for the inventory), and the next poll is
+paced from when the lookups finished, on the budget they left, never earlier
+than the refresh itself asked for.
 
 The store atomically rechecks repository, run, recorded attempt, active status,
 and that the row has not changed after the observation began. Available demand
