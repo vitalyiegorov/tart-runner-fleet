@@ -1082,8 +1082,14 @@ change anything. Never deregister such a runner by hand.
 
 ### Every guest the fleet stopped
 
-Every stop rung that powers a guest off is logged once, whatever decided the
-drain (knee-doctor#1352):
+Every stop rung that powers a guest off is logged, whatever decided the drain
+(knee-doctor#1352). `occupancy_budget` and `guest_unresponsive` drains repeat
+the line on each deregistration retry, so read the first line for an instance.
+A guest found powered off after every rung failed (a destructive rung that
+stopped it but could not delete it) is logged with `rung=exhausted`.
+`guests=` and `guestMemoryMiB=` on a gate closure count only guests that the
+scheduler charges to the host, and read `0` when the inventory could not be
+listed:
 
 ```sh
 grep 'instance guest stopped' fleet-authority.stderr.log

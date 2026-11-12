@@ -23,6 +23,7 @@ func TestDrainReportsEveryGuestItStops(t *testing.T) {
 		{"job completed", operations.DrainPhaseEvent, 0, "graceful"},
 		{"idle runner reclaimed", operations.DrainPhaseLingeringRunner, 0, "graceful"},
 		{"escalated stop", operations.DrainPhaseEvent, GracefulStopAttempts, "forced"},
+		{"destroyed but not deleted", operations.DrainPhaseOccupancyBudget, GracefulStopAttempts + ForcedStopAttempts + DestructiveStopAttempts, "exhausted"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			executor, state, _, _ := drainFixture(operations.StateDeregistering)

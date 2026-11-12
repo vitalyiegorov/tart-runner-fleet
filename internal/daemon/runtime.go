@@ -2190,7 +2190,7 @@ func (r *failureReporter) reportAdmissionGate(edge admissionTransition, result a
 	if !edge.Allowed {
 		guests, guestMemory := 0, 0
 		for _, instance := range result.Instances {
-			if instance.Live() {
+			if instance.ConsumesHostResources() {
 				guests++
 				guestMemory += instance.Resources.MemoryMB
 			}
@@ -2406,8 +2406,10 @@ func (r *failureReporter) reportDrainAbort(abort lifecycle.DrainAbort) {
 //
 // The job id is the spawning demand's. GitHub may have brokered a different job
 // to the runner (ADR 0074), so it identifies the binding, not necessarily the
-// job that was interrupted. It is never rate limited: each line is one guest
-// ended. The instance row carries no secret.
+// job that was interrupted. It is never rate limited: each line is one stop the
+// drain issued. The occupancy-budget and guest-unresponsive phases repeat it on
+// every deregistration retry, so the first line for an instance is the stop.
+// The instance row carries no secret.
 func (r *failureReporter) reportGuestStop(stop lifecycle.GuestStop) {
 	r.logger.Warn("instance guest stopped", "instance", stop.Instance.ID,
 		"profile", string(stop.Instance.Profile), "repo", stop.Instance.Repo,

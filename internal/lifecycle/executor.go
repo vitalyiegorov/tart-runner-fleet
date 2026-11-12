@@ -801,11 +801,13 @@ func (e DrainExecutor) stopGuest(ctx context.Context, instance operations.Instan
 		// superstition, and an operation that retries forever is one an operator
 		// cannot discharge, so the drain reports a failure the worker must park
 		// rather than repeat.
+		// A destructive rung can power the guest off and still fail its delete,
+		// so a guest found idle here was ended by this drain and is reported
+		// under the exhausted rung.
 		power, err := e.VM.Power(ctx, instance.ID)
 		if err != nil || !power.ProvenIdle() {
 			return exhaustedError(StageStop)
 		}
-		return nil
 	}
 	if stopErr != nil {
 		return stageError{stage: StageStop, stopAttempts: StopAttempts(operation) + 1}
