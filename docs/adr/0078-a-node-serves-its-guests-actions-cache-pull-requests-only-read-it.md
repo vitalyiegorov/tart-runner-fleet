@@ -260,3 +260,12 @@ Consequences:
   which sends those guests to GitHub until they are repinned.
 - `--metrics-listen 127.0.0.1:3019` now ships in the gate unit too (ADR 0080).
 
+
+## Amendment: issue #509, artifact ownership
+
+With artifact serving disabled, decision 2 is unchanged. When explicitly
+configured under [ADR 0097](0097-a-gate-serves-run-scoped-actions-artifacts.md),
+ArtifactService and its distinct signed blob namespace go to one Ubuntu owner,
+served locally there and forwarded from other gates. Only that owner verifies
+artifact runtime JWTs. PR cache saves remain refused; own-run PR artifact
+uploads are allowed. All other results traffic still goes to GitHub.

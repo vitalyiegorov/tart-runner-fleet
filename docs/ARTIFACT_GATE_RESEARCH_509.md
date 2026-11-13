@@ -192,3 +192,13 @@ run ID in `internal/domain/domain.go:14-27` does not create such affinity.
 Prefer already available same-node/site labels when possible, but do not
 claim a scheduler can force this today. Cross-owner discovery and transport
 are a new ADR 0034 exception and a rollout prerequisite for split runs.
+
+## Owner decisions after research
+
+The historical alternatives/open questions above are superseded by ADR 0097:
+Ubuntu is the single owner, other gates forward all artifact traffic over a
+configured loopback SSH forward, and failure reports remain local without a
+viewer. No per-site stores, peer fetch, ID merging or owner discovery will be
+built. Existing cloudflared transport is admin/health only (OPERATIONS.md:2287
+and ADR 0093); a new artifact-only SSH local forward must be provisioned before
+enabling forwarding. No node or service was contacted to validate that path.

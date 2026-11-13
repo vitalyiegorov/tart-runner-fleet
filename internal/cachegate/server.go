@@ -171,7 +171,12 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	identityKey := flags.String("identity-key", "", "optional file holding the key the gate proves itself with, created if absent")
 	npmDir := flags.String("npm-cache", "", "optional absolute directory of the npm read-through cache served under /npm/")
 	npmRaw := flags.String("npm-upstream", defaultNPMUpstream, "absolute URL of the npm registry the cache reads through to")
+	artifacts := artifactFlags(flags)
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if !artifacts.valid() || artifactForwardLoop(*listen, artifacts.upstream) {
+		artifactConfigError(stderr)
 		return 2
 	}
 	cache, cacheOK := absoluteURL(*cacheRaw)
@@ -187,6 +192,13 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if *npmDir != "" {
 		npm = newNPMCache(*npmDir, registry)
 	}
+	counters := &Counters{}
+	artifactHTTP, budget, closeArtifacts, artifactErr := artifacts.open(npm, counters)
+	if artifactErr != nil {
+		_, _ = fmt.Fprintln(stderr, "cache-gate: artifact storage or write budget unavailable")
+		return 1
+	}
+	defer closeArtifacts()
 	var identity ed25519.PrivateKey
 	if *identityKey != "" {
 		key, err := LoadOrCreateIdentity(*identityKey)
@@ -203,8 +215,8 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "cache-gate: listen: %v\n", err)
 		return 1
 	}
-	counters := &Counters{}
-	server := newServer(identityHandler(identity, countingHandler(cache, results, npm, stdout, counters)))
+	handler := withArtifacts(countingHandler(cache, results, npm, stdout, counters), artifactHTTP, budget, artifacts.cachePeak, counters)
+	server := newServer(identityHandler(identity, handler))
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
 	if *metricsListen != "" {

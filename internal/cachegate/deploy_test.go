@@ -33,3 +33,11 @@ func TestTheDropInIsTheShippedGateCommandAndOneFlag(t *testing.T) {
 		t.Fatal("the drop-in does not clear the shipped ExecStart")
 	}
 }
+
+func TestArtifactServingIsAbsentFromShippedUnits(t *testing.T) {
+	for _, parts := range [][]string{{"actions-cache", "tart-runner-fleet-cache-gate.service"}, {"npm-cache", "tart-runner-fleet-cache-gate.service.d", "npm-cache.conf"}} {
+		if regexp.MustCompile(`--artifacts-(dir|upstream)`).MatchString(deployFile(t, parts...)) {
+			t.Fatal("default deployment enabled artifact authority")
+		}
+	}
+}

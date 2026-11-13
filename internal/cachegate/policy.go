@@ -13,6 +13,10 @@
 // lets through is verified by the server exactly as if the gate were absent.
 // A forged token therefore cannot widen access: it is refused here or rejected
 // there.
+//
+// This filter applies only to cache traffic. An explicitly configured artifact
+// owner verifies its own JWT signatures and grants only repo/run-scoped access;
+// artifact forwarding gates make no authorization decision (ADR 0097).
 package cachegate
 
 import (
@@ -69,6 +73,8 @@ const (
 	// NPM is the node's npm read-through cache (ADR 0093). DecideNPM routes here;
 	// Decide never does.
 	NPM
+	// Artifacts is the configured single owner, served locally or over an SSH forward.
+	Artifacts
 	upstreamCount
 )
 
