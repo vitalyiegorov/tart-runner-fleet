@@ -21,6 +21,9 @@ const artifactService = "/twirp/github.actions.results.api.v1.ArtifactService/"
 const artifactBlob = "/.trf/artifacts/blobs/"
 const artifactBlockLimit = 16 << 20
 
+// Fixed worst-case weights: sixteen 16 MiB bodies, shared by both owner listeners.
+const artifactUploadSlots = 16
+
 func artifactRoute(path string) bool {
 	return strings.HasPrefix(path, artifactService) || strings.HasPrefix(path, artifactBlob)
 }
@@ -252,11 +255,16 @@ func (s *artifactStore) blob(w http.ResponseWriter, r *http.Request) {
 		artifactError(w, 403)
 		return
 	}
-	put, err := s.readUpload(w, r)
+	put, release, err := s.readUpload(w, r)
 	if err != nil {
+		if errors.Is(err, errArtifactSpace) {
+			// Do not let net/http drain a trickling rejected body before flushing 503.
+			w.Header().Set("Connection", "close")
+		}
 		artifactStoreError(w, err)
 		return
 	}
+	defer release()
 	if err = s.writeBlob(id, expiry, put); err != nil {
 		artifactStoreError(w, err)
 		return
@@ -298,30 +306,44 @@ func (s *artifactStore) writeBlob(id, expiry int64, put func(artifactRecord) err
 	defer release()
 	return put(a)
 }
-func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (func(artifactRecord) error, error) {
+
+// Success hands the slot to blob until writeBlob returns. Failed reads and
+// panics before handoff release it here, without waiting on the store mutex.
+func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (put func(artifactRecord) error, release func(), err error) {
+	select {
+	case s.uploadSlots <- struct{}{}:
+	default:
+		return nil, nil, errArtifactSpace
+	}
+	releaseSlot := func() { <-s.uploadSlots }
+	defer func() {
+		if put == nil {
+			releaseSlot()
+		}
+	}()
 	switch r.URL.Query().Get("comp") {
 	case "block":
 		key := r.URL.Query().Get("blockid")
 		decoded, err := base64.StdEncoding.DecodeString(key)
 		if err != nil || len(decoded) == 0 || len(decoded) > 64 {
-			return nil, errArtifactInput
+			return nil, nil, errArtifactInput
 		}
 		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, artifactBlockLimit))
 		if err != nil {
-			return nil, errArtifactInput
+			return nil, nil, errArtifactInput
 		}
-		return func(a artifactRecord) error { return s.putBlock(a, key, data) }, nil
+		return func(a artifactRecord) error { return s.putBlock(a, key, data) }, releaseSlot, nil
 	case "blocklist":
 		var list struct {
 			XMLName xml.Name `xml:"BlockList"`
 			Keys    []string `xml:"Latest"`
 		}
 		if xml.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&list) != nil {
-			return nil, errArtifactInput
+			return nil, nil, errArtifactInput
 		}
-		return func(a artifactRecord) error { return s.commitBlocks(a, list.Keys) }, nil
+		return func(a artifactRecord) error { return s.commitBlocks(a, list.Keys) }, releaseSlot, nil
 	default:
-		return nil, errArtifactInput
+		return nil, nil, errArtifactInput
 	}
 }
 

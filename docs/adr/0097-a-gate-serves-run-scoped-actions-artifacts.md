@@ -197,6 +197,18 @@ while waiting for the network, then object state/expiry is rechecked under
 the mutex before persistence. Finalize hashes immutable committed blocks
 outside the mutex under a lease; a finalized replay compares stored size/hash
 without streaming. Slow transfers do not serialize unrelated run operations.
+
+A non-blocking, store-wide 16-slot semaphore bounds buffered upload bodies
+across both owner listeners: at most 256 MiB of block payload (16 MiB per
+slot, excluding allocator and SQLite overhead). Block-list reads share the
+same conservative slot weight. Acquire before reading/allocating a body and
+hold through persistence, including time queued for the store mutex. Full
+capacity returns 503 without reading or waiting, allowing SDK retry. Busy
+HTTP/1 connections are closed so net/http does not drain an unread trickling
+body before flushing the rejection. Failed
+reads, rejected state/budget checks and successful writes all release their
+slot. This memory bound is independent of the disk write reserve; a valid
+write capability cannot admit unbounded trickling PUT buffers.
 Storage gauges are refreshed at startup and on the existing minute prune
 tick, not by full-table aggregates on each HTTP request.
 

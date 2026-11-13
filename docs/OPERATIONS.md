@@ -2679,3 +2679,11 @@ artifact creates/listings, transport reachability and an actual rollback.
 Removing both artifact modes makes remaining artifact-related flags inert
 with a warning. Global LRU has no per-run quota and can evict an active run's
 finalized artifacts under pressure; size the cap for all concurrent runs.
+
+The artifact owner admits at most 16 buffered upload bodies across its guest
+and artifact-only listeners. Each slot covers a full 16 MiB block (256 MiB
+payload total, excluding allocator/SQLite overhead); block-list bodies share
+this limit. Excess PUTs return 503 immediately without consuming their bodies
+so the SDK retries. Slots remain held through persistence and are released
+on all failures as well as success. Slow trickling clients therefore occupy
+bounded memory even before the disk write budget is reserved.
