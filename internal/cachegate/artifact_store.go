@@ -24,16 +24,17 @@ var errArtifactInput = errors.New("invalid artifact request")
 // Blocks and the publication record share SQLite's FULL synchronous transaction.
 // No filesystem rename/index split or second recovery mechanism is needed.
 type artifactStore struct {
-	mu          sync.Mutex
-	db          *sql.DB
-	path        string
-	cap         int64
-	clock       func() time.Time
-	budget      *writeBudget
-	secret      [32]byte
-	leases      map[int64]int
-	metrics     *artifactMetrics
-	uploadSlots chan struct{}
+	mu            sync.Mutex
+	db            *sql.DB
+	path          string
+	cap           int64
+	clock         func() time.Time
+	budget        *writeBudget
+	secret        [32]byte
+	leases        map[int64]int
+	metrics       *artifactMetrics
+	uploadSlots   chan struct{}
+	downloadSlots chan struct{}
 }
 type artifactRecord struct {
 	ID                       int64
@@ -76,7 +77,7 @@ func openArtifactStore(path string, capBytes int64, clock func() time.Time, budg
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &artifactStore{db: db, path: path, cap: capBytes, clock: clock, budget: budget, leases: map[int64]int{}, uploadSlots: make(chan struct{}, artifactUploadSlots)}
+	s := &artifactStore{db: db, path: path, cap: capBytes, clock: clock, budget: budget, leases: map[int64]int{}, uploadSlots: make(chan struct{}, artifactUploadSlots), downloadSlots: make(chan struct{}, artifactDownloadSlots)}
 	_, _ = rand.Read(s.secret[:])
 	for _, query := range []string{
 		"PRAGMA journal_mode=DELETE",

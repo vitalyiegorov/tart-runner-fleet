@@ -24,6 +24,8 @@ const artifactBlockLimit = 16 << 20
 // Fixed worst-case weights: sixteen 16 MiB bodies, shared by both owner listeners.
 const artifactUploadSlots = 16
 
+const artifactDownloadSlots = 16
+
 func artifactRoute(path string) bool {
 	return strings.HasPrefix(path, artifactService) || strings.HasPrefix(path, artifactBlob)
 }
@@ -238,6 +240,20 @@ func (s *artifactStore) blob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mode == "read" && r.Method == http.MethodGet {
+		// Unlike uploads, GETs wait without buffering or pinning an artifact.
+		select {
+		case s.downloadSlots <- struct{}{}:
+			defer func() { <-s.downloadSlots }()
+		case <-r.Context().Done():
+			artifactError(w, http.StatusRequestTimeout)
+			return
+		}
+		// Cancellation and availability can become ready together. Never load a
+		// block for a cancelled request, even if select acquired its own slot.
+		if r.Context().Err() != nil {
+			artifactError(w, http.StatusRequestTimeout)
+			return
+		}
 		a, err := s.readableBlob(id, expiry)
 		if err != nil {
 			artifactStoreError(w, err)

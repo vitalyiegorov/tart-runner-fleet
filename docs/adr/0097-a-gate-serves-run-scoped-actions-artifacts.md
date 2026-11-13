@@ -209,6 +209,16 @@ body before flushing the rejection. Failed
 reads, rejected state/budget checks and successful writes all release their
 slot. This memory bound is independent of the disk write reserve; a valid
 write capability cannot admit unbounded trickling PUT buffers.
+A separate store-wide 16-slot semaphore bounds downloads across both owner
+listeners. GETs wait for a slot with request-context cancellation rather than
+returning a busy 503, since download clients may not retry it. Admission is
+before any block load or eviction lease; waiting holds neither a block buffer
+nor the store mutex. Object state and capability expiry are rechecked after
+admission. Completion, streaming errors, lookup failures and panics release
+the owned slot. A cancelled waiter never releases another request's slot.
+Network writes remain outside the store mutex. This caps active GET block
+payload at 256 MiB, independent of upload buffers and SQLite/allocator overhead.
+
 Storage gauges are refreshed at startup and on the existing minute prune
 tick, not by full-table aggregates on each HTTP request.
 

@@ -2687,3 +2687,12 @@ this limit. Excess PUTs return 503 immediately without consuming their bodies
 so the SDK retries. Slots remain held through persistence and are released
 on all failures as well as success. Slow trickling clients therefore occupy
 bounded memory even before the disk write budget is reserved.
+
+Downloads have their own 16-slot owner-wide limit, shared by both listeners
+and independent of upload admission. Excess GETs wait without loading block
+bytes or holding the store mutex; request cancellation abandons the wait.
+After admission the gate rechecks the artifact and capability expiry, then
+streams outside the mutex. Completion, error and panic release the slot.
+Active GET payload buffers total at most 256 MiB (excluding allocator/SQLite
+overhead). A busy owner does not reject queued downloads with 503, preserving
+parallel E2E handoffs whose download client may not retry a busy response.
