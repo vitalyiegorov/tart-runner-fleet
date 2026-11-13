@@ -928,6 +928,7 @@ depends on. The recipe's verification step runs it.
 [ADR 0097](0097-a-gate-serves-run-scoped-actions-artifacts.md) permits one
 explicit data-plane exception: Ubuntu's gate owns all fleet-served Actions
 artifacts; other gates forward artifact RPCs and blob transfers to it over an
-operator-provisioned authenticated encrypted SSH local forward. This adds no
+operator-provisioned authenticated encrypted SSH local forward to the owner's
+artifact-only listener; cache routes cannot traverse it. This adds no
 cross-node scheduler, state replication, owner discovery or peer fetch. Cache
 and npm keep their existing node/site placement.

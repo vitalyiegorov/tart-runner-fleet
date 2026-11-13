@@ -77,6 +77,7 @@ func TestArtifactOwnerMetricsAndUnavailableBudget(t *testing.T) {
 	token := f.token("123", "r", "j")
 	f.upload(token, "r", "j", "metrics", []byte("123"))
 	f.rpc("forged", "CreateArtifact", artifactBody("r", "j", "bad"))
+	f.store.prune()
 	counters := &Counters{artifactsEnabled: true, artifactStats: f.store.metrics}
 	for _, want := range []string{"fleet_artifacts_used_bytes 3", "fleet_artifacts_staged_bytes 0", "fleet_artifacts_objects 1", "fleet_artifacts_auth_refusals_total 1"} {
 		if !strings.Contains(counters.render(), want) {
@@ -135,7 +136,7 @@ func TestArtifactConfigurationIsDefaultOffAndStartupFailsClosed(t *testing.T) {
 		t.Fatal("disabled handler missing")
 	}
 	dir := t.TempDir()
-	c := &artifactConfig{dir: filepath.Join(dir, "owner"), origin: "http://gate.test", repos: "123", budgetPath: filepath.Join(dir, "absent"), cap: 1 << 20, floor: 1, cachePeak: 1}
+	c := &artifactConfig{listen: "127.0.0.1:0", dir: filepath.Join(dir, "owner"), origin: "http://gate.test", repos: "123", budgetPath: filepath.Join(dir, "absent"), cap: 1 << 20, floor: 1, cachePeak: 1}
 	if _, _, _, err = c.open(nil, &Counters{}); err == nil {
 		t.Fatal("missing budget accepted")
 	}
@@ -191,12 +192,12 @@ func TestArtifactBlobFailureBoundaries(t *testing.T) {
 		t.Fatal("interrupted PUT acknowledged")
 	}
 	f.rpc(auth, "DeleteArtifact", artifactBody("r", "j", "a"))
-	if f.blob(raw, http.MethodPut, nil).Code != 404 {
+	if f.blob(raw+"&comp=block&blockid=YQ==", http.MethodPut, nil).Code != 404 {
 		t.Fatal("deleted capability survived")
 	}
 	raw = f.create(auth, "r", "j", "expired")
 	f.store.db.Exec("UPDATE artifacts SET expires=?", f.at.Unix())
-	if f.blob(raw, http.MethodPut, nil).Code != 404 {
+	if f.blob(raw+"&comp=block&blockid=YQ==", http.MethodPut, nil).Code != 404 {
 		t.Fatal("expired object survived capability")
 	}
 	if f.rpc(auth, "GetSignedArtifactURL", artifactBody("r", "other-job", "expired")).Code != 404 {
@@ -251,7 +252,7 @@ func TestArtifactGuardedNPMConfigurationAndBrokenCacheBody(t *testing.T) {
 	os.Chmod(dir, 0700)
 	registry, _ := url.Parse("http://registry.test")
 	npm := newNPMCache(dir, registry)
-	config := &artifactConfig{dir: dir, origin: "http://gate.test", repos: "123", budgetPath: dir, cap: 1024, floor: 1, cachePeak: 1}
+	config := &artifactConfig{listen: "127.0.0.1:0", dir: dir, origin: "http://gate.test", repos: "123", budgetPath: dir, cap: 1024, floor: 1, cachePeak: 1}
 	_, _, closeOwner, err := config.open(npm, &Counters{})
 	if err != nil {
 		t.Fatal(err)
@@ -267,11 +268,16 @@ func TestArtifactGuardedNPMConfigurationAndBrokenCacheBody(t *testing.T) {
 	}
 	b := &writeBudget{floor: 1, probe: func() (int64, error) { return 1 << 40, nil }}
 	counters := &Counters{}
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("broken body reached cache") })
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err == nil {
+			t.Error("broken stream became successful")
+		}
+		w.WriteHeader(http.StatusBadGateway)
+	})
 	handler := withArtifacts(next, next, b, 1, counters)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/upload/id", iotest.ErrReader(io.ErrUnexpectedEOF)))
-	if w.Code != 400 {
+	if w.Code != http.StatusBadGateway {
 		t.Fatal("broken cache upload acknowledged")
 	}
 	if !strings.Contains(counters.render(), "fleet_cache_gate_write_reserved_bytes 0") {

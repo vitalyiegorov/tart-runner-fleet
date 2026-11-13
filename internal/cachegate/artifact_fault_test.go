@@ -26,6 +26,7 @@ var errArtifactIO = errors.New("injected artifact database I/O failure")
 type artifactFaultDriver struct {
 	match string
 	write bool
+	pause *artifactPausedBody
 }
 
 func (d *artifactFaultDriver) Open(path string) (driver.Conn, error) {
@@ -48,6 +49,10 @@ func (c *artifactFaultConnection) ExecContext(ctx context.Context, q string, arg
 	return c.Conn.(driver.ExecerContext).ExecContext(ctx, q, args)
 }
 func (c *artifactFaultConnection) QueryContext(ctx context.Context, q string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.fail.pause != nil && strings.Contains(q, "SELECT data") {
+		c.fail.pause.once.Do(func() { close(c.fail.pause.entered) })
+		<-c.fail.pause.release
+	}
 	if !c.fail.write && strings.Contains(q, c.fail.match) {
 		return nil, errArtifactIO
 	}
@@ -57,7 +62,7 @@ func artifactInjectFailure(t *testing.T, f *artifactFixture, match string, write
 	t.Helper()
 	f.store.db.Close()
 	name := fmt.Sprintf("artifact-fault-%d", artifactFaultSerial.Add(1))
-	sql.Register(name, &artifactFaultDriver{match, write})
+	sql.Register(name, &artifactFaultDriver{match: match, write: write})
 	db, err := sql.Open(name, f.store.path)
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +125,8 @@ func TestArtifactStorageIOErrorsNeverBecomeSuccess(t *testing.T) {
 		{"download bytes", "SELECT data", false, func(f *artifactFixture, a artifactRecord) error { _, err := f.store.stream(a, io.Discard); return err }},
 		{"final publication", "UPDATE artifacts SET final", true, func(f *artifactFixture, a artifactRecord) error {
 			a.Final = false
+			f.store.mu.Lock()
+			defer f.store.mu.Unlock()
 			_, err := f.store.finalize(a, artifactRequest{Size: "1"})
 			return err
 		}},
@@ -218,9 +225,11 @@ func TestArtifactPrivateStorageAndInvalidRPCs(t *testing.T) {
 		t.Fatal("unavailable cleanup allowed create")
 	}
 	os.Remove(f.store.path)
-	if _, err := f.store.reserveWrite(); err == nil {
-		t.Fatal("missing storage allowed reservation")
+	release, err := f.store.reserveWrite()
+	if err != nil {
+		t.Fatal(err)
 	}
+	release() // reservation follows the filesystem probe, not index allocation
 	dir := t.TempDir()
 	os.Chmod(dir, 0755)
 	if _, err := openArtifactStore(filepath.Join(dir, "artifacts.db"), 1024, func() time.Time { return f.at }, f.budget); err == nil {
@@ -269,7 +278,7 @@ func TestArtifactOwnerRefusesDifferentStorageFilesystem(t *testing.T) {
 	if sameArtifactFilesystem(local, root) {
 		return
 	}
-	c := &artifactConfig{dir: root, origin: "http://gate.test", repos: "123", budgetPath: local, cap: 1024, floor: 1, cachePeak: 1}
+	c := &artifactConfig{listen: "127.0.0.1:0", dir: root, origin: "http://gate.test", repos: "123", budgetPath: local, cap: 1024, floor: 1, cachePeak: 1}
 	if _, _, _, err := c.open(nil, &Counters{}); err == nil {
 		t.Fatal("owner wrote outside guarded filesystem")
 	}
@@ -285,7 +294,7 @@ func TestArtifactOwnerChecksFilesystemBeforeCreatingDatabase(t *testing.T) {
 	if sameArtifactFilesystem(local, root) {
 		return
 	}
-	c := &artifactConfig{dir: root, origin: "http://gate.test", repos: "123", budgetPath: local, cap: 1024, floor: 1, cachePeak: 1}
+	c := &artifactConfig{listen: "127.0.0.1:0", dir: root, origin: "http://gate.test", repos: "123", budgetPath: local, cap: 1024, floor: 1, cachePeak: 1}
 	if _, _, _, err := c.open(nil, &Counters{}); err == nil {
 		t.Fatal("owner allowed foreign filesystem")
 	}
@@ -304,7 +313,7 @@ func TestArtifactReconnectKeepsStorageConstraints(t *testing.T) {
 		}
 		expected := int64(1)
 		if strings.Contains(query, "max_page_count") {
-			expected = (f.store.cap + (8 << 20)) / 4096
+			expected = (f.store.cap + f.store.cap/100 + (8 << 20)) / 4096
 		}
 		if actual != expected {
 			t.Fatalf("reconnected SQLite lost storage constraint %s", query)

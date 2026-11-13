@@ -210,7 +210,7 @@ func TestArtifactExpiryAndStagingBounds(t *testing.T) {
 func TestArtifactConfiguredModesAndSharedGuard(t *testing.T) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0700)
-	base := artifactConfig{dir: dir, origin: "http://host.containers.internal:3017", repos: "123", budgetPath: dir, cap: 1 << 20, floor: 1, cachePeak: 1024}
+	base := artifactConfig{listen: "127.0.0.1:0", dir: dir, origin: "http://host.containers.internal:3017", repos: "123", budgetPath: dir, cap: 1 << 20, floor: 1, cachePeak: 1024}
 	if !base.valid() {
 		t.Fatal("valid owner refused")
 	}
@@ -342,21 +342,5 @@ func TestArtifactSlowSiteAUploadCanContinuePastFifteenMinutes(t *testing.T) {
 	f.at = f.at.Add(6 * time.Hour)
 	if w := f.blob(raw+"&comp=block&blockid=Yg==", http.MethodPut, []byte("block")); w.Code != http.StatusForbidden {
 		t.Fatal("write capability never expired")
-	}
-}
-
-func TestArtifactDeletionReservesItsSQLiteJournal(t *testing.T) {
-	f := newArtifactFixture(t)
-	auth := f.token("123", "r", "j")
-	f.upload(auth, "r", "j", "a", []byte("bytes"))
-	f.budget.probe = func() (int64, error) { return 0, nil }
-	if f.rpc(auth, "DeleteArtifact", artifactBody("r", "j", "a")).Code != http.StatusServiceUnavailable {
-		t.Fatal("deletion journal bypassed disk floor")
-	}
-	if _, err := f.store.named(artifactPrincipal{repo: "123", run: "r"}, "a"); err != nil {
-		t.Fatal("refused deletion changed artifact")
-	}
-	if f.rpc(auth, "ListArtifacts", artifactBody("r", "j", "")).Code != http.StatusOK {
-		t.Fatal("write floor blocked a read")
 	}
 }

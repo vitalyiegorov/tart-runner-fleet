@@ -75,7 +75,9 @@
 
 Ubuntu's gate is the only artifact authorization/storage boundary. Forwarding
 gates pass artifact RPC/blob traffic over an operator-provisioned loopback SSH
-forward and never decode claims to authorize. Only the owner verifies RS256,
+forward and never decode claims to authorize. That forward targets the
+owner's artifact-only loopback listener (:3021), which returns 404 for cache,
+npm, identity and every other non-artifact path. Only the owner verifies RS256,
 GitHub issuer/expiry, configured repo IDs and the signed Actions.Results
 backend run/job grant. PRs may upload and consume only their own run, while
 cache's PR-read-only rule remains intact. Sibling jobs use the stored producer

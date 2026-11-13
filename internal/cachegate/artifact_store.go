@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // the artifact database is separate from fleet.db
@@ -66,7 +68,7 @@ func openArtifactStore(path string, capBytes int64, clock func() time.Time, budg
 		return nil, errArtifactInput
 	}
 	// Driver DSN pragmas apply to every replacement connection too.
-	pragmas := url.Values{"_pragma": []string{"foreign_keys(1)", "synchronous(FULL)", "busy_timeout(5000)", fmt.Sprintf("max_page_count(%d)", (capBytes+(8<<20))/4096)}}
+	pragmas := url.Values{"_pragma": []string{"foreign_keys(1)", "synchronous(FULL)", "busy_timeout(5000)", fmt.Sprintf("max_page_count(%d)", (capBytes+capBytes/100+(8<<20))/4096)}}
 	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: pragmas.Encode()}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -132,28 +134,31 @@ func (s *artifactStore) makeRoom(extra, keep int64) error {
 		if extra <= s.cap && used <= s.cap-extra && count < 10000 {
 			return nil
 		}
-		ids, err := s.candidates("SELECT id FROM artifacts WHERE final=1 AND id<>? ORDER BY access,id", keep)
-		if err != nil {
+		if err := s.evictLRU(keep); err != nil {
 			return err
 		}
-		var victim int64
-		for _, id := range ids {
-			if s.leases[id] == 0 {
-				victim = id
-				break
-			}
+	}
+}
+func (s *artifactStore) evictLRU(keep int64) error {
+	ids, err := s.candidates("SELECT id FROM artifacts WHERE final=1 AND id<>? ORDER BY access,id", keep)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if s.leases[id] != 0 {
+			continue
 		}
-		if victim == 0 {
-			return errArtifactSpace
-		}
-		if _, err := s.db.Exec("DELETE FROM artifacts WHERE id=?", victim); err != nil {
+		if _, err = s.db.Exec("DELETE FROM artifacts WHERE id=?", id); err != nil {
 			return err
 		}
 		if s.metrics != nil {
 			s.metrics.lru.Add(1)
 		}
+		return nil
 	}
+	return errArtifactSpace
 }
+
 func (s *artifactStore) create(p artifactPrincipal, name string, expires time.Time) (artifactRecord, error) {
 	if err := s.makeRoom(0, 0); err != nil {
 		return artifactRecord{}, err
@@ -185,6 +190,9 @@ func (s *artifactStore) create(p artifactPrincipal, name string, expires time.Ti
 	return s.record(id)
 }
 func (s *artifactStore) putBlock(a artifactRecord, key string, data []byte) error {
+	if int64(len(data)) > s.cap {
+		return errArtifactSpace
+	}
 	if a.Final || a.Blocks != "[]" {
 		return errArtifactInput
 	}
@@ -203,7 +211,18 @@ func (s *artifactStore) putBlock(a artifactRecord, key string, data []byte) erro
 	if count >= 10000 {
 		return errArtifactSpace
 	}
-	_, err = s.db.Exec("INSERT INTO blocks(artifact,key,data) VALUES(?,?,?) ON CONFLICT(artifact,key) DO UPDATE SET data=excluded.data", a.ID, key, data)
+	write := func() error {
+		_, e := s.db.Exec("INSERT INTO blocks(artifact,key,data) VALUES(?,?,?) ON CONFLICT(artifact,key) DO UPDATE SET data=excluded.data", a.ID, key, data)
+		return e
+	}
+	err = write()
+	var coded interface{ Code() int }
+	if errors.As(err, &coded) && coded.Code()&255 == 13 { // SQLITE_FULL: SQLite rolled back the failed statement.
+		if e := s.evictLRU(a.ID); e != nil {
+			return e
+		}
+		err = write()
+	}
 	if err != nil {
 		return err
 	}
@@ -273,15 +292,10 @@ func (s *artifactStore) list(p artifactPrincipal) ([]artifactRecord, error) {
 	return all, rows.Err()
 }
 
-// DELETE journaling can copy existing pages before a transaction overwrites
-// them. Reserve the entire current database plus a bounded block's growth,
-// rather than assuming a tiny XML commit costs only its request length.
+// One bounded block plus journal/copy and metadata headroom, independent of
+// allocated database size. Reclamation is never gated by this reservation.
 func (s *artifactStore) reserveWrite() (func(), error) {
-	info, err := os.Stat(s.path)
-	if err != nil {
-		return nil, err
-	}
-	return s.budget.reserve(info.Size()*2 + artifactBlockLimit*3 + (1 << 20))
+	return s.budget.reserve(artifactBlockLimit*3 + (1 << 20))
 }
 
 func (s *artifactStore) candidates(query string, args ...any) ([]int64, error) {
@@ -299,4 +313,67 @@ func (s *artifactStore) candidates(query string, args ...any) ([]int64, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+type artifactMetrics struct{ used, staged, objects, ttl, lru, refused atomic.Int64 }
+
+func (m *artifactMetrics) render(w *strings.Builder) {
+	for _, metric := range []struct {
+		name  string
+		value int64
+	}{
+		{"used_bytes", m.used.Load()}, {"staged_bytes", m.staged.Load()}, {"objects", m.objects.Load()},
+		{"ttl_evictions_total", m.ttl.Load()}, {"lru_evictions_total", m.lru.Load()}, {"auth_refusals_total", m.refused.Load()},
+	} {
+		fmt.Fprintf(w, "fleet_artifacts_%s %d\n", metric.name, metric.value)
+	}
+}
+
+// observe is a coherent snapshot taken under the store mutex. Failed queries
+// preserve the last valid observation instead of publishing an empty store.
+func (s *artifactStore) observe() {
+	if s.metrics == nil {
+		return
+	}
+	var used, staged, objects int64
+	if s.db.QueryRow("SELECT COALESCE(SUM(length(data)),0) FROM blocks").Scan(&used) != nil {
+		return
+	}
+	if s.db.QueryRow("SELECT COALESCE(SUM(length(data)),0) FROM blocks JOIN artifacts ON artifacts.id=blocks.artifact WHERE artifacts.final=0").Scan(&staged) != nil {
+		return
+	}
+	if s.db.QueryRow("SELECT COUNT(*) FROM artifacts").Scan(&objects) != nil {
+		return
+	}
+	s.metrics.used.Store(used)
+	s.metrics.staged.Store(staged)
+	s.metrics.objects.Store(objects)
+}
+
+var artifactSweepInterval = time.Minute
+
+// Expiry is checked on every lookup; this sweep reclaims idle staging and
+// expired records even when no new uploads arrive. Stop joins before DB close.
+func artifactMaintenance(s *artifactStore) func() {
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(artifactSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.prune()
+			}
+		}
+	}()
+	return func() { close(stop); <-done }
+}
+func (s *artifactStore) prune() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.makeRoom(0, 0)
+	s.observe()
 }

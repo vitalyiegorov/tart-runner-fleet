@@ -86,7 +86,7 @@ func TestArtifactFullExecuteOwnerAndForwardingLifecycle(t *testing.T) {
 			listen := freeAddress(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			args := []string{"--listen", listen, "--upstream", cache.String(), "--results-upstream", cache.String(), "--write-budget-path", dir, "--write-min-free-bytes", "1", "--artifacts-max-bytes", "1048576"}
+			args := []string{"--listen", listen, "--upstream", cache.String(), "--results-upstream", cache.String(), "--write-budget-path", dir, "--write-min-free-bytes", "1", "--artifacts-max-bytes", "1048576", "--cache-write-peak-bytes", "1048576", "--artifacts-listen", "127.0.0.1:0"}
 			if mode == "owner" {
 				args = append(args, "--artifacts-dir", dir, "--artifacts-repositories", "123")
 			} else {

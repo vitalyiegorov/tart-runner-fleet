@@ -2590,19 +2590,21 @@ Owner flags, added to its existing gate command after operational approval:
 - `--artifacts-dir /absolute/private/path`: proposed
   `~/.local/share/tart-runner-fleet-artifacts`; holds `artifacts.db` and SQLite's
   transient journal, outside fleet.db. Requires a private directory.
+- `--artifacts-listen 127.0.0.1:3021`: owner artifact-only listener. All
+  non-artifact routes return 404; the SSH forward must target this port.
 - `--artifacts-repositories 123,456`: allowed **numeric** repository IDs.
 - `--artifacts-origin http://host.containers.internal:3017`: signed blob URLs
   reach each guest's own gate, which forwards them to the same owner. The Tart
   image's existing hosts mapping must still resolve to Omarchy. Never use the
   SSH tunnel's loopback origin here.
 - `--artifacts-max-bytes 21474836480`: 20 GiB of blocks, including staging.
-  Database allocation is hard-capped at this plus 8 MiB; free pages are reused.
+  Database allocation is capped at this plus 1% and 8 MiB; free pages are reused.
 - `--write-budget-path /existing/shared/filesystem/path`: filesystem holding
   **all** local Actions cache, npm cache (if enabled), and artifacts. Gate
   verifies owner/npm device identity; verify the sidecar mount separately.
 - `--write-min-free-bytes 64424509440`: 60 GiB reserve, never below the node's
   `minFreeDiskGb`. The gate also preserves 5% free inodes when applicable.
-- `--cache-write-peak-bytes 64424509440`: conservative cache commit-copy peak,
+- `--cache-write-peak-bytes 64424509440`: required cache commit-copy peak (no default),
   at least the sidecar's `CACHE_MAX_SIZE_BYTES`. Match any later cap increase.
 
 Forwarding gate: configure `--artifacts-upstream http://127.0.0.1:3020` plus
@@ -2615,7 +2617,7 @@ are refused. Neither owner nor forwarder falls back to GitHub on a failure.
 **Transport still needs provisioning.** Existing docs reserve cloudflared for
 admin/health, and there is no artifact data tunnel deployed by this change.
 The smallest path is an independently supervised SSH local forward from
-Omarchy `127.0.0.1:3020` to Ubuntu `127.0.0.1:3017` over the fleet's existing
+Omarchy `127.0.0.1:3020` to Ubuntu artifact-only `127.0.0.1:3021` over the fleet's existing
 cloudflared-backed SSH host access. Pin/verify host keys, require
 ExitOnForwardFailure and server-alive limits, and bind only loopback. This is
 an artifact-only data exception; npm and Actions cache stay local. The gate
@@ -2630,7 +2632,7 @@ run by this change), using its already-configured SSH/cloudflared host alias:
 ssh -N -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
-  -L 127.0.0.1:3020:127.0.0.1:3017 ubuntu-vitalii
+  -L 127.0.0.1:3020:127.0.0.1:3021 ubuntu-vitalii
 ```
 
 Supervise this independently of CI jobs, verify the target host key first,
@@ -2641,8 +2643,10 @@ uses 72 hours. Abandoned staging expires after one hour without block activity.
 A minute sweep removes expired records when its write budget permits. LRU
 reclaims finalized objects at the byte cap; active downloads are leased.
 Reads never extend retention. SQLite files can remain allocated after rows
-are deleted; page reuse avoids a repeated VACUUM/copy cost. Journal/copy peaks
-are included in reservations. This protects cooperating gate writes, not
+are deleted; page reuse avoids a repeated VACUUM/copy cost. Bounded block/copy peaks
+are included in reservations; delete and prune can reclaim below the write
+floor. Cache bodies stream with a progress deadline, including 128 MiB
+single-shot PUTs; only commits reserve the explicitly configured cache cap. This protects cooperating gate writes, not
 unrelated host writers; retain host admission guardrails and capacity headroom.
 Unknown disk space blocks writes. Reads continue. A write/expiry error is
 explicit; do not delete VMs or modify fleet.db to repair artifact storage.
@@ -2654,7 +2658,8 @@ Metrics stay on the gate's existing loopback listener:
 `fleet_artifacts_lru_evictions_total`, `fleet_artifacts_auth_refusals_total`,
 `fleet_cache_gate_write_reserved_bytes`, `fleet_cache_gate_write_refusals_total`.
 The forwarding gate exposes transfer bytes; owner storage metrics live only
-on Ubuntu. A failed query preserves its last valid observation. JWTs and
+on Ubuntu. Gauges refresh at startup and on the minute sweep, not on each request.
+A failed query preserves its last valid observation. JWTs and
 signed URL queries are never logged or put in labels.
 
 **All failure reports stay local; no viewer or GitHub exception.** Artifacts
@@ -2670,3 +2675,7 @@ restart invalidates signed URLs; create/list/sign retries obtain fresh URLs.
 New GitHub uploads can encounter the original quota. Before promotion, prove
 a knee-doctor PR build -> all seven lanes with matching bytes, zero GitHub
 artifact creates/listings, transport reachability and an actual rollback.
+
+Removing both artifact modes makes remaining artifact-related flags inert
+with a warning. Global LRU has no per-run quota and can evict an active run's
+finalized artifacts under pressure; size the cap for all concurrent runs.

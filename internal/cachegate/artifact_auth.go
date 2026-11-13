@@ -32,13 +32,14 @@ type artifactClaims struct {
 func (*artifactClaims) Valid() error { return nil }
 
 type artifactVerifier struct {
-	mu      sync.Mutex
-	url     string
-	client  *http.Client
-	clock   func() time.Time
-	keys    map[string]*rsa.PublicKey
-	fetched time.Time
-	loaded  time.Time
+	mu              sync.Mutex
+	url             string
+	client          *http.Client
+	clock           func() time.Time
+	keys            map[string]*rsa.PublicKey
+	fetched         time.Time
+	loaded          time.Time
+	rotationRefresh bool
 }
 
 func (v *artifactVerifier) verify(ctx context.Context, auth string) (artifactPrincipal, error) {
@@ -82,8 +83,16 @@ func (v *artifactVerifier) key(ctx context.Context, kid string) (*rsa.PublicKey,
 	if key := v.keys[kid]; key != nil && at.Before(v.loaded.Add(10*time.Minute)) {
 		return key, nil
 	}
-	if kid == "" || !v.fetched.IsZero() && at.Before(v.fetched.Add(30*time.Second)) {
+	if kid == "" {
 		return nil, errArtifactAuth
+	}
+	if !v.fetched.IsZero() && at.Before(v.fetched.Add(30*time.Second)) {
+		if len(v.keys) == 0 || v.keys[kid] != nil || v.rotationRefresh {
+			return nil, errArtifactAuth
+		}
+		v.rotationRefresh = true // one extra fetch per window, never one per attacker-selected kid
+	} else {
+		v.rotationRefresh = false
 	}
 	v.fetched = at // failed refreshes are bounded too; old keys expire, never extend on failure
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

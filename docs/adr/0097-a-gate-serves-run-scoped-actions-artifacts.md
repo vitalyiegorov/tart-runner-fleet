@@ -2,10 +2,10 @@
 
 ## Status
 
-Accepted design for issue #509, with owner decisions recorded in this session.
+Accepted for issue #509, with council corrections tracked by PR #510.
 Implementation is default off; deployment and promotion are separate tasks.
 Amends ADR 0078 decision 2 and ADR 0034's no-cross-node-artifact-path rule.
-[Upstream research](../ARTIFACT_GATE_RESEARCH_509.md).
+
 
 ## Context
 
@@ -84,17 +84,25 @@ staged/unreferenced blocks. Active downloads lease their records; eviction
 skips them and delete retries rather than breaking the stream. No full ZIP
 is buffered in memory; blocks are at most 16 MiB.
 
-SQLite's physical page ceiling is the logical cap plus 8 MiB of metadata
-headroom; reaching it fails closed. Allocated pages are reused after eviction,
-not continually vacuumed. The DELETE journal can temporarily copy pages:
-reserve twice the current database plus three block sizes and metadata
-headroom before artifact writes. Byte cap and physical reserve are distinct.
+SQLite's hard page ceiling includes 1% proportional slack plus 8 MiB metadata
+headroom above the logical cap, so overflow pages do not prematurely exhaust
+a large store. SQLITE_FULL evicts one eligible LRU object and retries the
+block insertion exactly once; other I/O failures remain explicit. Reject a
+block larger than the entire cap before any eviction. Allocated free pages
+are reused rather than continually vacuumed. Artifact writes reserve a fixed
+three-block peak plus 1 MiB metadata, independent of database file size.
+Deletion and pruning are not gated by that write reserve: reclamation must
+remain possible at low space. Byte cap and physical reserve are distinct.
 
 One synchronized budget per gate observes fresh filesystem available bytes
 and the 5% free-inode floor, then accounts for concurrent artifact, signed
 cache-upload/commit and npm writes. Unknown space refuses writes. Cache PUTs
-are bounded at 64 MiB; commit/finalize conservatively reserves an additional
-cache copy peak (default 60 GiB, at least the sidecar's configured size cap).
+stream unchanged using Content-Length-based reservations; unknown-length
+bodies have a fixed 128 MiB bound/reservation. This preserves the client's
+128 MiB single-shot uploads. The progress deadline covers the streaming
+request and releases reservations on a stall. Only block-list commit and
+finalize reserve the additional cache copy peak, which must be explicitly
+configured to the sidecar's cache size cap (there is no 60 GiB default).
 Npm reserves per streamed chunk through publication. Cache sidecars remain
 loopback-only. write-budget-path must name the actual common filesystem;
 owner/npm paths are checked for the same device. Operator proof that the
@@ -105,22 +113,26 @@ ADR 0006's guest virtual capacity floor is unchanged. Admission alone does
 not protect running writers. Guarded writes cannot spend their shared reserve;
 unrelated host writers can still race filesystem observations, so this is
 not a filesystem-wide hard quota. Low-space reads remain available. SQLite
-deletion also reserves its journal peak and may refuse when that reserve is
-unavailable; never manufacture a
-successful deletion or mutate fleet VM state to reclaim artifact space.
+may still refuse a deletion if the filesystem cannot create its journal;
+never manufacture success or mutate fleet VM state to reclaim artifact space.
 
 ### Transport and guest origins
 
 Existing fleet access is SSH through cloudflared; repository docs explicitly
 keep cache payloads off cloudflared. There is no existing documented artifact
 transport. The smallest addition is an operator-managed **SSH local forward**
-from Omarchy loopback to Ubuntu's loopback gate, over that authenticated,
+from Omarchy loopback to Ubuntu's artifact-only loopback listener, over that authenticated,
 encrypted SSH connection, with known-host verification, ExitOnForwardFailure
 and server-alive limits. This is an artifact-only exception to the admin/health
 transport restriction, not permission to tunnel npm or Actions cache data.
 
 Forward mode therefore accepts only an explicit HTTP literal-loopback endpoint
 with a port, intended for that local forward; no public plaintext upstream.
+The owner exposes an additional `--artifacts-listen` loopback listener
+(default 127.0.0.1:3021) serving only ArtifactService and signed artifact blob
+paths. Every cache, npm, identity, health and other path there returns 404.
+The SSH forward must land on this listener, never the whole :3017 gate; local
+processes on the forwarding host therefore gain no cross-site cache path.
 The gate does not create tunnels or manage SSH credentials. It returns an
 explicit unavailable error if the forward is down, refuses redirects, and
 never falls back to GitHub. Deployment must provision and verify this tunnel;
@@ -147,7 +159,9 @@ hardcoded artifact-url output is unusable for these IDs. This accepted limit
 includes Playwright reports. Ordinary gate-reaching v4 workflow steps need no
 change; GitHub REST tooling is not transparently compatible.
 
-Default off preserves artifact passthrough. Rollback: complete/drain affected
+Default off preserves artifact passthrough. Removing owner/forward mode makes
+leftover artifact-related flags inert with a warning, allowing rollback
+without removing every associated option. Rollback: complete/drain affected
 runs before disabling forwarding/owner or restoring prior executor.image /
 Tart baseVm and gate config. Preserve owner storage and the serving routes
 until existing consumers finish; changing routing mid-run loses access.
@@ -174,3 +188,50 @@ verified repo/run predicate and one shared budget. Testability: deterministic
 signed-token, protocol, persistence, expiry/LRU, forwarding and disk-pressure
 tests exercise the new boundary; runtime/fleet safety policy is unchanged.
 Observe/shadow and VM mutation authority limits remain intact.
+
+## Council constraints and consequences
+
+Network request bodies and RPC response writes never hold the SQLite mutex.
+Capabilities are checked before bounded body reads, with no disk reservation
+while waiting for the network, then object state/expiry is rechecked under
+the mutex before persistence. Finalize hashes immutable committed blocks
+outside the mutex under a lease; a finalized replay compares stored size/hash
+without streaming. Slow transfers do not serialize unrelated run operations.
+Storage gauges are refreshed at startup and on the existing minute prune
+tick, not by full-table aggregates on each HTTP request.
+
+There is deliberately **no per-run eviction quota**. Global LRU can evict an
+active run's finalized artifact under cap pressure once no transfer lease
+protects it. Size the owner cap for concurrent runs; own-run authorization
+does not promise retention against eviction by other runs. No scheduler or
+new run state is introduced to mask that tradeoff.
+
+JWKS keeps a 30-second refresh limit with one immediate bonus refresh when
+an unseen kid appears after keys were loaded. The bonus is bounded per
+refresh window, not per arbitrary attacker-supplied kid. Existing verified
+keys keep their original expiry on a failed refresh.
+
+## Evidence and validation
+
+Pinned cache image: v9.8.0, source `c866ae42315af2cb5e165a23a414228fd2fc035f`;
+its [catch-all](https://github.com/falcondev-oss/github-actions-cache-server/blob/c866ae42315af2cb5e165a23a414228fd2fc035f/routes/%5B...path%5D.ts)
+forwards artifacts. Latest researched v10.0.0
+[`c829dd6f58b28b785e090dd938ec1e4ee7c477a2`](https://github.com/falcondev-oss/github-actions-cache-server/blob/c829dd6f58b28b785e090dd938ec1e4ee7c477a2/proto/cache.proto)
+also implements only CacheService.
+
+The v4 upload action snapshot
+[`ea165f8d65b6e75b540449e92b4886f43607fa02`](https://github.com/actions/upload-artifact/blob/ea165f8d65b6e75b540449e92b4886f43607fa02/dist/upload/index.js#L3515-L3580)
+locks artifact v2.3.2: JSON Twirp at ACTIONS_RESULTS_URL's origin with the
+runtime bearer token, CreateArtifact -> Azure block PUT/XML block-list ->
+FinalizeArtifact. Download snapshot
+[`d3f86a106a0bac45b974a628896c90dbdf5c8093`](https://github.com/actions/download-artifact/blob/d3f86a106a0bac45b974a628896c90dbdf5c8093/dist/index.js#L2299-L2340)
+lists with consumer IDs, signs with producer IDs and fetches ZIP bytes.
+Explicit github-token inputs choose REST and bypass the gate. A real v2.3.2
+SDK offline upload/list/download/digest/delete probe passed during initial
+implementation; it introduced no repository npm dependency.
+
+`internal/cachegate/artifact_council_test.go` records deterministic regressions
+for #510's council findings, including stalls, large cache PUTs, page pressure,
+reclamation, rollback, gauges and the artifact-only listener. Existing security,
+SQLite fault, restart and split-site seven-lane replay tests remain in place.
+No fleet.v1 or fleet.db migration and no observe/shadow authority promotion.

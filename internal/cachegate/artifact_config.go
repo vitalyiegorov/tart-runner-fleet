@@ -1,10 +1,10 @@
 package cachegate
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,12 +16,13 @@ import (
 )
 
 type artifactConfig struct {
-	dir, origin, upstream, repos, budgetPath string
-	cap, floor, cachePeak                    int64
+	dir, origin, upstream, repos, budgetPath, listen string
+	cap, floor, cachePeak                            int64
 }
 
 func artifactFlags(f *flag.FlagSet) *artifactConfig {
 	c := &artifactConfig{}
+	f.StringVar(&c.listen, "artifacts-listen", "127.0.0.1:3021", "owner-only loopback listener; serves artifact routes only")
 	f.StringVar(&c.dir, "artifacts-dir", "", "private artifact owner directory; empty disables owner")
 	f.StringVar(&c.origin, "artifacts-origin", "http://host.containers.internal:3017", "guest-facing gate origin for signed artifact URLs")
 	f.StringVar(&c.upstream, "artifacts-upstream", "", "loopback SSH local forward to the single artifact owner")
@@ -29,7 +30,7 @@ func artifactFlags(f *flag.FlagSet) *artifactConfig {
 	f.StringVar(&c.budgetPath, "write-budget-path", "", "existing filesystem shared by local cache, npm and artifacts")
 	f.Int64Var(&c.cap, "artifacts-max-bytes", 20<<30, "artifact logical byte cap (includes staged blocks)")
 	f.Int64Var(&c.floor, "write-min-free-bytes", 60<<30, "physical disk reserve; must meet node minFreeDiskGb")
-	f.Int64Var(&c.cachePeak, "cache-write-peak-bytes", 60<<30, "maximum cache commit copy peak; must cover cache byte cap")
+	f.Int64Var(&c.cachePeak, "cache-write-peak-bytes", 0, "maximum cache commit copy peak; must cover cache byte cap")
 	return c
 }
 func originURL(raw string) (*url.URL, bool) {
@@ -38,14 +39,14 @@ func originURL(raw string) (*url.URL, bool) {
 }
 func (c *artifactConfig) valid() bool {
 	if c.dir == "" && c.upstream == "" {
-		return c.repos == "" && c.budgetPath == ""
+		return true
 	}
 	if c.dir != "" && c.upstream != "" || c.cap <= 0 || c.cap > 1<<50 || c.floor <= 0 || c.cachePeak <= 0 || !filepath.IsAbs(c.budgetPath) {
 		return false
 	}
 	if c.dir != "" {
 		_, ok := originURL(c.origin)
-		return ok && filepath.IsAbs(c.dir) && len(c.repositoryIDs()) > 0
+		return ok && loopbackAddress(c.listen) && filepath.IsAbs(c.dir) && len(c.repositoryIDs()) > 0
 	}
 	target, ok := originURL(c.upstream)
 	if !ok || target.Scheme != "http" || !loopbackAddress(target.Host) || target.Port() == "0" || c.repos != "" {
@@ -123,8 +124,18 @@ func withArtifacts(next, artifacts http.Handler, budget *writeBudget, cachePeak 
 		// Cache signed URLs bypass bearer auth just as artifact capabilities do. Guard
 		// every mutating cache route, including unknown-length block PUTs.
 		if writePaths[r.URL.Path] || hasPrefix(r.URL.Path, []string{"/upload/", "/devstoreaccount1/"}) && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			const limit = 64 << 20
-			peak := int64(limit * 3)
+			const unknownLimit = 128 << 20
+			length := r.ContentLength
+			r.Body = &progressBody{ReadCloser: r.Body, control: http.NewResponseController(w)}
+			if length < 0 {
+				length = unknownLimit
+				r.Body = http.MaxBytesReader(w, r.Body, unknownLimit)
+			}
+			if length > (math.MaxInt64-4096-cachePeak)/3 {
+				artifactError(w, 503)
+				return
+			}
+			peak := length*3 + 4096
 			if r.URL.Query().Get("comp") == "blocklist" || r.URL.Path == cacheService+"FinalizeCacheEntryUpload" {
 				peak += cachePeak
 			}
@@ -134,13 +145,6 @@ func withArtifacts(next, artifacts http.Handler, budget *writeBudget, cachePeak 
 				return
 			}
 			defer release()
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-			if err != nil {
-				artifactError(w, 400)
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
-			r.ContentLength = int64(len(body))
 		}
 		next.ServeHTTP(w, r)
 	})

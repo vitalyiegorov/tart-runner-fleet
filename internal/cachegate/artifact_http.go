@@ -71,19 +71,7 @@ func artifactHandler(s *artifactStore, v *artifactVerifier, origin string, repos
 			artifactError(w, 403)
 			return
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		defer s.observe()
-		if method == "CreateArtifact" || method == "FinalizeArtifact" || method == "DeleteArtifact" {
-			release, reserveErr := s.reserveWrite()
-			if reserveErr != nil {
-				artifactStoreError(w, reserveErr)
-				return
-			}
-			defer release()
-		}
-		var response any
-		response, err = s.rpc(p, method, req, origin)
+		response, err := s.handleRPC(p, method, req, origin)
 		if err != nil {
 			artifactStoreError(w, err)
 			return
@@ -103,6 +91,20 @@ type artifactRequest struct {
 	Hash       string    `json:"hash"`
 	NameFilter string    `json:"name_filter"`
 	IDFilter   string    `json:"id_filter"`
+}
+
+// Request bodies and response writes stay outside the database critical section.
+func (s *artifactStore) handleRPC(p artifactPrincipal, method string, r artifactRequest, origin string) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if method == "CreateArtifact" {
+		release, err := s.reserveWrite()
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+	return s.rpc(p, method, r, origin)
 }
 
 func (s *artifactStore) rpc(p artifactPrincipal, method string, r artifactRequest, origin string) (any, error) {
@@ -159,8 +161,14 @@ func (s *artifactStore) finalize(a artifactRecord, r artifactRequest) (any, erro
 	if err != nil || size < 0 {
 		return nil, errArtifactInput
 	}
+	if a.Final {
+		if size != a.Size || r.Hash != "" && r.Hash != a.Hash {
+			return nil, errArtifactInput
+		}
+		return map[string]any{"ok": true, "artifact_id": fmt.Sprint(a.ID)}, nil
+	}
 	hash := sha256.New()
-	actual, err := s.stream(a, hash)
+	actual, err := s.hashUnlocked(a, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -168,10 +176,16 @@ func (s *artifactStore) finalize(a artifactRecord, r artifactRequest) (any, erro
 	if size != actual || r.Hash != "" && r.Hash != digest {
 		return nil, errArtifactInput
 	}
-	if !a.Final {
-		if _, err = s.db.Exec("UPDATE artifacts SET final=1,size=?,hash=? WHERE id=?", actual, digest, a.ID); err != nil {
-			return nil, err
-		}
+	if a.Expires <= s.clock().Unix() {
+		return nil, errArtifactMissing
+	}
+	release, err := s.reserveWrite()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if _, err = s.db.Exec("UPDATE artifacts SET final=1,size=?,hash=? WHERE id=?", actual, digest, a.ID); err != nil {
+		return nil, err
 	}
 	return map[string]any{"ok": true, "artifact_id": fmt.Sprint(a.ID)}, nil
 }
@@ -204,15 +218,14 @@ func (s *artifactStore) signedURL(origin string, a artifactRecord, mode string) 
 	exp := fmt.Sprint(expiry)
 	return origin + path + "?mode=" + mode + "&expires=" + exp + "&sig=" + s.signature(path, mode, exp)
 }
+
+// Capability verification and bounded network reads never hold the store lock
+// or a disk reservation. The record is rechecked after the body arrives.
 func (s *artifactStore) blob(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	defer s.observe()
 	q := r.URL.Query()
 	mode, exp, sig := q.Get("mode"), q.Get("expires"), q.Get("sig")
-	expected := s.signature(r.URL.Path, mode, exp)
 	expiry, err := strconv.ParseInt(exp, 10, 64)
-	if err != nil || expiry <= s.clock().Unix() || !hmac.Equal([]byte(sig), []byte(expected)) || mode != "read" && mode != "write" {
+	if err != nil || expiry <= s.clock().Unix() || !hmac.Equal([]byte(sig), []byte(s.signature(r.URL.Path, mode, exp))) || mode != "read" && mode != "write" {
 		artifactError(w, 403)
 		return
 	}
@@ -221,67 +234,30 @@ func (s *artifactStore) blob(w http.ResponseWriter, r *http.Request) {
 		artifactError(w, 403)
 		return
 	}
-	a, err := s.record(id)
-	if err != nil || a.Expires <= s.clock().Unix() {
-		artifactStoreError(w, errArtifactMissing)
-		return
-	}
-	if mode == "read" && r.Method == http.MethodGet && a.Final {
+	if mode == "read" && r.Method == http.MethodGet {
+		a, err := s.readableBlob(id, expiry)
+		if err != nil {
+			artifactStoreError(w, err)
+			return
+		}
+		defer s.releaseLease(a.ID)
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Length", fmt.Sprint(a.Size))
-		s.leases[a.ID]++
-		s.mu.Unlock()
-		defer func() {
-			s.mu.Lock()
-			s.leases[a.ID]--
-			if s.leases[a.ID] == 0 {
-				delete(s.leases, a.ID)
-			}
-		}()
-		_, err = s.stream(a, artifactDownloadWriter{w})
-		if err != nil {
+		if _, err = s.stream(a, artifactDownloadWriter{w}); err != nil {
 			panic(http.ErrAbortHandler)
 		}
 		return
 	}
-	if mode != "write" || r.Method != http.MethodPut || a.Final {
+	if mode != "write" || r.Method != http.MethodPut {
 		artifactError(w, 403)
 		return
 	}
-	release, err := s.reserveWrite()
+	put, err := s.readUpload(w, r)
 	if err != nil {
 		artifactStoreError(w, err)
 		return
 	}
-	defer release()
-	switch q.Get("comp") {
-	case "block":
-		key := q.Get("blockid")
-		decoded, e := base64.StdEncoding.DecodeString(key)
-		if e != nil || len(decoded) == 0 || len(decoded) > 64 {
-			artifactError(w, 400)
-			return
-		}
-		data, e := io.ReadAll(http.MaxBytesReader(w, r.Body, artifactBlockLimit))
-		if e != nil {
-			artifactError(w, 400)
-			return
-		}
-		err = s.putBlock(a, key, data)
-	case "blocklist":
-		var list struct {
-			XMLName xml.Name `xml:"BlockList"`
-			Keys    []string `xml:"Latest"`
-		}
-		if xml.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&list) != nil {
-			artifactError(w, 400)
-			return
-		}
-		err = s.commitBlocks(a, list.Keys)
-	default:
-		err = errArtifactInput
-	}
-	if err != nil {
+	if err = s.writeBlob(id, expiry, put); err != nil {
 		artifactStoreError(w, err)
 		return
 	}
@@ -289,10 +265,88 @@ func (s *artifactStore) blob(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Last-Modified", s.clock().UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusCreated)
 }
+func (s *artifactStore) readableBlob(id, expiry int64) (artifactRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, err := s.record(id)
+	if err != nil {
+		return a, err
+	}
+	if !a.Final || min(a.Expires, expiry) <= s.clock().Unix() {
+		return a, errArtifactMissing
+	}
+	s.leases[a.ID]++
+	return a, nil
+}
+func (s *artifactStore) writeBlob(id, expiry int64, put func(artifactRecord) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, err := s.record(id)
+	if err != nil {
+		return err
+	}
+	if min(a.Expires, expiry) <= s.clock().Unix() {
+		return errArtifactMissing
+	}
+	if a.Final {
+		return errArtifactAuth
+	}
+	release, err := s.reserveWrite()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return put(a)
+}
+func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (func(artifactRecord) error, error) {
+	switch r.URL.Query().Get("comp") {
+	case "block":
+		key := r.URL.Query().Get("blockid")
+		decoded, err := base64.StdEncoding.DecodeString(key)
+		if err != nil || len(decoded) == 0 || len(decoded) > 64 {
+			return nil, errArtifactInput
+		}
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, artifactBlockLimit))
+		if err != nil {
+			return nil, errArtifactInput
+		}
+		return func(a artifactRecord) error { return s.putBlock(a, key, data) }, nil
+	case "blocklist":
+		var list struct {
+			XMLName xml.Name `xml:"BlockList"`
+			Keys    []string `xml:"Latest"`
+		}
+		if xml.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&list) != nil {
+			return nil, errArtifactInput
+		}
+		return func(a artifactRecord) error { return s.commitBlocks(a, list.Keys) }, nil
+	default:
+		return nil, errArtifactInput
+	}
+}
+
+// Caller holds mu. Committed blocks are immutable; a lease protects them
+// while hashing yields the mutex to unrelated runs. Return with mu held.
+func (s *artifactStore) hashUnlocked(a artifactRecord, w io.Writer) (int64, error) {
+	s.leases[a.ID]++
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.unlease(a.ID) }()
+	return s.stream(a, w)
+}
+func (s *artifactStore) unlease(id int64) {
+	s.leases[id]--
+	if s.leases[id] == 0 {
+		delete(s.leases, id)
+	}
+}
+func (s *artifactStore) releaseLease(id int64) { s.mu.Lock(); defer s.mu.Unlock(); s.unlease(id) }
+
 func artifactStoreError(w http.ResponseWriter, err error) {
 	status := http.StatusServiceUnavailable
 	if errors.Is(err, errArtifactMissing) {
 		status = 404
+	} else if errors.Is(err, errArtifactAuth) {
+		status = 403
 	} else if errors.Is(err, errArtifactInput) {
 		status = 400
 	}
@@ -320,4 +374,15 @@ type artifactDownloadWriter struct{ http.ResponseWriter }
 func (w artifactDownloadWriter) Write(p []byte) (int, error) {
 	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(bodyStallTimeout))
 	return w.ResponseWriter.Write(p)
+}
+
+// The SSH forward lands here, never on the cache/npm/identity listener.
+func artifactOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !artifactRoute(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
