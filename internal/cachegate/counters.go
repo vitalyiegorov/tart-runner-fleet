@@ -21,7 +21,10 @@ type Counters struct {
 	fromRegistry atomic.Int64
 	// npmEnabled exports the npm series, so a gate with no npm cache scrapes exactly
 	// the series it always did. countingHandler sets it before the gate serves.
-	npmEnabled bool
+	npmEnabled       bool
+	artifactsEnabled bool
+	artifactStats    *artifactMetrics
+	writeBudget      *writeBudget
 }
 
 func (c *Counters) render() string {
@@ -31,8 +34,8 @@ func (c *Counters) render() string {
 	for _, upstream := range []struct {
 		name  string
 		index Upstream
-	}{{"cache", CacheServer}, {"results", Results}, {"npm", NPM}} {
-		if upstream.index == NPM && !c.npmEnabled {
+	}{{"cache", CacheServer}, {"results", Results}, {"npm", NPM}, {"artifacts", Artifacts}} {
+		if upstream.index == NPM && !c.npmEnabled || upstream.index == Artifacts && !c.artifactsEnabled {
 			continue
 		}
 		fmt.Fprintf(&output, "fleet_cache_gate_bytes_total{upstream=%q,direction=\"to_guest\"} %d\n",
@@ -42,6 +45,15 @@ func (c *Counters) render() string {
 	}
 	if c.npmEnabled {
 		fmt.Fprintf(&output, "fleet_cache_gate_bytes_total{upstream=\"npm\",direction=\"from_registry\"} %d\n", c.fromRegistry.Load())
+	}
+	if c.artifactStats != nil {
+		c.artifactStats.render(&output)
+	}
+	if c.writeBudget != nil {
+		c.writeBudget.mu.Lock()
+		reserved := c.writeBudget.reserved
+		c.writeBudget.mu.Unlock()
+		fmt.Fprintf(&output, "fleet_cache_gate_write_reserved_bytes %d\nfleet_cache_gate_write_refusals_total %d\n", reserved, c.writeBudget.refused.Load())
 	}
 	return output.String()
 }

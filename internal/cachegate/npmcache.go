@@ -69,6 +69,7 @@ func (s npmStatus) Error() string { return fmt.Sprintf("the registry answered %d
 // whole, by rename, or not at all. A directory that cannot be written is simply a cache that does
 // not grow, which is how the prune freezes it.
 type npmCache struct {
+	budget   *writeBudget
 	dir      string
 	registry string
 	client   *http.Client
@@ -358,7 +359,13 @@ func (c *npmCache) store(o npmObject, tmp *os.File, response *http.Response, sta
 		return errNPMDisk
 	}
 	body := &npmProgress{body: response.Body, stalled: stalled, counted: c.counters}
-	written, err := io.Copy(tmp, io.MultiReader(bytes.NewReader(append(line, '\n')), io.LimitReader(body, npmMaxObject+1)))
+	var destination io.Writer = tmp
+	if c.budget != nil {
+		guarded := &budgetWriter{Writer: tmp, budget: c.budget}
+		defer guarded.close()
+		destination = guarded
+	}
+	written, err := io.Copy(destination, io.MultiReader(bytes.NewReader(append(line, '\n')), io.LimitReader(body, npmMaxObject+1)))
 	if body.err != nil {
 		return errNPMRegistry
 	}

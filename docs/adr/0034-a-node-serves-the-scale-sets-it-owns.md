@@ -922,3 +922,13 @@ check runs in `make ci`. It does not prove that an image already in production
 was built from the current list. `--check` in the guest, fed the current list,
 proves that every listed command is present, which is the property a job
 depends on. The recipe's verification step runs it.
+
+## Amendment: issue #509, a single artifact data owner
+
+[ADR 0097](0097-a-gate-serves-run-scoped-actions-artifacts.md) permits one
+explicit data-plane exception: Ubuntu's gate owns all fleet-served Actions
+artifacts; other gates forward artifact RPCs and blob transfers to it over an
+operator-provisioned authenticated encrypted SSH local forward to the owner's
+artifact-only listener; cache routes cannot traverse it. This adds no
+cross-node scheduler, state replication, owner discovery or peer fetch. Cache
+and npm keep their existing node/site placement.

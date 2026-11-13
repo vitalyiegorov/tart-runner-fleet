@@ -2574,3 +2574,125 @@ Started/assigned demand remains active while a nonterminal local instance names
 its runner or scheduling identity. This path never deletes or drains instances,
 changes authority mode, or bypasses update quiescence. Inspect the versioned
 status/queues/instances interface; do not delete demand rows manually.
+
+## Actions artifacts: one Ubuntu owner (ADR 0097, default off)
+
+The artifact feature does nothing without explicit owner or forwarding flags.
+The shipped units remain unchanged. Do not enable it as part of a code rollout.
+The single owner is **ubuntu-vitalii**. Omarchy forwards artifact RPCs and blob
+PUT/GET to it; Mini/MacBook Linux guests using Omarchy follow the same route.
+Cache/npm still use their current local stores. macOS Tart, roaming MacBook
+(#446) and explicit `github-token` REST downloads keep using GitHub and cannot
+consume gate-only artifacts. Validate complete handoff reachability first.
+
+Owner flags, added to its existing gate command after operational approval:
+
+- `--artifacts-dir /absolute/private/path`: proposed
+  `~/.local/share/tart-runner-fleet-artifacts`; holds `artifacts.db` and SQLite's
+  transient journal, outside fleet.db. Requires a private directory.
+- `--artifacts-listen 127.0.0.1:3021`: owner artifact-only listener. All
+  non-artifact routes return 404; the SSH forward must target this port.
+- `--artifacts-repositories 123,456`: allowed **numeric** repository IDs.
+- `--artifacts-origin http://host.containers.internal:3017`: signed blob URLs
+  reach each guest's own gate, which forwards them to the same owner. The Tart
+  image's existing hosts mapping must still resolve to Omarchy. Never use the
+  SSH tunnel's loopback origin here.
+- `--artifacts-max-bytes 21474836480`: 20 GiB of blocks, including staging.
+  Database allocation is capped at this plus 1% and 8 MiB; free pages are reused.
+- `--write-budget-path /existing/shared/filesystem/path`: filesystem holding
+  **all** local Actions cache, npm cache (if enabled), and artifacts. Gate
+  verifies owner/npm device identity; verify the sidecar mount separately.
+- `--write-min-free-bytes 64424509440`: 60 GiB reserve, never below the node's
+  `minFreeDiskGb`. The gate also preserves 5% free inodes when applicable.
+- `--cache-write-peak-bytes 64424509440`: required cache commit-copy peak (no default),
+  at least the sidecar's `CACHE_MAX_SIZE_BYTES`. Match any later cap increase.
+
+Forwarding gate: configure `--artifacts-upstream http://127.0.0.1:3020` plus
+its own write-budget-path/reserve/cache-peak for its local cache/npm writers.
+It keeps no artifact state and makes no artifact auth decisions. The target
+must be a literal loopback address with a port; plaintext public/LAN targets,
+credentials, URL paths, redirects and forwarding back to the listening port
+are refused. Neither owner nor forwarder falls back to GitHub on a failure.
+
+**Transport still needs provisioning.** Existing docs reserve cloudflared for
+admin/health, and there is no artifact data tunnel deployed by this change.
+The smallest path is an independently supervised SSH local forward from
+Omarchy `127.0.0.1:3020` to Ubuntu artifact-only `127.0.0.1:3021` over the fleet's existing
+cloudflared-backed SSH host access. Pin/verify host keys, require
+ExitOnForwardFailure and server-alive limits, and bind only loopback. This is
+an artifact-only data exception; npm and Actions cache stay local. The gate
+never invokes SSH, creates credentials or installs a service. Do not enable
+forwarding until this encrypted authenticated transport and its outage
+behavior are verified. The SSH forward must not use a pooled CI runner slot.
+
+Proposed command on Omarchy (for a separate approved operational task; not
+run by this change), using its already-configured SSH/cloudflared host alias:
+
+```sh
+ssh -N -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:3020:127.0.0.1:3021 ubuntu-vitalii
+```
+
+Supervise this independently of CI jobs, verify the target host key first,
+and test disconnect/reconnect before configuring the forwarding gate.
+
+Retention is min(requested absolute expiry, 72 hours); missing/0 retention
+uses 72 hours. Abandoned staging expires after one hour without block activity.
+A minute sweep removes expired records when its write budget permits. LRU
+reclaims finalized objects at the byte cap; active downloads are leased.
+Reads never extend retention. SQLite files can remain allocated after rows
+are deleted; page reuse avoids a repeated VACUUM/copy cost. Bounded block/copy peaks
+are included in reservations; delete and prune can reclaim below the write
+floor. Cache bodies stream with a progress deadline, including 128 MiB
+single-shot PUTs; only commits reserve the explicitly configured cache cap. This protects cooperating gate writes, not
+unrelated host writers; retain host admission guardrails and capacity headroom.
+Unknown disk space blocks writes. Reads continue. A write/expiry error is
+explicit; do not delete VMs or modify fleet.db to repair artifact storage.
+
+Metrics stay on the gate's existing loopback listener:
+`fleet_cache_gate_bytes_total{upstream="artifacts",direction="from_guest"|"to_guest"}`,
+`fleet_artifacts_used_bytes`, `fleet_artifacts_staged_bytes`,
+`fleet_artifacts_objects`, `fleet_artifacts_ttl_evictions_total`,
+`fleet_artifacts_lru_evictions_total`, `fleet_artifacts_auth_refusals_total`,
+`fleet_cache_gate_write_reserved_bytes`, `fleet_cache_gate_write_refusals_total`.
+The forwarding gate exposes transfer bytes; owner storage metrics live only
+on Ubuntu. Gauges refresh at startup and on the minute sweep, not on each request.
+A failed query preserves its last valid observation. JWTs and
+signed URL queries are never logged or put in labels.
+
+**All failure reports stay local; no viewer or GitHub exception.** Artifacts
+are absent from GitHub UI/REST and `gh run download`; upload-artifact's
+hardcoded `artifact-url` output is unusable for local IDs. Standard same-run
+v4 transfers still work through the gate. This includes Playwright reports.
+
+Rollback must complete/drain affected runs before disabling owner/forwarding
+or restoring the previous executor.image/Tart baseVm and gate configuration.
+Preserve owner database/read routes through remaining consumers. Read URLs last 15 minutes; upload URLs last six hours to accommodate large
+site-A transfers, both capped by retention. A process
+restart invalidates signed URLs; create/list/sign retries obtain fresh URLs.
+New GitHub uploads can encounter the original quota. Before promotion, prove
+a knee-doctor PR build -> all seven lanes with matching bytes, zero GitHub
+artifact creates/listings, transport reachability and an actual rollback.
+
+Removing both artifact modes makes remaining artifact-related flags inert
+with a warning. Global LRU has no per-run quota and can evict an active run's
+finalized artifacts under pressure; size the cap for all concurrent runs.
+
+The artifact owner admits at most 16 buffered upload bodies across its guest
+and artifact-only listeners. Each slot covers a full 16 MiB block (256 MiB
+payload total, excluding allocator/SQLite overhead); block-list bodies share
+this limit. Excess PUTs return 503 immediately without consuming their bodies
+so the SDK retries. Slots remain held through persistence and are released
+on all failures as well as success. Slow trickling clients therefore occupy
+bounded memory even before the disk write budget is reserved.
+
+Downloads have their own 16-slot owner-wide limit, shared by both listeners
+and independent of upload admission. Excess GETs wait without loading block
+bytes or holding the store mutex; request cancellation abandons the wait.
+After admission the gate rechecks the artifact and capability expiry, then
+streams outside the mutex. Completion, error and panic release the slot.
+Active GET payload buffers total at most 256 MiB (excluding allocator/SQLite
+overhead). A busy owner does not reject queued downloads with 503, preserving
+parallel E2E handoffs whose download client may not retry a busy response.

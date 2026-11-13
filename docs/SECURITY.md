@@ -70,3 +70,29 @@
   as `budgie-at/budgie`; separate hosts, or at minimum separate base images and
   a distinct `vmPrefix`, keep one compromised public build from observing
   another tenant's work.
+
+## Artifact owner (ADR 0097; disabled by default)
+
+Ubuntu's gate is the only artifact authorization/storage boundary. Forwarding
+gates pass artifact RPC/blob traffic over an operator-provisioned loopback SSH
+forward and never decode claims to authorize. That forward targets the
+owner's artifact-only loopback listener (:3021), which returns 404 for cache,
+npm, identity and every other non-artifact path. Only the owner verifies RS256,
+GitHub issuer/expiry, configured repo IDs and the signed Actions.Results
+backend run/job grant. PRs may upload and consume only their own run, while
+cache's PR-read-only rule remains intact. Sibling jobs use the stored producer
+job ID. Generic workflow OIDC tokens lacking that grant are insufficient.
+
+Signed blob URLs are transferable, expiring object/operation capabilities.
+They contain no runtime JWT; their HMAC key exists only in owner memory.
+Restart invalidates outstanding URLs. Private SQLite permissions, size/hash
+checks, hard storage caps and a shared fresh write reserve protect publication.
+An unavailable key/store/space observation never authorizes access or becomes
+an authoritative empty collection. No capability query or JWT is logged.
+
+Artifact-only SSH forwarding is an explicit exception to the existing
+admin/health-only tunnel rule; it does not expose npm or cache data across
+sites. Validate pinned host identities and loopback binds before configuring
+forward mode. This code installs no tunnel or service and grants no operational
+promotion. GitHub UI, artifact-url and gh run download cannot retrieve local
+artifacts, including failure reports; no public viewer is added.
