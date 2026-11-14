@@ -26,6 +26,8 @@ const artifactUploadSlots = 16
 
 const artifactDownloadSlots = 16
 
+var errArtifactMIME = errors.New("version 7 requires application/zip; non-zip uploads are unsupported")
+
 func artifactRoute(path string) bool {
 	return strings.HasPrefix(path, artifactService) || strings.HasPrefix(path, artifactBlob)
 }
@@ -91,6 +93,7 @@ type artifactRequest struct {
 	Job        string    `json:"workflow_job_run_backend_id"`
 	Name       string    `json:"name"`
 	Version    int       `json:"version"`
+	MIMEType   string    `json:"mime_type"`
 	Expires    time.Time `json:"expires_at"`
 	Size       string    `json:"size"`
 	Hash       string    `json:"hash"`
@@ -120,8 +123,11 @@ func (s *artifactStore) rpc(p artifactPrincipal, method string, r artifactReques
 		return nil, errArtifactInput
 	}
 	if method == "CreateArtifact" {
-		if r.Version != 4 {
+		if r.Version != 4 && r.Version != 7 {
 			return nil, errArtifactInput
+		}
+		if r.Version == 7 && r.MIMEType != "application/zip" {
+			return nil, errArtifactMIME
 		}
 		a, err := s.create(p, r.Name, r.Expires)
 		if err != nil {
@@ -204,7 +210,7 @@ func (s *artifactStore) listResponse(p artifactPrincipal, r artifactRequest) (an
 		if r.NameFilter != "" && a.Name != r.NameFilter || r.IDFilter != "" && r.IDFilter != fmt.Sprint(a.ID) {
 			continue
 		}
-		result = append(result, map[string]any{"database_id": fmt.Sprint(a.ID), "workflow_run_backend_id": a.Run, "workflow_job_run_backend_id": a.Job, "name": a.Name, "size": fmt.Sprint(a.Size), "created_at": time.Unix(a.Created, 0).UTC().Format(time.RFC3339), "digest": strings.TrimPrefix(a.Hash, "sha256:")})
+		result = append(result, map[string]any{"database_id": fmt.Sprint(a.ID), "workflow_run_backend_id": a.Run, "workflow_job_run_backend_id": a.Job, "name": a.Name, "size": fmt.Sprint(a.Size), "created_at": time.Unix(a.Created, 0).UTC().Format(time.RFC3339), "digest": a.Hash})
 	}
 	return map[string]any{"artifacts": result}, nil
 }
@@ -380,6 +386,10 @@ func (s *artifactStore) unlease(id int64) {
 func (s *artifactStore) releaseLease(id int64) { s.mu.Lock(); defer s.mu.Unlock(); s.unlease(id) }
 
 func artifactStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errArtifactMIME) {
+		artifactErrorMessage(w, http.StatusBadRequest, "artifact service: "+errArtifactMIME.Error())
+		return
+	}
 	status := http.StatusServiceUnavailable
 	if errors.Is(err, errArtifactMissing) {
 		status = 404
@@ -391,6 +401,9 @@ func artifactStoreError(w http.ResponseWriter, err error) {
 	artifactError(w, status)
 }
 func artifactError(w http.ResponseWriter, status int) {
+	artifactErrorMessage(w, status, "artifact service: "+http.StatusText(status))
+}
+func artifactErrorMessage(w http.ResponseWriter, status int, message string) {
 	code := "unavailable"
 	switch status {
 	case 403:
@@ -402,7 +415,7 @@ func artifactError(w http.ResponseWriter, status int) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "msg": "artifact service: " + http.StatusText(status)})
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "msg": message})
 }
 
 // A stalled reader cannot retain its eviction lease indefinitely. Every block

@@ -92,7 +92,7 @@ jobs:
       - name: Build twice and compare reproducible binaries and CycloneDX SBOMs
         run: ./scripts/build-release.sh "$VERSION" dist
       - name: Upload immutable release candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           # One candidate, both node types: ADR 0034's release carries a
           # darwin/arm64 and a linux/amd64 archive under one SHA256SUMS.

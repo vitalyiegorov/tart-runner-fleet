@@ -2601,6 +2601,13 @@ changing routes or rolling back. If expiry/LRU removes a candidate, rerun the
 complete CI workflow; never substitute an unverified rebuild in publish.
 The tag release and cache canary also use same-run runtime downloads.
 
+Supported CreateArtifact client protocols: version 4, and version 7 with
+`"mime_type": "application/zip"` (a JSON string). Version 7 raw uploads,
+including `archive: false` non-ZIP files, are unsupported and return an explicit
+400 invalid_argument. Both supported versions use the same storage and ZIP
+download path. Repository workflows pin upload-artifact v6.0.0 (`b7c566a7`,
+protocol 4) to bootstrap deployment; download-artifact v8.0.1 remains compatible.
+
 Owner flags, added to its existing gate command after operational approval:
 
 - `--artifacts-dir /absolute/private/path`: proposed

@@ -120,7 +120,7 @@ jobs:
         run: go test -count=1 -timeout 10m ./tests/simulation -run TestSimFuzz -seeds=80 -sim-ticks=200
       - name: Upload exact coverage evidence
         if: always() && hashFiles('coverage.out') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
           path: coverage.out
@@ -196,7 +196,7 @@ jobs:
           fi
           ./scripts/build-release.sh "$VERSION" dist
       - name: Upload verified CI binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ci-release-${{ github.sha }}
           path: dist/
@@ -275,6 +275,10 @@ jobs:
         with:
           name: ci-release-${{ github.sha }}
           path: dist
+          # The next step verifies every file against SHA256SUMS. Warning here
+          # lets the #514 fix ship through a gate that still lists bare-hex
+          # digests (fixed in this release), without weakening integrity.
+          digest-mismatch: warn
 
       - name: Verify release identity, contents, and checksums
         run: |
