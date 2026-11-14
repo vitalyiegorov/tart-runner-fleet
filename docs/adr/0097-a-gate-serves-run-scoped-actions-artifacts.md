@@ -28,7 +28,7 @@ merging, replication, fallback fetches or scheduler changes. Site A's roughly
 This single-owner data path is the narrow exception to ADR 0034. Cache and
 npm retain their existing placement and authorization rules.
 
-Serve the five v4 JSON ArtifactService Twirp RPCs and Azure block PUT/block-list
+Serve the five JSON ArtifactService Twirp RPCs and Azure block PUT/block-list
 commit/signed ZIP GET protocol in the existing Go gate. Do not replace the
 cache backend or add a general Azure API. Use the existing SQLite dependency:
 metadata and bounded blob blocks live in one private database, separate from
@@ -313,3 +313,26 @@ for #510's council findings, including stalls, large cache PUTs, page pressure,
 reclamation, rollback, gauges and the artifact-only listener. Existing security,
 SQLite fault, restart and split-site seven-lane replay tests remain in place.
 No fleet.v1 or fleet.db migration and no observe/shadow authority promotion.
+
+## Client protocol compatibility (issue #514)
+
+CreateArtifact accepts protocol version 4 and version 7 ZIP uploads. Version 7
+must send `"mime_type": "application/zip"`: the generated Twirp client uses
+proto field names and serializes google.protobuf.StringValue as a JSON string.
+Missing or other MIME types receive an explicit invalid_argument/400 because
+raw non-ZIP uploads cannot use the existing ZIP download path. Unknown JSON
+fields remain ignored. Storage, signed URLs, finalization and downloads are
+identical for both versions; no database or fleet.v1 migration is needed.
+
+Pin repository uploads to upload-artifact v7.0.0 (`b7c566a7`, protocol 4) so
+this fix can pass CI before the gate is deployed. Keep download-artifact
+v8.0.1 (`3e5f45b2`): it lists/signs the same artifacts and extracts the ZIP
+response. The newer upload snapshots `043fb46d` and `cf430e03` send protocol 7.
+
+Owner's three questions: remove overengineering by sharing the existing store
+and transfer path; reduce complexity with one version/MIME check and no new
+state or configuration; test the incident through deterministic signed-token
+HTTP replay, v4 retry identity and sibling download. This is a fleet defect at
+the artifact protocol boundary, outside scheduler simulation state; existing
+artifact fixtures generate the triggering state. Observe/shadow and mutation
+authority limits remain intact. Deployment remains a separate operation.
