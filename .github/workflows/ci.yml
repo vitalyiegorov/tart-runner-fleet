@@ -245,3 +245,175 @@ jobs:
           test "$UNIT_RESULT" = success
           test "$RACE_RESULT" = success
           test "$BUILD_RESULT" = success
+
+  publish:
+    name: Publish verified main release
+    # Only trusted main pushes may use a release write token. The default
+    # needs condition also requires Required CI to have succeeded.
+    needs: verify
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    concurrency:
+      group: main-production-release
+      cancel-in-progress: false
+    runs-on: [self-hosted, trf-linux-amd64-2x4]
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.sha }}
+      RUN_NUMBER: ${{ github.run_number }}
+    steps:
+      # No github-token: the runtime API reads the same run on either the
+      # fleet gate or GitHub, without a cross-run REST/storage dependency.
+      - name: Download the verified main artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-release-${{ github.sha }}
+          path: dist
+
+      - name: Verify release identity, contents, and checksums
+        run: |
+          set -euo pipefail
+          case "$HEAD_SHA" in
+            *[!0-9a-f]*|'') echo "invalid main commit SHA" >&2; exit 2 ;;
+          esac
+          case "$RUN_NUMBER" in
+            *[!0-9]*|'') echo "invalid CI run number" >&2; exit 2 ;;
+          esac
+
+          SHORT_SHA="$(printf '%.12s' "$HEAD_SHA")"
+          VERSION="v0.1.${RUN_NUMBER}+main.${SHORT_SHA}"
+          # ADR 0034 gives the fleet two node types, so a release carries two
+          # archives and neither may be published without the other.
+          ARCHIVE="tart-runner-fleet-${VERSION}-darwin-arm64.tar.gz"
+          LINUX_ARCHIVE="tart-runner-fleet-${VERSION}-linux-amd64.tar.gz"
+
+          test "$(cat dist/RELEASE_VERSION)" = "$VERSION"
+          for file in \
+            BUILDINFO.txt BUILDINFO-linux-amd64.txt RELEASE_VERSION SHA256SUMS \
+            fleet \
+            fleet-linux-amd64 \
+            tart-runner-fleet-bootstrap-darwin-arm64 \
+            tart-runner-fleet-bootstrap-linux-arm64 \
+            tart-runner-fleet-bootstrap-linux-amd64 \
+            fleet.cdx.json \
+            fleet-linux-amd64.cdx.json \
+            tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-amd64.cdx.json \
+            com.vitalyiegorov.tart-runner-fleet.plist \
+            com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+            com.vitalyiegorov.tart-runner-fleet.canary.plist \
+            com.vitalyiegorov.tart-runner-fleet.authority.plist \
+            render-launchd.sh \
+            tart-runner-fleet.service \
+            tart-runner-fleet-shadow.service \
+            tart-runner-fleet-canary.service \
+            tart-runner-fleet-authority.service \
+            tart-runner-fleet-updater.service \
+            tart-runner-fleet-updater.timer \
+            tart-runner-fleet-updater-handoff.service \
+            render-systemd.sh \
+            "$ARCHIVE" "$LINUX_ARCHIVE"; do
+            test -f "dist/$file"
+          done
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+
+          # Each archive is a complete generation for its node: the controller,
+          # its SBOM and build identity, the guest bootstrap helpers, and the
+          # service definitions plus renderer that boot it.
+          COMMON="$(printf '%s\n' \
+            BUILDINFO.txt RELEASE_VERSION fleet fleet.cdx.json \
+            tart-runner-fleet-bootstrap-darwin-arm64 \
+            tart-runner-fleet-bootstrap-linux-arm64 \
+            tart-runner-fleet-bootstrap-linux-amd64 \
+            tart-runner-fleet-bootstrap-darwin-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-arm64.cdx.json \
+            tart-runner-fleet-bootstrap-linux-amd64.cdx.json)"
+          EXPECTED_ARCHIVE_CONTENTS="$(printf '%s\n%s\n' "$COMMON" "$(printf '%s\n' \
+            com.vitalyiegorov.tart-runner-fleet.plist \
+            com.vitalyiegorov.tart-runner-fleet.shadow.plist \
+            com.vitalyiegorov.tart-runner-fleet.canary.plist \
+            com.vitalyiegorov.tart-runner-fleet.authority.plist \
+            render-launchd.sh)" | LC_ALL=C sort)"
+          ACTUAL_ARCHIVE_CONTENTS="$(tar -tzf "dist/$ARCHIVE" | LC_ALL=C sort)"
+          test "$ACTUAL_ARCHIVE_CONTENTS" = "$EXPECTED_ARCHIVE_CONTENTS"
+
+          EXPECTED_LINUX_CONTENTS="$(printf '%s\n%s\n' "$COMMON" "$(printf '%s\n' \
+            tart-runner-fleet.service \
+            tart-runner-fleet-shadow.service \
+            tart-runner-fleet-canary.service \
+            tart-runner-fleet-authority.service \
+            tart-runner-fleet-updater.service \
+            tart-runner-fleet-updater.timer \
+            tart-runner-fleet-updater-handoff.service \
+            render-systemd.sh)" | LC_ALL=C sort)"
+          ACTUAL_LINUX_CONTENTS="$(tar -tzf "dist/$LINUX_ARCHIVE" | LC_ALL=C sort)"
+          test "$ACTUAL_LINUX_CONTENTS" = "$EXPECTED_LINUX_CONTENTS"
+
+          {
+            echo "VERSION=$VERSION"
+            echo "ARCHIVE=$ARCHIVE"
+            echo "LINUX_ARCHIVE=$LINUX_ARCHIVE"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish immutable production release
+        run: |
+          set -euo pipefail
+          assets=(
+            "dist/$ARCHIVE"
+            "dist/$LINUX_ARCHIVE"
+            dist/SHA256SUMS
+            dist/BUILDINFO.txt
+            dist/BUILDINFO-linux-amd64.txt
+            dist/RELEASE_VERSION
+            dist/fleet
+            dist/fleet-linux-amd64
+            dist/tart-runner-fleet-bootstrap-darwin-arm64
+            dist/tart-runner-fleet-bootstrap-linux-arm64
+            dist/tart-runner-fleet-bootstrap-linux-amd64
+            dist/fleet.cdx.json
+            dist/fleet-linux-amd64.cdx.json
+            dist/tart-runner-fleet-bootstrap-darwin-arm64.cdx.json
+            dist/tart-runner-fleet-bootstrap-linux-arm64.cdx.json
+            dist/tart-runner-fleet-bootstrap-linux-amd64.cdx.json
+            dist/com.vitalyiegorov.tart-runner-fleet.plist
+            dist/com.vitalyiegorov.tart-runner-fleet.shadow.plist
+            dist/com.vitalyiegorov.tart-runner-fleet.canary.plist
+            dist/com.vitalyiegorov.tart-runner-fleet.authority.plist
+            dist/render-launchd.sh
+            dist/tart-runner-fleet.service
+            dist/tart-runner-fleet-shadow.service
+            dist/tart-runner-fleet-canary.service
+            dist/tart-runner-fleet-authority.service
+            dist/tart-runner-fleet-updater.service
+            dist/tart-runner-fleet-updater.timer
+            dist/tart-runner-fleet-updater-handoff.service
+            dist/render-systemd.sh
+          )
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
+            if [ "$IS_DRAFT" != true ]; then
+              TAG_SHA="$(gh api "repos/$GH_REPO/commits/$VERSION" --jq .sha)"
+              test "$TAG_SHA" = "$HEAD_SHA"
+              printf 'release %s is already published and immutable\n' "$VERSION"
+              exit 0
+            fi
+            DRAFT_TARGET="$(gh release view "$VERSION" --json targetCommitish --jq .targetCommitish)"
+            test "$DRAFT_TARGET" = "$HEAD_SHA"
+          else
+            gh release create "$VERSION" \
+              --target "$HEAD_SHA" \
+              --title "$VERSION" \
+              --draft \
+              --generate-notes
+          fi
+          # A retry may repair a partial draft. Repository-level release
+          # immutability locks the assets and tag as soon as it is published.
+          gh release upload "$VERSION" "${assets[@]}" --clobber
+          gh release edit "$VERSION" --draft=false --latest
