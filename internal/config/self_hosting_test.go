@@ -110,28 +110,41 @@ func TestExampleConfigIsPortableOnlyOnceItsHostBudgetIsRemoved(t *testing.T) {
 }
 
 func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
-	workflow, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
+	workflow, err := os.ReadFile("../../.github/workflows/ci.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(workflow)
+	_, publish, found := strings.Cut(text, "\n  publish:\n")
+	if !found {
+		t.Fatal("main release must publish in the CI run: gate artifacts cannot cross runs")
+	}
 	for _, required := range []string{
-		"workflow_run:",
-		"workflows: [CI]",
-		"types: [completed]",
-		"branches: [main]",
-		"github.event.workflow_run.conclusion == 'success'",
-		"github.event.workflow_run.event == 'push'",
-		"actions: read",
+		"needs: verify",
+		"github.repository == 'vitalyiegorov/tart-runner-fleet'",
+		"github.event_name == 'push'",
+		"github.ref == 'refs/heads/main'",
 		"contents: write",
-		"run-id: ${{ github.event.workflow_run.id }}",
-		"github-token: ${{ github.token }}",
+		"group: main-production-release",
+		"cancel-in-progress: false",
+		"HEAD_SHA: ${{ github.sha }}",
+		"RUN_NUMBER: ${{ github.run_number }}",
+		"name: ci-release-${{ github.sha }}",
+		"actions/download-artifact@",
 		"gh release create",
 		"--target \"$HEAD_SHA\"",
 	} {
-		if !strings.Contains(text, required) {
-			t.Errorf("main release workflow must contain %q", required)
+		if !strings.Contains(publish, required) {
+			t.Errorf("main release job must contain %q", required)
 		}
+	}
+	for _, forbidden := range []string{"          github-token:", "run-id:", "repository:", "actions: read", "actions/checkout@", "build-release.sh"} {
+		if strings.Contains(publish, forbidden) {
+			t.Errorf("main release must consume the verified bytes within its own run: found %q", forbidden)
+		}
+	}
+	if _, err := os.Stat("../../.github/workflows/main-release.yml"); !os.IsNotExist(err) {
+		t.Fatal("the obsolete cross-run publisher must be removed")
 	}
 	if strings.Contains(text, "--prerelease") {
 		t.Error("successful main builds must publish production releases, not prereleases")
@@ -213,7 +226,7 @@ func TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact(t *testing.T) {
 		}
 	}
 
-	mainRelease, err := os.ReadFile("../../.github/workflows/main-release.yml") // #nosec G304 -- fixed repository fixture.
+	mainRelease, err := os.ReadFile("../../.github/workflows/ci.yml") // #nosec G304 -- fixed repository fixture.
 	if err != nil {
 		t.Fatal(err)
 	}

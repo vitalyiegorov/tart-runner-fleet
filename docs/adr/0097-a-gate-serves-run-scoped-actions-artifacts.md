@@ -171,6 +171,58 @@ Loopback metrics separate artifact transfer bytes from cache/results/npm;
 operator capacity/eviction/write-refusal metrics document storage pressure.
 No repo/run/job/name/signature metric labels.
 
+## Amendment: release publication stays in the verified CI run
+
+The former `main-release.yml` used a `workflow_run` event and an explicit
+`github-token` download of `ci-release-<sha>`. Once CI uploads to the gate,
+that REST consumer cannot see its candidate. GitHub artifact quota is already
+exhausted, so moving the producer to a GitHub-hosted runner does not solve it.
+
+Move the existing publish job into `ci.yml`, after `Required CI` succeeds.
+It runs only on this repository's main pushes, with a job-scoped contents
+write token, no checkout or rebuild, and the same production release
+serialization group. Its tokenless download uses the runtime API in the same
+run as the producer. Both jobs remain on fleet Linux runners; their artifact
+routes must reach the same owner. This preserves the exact double-built CI
+bytes, version identity, complete archive checks, checksums, and immutable
+release publication. Other CI jobs retain read-only contents permission.
+`Required CI` keeps its name and verifies the existing four blocking jobs;
+publish failure makes the workflow fail without changing that branch gate.
+
+Alternatives rejected: rebuilding from the same SHA alone does not attest
+byte equality with CI, and adding an independently stored digest introduces
+a second handoff. A draft release or OCI candidate adds credentials, cleanup
+and durable storage before CI has finished. Same-run consumption removes the
+cross-run mechanism and needs neither new storage nor paid runner minutes.
+
+Audit: `release.yml` build/publish and `cache-rollout-canary.yml` seed/restore
+already download within one run without a REST token. Coverage is upload-only.
+There are no other workflow/script REST artifact listings, cleanup consumers,
+or `gh run download` calls in this repository. Local evidence remains absent
+from GitHub UI/REST as documented above.
+
+Rollout: let existing main CI and Main Release runs finish before merging
+this amendment, so removing the cross-run workflow does not strand an old
+candidate. Merge before enabling artifact routing. Drain all candidate
+producers and consumers before switching artifact routes in either direction;
+do not rerun an old
+cross-run workflow after cutover. After routing both handoff legs to the gate,
+verify a new main CI run publishes both node archives before declaring rollout
+complete. Until then, default-off uploads still face the existing GitHub quota.
+Gate expiry/LRU can still evict a candidate:
+fail closed and rerun the complete CI workflow to regenerate it, rather than
+rebuilding only the publish job or mixing storage routes. A publish-only retry
+works only while that run's candidate remains available. Enablement, rollback
+proof and live release evidence remain separate operational tasks.
+
+Owner's three questions: remove overengineering by deleting a workflow and
+its REST handoff; reduce complexity by using the existing job dependency and
+same-run artifact protocol; test the workflow contract in
+`TestSuccessfulMainCIBuildPublishesItsVerifiedArtifact` and actionlint. This
+changes workflow wiring, not a fleet policy or simulation state, so the fleet
+simulation remains unchanged. No fleet.v1/API or database migration; no change
+to observe/shadow or VM mutation authority.
+
 ## Deployment evidence still required
 
 Provision the SSH local forward and verify its identity, routing, throughput

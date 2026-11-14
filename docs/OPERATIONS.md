@@ -2585,6 +2585,19 @@ Cache/npm still use their current local stores. macOS Tart, roaming MacBook
 (#446) and explicit `github-token` REST downloads keep using GitHub and cannot
 consume gate-only artifacts. Validate complete handoff reachability first.
 
+For this repository, main releases publish in `ci.yml` after `Required CI`,
+using the same run's verified candidate without a REST token. The old
+`main-release.yml` cross-run workflow is removed (ADR 0097 amendment). Drain
+existing main CI/Main Release runs before merging, so removing the old workflow
+does not strand their candidates. Merge **before** gate enablement.
+After routing both handoff legs to the gate, verify a new main CI run publishes
+both node archives before declaring rollout complete. Default-off uploads
+still face the existing GitHub quota. Producer and publisher must reach the
+same artifact owner; drain runs before
+changing routes or rolling back. If expiry/LRU removes a candidate, rerun the
+complete CI workflow; never substitute an unverified rebuild in publish.
+The tag release and cache canary also use same-run runtime downloads.
+
 Owner flags, added to its existing gate command after operational approval:
 
 - `--artifacts-dir /absolute/private/path`: proposed
