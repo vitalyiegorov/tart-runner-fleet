@@ -210,7 +210,7 @@ func (s *artifactStore) listResponse(p artifactPrincipal, r artifactRequest) (an
 		if r.NameFilter != "" && a.Name != r.NameFilter || r.IDFilter != "" && r.IDFilter != fmt.Sprint(a.ID) {
 			continue
 		}
-		result = append(result, map[string]any{"database_id": fmt.Sprint(a.ID), "workflow_run_backend_id": a.Run, "workflow_job_run_backend_id": a.Job, "name": a.Name, "size": fmt.Sprint(a.Size), "created_at": time.Unix(a.Created, 0).UTC().Format(time.RFC3339), "digest": strings.TrimPrefix(a.Hash, "sha256:")})
+		result = append(result, map[string]any{"database_id": fmt.Sprint(a.ID), "workflow_run_backend_id": a.Run, "workflow_job_run_backend_id": a.Job, "name": a.Name, "size": fmt.Sprint(a.Size), "created_at": time.Unix(a.Created, 0).UTC().Format(time.RFC3339), "digest": a.Hash})
 	}
 	return map[string]any{"artifacts": result}, nil
 }

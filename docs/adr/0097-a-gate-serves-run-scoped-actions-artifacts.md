@@ -324,10 +324,11 @@ raw non-ZIP uploads cannot use the existing ZIP download path. Unknown JSON
 fields remain ignored. Storage, signed URLs, finalization and downloads are
 identical for both versions; no database or fleet.v1 migration is needed.
 
-Pin repository uploads to upload-artifact v7.0.0 (`b7c566a7`, protocol 4) so
+Pin repository uploads to upload-artifact v6.0.0 (`b7c566a7`, protocol 4) so
 this fix can pass CI before the gate is deployed. Keep download-artifact
 v8.0.1 (`3e5f45b2`): it lists/signs the same artifacts and extracts the ZIP
-response. The newer upload snapshots `043fb46d` and `cf430e03` send protocol 7.
+response. The newer upload releases v7.0.0 (`bbbca2dd`), `043fb46d` and
+`cf430e03` send protocol 7.
 
 Owner's three questions: remove overengineering by sharing the existing store
 and transfer path; reduce complexity with one version/MIME check and no new

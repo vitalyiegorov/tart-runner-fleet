@@ -1,6 +1,8 @@
 package cachegate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -34,10 +36,18 @@ func TestArtifactV7ZIPUsesExistingStoreAndDownload(t *testing.T) {
 	sibling := f.token("123", "run", "consumer")
 	w = f.rpc(sibling, "ListArtifacts", artifactBody("run", "consumer", ""))
 	var listed struct {
-		Artifacts []json.RawMessage `json:"artifacts"`
+		Artifacts []struct {
+			Digest string `json:"digest"`
+		} `json:"artifacts"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &listed); err != nil || w.Code != http.StatusOK || len(listed.Artifacts) != 1 {
 		t.Fatalf("list: %d %s (%v)", w.Code, w.Body.String(), err)
+	}
+	// download-artifact compares this to its computed "sha256:<hex>"; v8's
+	// default digest-mismatch is error, so a bare hex digest fails every download.
+	sum := sha256.Sum256([]byte("zip bytes"))
+	if want := "sha256:" + hex.EncodeToString(sum[:]); listed.Artifacts[0].Digest != want {
+		t.Fatalf("listed digest %q, want %q", listed.Artifacts[0].Digest, want)
 	}
 	w = f.rpc(sibling, "GetSignedArtifactURL", artifactBody("run", "producer", "archive"))
 	var signed struct {
