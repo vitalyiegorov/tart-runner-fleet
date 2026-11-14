@@ -275,6 +275,10 @@ jobs:
         with:
           name: ci-release-${{ github.sha }}
           path: dist
+          # The next step verifies every file against SHA256SUMS. Warning here
+          # lets the #514 fix ship through a gate that still lists bare-hex
+          # digests (fixed in this release), without weakening integrity.
+          digest-mismatch: warn
 
       - name: Verify release identity, contents, and checksums
         run: |
