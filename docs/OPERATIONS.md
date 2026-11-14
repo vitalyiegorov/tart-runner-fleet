@@ -2593,7 +2593,10 @@ does not strand their candidates. Merge **before** gate enablement.
 After routing both handoff legs to the gate, verify a new main CI run publishes
 both node archives before declaring rollout complete. Default-off uploads
 still face the existing GitHub quota. Producer and publisher must reach the
-same artifact owner; drain runs before
+same artifact owner: before enabling routing, confirm every `linux-go-4x8`
+provider reaches the gate (an off-LAN MacBook, #446, uploads to GitHub and its
+build cannot be published). Recover a failed publish with a complete CI re-run,
+not a failed-jobs-only re-run, until attempt sharing is proven; drain runs before
 changing routes or rolling back. If expiry/LRU removes a candidate, rerun the
 complete CI workflow; never substitute an unverified rebuild in publish.
 The tag release and cache canary also use same-run runtime downloads.

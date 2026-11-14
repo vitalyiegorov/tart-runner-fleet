@@ -211,8 +211,12 @@ verify a new main CI run publishes both node archives before declaring rollout
 complete. Until then, default-off uploads still face the existing GitHub quota.
 Gate expiry/LRU can still evict a candidate:
 fail closed and rerun the complete CI workflow to regenerate it, rather than
-rebuilding only the publish job or mixing storage routes. A publish-only retry
-works only while that run's candidate remains available. Enablement, rollback
+rebuilding only the publish job or mixing storage routes. The gate scopes
+artifacts to the signed backend run, so a failed-jobs-only re-run of publish may
+not see attempt 1's candidate; until rollout proves attempts share it, recover a
+failed publish with a complete CI re-run. Every `linux-go-4x8` provider must
+reach the same owner (the roaming MacBook, #446, must leave that label or reach
+Omarchy) before routing is enabled. Enablement, rollback
 proof and live release evidence remain separate operational tasks.
 
 Owner's three questions: remove overengineering by deleting a workflow and
