@@ -15,7 +15,6 @@ export const SiteFooter = () => (
             <div className="max-w-sm">
                 <Lockup className="h-8 w-auto" />
                 <p className="mt-4 text-sm text-fg-muted">{site.tagline}</p>
-                <p className="mt-2 text-sm text-fg-subtle">Formerly Tart Runner Fleet.</p>
             </div>
             <nav aria-label="Footer">
                 <ul className="grid gap-x-10 gap-y-3 text-sm sm:grid-cols-2">

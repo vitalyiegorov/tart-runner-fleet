@@ -46,7 +46,7 @@ export const Hero = () => (
         <div className="mx-auto grid max-w-6xl items-center gap-12 px-4 pt-16 pb-20 sm:px-6 sm:pt-24 grid-cols-1 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:gap-16 lg:pt-28 lg:pb-28">
             <div className="motion-rise">
                 <Mark className="size-16 sm:size-20" animated />
-                <p className="eyebrow mt-8">Formerly Tart Runner Fleet · AGPL-3.0</p>
+                <p className="eyebrow mt-8">Open source · AGPL-3.0</p>
                 <h1
                     id="hero-title"
                     className="mt-4 text-5xl leading-[1.02] font-semibold tracking-tighter text-balance sm:text-6xl lg:text-7xl"
