@@ -2631,9 +2631,9 @@ Owner flags, added to its existing gate command after operational approval:
   at least the sidecar's `CACHE_MAX_SIZE_BYTES`. Match any later cap increase.
 
 The write-budget path and all guarded stores must share one filesystem free-space
-pool. Btrfs subvolumes are supported: their device IDs may differ, so admission
-compares filesystem identity (the read-only btrfs filesystem UUID on Linux,
-`statfs` IDs otherwise). Separate filesystems and failed observations
+pool. Admission accepts a matching device ID, or on Linux two btrfs paths with
+the same read-only btrfs filesystem UUID (subvolumes get distinct device IDs).
+`statfs` IDs are never compared. Separate filesystems and failed observations
 remain refused. An artifact configuration/storage failure still stops startup;
 there is no unbudgeted fallback for cache or npm writes.
 
