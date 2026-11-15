@@ -34,7 +34,7 @@ func TestIssue502DemandConflictRetainsDiagnosticAndNack(t *testing.T) {
 		changed, err := w.demand.IngestOnceResult(ctx, binding, source)
 		failure := githubscaleset.DescribeIngestFailure(err)
 		var detail *operations.DemandConflict
-		if !errors.Is(err, operations.ErrConflict) || !errors.As(err, &detail) || detail.Check != "reservation_duplicate" || detail.RequestID != 71 || detail.JobID != "job-71" || detail.MessageType != operations.DemandJobStarted || detail.Instance != "trf-conflict-two" {
+		if !errors.Is(err, operations.ErrConflict) || !errors.As(err, &detail) || detail.Check != "reservation_duplicate" || detail.RequestID != 71 || detail.JobID != "job-71" || detail.MessageType != operations.DemandJobStarted || detail.Instance != "trf-conflict-one" || detail.Other != "trf-conflict-two" {
 			t.Fatalf("missing contradiction diagnostic: %v", err)
 		}
 		if failure.Reason != githubscaleset.ReasonDemandCommitConflict || failure.Phase != githubscaleset.PhaseCommit || source.acks != 0 || changed != (attempt == 0) {

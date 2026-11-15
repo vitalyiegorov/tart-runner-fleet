@@ -17,7 +17,7 @@ func assertDemandConflict(t *testing.T, err error, check, instance string) {
 	if !errors.Is(err, operations.ErrConflict) || !errors.As(err, &detail) {
 		t.Fatalf("missing conflict diagnostic for %s: %v", check, err)
 	}
-	if detail.Check != check || detail.Instance != instance {
+	if string(detail.Check) != check || detail.Instance != instance {
 		t.Fatalf("diagnostic = %+v", detail)
 	}
 	if !strings.Contains(err.Error(), check) || !strings.Contains(err.Error(), instance) {
@@ -36,7 +36,9 @@ func TestDemandConflictChecks(t *testing.T) {
 			instances := []operations.Instance{a, b}
 			switch check {
 			case "reservation_duplicate":
-				instances = append(instances, a)
+				duplicate := a
+				duplicate.ID = "runner-other"
+				instances = append(instances, duplicate)
 			case "binding_shape_mismatch":
 				b.Profile = "builder"
 			case "binding_metadata_invalid":
@@ -54,10 +56,17 @@ func TestDemandConflictChecks(t *testing.T) {
 			}
 			_, err := store.alignRunnerDemand(ctx, b, instances, record)
 			id := b.ID
-			if check == "binding_source_cas" {
+			if check == "binding_source_cas" || check == "reservation_duplicate" {
 				id = a.ID
 			}
 			assertDemandConflict(t, err, check, id)
+			var detail *operations.DemandConflict
+			if !errors.As(err, &detail) || detail.From != "" || detail.To != "" {
+				t.Fatalf("binding contains filler states: %v", err)
+			}
+			if check == "reservation_duplicate" && !strings.Contains(err.Error(), "runner-other") {
+				t.Fatalf("missing other duplicate: %v", err)
+			}
 		})
 	}
 	t.Run("demand_job_identity", func(t *testing.T) {
@@ -122,10 +131,13 @@ func TestProjectDemandConflictCarriesDeliveredIdentifiers(t *testing.T) {
 				}
 			}
 			err := store.ProjectDemandEvent(ctx, 1, event)
-			assertDemandConflict(t, err, "reservation_duplicate", "runner-beta")
+			assertDemandConflict(t, err, "reservation_duplicate", "runner-alpha")
 			var detail *operations.DemandConflict
 			if !errors.As(err, &detail) || detail.MessageType != event.Kind || detail.RequestID != 101 || detail.JobID != event.JobID || detail.Runner != event.RunnerName {
 				t.Fatalf("missing delivered identifiers: %v", err)
+			}
+			if !strings.Contains(err.Error(), "other=runner-beta") {
+				t.Fatalf("missing duplicate: %v", err)
 			}
 			for _, secret := range []string{"secret-display", "secret-ref", "secret-label"} {
 				if strings.Contains(err.Error(), secret) {

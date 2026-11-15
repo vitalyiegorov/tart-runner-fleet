@@ -362,15 +362,16 @@ func (p SessionRecoveryPolicy) OnFailure(state SessionFailureState, err error, n
 	if SessionTerminal(err) {
 		return SessionRecoveryDecision{State: next, Reason: ReasonSessionExpired, Discard: true}
 	}
+	bounded := next.Consecutive >= policy.MaxConsecutiveFailures || now.Sub(next.Since) >= policy.FailureWindow
 	// A durable commit conflict is classified before the bounded escalation, and
 	// deliberately: escalation reports recreated_after_failures, which is a
 	// statement about the SESSION, and a session is not what refused the message.
 	// Reporting it that way is how a three-day durable defect read as broker
 	// flapping (issue #165).
 	if errors.Is(err, operations.ErrConflict) {
-		return SessionRecoveryDecision{State: next, Reason: ReasonDemandCommitConflict}
+		return SessionRecoveryDecision{State: next, Reason: ReasonDemandCommitConflict, Discard: bounded}
 	}
-	if next.Consecutive >= policy.MaxConsecutiveFailures || now.Sub(next.Since) >= policy.FailureWindow {
+	if bounded {
 		return SessionRecoveryDecision{State: next, Reason: ReasonRecreatedAfterFailures, Discard: true}
 	}
 	return SessionRecoveryDecision{State: next, Reason: ReasonMessagePollFailed}

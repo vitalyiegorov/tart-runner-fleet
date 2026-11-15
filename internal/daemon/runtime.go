@@ -262,16 +262,14 @@ func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(conte
 	if ctx.Err() != nil {
 		return err
 	}
-	// A local refusal says nothing about the broker session. Preserve the nack
-	// and readiness failure, but do not spend its session-recovery budget or
-	// release a healthy handle. Only the callback can establish local provenance.
-	if errors.Is(commitErr, operations.ErrConflict) && errors.Is(err, operations.ErrConflict) {
+	// Count local refusals too: a committed inbox cursor can be ahead of the
+	// session cursor. Bound retries so a poisoned projection cannot starve later
+	// messages. Only callback provenance permits retaining the live session.
+	decision := s.recordFailure(err)
+	if errors.Is(commitErr, operations.ErrConflict) && errors.Is(err, operations.ErrConflict) && !decision.Discard {
 		return &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonDemandCommitConflict, Cause: err}
 	}
-	// The concrete broker failure never reaches a log line. It travels wrapped
-	// inside a closed-vocabulary reason so an operator can see why ingestion
-	// failed through the admin API without any upstream text being rendered.
-	decision := s.recordFailure(err)
+	// Replacement outcomes remain closed-vocabulary; raw broker text is not logged.
 	discard := decision.Discard || s.releaseRefusalsExceeded()
 	replaceErr := s.replace(ctx, source, discard)
 	if errors.Is(replaceErr, errScaleSetClose) {

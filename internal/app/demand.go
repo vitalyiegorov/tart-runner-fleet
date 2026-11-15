@@ -1023,9 +1023,10 @@ func (c DemandCoordinator) IngestOnceResult(ctx context.Context, binding Binding
 				}
 			}
 			// Every event is already durable. Attempt independent neighbors and
-			// retain the nack, but do not count on a redelivery: the batch has
-			// already advanced the durable cursor, and a replacement session
-			// opens past this message. The completion drain is re-derived from
+			// retain the nack. Local conflicts retry the session only until the
+			// consecutive-failure count or window bound; do not rely on redelivery:
+			// the batch advanced the durable cursor and replacement opens past it.
+			// The completion drain is re-derived from
 			// the durable rows on every tick instead (issue #442).
 			return projectionErr
 		}
