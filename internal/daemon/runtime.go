@@ -249,7 +249,11 @@ func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(conte
 	if err != nil {
 		return err
 	}
-	err = source.Handle(ctx, commit)
+	var commitErr error
+	err = source.Handle(ctx, func(ctx context.Context, demand githubscaleset.Demand) error {
+		commitErr = commit(ctx, demand)
+		return commitErr
+	})
 	release()
 	if err == nil {
 		s.clearFailures()
@@ -257,6 +261,12 @@ func (s *recoveringScaleSetSource) Handle(ctx context.Context, commit func(conte
 	}
 	if ctx.Err() != nil {
 		return err
+	}
+	// A local refusal says nothing about the broker session. Preserve the nack
+	// and readiness failure, but do not spend its session-recovery budget or
+	// release a healthy handle. Only the callback can establish local provenance.
+	if errors.Is(commitErr, operations.ErrConflict) && errors.Is(err, operations.ErrConflict) {
+		return &githubscaleset.SessionFailure{Reason: githubscaleset.ReasonDemandCommitConflict, Cause: err}
 	}
 	// The concrete broker failure never reaches a log line. It travels wrapped
 	// inside a closed-vocabulary reason so an operator can see why ingestion
@@ -2168,6 +2178,9 @@ func (r *failureReporter) reportBinding(binding app.Binding, failure githubscale
 	// closed vocabulary; anything else is withheld rather than rendered.
 	if githubscaleset.ValidPollCause(failure.Cause) {
 		attributes = append(attributes, "cause", failure.Cause)
+	}
+	for _, conflict := range failure.Conflicts {
+		attributes = append(attributes, slog.Any("conflict", conflict))
 	}
 	r.logger.Warn("binding ingest failure", attributes...)
 }

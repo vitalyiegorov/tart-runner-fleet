@@ -93,6 +93,8 @@ const (
 // never appear here — they stay inside SessionFailure.Cause, reachable by
 // errors.As and by nothing that writes.
 type IngestFailure struct {
+	// Conflicts retain each independent projection refusal, including joined errors.
+	Conflicts []*operations.DemandConflict
 	// Reason is the closed-vocabulary classification. It is the metric label and
 	// the only field that existed before issue #292.
 	Reason string
@@ -147,6 +149,12 @@ func DescribeIngestFailure(err error) IngestFailure {
 		return IngestFailure{}
 	}
 	failure := IngestFailure{Reason: reason, Phase: phaseFor(reason)}
+	walkErrors(err, func(e error) {
+		// walkErrors already unwraps every node; inspect only this value.
+		if detail, ok := any(e).(*operations.DemandConflict); ok {
+			failure.Conflicts = append(failure.Conflicts, detail)
+		}
+	})
 	var session *SessionFailure
 	if errors.As(err, &session) && session.Poll != reason && ValidFailureReason(session.Poll) {
 		failure.Poll = session.Poll
@@ -260,7 +268,7 @@ func SessionHeld(err error) bool {
 // reason rather than exposing upstream text.
 //
 // A durable commit conflict is classified before that degradation. It reaches
-// here as operations.ErrConflict from the store, carries nothing renderable, and
+// here as operations.ErrConflict from the store, carries safe check diagnostics, and
 // means something categorically different from a failed poll: the fleet, not the
 // network, refused the message, and no amount of redelivery will change that.
 func IngestFailureDetail(err error) string {
