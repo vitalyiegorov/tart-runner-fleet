@@ -2,29 +2,30 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
-
-	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
-// UndeliveredJobs diagnoses REST work before shared-label attribution removes
-// jobs assigned nowhere from the local view. It grants no demand or mutation
-// authority. Counters are aggregate: zero on ALL matching local sets is evidence
-// of non-delivery here, never proof of the state of a sibling's broker.
+// ScaleSetAssignment is one audit reading, including whether its timestamp is fresh.
+// A missing or stale reading is unknown, never evidence of zero assignment.
+type ScaleSetAssignment struct {
+	Scope    string
+	ID       int64
+	Name     string
+	Labels   []string
+	Assigned int
+	Fresh    bool
+}
+
+// UndeliveredJobs reports candidates only: REST cannot identify concurrency holds.
 func (c DemandCoordinator) UndeliveredJobs(ctx context.Context, bindings []Binding, snapshot GitHubQueueSnapshot, slo time.Duration) ([]string, error) {
-	statisticsStore, ok := c.Store.(DemandStatisticsStore)
-	if !ok || snapshot == nil || slo <= 0 {
+	if snapshot == nil || slo <= 0 || len(c.AuditedAssignments) == 0 {
 		return nil, nil
 	}
 	now := c.now()
-	type evidence struct {
-		zero    bool
-		vouched map[string]bool
-	}
-	readings := map[int64]evidence{}
+	readings := map[int64]map[string]bool{}
 	var findings []string
 	for _, job := range snapshot.QueuedJobs() {
 		if job.Status != "queued" || !job.QueueTimeExact || job.CreatedAt.IsZero() || now.Sub(job.CreatedAt) < slo {
@@ -37,30 +38,46 @@ func (c DemandCoordinator) UndeliveredJobs(ctx context.Context, bindings []Bindi
 		orphaned := len(matched) > 0
 		for _, binding := range matched {
 			key := binding.durableKey()
-			reading, seen := readings[key]
+			if !c.auditUnassigned(*binding, job.Labels) {
+				orphaned = false
+				continue
+			}
+			vouched, seen := readings[key]
 			if !seen {
-				statistics, err := statisticsStore.DemandStatistics(ctx, key)
-				if err != nil && !errors.Is(err, operations.ErrNotFound) {
+				vouched, err = c.vouchedJobs(ctx, *binding)
+				if err != nil {
 					return nil, err
 				}
-				reading.zero = err == nil && statistics.Valid() && !statistics.ObservedAt.IsZero() && !statistics.ObservedAt.After(now) && now.Sub(statistics.ObservedAt) <= c.statisticsMaxAge() && statistics.Assigned == 0 && statistics.Available == 0
-				if reading.zero {
-					reading.vouched, err = c.vouchedJobs(ctx, *binding)
-					if err != nil {
-						return nil, err
-					}
-				}
-				readings[key] = reading
+				readings[key] = vouched
 			}
-			if !reading.zero || reading.vouched[restJobKey(job.ID)] || reading.vouched[restCorrelationKey(job.Repository.Owner, job.Repository.Name, job.RunID, job.Name)] {
+			if vouched[restJobKey(job.ID)] || vouched[restCorrelationKey(job.Repository.Owner, job.Repository.Name, job.RunID, job.Name)] {
 				orphaned = false
 			}
 		}
 		if orphaned {
 			repo := job.Repository.Owner + "/" + job.Repository.Name
-			findings = append(findings, fmt.Sprintf("%s run %d job %d (%s): queued for %.0fm; matching local sets report assigned=0 and available=0 with no local runner demand; possible unassigned job (a sibling may be serving it). Operator remedy after checking the run: gh run cancel %d -R %s; then gh run rerun %d --failed -R %s", repo, job.RunID, job.ID, job.Name, now.Sub(job.CreatedAt).Minutes(), job.RunID, repo, job.RunID, repo))
+			findings = append(findings, fmt.Sprintf("%s run %d job %d: queued for %.0fm; unassigned job candidate: every matching audited set reports assigned=0 with no local runner demand. Rule out a concurrency group hold and a sibling backlog first. Operator remedy only after confirming the run is not held by a concurrency group: gh run cancel %d -R %s; then gh run rerun %d --failed -R %s", repo, job.RunID, job.ID, now.Sub(job.CreatedAt).Minutes(), job.RunID, repo, job.RunID, repo))
 		}
 	}
 	sort.Strings(findings)
 	return findings, nil
+}
+
+// auditUnassigned requires local coverage and zero assignment across all matching
+// sets in the scope, including siblings. A stale matching sibling vetoes it.
+func (c DemandCoordinator) auditUnassigned(binding Binding, labels []string) bool {
+	local := false
+	for _, row := range c.AuditedAssignments {
+		if !strings.EqualFold(row.Scope, binding.Scope) {
+			continue
+		}
+		if row.ID != binding.ScaleSetID && !containsFold(labels, row.Name) && !advertisesEveryRoutingLabel(row.Labels, labels) {
+			continue
+		}
+		if !row.Fresh || row.Assigned != 0 {
+			return false
+		}
+		local = local || row.ID == binding.ScaleSetID
+	}
+	return local
 }

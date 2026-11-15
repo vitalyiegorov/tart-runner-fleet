@@ -15,8 +15,8 @@ func TestIssue520DoctorReportsUnassignedRESTJobs(t *testing.T) {
 	if err := h.RecordObservation(name, ObservationFresh); err != nil {
 		t.Fatal(err)
 	}
-	if h.Ingest().OK {
-		t.Fatal("doctor silently passed an unassigned REST job")
+	if !h.Ingest().OK || len(h.Ingest().Reasons) != 1 {
+		t.Fatal("doctor candidate must pass with detail")
 	}
 	snapshot := h.Snapshot()
 	snapshot.UndeliveredJobs[0] = "mutated"

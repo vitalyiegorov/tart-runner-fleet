@@ -383,6 +383,7 @@ type Snapshot struct {
 	// and ParkedScaleSetsAuditedAt is when it completed. A zero time means no
 	// audit has ever run on this node -- an observe-mode daemon never runs one --
 	// which is reported as "not audited" and never as a pass.
+	AuditedScaleSets         []ParkedScaleSetMetric
 	ParkedScaleSets          []ParkedScaleSetMetric
 	ParkedScaleSetsAuditedAt time.Time
 	// ScaleSetInstances is the per-set instance count the stranded-set detector
@@ -438,6 +439,7 @@ type Health struct {
 	parkedScaleSets     []ParkedScaleSetMetric
 	scaleSetInstances   []ScaleSetInstanceMetric
 	strandedScaleSets   []StrandedScaleSetMetric
+	auditedScaleSets    []ParkedScaleSetMetric
 	parkedAuditedAt     time.Time
 	instances           map[string]InstanceMetrics
 	observations        map[string]ObservationMetric
@@ -659,7 +661,13 @@ func cloneParkedScaleSets(rows []ParkedScaleSetMetric) []ParkedScaleSetMetric {
 // conflation is the whole of issue #164, where every signal read PASS while two
 // jobs sat assigned to a set no daemon polled for 4.5 hours.
 func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time.Time) error {
-	for _, row := range rows {
+	return h.SetScaleSetAudit(nil, rows, observedAt)
+}
+
+// SetScaleSetAudit publishes the complete audit alongside its parked subset.
+// Bound rows are needed to diagnose unassigned jobs across every matching set.
+func (h *Health) SetScaleSetAudit(all, rows []ParkedScaleSetMetric, observedAt time.Time) error {
+	for _, row := range append(append([]ParkedScaleSetMetric(nil), all...), rows...) {
 		if row.Scope == "" || row.ScaleSetID <= 0 || row.Assigned < 0 || row.Busy < 0 {
 			return errInvalidMetric
 		}
@@ -668,6 +676,7 @@ func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time
 		return errInvalidMetric
 	}
 	h.mu.Lock()
+	h.auditedScaleSets = cloneParkedScaleSets(all)
 	h.parkedScaleSets = cloneParkedScaleSets(rows)
 	h.parkedAuditedAt = observedAt.UTC()
 	h.revision++
@@ -1246,6 +1255,7 @@ func (h *Health) Snapshot() Snapshot {
 		Envelope:                 h.envelope,
 		AdmissionFloors:          h.admissionFloors,
 		QueueSLO:                 h.queueSLO,
+		AuditedScaleSets:         cloneParkedScaleSets(h.auditedScaleSets),
 		ParkedScaleSets:          cloneParkedScaleSets(h.parkedScaleSets),
 		ParkedScaleSetsAuditedAt: h.parkedAuditedAt,
 		StrandedScaleSets:        append([]StrandedScaleSetMetric(nil), h.strandedScaleSets...),
@@ -1547,7 +1557,7 @@ func (h *Health) Ingest() HealthResult { return ingestResult(h.Snapshot()) }
 // ingestResult is the check as a pure function of one snapshot, so the status
 // document and the health accessor can never disagree.
 func ingestResult(snapshot Snapshot) HealthResult {
-	reasons := append([]string(nil), snapshot.UndeliveredJobs...)
+	var reasons []string
 	// A set this node binds that GitHub has stopped delivering for is the same
 	// fault as an undelivered queue and is reported on the same row, even when
 	// the queue SLO is disabled: the node's own queue for such a set is EMPTY --
@@ -1556,7 +1566,7 @@ func ingestResult(snapshot Snapshot) HealthResult {
 		reasons = append(reasons, row.Reason)
 	}
 	if snapshot.QueueSLO <= 0 {
-		return ingestVerdict(reasons)
+		return ingestCandidateVerdict(reasons, snapshot.UndeliveredJobs)
 	}
 	for _, row := range snapshot.ScopeQueues {
 		undelivered := row.Observed - row.Delivered
@@ -1574,7 +1584,14 @@ func ingestResult(snapshot Snapshot) HealthResult {
 		}
 		reasons = append(reasons, reason)
 	}
-	return ingestVerdict(reasons)
+	return ingestCandidateVerdict(reasons, snapshot.UndeliveredJobs)
+}
+
+func ingestCandidateVerdict(reasons, candidates []string) HealthResult {
+	result := ingestVerdict(reasons)
+	result.Reasons = append(result.Reasons, candidates...)
+	sort.Strings(result.Reasons)
+	return result
 }
 
 func ingestVerdict(reasons []string) HealthResult {

@@ -1,4 +1,4 @@
-# ADR 0098: Unassigned REST jobs are an ingest finding
+# ADR 0098: Unassigned REST jobs are diagnostic candidates
 
 ## Status
 
@@ -28,31 +28,51 @@ or the standing offer. No new peer coordination or capacity policy is added.
 
 The existing REST ingest pass diagnoses jobs from its complete snapshot before
 shared-label attribution hides jobs assigned nowhere. It reuses the queue SLO
-(default ten minutes), the existing routing predicates, broker statistics store,
-and durable-demand correlation. A finding requires:
+(default ten minutes), the existing routing predicates, completed scale-set audit,
+and durable-demand correlation. A candidate requires:
 
 - A queued REST job with an exact queue timestamp, aged at least the queue SLO,
   matching at least one binding this node serves.
-- Every matching local binding has valid, fresh, non-future broker statistics
-  with assigned=0 and available=0. Missing/stale counters are unknown, not zero.
+- A completed audit no older than twice the larger of the audit and REST poll
+  intervals (the same freshness gate as foreign selectors). Every matching local
+  set must appear, and every audited set advertising the job's labels in that
+  scope, local or sibling, must have a fresh, non-future reading with assigned=0.
+  Missing or stale readings remain unknown. Idle broker message statistics are
+  not evidence: without a new message they may be arbitrarily old.
 - No matching binding's active demand names the numeric job or its existing
   repository/run/display-name correlation tuple.
 
-One finding per job names repository, run, job, display name and age, reports
-local evidence, and warns that a sibling may be serving it. It fails the existing
-`ingest delivery` row in doctor and its existing versioned JSON check reasons.
-It recommends operator verification followed by `gh run cancel` and
-`gh run rerun --failed`. It never cancels, reruns or creates demand.
+One candidate per job names repository, run, numeric job id and age. It keeps
+`ingest delivery` passing and adds detail to the existing check reasons, following
+ADR 0054's parked-row amendment: a sibling backlog is benign, not a local fault.
+Operators must rule out both a concurrency group hold and a sibling backlog first.
+Cancel/rerun is conditional: only after confirming the run is not held by a
+concurrency group, consider `gh run cancel` followed by `gh run rerun --failed`.
+The fleet never cancels, reruns or creates demand from this evidence.
 
-Findings are replaced per REST scope only on successful refresh/reconcile and
-expire with that scope's observation TTL; failed inventory never means empty.
+Known limit: GitHub REST does not expose whether a queued, unassigned job is held
+by a `concurrency: queue: max` group. Healthy simulator/emulator farm jobs can
+remain in precisely this state indefinitely. Zero audited assignments therefore
+identify a candidate, never a proven orphan or an ingest failure. Audit counts
+are not atomic with REST or proof of GitHub's internal broker freshness.
+
+Candidates are replaced per successful REST refresh/reconcile and expire with
+that scope's observation TTL. A diagnostic read error clears candidates for the
+pass and is reported separately; it cannot fail an already-committed ingest or
+mark its REST observation unavailable. Failed inventory remains unknown.
 No additional GitHub requests or rate budget are introduced. No schema migration,
 new JSON field, scheduler rule, promotion, or authority change is needed.
 
 ## Simplicity and proof
 
 We reuse the existing ingest check instead of adding a second doctor mechanism.
-The only new retained state is per-scope diagnostic text, necessary because REST
-own-share attribution intentionally drops the evidence before queue summaries.
+Retained state is per-scope diagnostic text and the complete audit readings
+(including bound sets), necessary because REST own-share attribution drops the
+evidence and the parked-only audit projection omits local zero assignments.
 The all-gated recovery simulation characterizes the broker blind spot; the
-coordinator replay and doctor tests prove the new alarm and its freshness bounds.
+coordinator replay and doctor tests prove the candidate details and their freshness bounds.
+
+Review questions: the broker-statistics dependency was removed; the existing
+audit and doctor row express the behavior without a new policy or knob. The
+rejoin replay exercises old broker statistics with fresh audit evidence; sibling
+backlog, concurrency wording and post-commit read failures have regressions.
