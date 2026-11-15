@@ -146,8 +146,8 @@ export const HowItWorks = () => (
                         adrLabel="ADR 0078 · ADR 0093"
                     >
                         <p>
-                            Guests read the Actions cache and npm packages through a gate on your network instead of the WAN. Pull requests
-                            only read the cache; they never write it.
+                            Linux guests read the Actions cache, and opt-in npm packages, through a gate on your network instead of the WAN.
+                            Pull requests only read the cache; they never write it. macOS guests keep GitHub&apos;s cache.
                         </p>
                         <p className="text-fg-subtle">Public git seeds are designed and ship separately.</p>
                     </LanCard>

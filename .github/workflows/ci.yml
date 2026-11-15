@@ -335,10 +335,14 @@ jobs:
 
   publish:
     name: Publish verified main release
-    # Only trusted main pushes may use a release write token. The default
-    # needs condition also requires Required CI to have succeeded.
+    # Only trusted main pushes may use a release write token, and only after
+    # Required CI succeeded. The explicit result check replaces the implicit
+    # success(), which a skipped landing job upstream would otherwise turn
+    # false for every Go-only push (actions/runner#491).
     needs: verify
     if: >-
+      !cancelled() &&
+      needs.verify.result == 'success' &&
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'

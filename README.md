@@ -10,9 +10,10 @@
 
 Unyoke brings GitHub Actions CI/CD onto hardware you own: a multi-node fleet
 of macOS hosts running ephemeral [Tart](https://tart.run/) VMs and Linux hosts
-running ephemeral Podman containers, with a LAN cache gate for the Actions cache and
-npm packages and a local Actions artifact store. Jobs, caches and artifacts
-use your machines instead of cloud-runner minutes and hosted artifact quotas.
+running ephemeral Podman containers, with an opt-in LAN cache gate that serves
+Linux guests the Actions cache and npm packages, and an opt-in local Actions
+artifact store. Jobs run on your machines instead of cloud-runner minutes, and
+enabled caches and artifacts stay off hosted quotas.
 Each node admits work within exact resource budgets and fresh host-pressure
 checks; unavailable observations fail closed. Durable SQLite state and the
 `fleet` CLI keep operation restart-safe and explicit. GitHub still provides

@@ -72,11 +72,17 @@ const features: Feature[] = [
     {
         title: 'LAN cache gate',
         icon: featureIcons.cache,
-        body: <>The Actions cache and npm downloads stay on your network. Pull requests read the cache but never write it.</>,
+        body: (
+            <>
+                Linux guests read the Actions cache, and opt-in npm downloads, from a gate on your network. Pull requests read the cache but
+                never write it; macOS guests keep GitHub&apos;s cache.
+            </>
+        ),
         evidence: [
             { label: 'ADR 0078', href: adr('0078-a-node-serves-its-guests-actions-cache-pull-requests-only-read-it') },
             { label: 'ADR 0093', href: adr('0093-the-home-site-reads-npm-and-public-git-through-the-gate') }
         ],
+        badge: 'opt-in',
         span: 'lg:col-span-2'
     },
     {
