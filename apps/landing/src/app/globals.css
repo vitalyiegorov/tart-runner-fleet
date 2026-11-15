@@ -1,0 +1,269 @@
+@import 'tailwindcss';
+
+/*
+ * Brand tokens from docs/BRAND.md. Deep teal #00856A and mint #52D6B3 are the
+ * accents; ink #142A2A and chalk #F3F8F5 are the grounds. Text tints are chosen
+ * for WCAG AA on their own background; the brand teal is reserved for marks,
+ * borders and large type, and a darker teal carries small text on light.
+ */
+:root {
+    color-scheme: dark;
+    --bg: #0a1515;
+    --bg-raised: #0f1f1f;
+    --surface: #132626;
+    --surface-strong: #142a2a;
+    --line: #21403b;
+    --line-strong: #2f5a53;
+    --fg: #f3f8f5;
+    --fg-muted: #a9c2bb;
+    --fg-subtle: #8aa69e;
+    --accent: #52d6b3;
+    --accent-text: #52d6b3;
+    --accent-solid: #52d6b3;
+    --accent-on: #0a1515;
+    --accent-soft: rgb(82 214 179 / 0.12);
+    --glow: rgb(82 214 179 / 0.16);
+    --grid: rgb(243 248 245 / 0.045);
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        color-scheme: light;
+        --bg: #f3f8f5;
+        --bg-raised: #eaf2ee;
+        --surface: #ffffff;
+        --surface-strong: #e4eee9;
+        --line: #cfe0d8;
+        --line-strong: #a9c7bb;
+        --fg: #142a2a;
+        --fg-muted: #445e59;
+        --fg-subtle: #4f6964;
+        --accent: #00856a;
+        --accent-text: #006b56;
+        --accent-solid: #007560;
+        --accent-on: #ffffff;
+        --accent-soft: rgb(0 133 106 / 0.09);
+        --glow: rgb(0 133 106 / 0.12);
+        --grid: rgb(20 42 42 / 0.05);
+    }
+}
+
+@theme inline {
+    --color-bg: var(--bg);
+    --color-bg-raised: var(--bg-raised);
+    --color-surface: var(--surface);
+    --color-surface-strong: var(--surface-strong);
+    --color-line: var(--line);
+    --color-line-strong: var(--line-strong);
+    --color-fg: var(--fg);
+    --color-fg-muted: var(--fg-muted);
+    --color-fg-subtle: var(--fg-subtle);
+    --color-accent: var(--accent);
+    --color-accent-text: var(--accent-text);
+    --color-accent-solid: var(--accent-solid);
+    --color-accent-on: var(--accent-on);
+    --color-accent-soft: var(--accent-soft);
+    --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+    --font-mono: var(--font-geist-mono), ui-monospace, 'SFMono-Regular', monospace;
+}
+
+@layer base {
+    html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 5rem;
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+    }
+
+    body {
+        background: var(--bg);
+        color: var(--fg);
+        font-feature-settings: 'ss01', 'cv11';
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        text-rendering: optimizeLegibility;
+    }
+
+    ::selection {
+        background: var(--accent);
+        color: var(--accent-on);
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: 6px;
+    }
+
+    code,
+    kbd,
+    pre {
+        font-family: var(--font-mono);
+    }
+}
+
+@layer components {
+    .bg-grid {
+        background-image:
+            linear-gradient(to right, var(--grid) 1px, transparent 1px), linear-gradient(to bottom, var(--grid) 1px, transparent 1px);
+        background-size: 48px 48px;
+        mask-image: radial-gradient(ellipse 80% 70% at 50% 0%, #000 40%, transparent 100%);
+    }
+
+    .glow {
+        background: radial-gradient(closest-side, var(--glow), transparent);
+    }
+
+    .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 1rem;
+    }
+
+    .eyebrow {
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent-text);
+    }
+}
+
+/* Motion: decorative only, and absent unless the visitor allows it. */
+@media (prefers-reduced-motion: no-preference) {
+    @keyframes release {
+        from {
+            transform: translate(-6px, 8px);
+        }
+        to {
+            transform: translate(0, 0);
+        }
+    }
+
+    @keyframes drift {
+        0%,
+        100% {
+            transform: translate(0, 0);
+        }
+        50% {
+            transform: translate(1px, -1.5px);
+        }
+    }
+
+    @keyframes rise {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+        to {
+            opacity: 1;
+            transform: none;
+        }
+    }
+
+    @keyframes travel-x {
+        from {
+            left: -6px;
+        }
+        to {
+            left: calc(100% - 2px);
+        }
+    }
+
+    @keyframes travel-y {
+        from {
+            top: -6px;
+        }
+        to {
+            top: calc(100% - 2px);
+        }
+    }
+
+    @keyframes lifecycle {
+        0%,
+        16% {
+            background: var(--accent-soft);
+            border-color: var(--accent);
+            color: var(--fg);
+        }
+        24%,
+        100% {
+            background: transparent;
+            border-color: var(--line);
+            color: var(--fg-muted);
+        }
+    }
+
+    @keyframes ephemeral {
+        0%,
+        8% {
+            opacity: 0;
+            transform: scale(0.85);
+        }
+        18%,
+        70% {
+            opacity: 1;
+            transform: scale(1);
+        }
+        82%,
+        100% {
+            opacity: 0;
+            transform: scale(0.85);
+        }
+    }
+
+    .motion-release {
+        animation:
+            release 900ms cubic-bezier(0.2, 0.8, 0.2, 1) 250ms both,
+            drift 7s ease-in-out 1.4s infinite;
+    }
+
+    .motion-rise {
+        animation: rise 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+
+    .motion-pulse-x::after,
+    .motion-pulse-y::after {
+        content: '';
+        position: absolute;
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--accent);
+        box-shadow: 0 0 12px var(--accent);
+    }
+
+    .motion-pulse-x::after {
+        top: calc(50% - 4px);
+        animation: travel-x 2.4s linear infinite;
+    }
+
+    .motion-pulse-y::after {
+        left: calc(50% - 4px);
+        animation: travel-y 2.4s linear infinite;
+    }
+
+    .motion-lifecycle > li {
+        animation: lifecycle 9s linear infinite;
+    }
+
+    .motion-ephemeral {
+        animation: ephemeral 4.8s ease-in-out infinite;
+        transform-origin: center;
+        transform-box: fill-box;
+    }
+
+    @supports (animation-timeline: view()) {
+        .reveal {
+            animation: rise linear both;
+            animation-timeline: view();
+            animation-range: entry 0% entry 40%;
+        }
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+}

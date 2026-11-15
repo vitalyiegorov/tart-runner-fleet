@@ -54,6 +54,8 @@ all changes as safety critical.
 - `tests/{contract,integration,replay,chaos}`: cross-package safety evidence.
 - `tests/simulation`: deterministic simulation of the whole fleet (ADR 0031).
 - `docs/adr`: decisions that must be updated when architecture changes.
+- `apps/landing`: the Unyoke marketing site (Next.js, pnpm workspace). It is
+  independent of the Go module; `make` never builds it and it never imports Go code.
 
 ## Agent inspection recipe
 

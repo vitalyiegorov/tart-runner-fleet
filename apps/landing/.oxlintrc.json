@@ -1,0 +1,41 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+    "plugins": ["typescript", "import", "promise", "node", "react", "jsx-a11y", "nextjs", "unicorn", "oxc"],
+    "categories": {
+        "correctness": "error",
+        "suspicious": "error",
+        "pedantic": "error",
+        "perf": "error",
+        "style": "off",
+        "restriction": "off"
+    },
+    "options": {
+        "typeAware": true,
+        "reportUnusedDisableDirectives": "error"
+    },
+    "env": {
+        "builtin": true
+    },
+    "settings": {
+        "next": {
+            "rootDir": ["."]
+        },
+        "react": {
+            "linkComponents": [{ "name": "Link", "linkAttribute": "href" }],
+            "version": "19.3"
+        }
+    },
+    "ignorePatterns": [".next/**", "node_modules/**", "next-env.d.ts", "test-results/**", "playwright-report/**"],
+    "rules": {
+        "react/react-in-jsx-scope": "off",
+        "react/jsx-filename-extension": ["error", { "extensions": [".tsx"] }],
+        "import/no-unassigned-import": ["error", { "allow": ["**/*.css"] }],
+        "max-lines": ["error", { "max": 300, "skipBlankLines": true }],
+        "max-lines-per-function": "off",
+        "typescript/no-explicit-any": "error",
+        "typescript/consistent-type-imports": "error",
+        "typescript/prefer-readonly-parameter-types": "off",
+        "jsx-a11y/prefer-tag-over-role": "off",
+        "jsx-a11y/no-noninteractive-tabindex": ["error", { "tags": ["pre"] }]
+    }
+}

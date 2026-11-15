@@ -375,6 +375,17 @@ make fmt
 git diff --check
 ```
 
+The Unyoke landing page lives in [`apps/landing`](apps/landing), a pnpm
+workspace beside the Go module. It needs Node 24 and pnpm (pinned in
+`package.json`); its gates run in CI only when its inputs change:
+
+```sh
+pnpm install
+pnpm landing:dev       # http://localhost:3200
+pnpm landing:check     # format, lint, typecheck, dead code
+pnpm landing:build && pnpm landing:test:e2e   # Playwright + axe smoke
+```
+
 Requires Go 1.26.11. Coverage floor is 99% statements; changes are test-first
 and PR titles are Conventional Commits — see [`CONTRIBUTING.md`](CONTRIBUTING.md)
 and [`AGENTS.md`](AGENTS.md). CI runs entirely on runners this fleet schedules

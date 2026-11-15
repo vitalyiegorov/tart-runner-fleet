@@ -1,0 +1,17 @@
+{
+    "name": "unyoke",
+    "private": true,
+    "description": "Workspace root for Unyoke's web properties. The Go module at the repository root is built with make, not pnpm.",
+    "license": "AGPL-3.0-only",
+    "scripts": {
+        "landing:dev": "pnpm --filter @unyoke/landing dev",
+        "landing:build": "pnpm --filter @unyoke/landing build",
+        "landing:start": "pnpm --filter @unyoke/landing start",
+        "landing:check": "pnpm --filter @unyoke/landing check",
+        "landing:test:e2e": "pnpm --filter @unyoke/landing test:e2e"
+    },
+    "engines": {
+        "node": ">=24.11.0"
+    },
+    "packageManager": "pnpm@11.28.3"
+}
