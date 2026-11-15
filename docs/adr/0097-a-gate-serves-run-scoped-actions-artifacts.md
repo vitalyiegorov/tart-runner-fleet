@@ -379,8 +379,9 @@ create.
 - **Signing.** Sign may name another backend run only for such an artifact.
   Every other cross-run sign is refused with 403, whether or not the artifact
   exists.
-- **Writes.** Create, finalize, block writes and delete stay bound to the
-  caller's own backend run and job.
+- **Writes.** Create, finalize and block writes stay bound to the caller's own
+  backend run and job. Delete stays bound to the caller's own backend run; as
+  before, any job of that attempt may delete its sibling jobs' artifacts.
 - **Missing claim.** A token without a valid `run_id`, and rows stored before
   this amendment (an empty GitHub run), keep attempt-only scope.
 - **Migration.** It is in place: a defaulted `ghrun` column plus an index on
