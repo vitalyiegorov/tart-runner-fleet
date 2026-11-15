@@ -331,6 +331,11 @@ func (s *artifactStore) writeBlob(id, expiry int64, put func(artifactRecord) err
 
 // Success hands the slot to blob until writeBlob returns. Failed reads and
 // panics before handoff release it here, without waiting on the store mutex.
+// artifactBlockReadTimeout bounds one block upload request (#511). The
+// toolkit keeps 16 x 8 MiB blocks in flight, so 5 minutes needs only about
+// 450 KB/s in total, yet still ends a trickling peer.
+var artifactBlockReadTimeout = 5 * time.Minute
+
 func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (put func(artifactRecord) error, release func(), err error) {
 	select {
 	case s.uploadSlots <- struct{}{}:
@@ -343,14 +348,13 @@ func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (put 
 			releaseSlot()
 		}
 	}()
-	// Blocks are at most 16 MiB; a fixed minute bounds even a trickling peer.
 	// The wrapper must not renew this deadline on each byte. It stays set after
 	// return: net/http drains an unread body before replying, and resets the
 	// read deadline itself when it reads the connection's next request.
 	if body, ok := r.Body.(*progressBody); ok {
 		r.Body = body.ReadCloser
 	}
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyStallTimeout))
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(artifactBlockReadTimeout))
 	switch r.URL.Query().Get("comp") {
 	case "block":
 		key := r.URL.Query().Get("blockid")

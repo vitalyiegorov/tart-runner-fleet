@@ -20,21 +20,24 @@ func TestArtifactPhysicalReserveObservations(t *testing.T) {
 	}
 }
 
-// Subvolumes have distinct device IDs but share the filesystem free-space pool.
-func TestArtifactBudgetAcceptsSubvolumesSharingFilesystem(t *testing.T) {
-	old := artifactStatfs
-	t.Cleanup(func() { artifactStatfs = old })
-	artifactStatfs = func(path string, stat *unix.Statfs_t) error {
-		stat.Fsid.Val[0] = 123
-		if path == "other-disk" {
-			stat.Fsid.Val[0] = 456
-		}
+// Distinct mounts that both report fsid 0 (FUSE) do not share a free-space
+// pool: only a matching device, or one btrfs filesystem UUID, proves that.
+func TestArtifactBudgetRejectsDistinctMountsSharingZeroFsid(t *testing.T) {
+	oldStat, oldStatfs := artifactStat, artifactStatfs
+	t.Cleanup(func() { artifactStat, artifactStatfs = oldStat, oldStatfs })
+	artifactStat = func(path string, stat *unix.Stat_t) error {
+		stat.Dev = uint64(len(path))
 		return nil
 	}
-	if !sameArtifactFilesystem("budget-subvolume", "store-subvolume") {
-		t.Fatal("shared pool rejected")
+	artifactStatfs = func(string, *unix.Statfs_t) error { return nil }
+	if sameArtifactFilesystem("fuse-a", "fuse-bb") {
+		t.Fatal("distinct zero-fsid mounts accepted")
 	}
-	if sameArtifactFilesystem("budget-subvolume", "other-disk") {
-		t.Fatal("different pool accepted")
+	if !sameArtifactFilesystem("same-1", "same-2") {
+		t.Fatal("same device rejected")
+	}
+	artifactStat = func(string, *unix.Stat_t) error { return unix.ENOENT }
+	if sameArtifactFilesystem("same-1", "same-2") {
+		t.Fatal("unobservable path accepted")
 	}
 }

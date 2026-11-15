@@ -31,10 +31,20 @@ func artifactDiskBytes(stat unix.Statfs_t) (int64, error) {
 // artifactStatfs is the filesystem observation seam used by storage admission.
 var artifactStatfs = unix.Statfs
 
+// artifactStat is the device observation seam used by storage admission.
+var artifactStat = unix.Stat
+
+// A shared device proves one free-space pool. btrfs subvolumes get distinct
+// devices on one pool, so only their filesystem UUID can prove it (#513);
+// fsid alone cannot, because FUSE mounts all report zero.
 func sameArtifactFilesystem(a, b string) bool {
-	var x, y unix.Statfs_t
-	if artifactStatfs(a, &x) != nil || artifactStatfs(b, &y) != nil {
+	var x, y unix.Stat_t
+	if artifactStat(a, &x) != nil || artifactStat(b, &y) != nil {
 		return false
 	}
-	return x.Fsid == y.Fsid || sameArtifactSubvolume(a, b, x, y)
+	if x.Dev == y.Dev {
+		return true
+	}
+	var p, q unix.Statfs_t
+	return artifactStatfs(a, &p) == nil && artifactStatfs(b, &q) == nil && sameArtifactSubvolume(a, b, p, q)
 }

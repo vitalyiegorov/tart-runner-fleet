@@ -8,8 +8,13 @@ import (
 )
 
 func TestArtifactBtrfsSubvolumesUseFilesystemUUID(t *testing.T) {
-	oldStat, oldID := artifactStatfs, artifactBtrfsID
-	t.Cleanup(func() { artifactStatfs, artifactBtrfsID = oldStat, oldID })
+	oldDev, oldStat, oldID := artifactStat, artifactStatfs, artifactBtrfsID
+	t.Cleanup(func() { artifactStat, artifactStatfs, artifactBtrfsID = oldDev, oldStat, oldID })
+	// Subvolumes report distinct devices (Omarchy: 57 and 88).
+	artifactStat = func(path string, stat *unix.Stat_t) error {
+		stat.Dev = uint64(len(path))
+		return nil
+	}
 	artifactStatfs = func(path string, stat *unix.Statfs_t) error {
 		stat.Type = unix.BTRFS_SUPER_MAGIC
 		stat.Fsid.Val[0] = int32(len(path))

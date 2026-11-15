@@ -2637,8 +2637,9 @@ compares filesystem identity (the read-only btrfs filesystem UUID on Linux,
 remain refused. An artifact configuration/storage failure still stops startup;
 there is no unbudgeted fallback for cache or npm writes.
 
-Artifact block and block-list PUT bodies have a fixed 60-second read deadline,
-including clients that trickle bytes. Blocks remain capped at 16 MiB and timed-out
+Artifact block and block-list PUT bodies have a fixed 5-minute read deadline,
+including clients that trickle bytes. The toolkit keeps 16 x 8 MiB blocks in
+flight, so this needs only about 450 KB/s in total across the forwarding tunnel. Blocks remain capped at 16 MiB and timed-out
 requests release their buffer slots. Cache/npm streams retain progress deadlines;
 artifact downloads retain a write deadline per block, bounding slow readers
 without imposing a total deadline on a large artifact.
