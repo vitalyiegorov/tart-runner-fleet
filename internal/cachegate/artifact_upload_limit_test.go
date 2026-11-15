@@ -172,3 +172,62 @@ func TestArtifactFullUploadBuffersRejectWithoutDrainingBody(t *testing.T) {
 		t.Fatal("busy owner did not return 503")
 	}
 }
+
+func TestArtifactTricklingUploadHasAbsoluteDeadline(t *testing.T) {
+	old := bodyStallTimeout
+	bodyStallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { bodyStallTimeout = old })
+	f := newArtifactFixture(t)
+	raw := f.create(f.token("123", "r", "j"), "r", "j", "trickle") + "&comp=block&blockid=YQ=="
+	gate := httptest.NewServer(withArtifacts(http.NotFoundHandler(), f.handler, f.budget, 1, &Counters{}))
+	defer gate.Close()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for range 100 {
+			<-ticker.C
+			if _, err := writer.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+		writer.Close()
+	}()
+	started := time.Now()
+	req, _ := http.NewRequest(http.MethodPut, gate.URL+mustArtifactURI(t, raw), reader)
+	response, err := gate.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	writer.Close()
+	<-done
+	if response.StatusCode != http.StatusBadRequest || time.Since(started) > time.Second {
+		t.Fatalf("trickle retained slot: status=%d duration=%s", response.StatusCode, time.Since(started))
+	}
+	req, _ = http.NewRequest(http.MethodPut, gate.URL+mustArtifactURI(t, raw), bytes.NewBufferString("normal"))
+	response, err = gate.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatal("normal upload failed or timed-out upload leaked slot")
+	}
+	if len(f.store.uploadSlots) != 0 {
+		t.Fatal("timed-out upload leaked slot")
+	}
+}
+
+func mustArtifactURI(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.RequestURI()
+}

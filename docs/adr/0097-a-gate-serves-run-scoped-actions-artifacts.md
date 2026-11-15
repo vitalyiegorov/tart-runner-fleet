@@ -337,3 +337,20 @@ HTTP replay, v4 retry identity and sibling download. This is a fleet defect at
 the artifact protocol boundary, outside scheduler simulation state; existing
 artifact fixtures generate the triggering state. Observe/shadow and mutation
 authority limits remain intact. Deployment remains a separate operation.
+
+## Amendment 2026-11-15 — shared pools and bounded block reads (#513, #511)
+
+Storage admission compares filesystem identity, not file device ID:
+btrfs subvolumes share capacity despite distinct devices and, on current Linux,
+distinct `statfs` IDs. Use the read-only `BTRFS_IOC_FS_INFO` UUID for that case;
+other filesystems use `statfs` identity. Unknown observations
+and distinct pools remain refused. No new degraded-startup state is introduced;
+allowing unrelated writers after budget setup fails would need a separate
+admission rule and remains out of scope.
+
+A bounded artifact block or block-list read gets an absolute 60-second deadline.
+Its progress wrapper cannot extend that deadline on trickling bytes. The existing
+per-block download write deadline already bounds slow readers; cache/npm streams
+keep progress deadlines. No server-wide transfer timeout or new option is needed.
+The download-artifact digest bootstrap for #514 is retired after v0.1.918;
+publishing again uses the action's default mismatch error.

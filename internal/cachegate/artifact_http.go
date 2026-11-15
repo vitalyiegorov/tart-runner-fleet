@@ -343,6 +343,15 @@ func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (put 
 			releaseSlot()
 		}
 	}()
+	// Blocks are at most 16 MiB; a fixed minute bounds even a trickling peer.
+	// The wrapper must not renew this deadline on each byte.
+	deadline := time.Now().Add(bodyStallTimeout)
+	if body, ok := r.Body.(*progressBody); ok {
+		r.Body = body.ReadCloser
+	}
+	control := http.NewResponseController(w)
+	_ = control.SetReadDeadline(deadline)
+	defer func() { _ = control.SetReadDeadline(time.Time{}) }()
 	switch r.URL.Query().Get("comp") {
 	case "block":
 		key := r.URL.Query().Get("blockid")

@@ -19,3 +19,22 @@ func TestArtifactPhysicalReserveObservations(t *testing.T) {
 		t.Fatal("boundary capacity refused")
 	}
 }
+
+// Subvolumes have distinct device IDs but share the filesystem free-space pool.
+func TestArtifactBudgetAcceptsSubvolumesSharingFilesystem(t *testing.T) {
+	old := artifactStatfs
+	t.Cleanup(func() { artifactStatfs = old })
+	artifactStatfs = func(path string, stat *unix.Statfs_t) error {
+		stat.Fsid.Val[0] = 123
+		if path == "other-disk" {
+			stat.Fsid.Val[0] = 456
+		}
+		return nil
+	}
+	if !sameArtifactFilesystem("budget-subvolume", "store-subvolume") {
+		t.Fatal("shared pool rejected")
+	}
+	if sameArtifactFilesystem("budget-subvolume", "other-disk") {
+		t.Fatal("different pool accepted")
+	}
+}

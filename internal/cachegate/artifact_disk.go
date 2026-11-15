@@ -28,7 +28,13 @@ func artifactDiskBytes(stat unix.Statfs_t) (int64, error) {
 	return int64(available), nil
 }
 
+// artifactStatfs is the filesystem observation seam used by storage admission.
+var artifactStatfs = unix.Statfs
+
 func sameArtifactFilesystem(a, b string) bool {
-	var x, y unix.Stat_t
-	return unix.Stat(a, &x) == nil && unix.Stat(b, &y) == nil && x.Dev == y.Dev
+	var x, y unix.Statfs_t
+	if artifactStatfs(a, &x) != nil || artifactStatfs(b, &y) != nil {
+		return false
+	}
+	return x.Fsid == y.Fsid || sameArtifactSubvolume(a, b, x, y)
 }

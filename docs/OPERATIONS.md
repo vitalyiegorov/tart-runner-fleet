@@ -2630,6 +2630,19 @@ Owner flags, added to its existing gate command after operational approval:
 - `--cache-write-peak-bytes 64424509440`: required cache commit-copy peak (no default),
   at least the sidecar's `CACHE_MAX_SIZE_BYTES`. Match any later cap increase.
 
+The write-budget path and all guarded stores must share one filesystem free-space
+pool. Btrfs subvolumes are supported: their device IDs may differ, so admission
+compares filesystem identity (the read-only btrfs filesystem UUID on Linux,
+`statfs` IDs otherwise). Separate filesystems and failed observations
+remain refused. An artifact configuration/storage failure still stops startup;
+there is no unbudgeted fallback for cache or npm writes.
+
+Artifact block and block-list PUT bodies have a fixed 60-second read deadline,
+including clients that trickle bytes. Blocks remain capped at 16 MiB and timed-out
+requests release their buffer slots. Cache/npm streams retain progress deadlines;
+artifact downloads retain a write deadline per block, bounding slow readers
+without imposing a total deadline on a large artifact.
+
 Forwarding gate: configure `--artifacts-upstream http://127.0.0.1:3020` plus
 its own write-budget-path/reserve/cache-peak for its local cache/npm writers.
 It keeps no artifact state and makes no artifact auth decisions. The target
