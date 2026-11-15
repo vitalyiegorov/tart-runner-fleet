@@ -384,6 +384,7 @@ workspace beside the Go module. It needs Node 24 and pnpm (pinned in
 pnpm install
 pnpm landing:dev       # http://localhost:3200
 pnpm landing:check     # format, lint, typecheck, dead code
+pnpm --dir apps/landing exec playwright install chromium   # once per machine
 pnpm landing:build && pnpm landing:test:e2e   # Playwright + axe smoke
 ```
 

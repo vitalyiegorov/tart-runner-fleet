@@ -81,7 +81,7 @@ jobs:
             ''|*[!0-9a-f]*|0000000000000000000000000000000000000000) ;;
             *)
               if git fetch --no-tags --quiet --depth=1 origin "$base" &&
-                git diff --quiet "$base" HEAD -- apps/landing package.json \
+                git diff --quiet "$base" HEAD -- apps/landing assets/brand package.json \
                   pnpm-workspace.yaml pnpm-lock.yaml .node-version .github/workflows/ci.yml; then
                 changed=false
               fi
