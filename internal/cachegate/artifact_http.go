@@ -329,13 +329,13 @@ func (s *artifactStore) writeBlob(id, expiry int64, put func(artifactRecord) err
 	return put(a)
 }
 
-// Success hands the slot to blob until writeBlob returns. Failed reads and
-// panics before handoff release it here, without waiting on the store mutex.
 // artifactBlockReadTimeout bounds one block upload request (#511). The
 // toolkit keeps 16 x 8 MiB blocks in flight, so 5 minutes needs only about
 // 450 KB/s in total, yet still ends a trickling peer.
 var artifactBlockReadTimeout = 5 * time.Minute
 
+// Success hands the slot to blob until writeBlob returns. Failed reads and
+// panics before handoff release it here, without waiting on the store mutex.
 func (s *artifactStore) readUpload(w http.ResponseWriter, r *http.Request) (put func(artifactRecord) error, release func(), err error) {
 	select {
 	case s.uploadSlots <- struct{}{}:

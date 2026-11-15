@@ -26,7 +26,10 @@ func TestArtifactBudgetRejectsDistinctMountsSharingZeroFsid(t *testing.T) {
 	oldStat, oldStatfs := artifactStat, artifactStatfs
 	t.Cleanup(func() { artifactStat, artifactStatfs = oldStat, oldStatfs })
 	artifactStat = func(path string, stat *unix.Stat_t) error {
-		stat.Dev = uint64(len(path))
+		stat.Dev = 1 // Untyped: Dev is uint64 on Linux, int32 on darwin.
+		if path == "fuse-bb" {
+			stat.Dev = 2
+		}
 		return nil
 	}
 	artifactStatfs = func(string, *unix.Statfs_t) error { return nil }
