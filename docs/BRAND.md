@@ -94,11 +94,12 @@ PNG renders are disposable verification files, not shipped assets.
 
 ## Scope and evidence
 
-The README introduction reflects the owner's rebrand brief: multi-node Tart
-and Podman execution, an npm/git/Actions LAN cache gate and a local Actions
-artifact store. This checkout's ADR directory ends at 0060; ADR 0097, cited by
-the owner for artifact storage, is not present here. The storage description
-comes from that explicit brief, not a claimed inspection or production audit.
+The README introduction describes multi-node Tart and Podman execution, a LAN
+cache gate for the Actions cache and npm
+([ADR 0078](adr/0078-a-node-serves-its-guests-actions-cache-pull-requests-only-read-it.md),
+[ADR 0093](adr/0093-the-home-site-reads-npm-and-public-git-through-the-gate.md);
+git seeds are decided there and ship later) and a local Actions artifact store
+([ADR 0097](adr/0097-a-gate-serves-run-scoped-actions-artifacts.md)).
 [ADR 0034](adr/0034-a-node-serves-the-scale-sets-it-owns.md) and
 [ADR 0058](adr/0058-a-node-declares-the-execution-technology-it-has.md) support
 the multi-node, backend-specific platform description. Older plan documents
