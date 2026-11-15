@@ -39,6 +39,7 @@ type artifactStore struct {
 type artifactRecord struct {
 	ID                       int64
 	Repo, Run, Job, Name     string
+	GitHubRun                string
 	Created, Expires, Access int64
 	Size                     int64
 	Hash                     string
@@ -46,7 +47,7 @@ type artifactRecord struct {
 	Final                    bool
 }
 
-const artifactColumns = "id,repo,run,job,name,created,expires,access,size,hash,blocks,final"
+const artifactColumns = "id,repo,run,job,name,created,expires,access,size,hash,blocks,final,ghrun"
 
 func openArtifactStore(path string, capBytes int64, clock func() time.Time, budget *writeBudget) (*artifactStore, error) {
 	if capBytes <= 0 || capBytes > 1<<50 {
@@ -89,12 +90,25 @@ func openArtifactStore(path string, capBytes int64, clock func() time.Time, budg
 			return nil, err
 		}
 	}
+	// Stores created before same-run reads gain the column in place; their rows
+	// keep an empty GitHub run and stay readable by their own attempt only.
+	var migrated bool
+	if err = db.QueryRow("SELECT COUNT(*)>0 FROM pragma_table_info('artifacts') WHERE name='ghrun'").Scan(&migrated); err == nil && !migrated {
+		_, err = db.Exec("ALTER TABLE artifacts ADD COLUMN ghrun TEXT NOT NULL DEFAULT ''")
+	}
+	if err == nil {
+		_, err = db.Exec("CREATE INDEX IF NOT EXISTS artifacts_ghrun ON artifacts(repo,ghrun)")
+	}
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 
 func scanArtifact(row interface{ Scan(...any) error }) (artifactRecord, error) {
 	var a artifactRecord
-	err := row.Scan(&a.ID, &a.Repo, &a.Run, &a.Job, &a.Name, &a.Created, &a.Expires, &a.Access, &a.Size, &a.Hash, &a.Blocks, &a.Final)
+	err := row.Scan(&a.ID, &a.Repo, &a.Run, &a.Job, &a.Name, &a.Created, &a.Expires, &a.Access, &a.Size, &a.Hash, &a.Blocks, &a.Final, &a.GitHubRun)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errArtifactMissing
 	}
@@ -181,7 +195,7 @@ func (s *artifactStore) create(p artifactPrincipal, name string, expires time.Ti
 	if !expires.After(at) {
 		return artifactRecord{}, errArtifactInput
 	}
-	result, err := s.db.Exec("INSERT INTO artifacts(repo,run,job,name,created,expires,access) VALUES(?,?,?,?,?,?,?)", p.repo, p.run, p.job, name, at.Unix(), expires.Unix(), at.Unix())
+	result, err := s.db.Exec("INSERT INTO artifacts(repo,run,job,name,created,expires,access,ghrun) VALUES(?,?,?,?,?,?,?,?)", p.repo, p.run, p.job, name, at.Unix(), expires.Unix(), at.Unix(), p.githubRun)
 	if err != nil {
 		return artifactRecord{}, err
 	}
@@ -278,7 +292,7 @@ func (s *artifactStore) stream(a artifactRecord, w io.Writer) (int64, error) {
 	return total, nil
 }
 func (s *artifactStore) list(p artifactPrincipal) ([]artifactRecord, error) {
-	rows, err := s.db.Query("SELECT "+artifactColumns+" FROM artifacts WHERE repo=? AND run=? AND final=1 AND expires>? ORDER BY id", p.repo, p.run, s.clock().Unix())
+	rows, err := s.db.Query("SELECT "+artifactColumns+" FROM artifacts WHERE repo=? AND (run=? OR ghrun<>'' AND ghrun=?) AND final=1 AND expires>? ORDER BY id", p.repo, p.run, p.githubRun, s.clock().Unix())
 	if err != nil {
 		return nil, err
 	}

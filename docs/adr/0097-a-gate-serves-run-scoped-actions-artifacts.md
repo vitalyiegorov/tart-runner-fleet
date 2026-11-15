@@ -54,8 +54,9 @@ IDs, not numeric GITHUB_RUN_ID. Allow only configured numeric repository IDs.
 No new audience requirement is invented: like the pinned cache verifier,
 signature/issuer and the service-specific signed scope establish authority;
 a generic workflow OIDC token without Actions.Results cannot authorize.
-No live token inspection is required. Reruns are isolated by their signed
-backend run identity; no promise maps attempts to a numeric GitHub run.
+No live token inspection is required. Writes are isolated by their signed
+backend run identity; reads also cover earlier attempts of the same GitHub run
+(see the 2026-11-15 same-run reads amendment).
 
 Create/finalize must match the caller's run and job. List authenticates the
 consumer job. Sign/delete accept the stored producer job within that same
@@ -211,10 +212,10 @@ verify a new main CI run publishes both node archives before declaring rollout
 complete. Until then, default-off uploads still face the existing GitHub quota.
 Gate expiry/LRU can still evict a candidate:
 fail closed and rerun the complete CI workflow to regenerate it, rather than
-rebuilding only the publish job or mixing storage routes. The gate scopes
-artifacts to the signed backend run, so a failed-jobs-only re-run of publish may
-not see attempt 1's candidate; until rollout proves attempts share it, recover a
-failed publish with a complete CI re-run. Every `linux-go-4x8` provider must
+rebuilding only the publish job or mixing storage routes. A failed-jobs-only
+re-run of publish reads attempt 1's candidate through the same-run reads
+amendment; an artifact uploaded before that amendment still needs a complete CI
+re-run. Every `linux-go-4x8` provider must
 reach the same owner (the roaming MacBook, #446, must leave that label or reach
 Omarchy) before routing is enabled. Enablement, rollback
 proof and live release evidence remain separate operational tasks.
@@ -357,3 +358,35 @@ per-block download write deadline already bounds slow readers; cache/npm streams
 keep progress deadlines. No server-wide transfer timeout or new option is needed.
 The download-artifact digest bootstrap for #514 is retired after v0.1.918;
 publishing again uses the action's default mismatch error.
+
+## Amendment 2026-11-15 — reads cover every attempt of one GitHub run (rnw-community/mobile-ci#369)
+
+GitHub issues a new backend run for every attempt, so "Re-run failed jobs"
+could not download what an earlier attempt's job uploaded (budgie run
+43712499361 attempt 4 missed attempt 3's finalized app). GitHub's own service
+and Gitea's v4 implementation serve earlier attempts to a re-run.
+
+The runtime token carries a signed `run_id` claim. A fleet probe on 2026-11-15
+read only claim names and comparisons, never values. It showed that `run_id`
+equals `GITHUB_RUN_ID` on attempts 1 and 2, while the `Actions.Results` run
+segment changes. The owner verifies that claim as a canonical decimal string
+within JavaScript's exact integer range and stores it with each artifact at
+create.
+
+- **Reads.** List returns the caller's backend run plus finalized artifacts of
+  the same repository whose stored GitHub run equals the caller's, by ascending
+  ID, so the toolkit's newest-by-ID choice picks the latest attempt.
+- **Signing.** Sign may name another backend run only for such an artifact.
+  Every other cross-run sign is refused with 403, whether or not the artifact
+  exists.
+- **Writes.** Create, finalize and block writes stay bound to the caller's own
+  backend run and job. Delete stays bound to the caller's own backend run; as
+  before, any job of that attempt may delete its sibling jobs' artifacts.
+- **Missing claim.** A token without a valid `run_id`, and rows stored before
+  this amendment (an empty GitHub run), keep attempt-only scope.
+- **Migration.** It is in place: a defaulted `ghrun` column plus an index on
+  `(repo, ghrun)`.
+
+The read widening is narrower than GitHub's own rule, under which any job with
+`actions: read` can download any run's artifacts.
+

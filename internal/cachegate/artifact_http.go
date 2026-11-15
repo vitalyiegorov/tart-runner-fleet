@@ -69,11 +69,12 @@ func artifactHandler(s *artifactStore, v *artifactVerifier, origin string, repos
 			return
 		}
 		var req artifactRequest
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req) != nil || req.Run != p.run || req.Job == "" {
+		method := strings.TrimPrefix(r.URL.Path, artifactService)
+		// Only a download may name another attempt's backend run; rpc checks it is this GitHub run.
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req) != nil || req.Run != p.run && method != "GetSignedArtifactURL" || req.Job == "" {
 			artifactError(w, 403)
 			return
 		}
-		method := strings.TrimPrefix(r.URL.Path, artifactService)
 		if (method == "CreateArtifact" || method == "FinalizeArtifact" || method == "ListArtifacts") && req.Job != p.job {
 			artifactError(w, 403)
 			return
@@ -135,7 +136,12 @@ func (s *artifactStore) rpc(p artifactPrincipal, method string, r artifactReques
 		}
 		return map[string]any{"ok": true, "signed_upload_url": s.signedURL(origin, a, "write")}, nil
 	}
-	a, err := s.named(p, r.Name)
+	producer := p
+	producer.run = r.Run
+	a, err := s.named(producer, r.Name)
+	if r.Run != p.run && (err != nil || a.GitHubRun == "" || a.GitHubRun != p.githubRun) {
+		return nil, errArtifactAuth
+	}
 	if err != nil {
 		return nil, err
 	}
