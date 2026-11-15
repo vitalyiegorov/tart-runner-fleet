@@ -231,3 +231,34 @@ func mustArtifactURI(t *testing.T, raw string) string {
 	}
 	return u.RequestURI()
 }
+
+// An early rejection must not clear the upload deadline: net/http drains the
+// unread body before it writes the response, and a stalled peer would hang it.
+func TestArtifactEarlyRejectionKeepsUploadDeadlineForBodyDrain(t *testing.T) {
+	old := bodyStallTimeout
+	bodyStallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { bodyStallTimeout = old })
+	f := newArtifactFixture(t)
+	raw := f.create(f.token("123", "r", "j"), "r", "j", "list") + "&comp=blocklist"
+	gate := httptest.NewServer(withArtifacts(http.NotFoundHandler(), f.handler, f.budget, 1, &Counters{}))
+	defer gate.Close()
+	target, _ := url.Parse(gate.URL)
+	conn, err := net.Dial("tcp", target.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	io.WriteString(conn, "PUT "+mustArtifactURI(t, raw)+" HTTP/1.1\r\nHost: gate\r\nContent-Length: 4096\r\n\r\n<Wrong/>")
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPut})
+	if err != nil {
+		t.Fatalf("rejected block list hung draining a stalled body: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400", response.StatusCode)
+	}
+	if len(f.store.uploadSlots) != 0 {
+		t.Fatal("rejected block list leaked its slot")
+	}
+}
