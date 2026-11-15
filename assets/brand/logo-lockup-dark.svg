@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 352 88" width="352" height="88" role="img" aria-labelledby="title desc">
+  <title id="title">Unyoke</title>
+  <desc id="desc">An open U with a detached bar beside a custom drawn wordmark.</desc>
+  <path transform="translate(4 12)" fill="#52D6B3" d="M8 8h12v24a12 12 0 0 0 24 0V24h12v8a24 24 0 0 1-48 0Z M44 8h12v8H44Z"/>
+  <path transform="translate(96 12)" fill="none" stroke="#F3F8F5" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" d="M0 4v29c0 18 28 18 28 0V4 M42 46V18m0 12c0-17 26-17 26 0v16 M82 18l13 28m13-28L90 62 M123 32c0-19 28-19 28 0s-28 19-28 0Z M166 4v42m24-28-24 19m10-8 16 17 M207 32h28c0-19-28-19-28 0 0 17 19 19 28 9"/>
+</svg>
