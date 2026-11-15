@@ -29,7 +29,7 @@ type artifactClaims struct {
 	jwt.RegisteredClaims
 	Repository string `json:"repository_id"`
 	Scope      string `json:"scp"`
-	RunID      string `json:"run_id"`
+	RunID      any    `json:"run_id"`
 }
 
 // The parser's global clock is deliberately not used; the verifier owns time.
@@ -62,8 +62,11 @@ func (v *artifactVerifier) verify(ctx context.Context, auth string) (artifactPri
 		return artifactPrincipal{}, errArtifactAuth
 	}
 	p := artifactPrincipal{repo: claims.Repository}
-	if id, e := strconv.ParseInt(claims.RunID, 10, 64); e == nil && id > 0 && id <= 1<<53-1 && strconv.FormatInt(id, 10) == claims.RunID {
-		p.githubRun = claims.RunID
+	// A run_id of any other JSON type counts as absent rather than refusing the token.
+	if run, _ := claims.RunID.(string); run != "" {
+		if id, e := strconv.ParseInt(run, 10, 64); e == nil && id > 0 && id <= 1<<53-1 && strconv.FormatInt(id, 10) == run {
+			p.githubRun = run
+		}
 	}
 	count := 0
 	for _, scope := range strings.Fields(claims.Scope) {

@@ -104,6 +104,22 @@ func TestArtifactOtherRunsStayRefused(t *testing.T) {
 	}
 }
 
+func TestArtifactNonStringRunIDCountsAsAbsent(t *testing.T) {
+	f := newArtifactFixture(t)
+	for _, claim := range []any{4242, true, map[string]any{"id": "4242"}} {
+		c := jwt.MapClaims{"iss": artifactIssuer, "exp": f.at.Add(time.Hour).Unix(), "repository_id": "123", "scp": "Actions.Results:own:job", "run_id": claim}
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
+		token.Header["kid"] = "test"
+		auth, err := token.SignedString(f.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := f.rpc(auth, "ListArtifacts", artifactBody("own", "job", "")); w.Code != 200 {
+			t.Fatalf("run_id %v refused the token's own run: %d", claim, w.Code)
+		}
+	}
+}
+
 func TestArtifactPreMigrationRowsStayAttemptScoped(t *testing.T) {
 	f := newArtifactFixture(t)
 	f.upload(f.token("123", "attempt-1", "plan"), "attempt-1", "plan", "app", []byte("legacy"))
