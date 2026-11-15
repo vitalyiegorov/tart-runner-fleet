@@ -32,7 +32,7 @@ jobs:
     # a fork containment guard rather than an authorization gate.
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'
     runs-on: [self-hosted, trf-linux-amd64-4x8]
-    timeout-minutes: 20
+    timeout-minutes: 60
     env:
       VERSION: ${{ inputs.version || github.ref_name }}
     steps:

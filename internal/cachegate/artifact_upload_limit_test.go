@@ -172,3 +172,125 @@ func TestArtifactFullUploadBuffersRejectWithoutDrainingBody(t *testing.T) {
 		t.Fatal("busy owner did not return 503")
 	}
 }
+
+func TestArtifactTricklingUploadHasAbsoluteDeadline(t *testing.T) {
+	old := artifactBlockReadTimeout
+	artifactBlockReadTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { artifactBlockReadTimeout = old })
+	f := newArtifactFixture(t)
+	raw := f.create(f.token("123", "r", "j"), "r", "j", "trickle") + "&comp=block&blockid=YQ=="
+	gate := httptest.NewServer(withArtifacts(http.NotFoundHandler(), f.handler, f.budget, 1, &Counters{}))
+	defer gate.Close()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for range 100 {
+			<-ticker.C
+			if _, err := writer.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+		writer.Close()
+	}()
+	started := time.Now()
+	req, _ := http.NewRequest(http.MethodPut, gate.URL+mustArtifactURI(t, raw), reader)
+	response, err := gate.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	writer.Close()
+	<-done
+	if response.StatusCode != http.StatusBadRequest || time.Since(started) > time.Second {
+		t.Fatalf("trickle retained slot: status=%d duration=%s", response.StatusCode, time.Since(started))
+	}
+	req, _ = http.NewRequest(http.MethodPut, gate.URL+mustArtifactURI(t, raw), bytes.NewBufferString("normal"))
+	response, err = gate.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatal("normal upload failed or timed-out upload leaked slot")
+	}
+	if len(f.store.uploadSlots) != 0 {
+		t.Fatal("timed-out upload leaked slot")
+	}
+}
+
+func mustArtifactURI(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.RequestURI()
+}
+
+// An early rejection must not clear the upload deadline: net/http drains the
+// unread body before it writes the response, and a stalled peer would hang it.
+func TestArtifactEarlyRejectionKeepsUploadDeadlineForBodyDrain(t *testing.T) {
+	old := artifactBlockReadTimeout
+	artifactBlockReadTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { artifactBlockReadTimeout = old })
+	f := newArtifactFixture(t)
+	raw := f.create(f.token("123", "r", "j"), "r", "j", "list") + "&comp=blocklist"
+	gate := httptest.NewServer(withArtifacts(http.NotFoundHandler(), f.handler, f.budget, 1, &Counters{}))
+	defer gate.Close()
+	target, _ := url.Parse(gate.URL)
+	conn, err := net.Dial("tcp", target.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	io.WriteString(conn, "PUT "+mustArtifactURI(t, raw)+" HTTP/1.1\r\nHost: gate\r\nContent-Length: 4096\r\n\r\n<Wrong/>")
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPut})
+	if err != nil {
+		t.Fatalf("rejected block list hung draining a stalled body: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400", response.StatusCode)
+	}
+	if len(f.store.uploadSlots) != 0 {
+		t.Fatal("rejected block list leaked its slot")
+	}
+}
+
+// A slow but progressing block must outlive the generic stall timeout:
+// @actions/artifact keeps 16 x 8 MiB blocks in flight, so on a ~2 MB/s link
+// each block legitimately needs more than a minute (#511).
+func TestArtifactSlowProgressingBlockOutlivesStallTimeout(t *testing.T) {
+	oldStall, oldBlock := bodyStallTimeout, artifactBlockReadTimeout
+	bodyStallTimeout, artifactBlockReadTimeout = 50*time.Millisecond, 2*time.Second
+	t.Cleanup(func() { bodyStallTimeout, artifactBlockReadTimeout = oldStall, oldBlock })
+	f := newArtifactFixture(t)
+	raw := f.create(f.token("123", "r", "j"), "r", "j", "slow") + "&comp=block&blockid=YQ=="
+	gate := httptest.NewServer(withArtifacts(http.NotFoundHandler(), f.handler, f.budget, 1, &Counters{}))
+	defer gate.Close()
+	reader, writer := io.Pipe()
+	go func() {
+		for range 10 {
+			time.Sleep(20 * time.Millisecond)
+			if _, err := writer.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+		writer.Close()
+	}()
+	req, _ := http.NewRequest(http.MethodPut, gate.URL+mustArtifactURI(t, raw), reader)
+	response, err := gate.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("slow progressing block rejected: %d", response.StatusCode)
+	}
+}

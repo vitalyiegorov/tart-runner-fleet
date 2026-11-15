@@ -658,3 +658,33 @@ into a smoke test, so the required event vocabulary is asserted directly.
   operation is claimed.
 - **Nothing here is production evidence.** Simulation is not a cutover, and no
   authority-mode promotion may cite it.
+
+## Amendment 2026-11-15 — independent simulation budgets (#516, #444)
+
+The simulation remains race-instrumented, with every seed, tick and assertion.
+`make race` composes the ordinary package suite (unchanged Go timeout) and the
+simulation suite (explicit 30-minute timeout). CI gives simulation its own required
+40-minute job. The 80-seed/200-tick bounded non-race sweep also leaves the
+coverage job for a required 35-minute test/45-minute job budget; Required CI and verified builds depend on both race jobs. Release
+verification allows 60 minutes for the sequential full race and coverage gates.
+
+The nightly non-race sweep partitions seeds 1–500 into ten disjoint contiguous
+50-seed jobs, each running all six worlds for all 320 ticks with its existing
+35-minute test/45-minute job budget. The matrix does not cancel other ranges on
+failure. It runs one shard at a time to preserve the fleet's existing resource
+bound; total nightly duration can exceed 35 minutes, but a single test binary
+no longer must finish all 500 seeds within that budget. Violations still shrink
+and report the exact seed; no wall-clock cutoff changes the property sample.
+
+On Omarchy with Go 1.26.11 and GOMAXPROCS=4, the default package measured
+126.707 seconds without race instrumentation and 1013.140 seconds with it
+(`-gcflags=modernc.org/...=-d=checkptr=0`). The federated test alone measured
+95.36 / 654.85 seconds. Host load ranged from 30 to 69 during the race run.
+The 30-minute simulation timeout leaves about 78% margin beyond the measured
+loaded run; the 40-minute job reserves another ten minutes for setup/build.
+A full nightly-sized shard (seeds 1–50, all six worlds, 320 ticks) passed
+in 713.926 seconds, leaving nearly 23 minutes within the existing test budget.
+The exact 80-seed/200-tick bounded CI sweep passed in 710.265 seconds, also
+exceeding its former ten-minute package timeout without a property violation.
+Reproduction commands and per-arm measurements are recorded in the fix commit.
+These are harness-budget changes, not fleet policy or authority promotion.

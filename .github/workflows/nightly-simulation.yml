@@ -36,6 +36,12 @@ env:
 
 jobs:
   sweep:
+    strategy:
+      fail-fast: false
+      # Preserve seeds 1..500 in ten disjoint ranges, one runner at a time.
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     # Only this repository owns the self-hosted fleet these labels resolve to.
     # A fork must not schedule nightly work it cannot serve.
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'
@@ -51,7 +57,9 @@ jobs:
       # pull-request gate. The budgets are sized from measured throughput with
       # margin; widen them here rather than in `make unit`, which every job runs.
       - name: Long deterministic simulation sweep
-        run: go test -count=1 -timeout 35m ./tests/simulation -run TestSimFuzz -seeds=500 -sim-ticks=320
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: go test -count=1 -timeout 35m ./tests/simulation -run TestSimFuzz -seed-base=$((1 + SHARD * 50)) -seeds=50 -sim-ticks=320
 
   race:
     if: github.repository == 'vitalyiegorov/tart-runner-fleet'

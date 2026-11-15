@@ -11,7 +11,7 @@ CPD_THRESHOLD ?= 100
 
 export GOTOOLCHAIN ?= local
 
-.PHONY: fmt fmt-check mod-check pr-title-check vet workflow-lint self-host-check lint deadcode cpd vuln test unit race coverage build preflight quality verify ci
+.PHONY: fmt fmt-check mod-check pr-title-check vet workflow-lint self-host-check lint deadcode cpd vuln test unit race race-packages race-simulation coverage build preflight quality verify ci
 
 fmt:
 	@files="$$(find . -name '*.go' -not -path './vendor/*')"; \
@@ -58,9 +58,15 @@ test:
 unit coverage:
 	./scripts/check-coverage.sh $(COVERAGE_MIN)
 
-race:
-	# Give each test binary the runner budget; keep its internal concurrency.
-	$(GO) test $(RACE_FLAGS) -p 1 -shuffle=on -count=1 ./...
+race: race-packages race-simulation
+
+race-packages:
+	$(GO) test $(RACE_FLAGS) -p 1 -shuffle=on -count=1 $$( $(GO) list ./... | grep -v '/tests/simulation$$' )
+
+# Loaded Omarchy: 1013s total, 655s federated test (#516). Preserve all
+# instrumentation and seeds; leave ~75% margin beyond that measured total.
+race-simulation:
+	$(GO) test $(RACE_FLAGS) -shuffle=on -count=1 -timeout=30m ./tests/simulation
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath ./...

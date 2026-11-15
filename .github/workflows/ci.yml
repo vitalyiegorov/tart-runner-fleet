@@ -144,12 +144,6 @@ jobs:
           cache: false
       - name: Shuffled unit, contract, integration, replay, and chaos tests
         run: make unit
-      # A bounded seed range of the deterministic fleet simulation (ADR 0031).
-      # `make unit` already runs its default budget; this widens it to roughly a
-      # minute of wall clock, which is what a review can afford. The nightly
-      # sweep in nightly-simulation.yml explores the rest.
-      - name: Bounded deterministic fleet simulation
-        run: go test -count=1 -timeout 10m ./tests/simulation -run TestSimFuzz -seeds=80 -sim-ticks=200
       - name: Upload exact coverage evidence
         if: always() && hashFiles('coverage.out') != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -175,11 +169,47 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Shuffled race suite
-        run: make race
+        run: make race-packages
+
+  race-simulation:
+    name: Simulation race detector
+    needs: preflight
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, linux-go-4x8]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Shuffled simulation race suite
+        run: make race-simulation
+
+  simulation:
+    name: Bounded simulation
+    needs: preflight
+    if: >-
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, linux-go-4x8]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Bounded deterministic fleet simulation
+        run: go test -count=1 -timeout 35m ./tests/simulation -run TestSimFuzz -seeds=80 -sim-ticks=200
 
   build:
     name: Verified builds
-    needs: [quality, unit, race]
+    needs: [quality, unit, race, race-simulation, simulation]
     if: >-
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       (github.event_name != 'pull_request' ||
@@ -289,7 +319,7 @@ jobs:
 
   verify:
     name: Required CI
-    needs: [quality, unit, race, build, landing]
+    needs: [quality, unit, race, race-simulation, simulation, build, landing]
     # Run after upstream success or failure, but terminate with a superseded or
     # manually cancelled workflow. GitHub preserves always() jobs on cancel.
     # This gate never runs on the fleet and never checks out repository content,
@@ -321,6 +351,8 @@ jobs:
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          SIMULATION_RESULT: ${{ needs.simulation.result }}
+          RACE_SIMULATION_RESULT: ${{ needs.race-simulation.result }}
           RACE_RESULT: ${{ needs.race.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           LANDING_RESULT: ${{ needs.landing.result }}
@@ -329,6 +361,8 @@ jobs:
           test "$QUALITY_RESULT" = success
           test "$UNIT_RESULT" = success
           test "$RACE_RESULT" = success
+          test "$RACE_SIMULATION_RESULT" = success
+          test "$SIMULATION_RESULT" = success
           test "$BUILD_RESULT" = success
           # Skipped only when preflight found no landing page input changed.
           case "$LANDING_RESULT" in success|skipped) ;; *) exit 1 ;; esac
@@ -366,10 +400,6 @@ jobs:
         with:
           name: ci-release-${{ github.sha }}
           path: dist
-          # The next step verifies every file against SHA256SUMS. Warning here
-          # lets the #514 fix ship through a gate that still lists bare-hex
-          # digests (fixed in this release), without weakening integrity.
-          digest-mismatch: warn
 
       - name: Verify release identity, contents, and checksums
         run: |

@@ -19,3 +19,28 @@ func TestArtifactPhysicalReserveObservations(t *testing.T) {
 		t.Fatal("boundary capacity refused")
 	}
 }
+
+// Distinct mounts that both report fsid 0 (FUSE) do not share a free-space
+// pool: only a matching device, or one btrfs filesystem UUID, proves that.
+func TestArtifactBudgetRejectsDistinctMountsSharingZeroFsid(t *testing.T) {
+	oldStat, oldStatfs := artifactStat, artifactStatfs
+	t.Cleanup(func() { artifactStat, artifactStatfs = oldStat, oldStatfs })
+	artifactStat = func(path string, stat *unix.Stat_t) error {
+		stat.Dev = 1 // Untyped: Dev is uint64 on Linux, int32 on darwin.
+		if path == "fuse-bb" {
+			stat.Dev = 2
+		}
+		return nil
+	}
+	artifactStatfs = func(string, *unix.Statfs_t) error { return nil }
+	if sameArtifactFilesystem("fuse-a", "fuse-bb") {
+		t.Fatal("distinct zero-fsid mounts accepted")
+	}
+	if !sameArtifactFilesystem("same-1", "same-2") {
+		t.Fatal("same device rejected")
+	}
+	artifactStat = func(string, *unix.Stat_t) error { return unix.ENOENT }
+	if sameArtifactFilesystem("same-1", "same-2") {
+		t.Fatal("unobservable path accepted")
+	}
+}
