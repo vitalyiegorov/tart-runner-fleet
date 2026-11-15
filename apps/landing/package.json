@@ -1,0 +1,39 @@
+{
+    "name": "@unyoke/landing",
+    "version": "0.1.0",
+    "private": true,
+    "license": "AGPL-3.0-only",
+    "type": "module",
+    "scripts": {
+        "dev": "next dev --port 3200",
+        "build": "next build",
+        "start": "next start --port 3200",
+        "lint": "oxlint --type-aware --deny-warnings",
+        "fmt": "oxfmt",
+        "fmt:check": "oxfmt --check",
+        "typecheck": "next typegen && tsc6 --noEmit",
+        "deadcode": "knip",
+        "check": "pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm deadcode",
+        "test:e2e": "playwright test"
+    },
+    "dependencies": {
+        "geist": "1.9.2",
+        "next": "16.4.6",
+        "react": "19.3.1",
+        "react-dom": "19.3.1"
+    },
+    "devDependencies": {
+        "@axe-core/playwright": "4.14.0",
+        "@playwright/test": "1.64.1",
+        "@tailwindcss/postcss": "4.3.5",
+        "@types/node": "24.19.2",
+        "@types/react": "19.3.0",
+        "@types/react-dom": "19.3.0",
+        "knip": "6.45.1",
+        "oxfmt": "0.78.0",
+        "oxlint": "1.93.0",
+        "oxlint-tsgolint": "7.0.2007",
+        "tailwindcss": "4.3.5",
+        "typescript": "npm:@typescript/typescript6@6.0.2"
+    }
+}

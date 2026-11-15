@@ -1,21 +1,30 @@
-# Tart Runner Fleet
+# Unyoke
 
-Tart Runner Fleet turns a single Apple-silicon Mac into a self-hosted GitHub
-Actions runner pool. One daemon subscribes to GitHub Actions **runner scale
-sets**, clones an immutable [Tart](https://tart.run/) VM per queued job,
-registers a just-in-time **ephemeral** runner inside it, and destroys the VM
-when that one job finishes. Admission is bounded twice — by exact CPU/memory/slot
-vectors *and* by a live host probe (free disk, reclaimable memory, swap, CPU
-idle, load) — so the machine never overcommits and can remain someone's daily
-driver. It exists for teams that need real macOS and Linux CI capacity on
-hardware they own, without a long-lived runner accumulating state or
-credentials. All state is durable SQLite; all operator access goes through one
-`fleet` binary over a private `0600` Unix socket; secrets are never logged or
-persisted.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-lockup-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/brand/logo-lockup-light.svg">
+  <img src="assets/brand/logo-lockup-light.svg" alt="Unyoke" width="352" height="88">
+</picture>
 
-macOS on Apple silicon only. Licensed under [AGPL-3.0](LICENSE); commercial
-licenses are available — contact the owner. Contributions require signing the
-[CLA](CLA.md).
+**CI/CD, on your own terms.** · [unyoke.dev](https://unyoke.dev)
+
+Unyoke brings GitHub Actions CI/CD onto hardware you own: a multi-node fleet
+of macOS hosts running ephemeral [Tart](https://tart.run/) VMs and Linux hosts
+running ephemeral Podman containers, with an opt-in LAN cache gate that serves
+Linux guests the Actions cache and npm packages, and an opt-in local Actions
+artifact store. Jobs run on your machines instead of cloud-runner minutes, and
+enabled caches and artifacts stay off hosted quotas.
+Each node admits work within exact resource budgets and fresh host-pressure
+checks; unavailable observations fail closed. Durable SQLite state and the
+`fleet` CLI keep operation restart-safe and explicit. GitHub still provides
+workflow orchestration; local execution and storage put those resources under
+your control.
+
+Formerly **Tart Runner Fleet**.
+
+macOS (Apple silicon, Tart) + Linux (amd64, Podman), across multiple nodes.
+Licensed under [AGPL-3.0](LICENSE); commercial licenses are available — contact
+the owner. Contributions require signing the [CLA](CLA.md).
 
 ## How it works
 
@@ -365,6 +374,18 @@ ENDPOINT="unix://$ROOT/state/fleetd.sock"
 make verify   # preflight + quality + coverage + race + build (same gates as CI)
 make fmt
 git diff --check
+```
+
+The Unyoke landing page lives in [`apps/landing`](apps/landing), a pnpm
+workspace beside the Go module. It needs Node 24 and pnpm (pinned in
+`package.json`); its gates run in CI only when its inputs change:
+
+```sh
+pnpm install
+pnpm landing:dev       # http://localhost:3200
+pnpm landing:check     # format, lint, typecheck, dead code
+pnpm --dir apps/landing exec playwright install chromium   # once per machine
+pnpm landing:build && pnpm landing:test:e2e   # Playwright + axe smoke
 ```
 
 Requires Go 1.26.11. Coverage floor is 99% statements; changes are test-first

@@ -9,3 +9,12 @@
 # in a public repository an accidental commit would publish local transcripts.
 /.claude/
 .DS_Store
+# Node workspace (apps/*). The Go module above is unaffected.
+node_modules/
+.next/
+.pnpm-store/
+next-env.d.ts
+*.tsbuildinfo
+/apps/*/test-results/
+/apps/*/playwright-report/
+/apps/*/blob-report/

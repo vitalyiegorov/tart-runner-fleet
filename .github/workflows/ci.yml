@@ -51,12 +51,44 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux-go-2x4]
     timeout-minutes: 10
+    outputs:
+      landing: ${{ steps.landing-paths.outputs.changed }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: false
+      # The landing job below needs a VM only when its own inputs changed. This
+      # compares the event's base with the checked-out commit and fails open: any
+      # base it cannot fetch or compare counts as a change.
+      - name: Detect landing page changes
+        id: landing-paths
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -eu
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base="$PR_BASE_SHA" ;;
+            merge_group) base="$MERGE_GROUP_BASE_SHA" ;;
+            push) base="$PUSH_BEFORE_SHA" ;;
+            *) base="" ;;
+          esac
+          changed=true
+          case "$base" in
+            ''|*[!0-9a-f]*|0000000000000000000000000000000000000000) ;;
+            *)
+              if git fetch --no-tags --quiet --depth=1 origin "$base" &&
+                git diff --quiet "$base" HEAD -- apps/landing assets/brand package.json \
+                  pnpm-workspace.yaml pnpm-lock.yaml .node-version .github/workflows/ci.yml; then
+                changed=false
+              fi
+              ;;
+          esac
+          printf 'changed=%s\n' "$changed" >> "$GITHUB_OUTPUT"
+          printf 'landing page inputs changed: %s\n' "$changed"
       - name: Validate pull request title
         if: github.event_name == 'pull_request'
         env:
@@ -203,9 +235,61 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  landing:
+    name: Landing page
+    needs: preflight
+    if: >-
+      needs.preflight.outputs.landing == 'true' &&
+      github.repository == 'vitalyiegorov/tart-runner-fleet' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    # oxlint and next build share the 4x8 shape the sibling landing repos use.
+    runs-on: [self-hosted, linux-go-4x8]
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      NEXT_TELEMETRY_DISABLED: '1'
+    defaults:
+      run:
+        working-directory: apps/landing
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      # pnpm's version comes from the root package.json packageManager field.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install workspace dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile
+      - name: Format check
+        run: pnpm fmt:check
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Dead code
+        run: pnpm deadcode
+      - name: Production build
+        run: pnpm build
+      - name: Install Chromium for the smoke suite
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Playwright and axe smoke against the production build
+        run: pnpm test:e2e
+      - name: Upload Playwright traces
+        if: failure() && hashFiles('apps/landing/test-results/**') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: landing-playwright-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/landing/test-results/
+          retention-days: 7
+
   verify:
     name: Required CI
-    needs: [quality, unit, race, build]
+    needs: [quality, unit, race, build, landing]
     # Run after upstream success or failure, but terminate with a superseded or
     # manually cancelled workflow. GitHub preserves always() jobs on cancel.
     # This gate never runs on the fleet and never checks out repository content,
@@ -239,19 +323,26 @@ jobs:
           UNIT_RESULT: ${{ needs.unit.result }}
           RACE_RESULT: ${{ needs.race.result }}
           BUILD_RESULT: ${{ needs.build.result }}
+          LANDING_RESULT: ${{ needs.landing.result }}
         run: |
           set -euo pipefail
           test "$QUALITY_RESULT" = success
           test "$UNIT_RESULT" = success
           test "$RACE_RESULT" = success
           test "$BUILD_RESULT" = success
+          # Skipped only when preflight found no landing page input changed.
+          case "$LANDING_RESULT" in success|skipped) ;; *) exit 1 ;; esac
 
   publish:
     name: Publish verified main release
-    # Only trusted main pushes may use a release write token. The default
-    # needs condition also requires Required CI to have succeeded.
+    # Only trusted main pushes may use a release write token, and only after
+    # Required CI succeeded. The explicit result check replaces the implicit
+    # success(), which a skipped landing job upstream would otherwise turn
+    # false for every Go-only push (actions/runner#491).
     needs: verify
     if: >-
+      !cancelled() &&
+      needs.verify.result == 'success' &&
       github.repository == 'vitalyiegorov/tart-runner-fleet' &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'
