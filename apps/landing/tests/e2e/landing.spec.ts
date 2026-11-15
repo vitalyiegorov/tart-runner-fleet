@@ -66,7 +66,7 @@ test('keeps the inline brand drawing identical to the shipped SVG', async ({ pag
 
 test('serves metadata routes', async ({ page, request }) => {
     await page.goto('/');
-    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute('href', 'https://unyoke.vercel.app');
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute('href', 'https://unyoke.dev');
     await expect(page.locator('meta[property="og:image"]')).toHaveAttribute('content', /\/opengraph-image/u);
 
     const routes = [
@@ -83,7 +83,7 @@ test('serves metadata routes', async ({ page, request }) => {
         expect(response.status(), path).toBe(200);
         expect(response.headers()['content-type'], path).toContain(type);
     });
-    expect(await (await request.get('/robots.txt')).text()).toContain('Sitemap: https://unyoke.vercel.app/sitemap.xml');
+    expect(await (await request.get('/robots.txt')).text()).toContain('Sitemap: https://unyoke.dev/sitemap.xml');
 });
 
 test('is keyboard navigable from the skip link', async ({ page }) => {

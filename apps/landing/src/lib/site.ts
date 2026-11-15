@@ -5,7 +5,7 @@ export const site = {
     tagline: 'CI/CD, on your own terms.',
     description:
         'Unyoke runs GitHub Actions on your own macOS and Linux machines, with ephemeral runners, LAN caches and a local artifact store, keeping CI/CD resources under your control with fail-closed scheduling.',
-    url: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'https://unyoke.vercel.app'),
+    url: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'https://unyoke.dev'),
     repository,
     docs: `${repository}#readme`,
     owner: 'https://github.com/vitalyiegorov'

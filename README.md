@@ -6,7 +6,7 @@
   <img src="assets/brand/logo-lockup-light.svg" alt="Unyoke" width="352" height="88">
 </picture>
 
-**CI/CD, on your own terms.**
+**CI/CD, on your own terms.** · [unyoke.dev](https://unyoke.dev)
 
 Unyoke brings GitHub Actions CI/CD onto hardware you own: a multi-node fleet
 of macOS hosts running ephemeral [Tart](https://tart.run/) VMs and Linux hosts
