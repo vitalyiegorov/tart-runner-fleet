@@ -341,6 +341,7 @@ type HostPressureMetric struct {
 
 // Snapshot is an immutable point-in-time copy suitable for rendering.
 type Snapshot struct {
+	UndeliveredJobs    []string
 	Revision           uint64
 	Now                time.Time
 	LastLoopTick       time.Time
@@ -382,6 +383,7 @@ type Snapshot struct {
 	// and ParkedScaleSetsAuditedAt is when it completed. A zero time means no
 	// audit has ever run on this node -- an observe-mode daemon never runs one --
 	// which is reported as "not audited" and never as a pass.
+	AuditedScaleSets         []ParkedScaleSetMetric
 	ParkedScaleSets          []ParkedScaleSetMetric
 	ParkedScaleSetsAuditedAt time.Time
 	// ScaleSetInstances is the per-set instance count the stranded-set detector
@@ -433,9 +435,11 @@ type Health struct {
 	mode                Mode
 	queues              map[string]QueueMetrics
 	scopeQueues         []ScopeQueueMetrics
+	undeliveredJobs     map[string][]string
 	parkedScaleSets     []ParkedScaleSetMetric
 	scaleSetInstances   []ScaleSetInstanceMetric
 	strandedScaleSets   []StrandedScaleSetMetric
+	auditedScaleSets    []ParkedScaleSetMetric
 	parkedAuditedAt     time.Time
 	instances           map[string]InstanceMetrics
 	observations        map[string]ObservationMetric
@@ -657,7 +661,13 @@ func cloneParkedScaleSets(rows []ParkedScaleSetMetric) []ParkedScaleSetMetric {
 // conflation is the whole of issue #164, where every signal read PASS while two
 // jobs sat assigned to a set no daemon polled for 4.5 hours.
 func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time.Time) error {
-	for _, row := range rows {
+	return h.SetScaleSetAudit(nil, rows, observedAt)
+}
+
+// SetScaleSetAudit publishes the complete audit alongside its parked subset.
+// Bound rows are needed to diagnose unassigned jobs across every matching set.
+func (h *Health) SetScaleSetAudit(all, rows []ParkedScaleSetMetric, observedAt time.Time) error {
+	for _, row := range append(append([]ParkedScaleSetMetric(nil), all...), rows...) {
 		if row.Scope == "" || row.ScaleSetID <= 0 || row.Assigned < 0 || row.Busy < 0 {
 			return errInvalidMetric
 		}
@@ -666,6 +676,7 @@ func (h *Health) SetParkedScaleSets(rows []ParkedScaleSetMetric, observedAt time
 		return errInvalidMetric
 	}
 	h.mu.Lock()
+	h.auditedScaleSets = cloneParkedScaleSets(all)
 	h.parkedScaleSets = cloneParkedScaleSets(rows)
 	h.parkedAuditedAt = observedAt.UTC()
 	h.revision++
@@ -1217,7 +1228,8 @@ func (h *Health) Snapshot() Snapshot {
 	defer h.mu.RUnlock()
 	return Snapshot{
 		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
-		Mode: h.mode, Queues: cloneMap(h.queues), ScopeQueues: cloneScopeQueues(h.scopeQueues),
+		Mode: h.mode, Queues: cloneMap(h.queues), UndeliveredJobs: h.undeliveredJobFindings(now),
+		ScopeQueues:  cloneScopeQueues(h.scopeQueues),
 		Instances:    cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
@@ -1243,6 +1255,7 @@ func (h *Health) Snapshot() Snapshot {
 		Envelope:                 h.envelope,
 		AdmissionFloors:          h.admissionFloors,
 		QueueSLO:                 h.queueSLO,
+		AuditedScaleSets:         cloneParkedScaleSets(h.auditedScaleSets),
 		ParkedScaleSets:          cloneParkedScaleSets(h.parkedScaleSets),
 		ParkedScaleSetsAuditedAt: h.parkedAuditedAt,
 		StrandedScaleSets:        append([]StrandedScaleSetMetric(nil), h.strandedScaleSets...),
@@ -1553,7 +1566,7 @@ func ingestResult(snapshot Snapshot) HealthResult {
 		reasons = append(reasons, row.Reason)
 	}
 	if snapshot.QueueSLO <= 0 {
-		return ingestVerdict(reasons)
+		return ingestCandidateVerdict(reasons, snapshot.UndeliveredJobs)
 	}
 	for _, row := range snapshot.ScopeQueues {
 		undelivered := row.Observed - row.Delivered
@@ -1571,7 +1584,14 @@ func ingestResult(snapshot Snapshot) HealthResult {
 		}
 		reasons = append(reasons, reason)
 	}
-	return ingestVerdict(reasons)
+	return ingestCandidateVerdict(reasons, snapshot.UndeliveredJobs)
+}
+
+func ingestCandidateVerdict(reasons, candidates []string) HealthResult {
+	result := ingestVerdict(reasons)
+	result.Reasons = append(result.Reasons, candidates...)
+	sort.Strings(result.Reasons)
+	return result
 }
 
 func ingestVerdict(reasons []string) HealthResult {

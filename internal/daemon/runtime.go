@@ -1667,7 +1667,7 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 	// the other: a node that could publish its parked rows and not its findings
 	// would read healthier than it is.
 	return errors.Join(a.health.SetStrandedScaleSets(strandedScaleSetMetrics(result)),
-		a.health.SetParkedScaleSets(parkedScaleSetMetrics(result), a.now().UTC()))
+		a.health.SetScaleSetAudit(scaleSetMetrics(result, false), scaleSetMetrics(result, true), a.now().UTC()))
 }
 
 // local is how the audit sees the node it runs on: the instances this node
@@ -1741,17 +1741,14 @@ func strandedScaleSetMetrics(result scalesetaudit.Result) []telemetry.StrandedSc
 	return rows
 }
 
-// parkedScaleSetMetrics keeps only the parked sets. A bound set is already
-// reported by every queue, observation and check this node publishes, and
-// carrying it here would turn a finding-shaped section into an inventory.
-func parkedScaleSetMetrics(result scalesetaudit.Result) []telemetry.ParkedScaleSetMetric {
+// scaleSetMetrics retains either the full audit or its parked subset.
+func scaleSetMetrics(result scalesetaudit.Result, parkedOnly bool) []telemetry.ParkedScaleSetMetric {
 	rows := make([]telemetry.ParkedScaleSetMetric, 0, len(result.ScaleSets))
 	for _, set := range result.ScaleSets {
-		if set.State != scalesetaudit.Parked {
+		if parkedOnly && set.State != scalesetaudit.Parked {
 			continue
 		}
-		rows = append(rows, telemetry.ParkedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name,
-			Labels: append([]string(nil), set.Labels...), Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
+		rows = append(rows, telemetry.ParkedScaleSetMetric{Scope: set.Scope, ScaleSetID: set.ID, Name: set.Name, Labels: append([]string(nil), set.Labels...), Assigned: set.Assigned, Busy: set.Busy, Registered: set.Registered, ObservedAt: set.ObservedAt})
 	}
 	return rows
 }
@@ -1820,6 +1817,7 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 	r.previous = observation.Snapshot
 	coordinator := r.coordinator
 	coordinator.ForeignSelectors = r.foreignSelectors(now)
+	coordinator.AuditedAssignments = r.auditedAssignments(now)
 	if lister, ok := r.observer.(runnerLister); ok {
 		coordinator.Runners = lister.Runners
 	}
@@ -1852,6 +1850,18 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 				}
 			}
 		}
+	}
+	// Diagnose from the complete REST view, before own-share attribution can
+	// hide work GitHub assigned nowhere. This adds only local reads.
+	if err == nil && r.health != nil && r.observation != "" {
+		findings, diagnosisErr := coordinator.UndeliveredJobs(ctx, r.bindings, observation.Snapshot, r.health.Snapshot().QueueSLO)
+		if diagnosisErr != nil {
+			findings = nil
+			if r.reporter != nil && r.reporter.admit("undelivered-diagnosis\x00"+r.observation) {
+				r.reporter.logger.Warn("unassigned job diagnosis unavailable", "observation", r.observation)
+			}
+		}
+		r.health.SetUndeliveredJobs(r.observation, findings)
 	}
 	// Classified before recording, so the observation detail and the loop
 	// failure reason are always the same closed reason (issue #458).
@@ -1903,8 +1913,7 @@ func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSe
 		return nil
 	}
 	snapshot := r.health.Snapshot()
-	maxAge := 2 * max(r.auditInterval, r.interval)
-	fresh := func(at time.Time) bool { return !at.IsZero() && !at.After(now) && now.Sub(at) <= maxAge }
+	fresh := r.auditFreshness(now)
 	if !fresh(snapshot.ParkedScaleSetsAuditedAt) {
 		return nil
 	}
@@ -1916,6 +1925,27 @@ func (r *restQueueIngester) foreignSelectors(now time.Time) []app.ForeignScaleSe
 		}
 	}
 	return selectors
+}
+
+func (r *restQueueIngester) auditFreshness(now time.Time) func(time.Time) bool {
+	maxAge := 2 * max(r.auditInterval, r.interval)
+	return func(at time.Time) bool { return !at.IsZero() && !at.After(now) && now.Sub(at) <= maxAge }
+}
+
+func (r *restQueueIngester) auditedAssignments(now time.Time) []app.ScaleSetAssignment {
+	if r.health == nil {
+		return nil
+	}
+	snapshot := r.health.Snapshot()
+	fresh := r.auditFreshness(now)
+	if !fresh(snapshot.ParkedScaleSetsAuditedAt) {
+		return nil
+	}
+	var rows []app.ScaleSetAssignment
+	for _, row := range snapshot.AuditedScaleSets {
+		rows = append(rows, app.ScaleSetAssignment{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name, Labels: row.Labels, Assigned: row.Assigned, Fresh: fresh(row.ObservedAt)})
+	}
+	return rows
 }
 
 // restBudgetDeferralMax bounds how long one refresh may wait for a rate window

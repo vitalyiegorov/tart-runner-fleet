@@ -183,13 +183,14 @@ type ForeignScaleSetSelector struct {
 }
 
 type DemandCoordinator struct {
-	Store            DemandStore
-	Projector        DemandProjector
-	Now              func() time.Time
-	StatisticsMaxAge time.Duration
-	GhostAbsence     time.Duration
-	StrictJobRouting bool
-	ForeignSelectors []ForeignScaleSetSelector
+	Store              DemandStore
+	Projector          DemandProjector
+	Now                func() time.Time
+	StatisticsMaxAge   time.Duration
+	GhostAbsence       time.Duration
+	StrictJobRouting   bool
+	ForeignSelectors   []ForeignScaleSetSelector
+	AuditedAssignments []ScaleSetAssignment
 	// Runners lists a repository's self-hosted runners as GitHub reports them
 	// (issue #498). It is consulted only for a self-hosted job no local set and
 	// no other proof routes, at most once per repository per reconcile. Nil, or

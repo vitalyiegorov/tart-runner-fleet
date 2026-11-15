@@ -2733,3 +2733,29 @@ streams outside the mutex. Completion, error and panic release the slot.
 Active GET payload buffers total at most 256 MiB (excluding allocator/SQLite
 overhead). A busy owner does not reject queued downloads with 503, preserving
 parallel E2E handoffs whose download client may not retry a busy response.
+
+### Old REST jobs assigned to no matching scale set (#520)
+
+`fleet doctor` adds an **unassigned job candidate** to **ingest delivery** detail
+while keeping the row passing. The REST job must exceed the queue SLO (normally
+ten minutes), all matching local and sibling sets in the scope must have fresh
+completed-audit readings with `assigned=0`, and no local demand may name the job.
+The audit uses the same freshness budget as foreign selectors (twice the larger
+of audit and REST poll intervals); idle broker message counters are not used.
+Missing or stale audit evidence cannot establish a candidate.
+
+Rule out both benign causes first: a **concurrency group hold** and a **sibling
+backlog**. GitHub REST cannot identify `concurrency: queue: max` holds; healthy
+simulator/emulator farm jobs may remain queued and unassigned for a long time.
+Any matching audited sibling with assigned work suppresses the candidate, but
+its counters and REST are not an atomic fleet-wide verdict.
+
+Only after confirming the run is not held by a concurrency group and checking
+sibling backlog, consider `gh run cancel <run> -R <owner/repo>`, wait for
+cancellation, then `gh run rerun <run> --failed -R <owner/repo>`. The fleet never
+performs these actions automatically. Diagnostic read errors clear candidates
+for that pass and log a separate warning; they do not fail committed ingestion.
+
+Session retention alone is not proven to prevent this: a gated idle set advertises
+zero capacity even with a session. [ADR 0098](adr/0098-unassigned-rest-jobs-are-an-ingest-finding.md)
+records why prevention remains deferred and what evidence is still needed.
