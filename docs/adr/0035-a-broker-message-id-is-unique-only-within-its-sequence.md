@@ -147,7 +147,8 @@ only remaining use is a case the fleet now handles for itself. The evidence an
 operator needs instead is the log line naming the binding and the adopted
 generation, which is what this ADR adds.
 
-**Leave session recreation unchanged on a durable conflict.** Kept. Recreating a
+**Leave session recreation unchanged on a durable conflict.** Initially kept;
+superseded by the #502 amendment below. Recreating a
 session cannot resolve a conflict the store raised, and the churn was part of
 the incident's noise, but after this change a conflict means a genuine durable
 contradiction rather than a sequence restart, and narrowing the recovery path is
@@ -171,3 +172,58 @@ a separate decision with its own evidence.
 - The four pre-existing simulation arms produce byte-identical corpus digests,
   so nothing about the fleet's scheduling behaviour moved; the new
   `sequence-reset-linux-large` arm is red before this change and green after.
+
+## Diagnostic amendment — issue #502 (2026-11-15)
+
+A durable conflict retains its existing `ErrConflict` identity, readiness effect,
+and `demand_commit_conflict` classification. Each rejecting check now carries a typed diagnostic; the session warning renders only
+its bounded check code, delivered message type, runner request/job identifiers,
+runner/instance names (both colliding instances for duplicate reservations), and
+attempted from/to states only for lifecycle transitions. Check codes are typed
+constants declared once in operations; logging does not duplicate the vocabulary.
+Independent joined projection failures retain every target. No error text or payload is logged.
+
+The check codes are `demand_job_identity`, `reservation_duplicate`,
+`binding_shape_mismatch`, `binding_metadata_invalid`, `binding_source_cas`,
+`binding_target_cas`, `binding_rebind_cas`, `instance_state_transition`,
+`transition_instance_cas`, and `transition_idempotent_state`.
+
+The runtime retains the current session when the commit callback returns a
+local `ErrConflict`, only below the existing `MaxConsecutiveFailures` count and
+`FailureWindow` deadline. Either bound forces the existing replacement path; a
+successful ingest resets the accounting. The reason remains
+`demand_commit_conflict` at the bound. A projection can refuse after the inbox
+transaction has already committed: replacing a healthy session then adds an unrelated create
+failure, as in the Mini 11-11 incident. Local refusals advance the existing
+failure budget so deterministic contradictions cannot pin the session cursor
+behind the durable inbox cursor and starve subsequent messages. Remote/HTTP,
+transport and session failures retain the existing replacement policy; classification alone is insufficient to establish locality.
+
+Acknowledgement ordering is unchanged: any callback error nacks, including a
+post-inbox projection conflict. No failed or uncommitted batch is acknowledged.
+The same session can redeliver; inbox deduplication is idempotent and projection
+is retried. Only a successful callback permits acknowledgement. Persistent
+conflicts remain unacknowledged and loud; a replacement opens at the durable
+cursor and permits subsequent messages to ingest. Completion recovery still
+re-derives from durable rows (#442). There is no catch-and-ack or assumed successful write.
+
+Readiness still degrades even for a single local conflict and recovers on a
+successful ingest. A committed inbox does not prove the lifecycle projection
+succeeded, so hiding this failure would violate #165 and the fail-closed health
+contract. Session retention avoids a recovery cascade without declaring the
+binding healthy. The exact production rejecting check remains unproven; the
+new diagnostic provides evidence for the next occurrence. There is no schema,
+fleet.v1 API, authority, or promotion change. The existing predicates remain the single source of truth;
+a diagnostic value and existing error-tree traversal suffice, without another
+state, pass over demand, or configuration knob. Store regression tests exercise
+each refusal deterministically and warning tests exclude payload fields. The
+simulation generates contradictory reservations and verifies durable cursor,
+nack and diagnostic behavior. Runtime tests prove transient same-session retry,
+reset on success, count/window bounds with subsequent-message ingestion, and
+remote replacement independently.
+
+Review questions: this reuses the existing failure accumulator and replacement
+path, adding no knob or state. The typed codes remove a duplicate allowlist. The
+deterministic simulation exercises the contradictory reservations (a fleet
+defect, not an oracle or world-model defect); runtime tests exercise bounded
+recovery with distinct durable and session cursors.

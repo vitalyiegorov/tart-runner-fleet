@@ -82,12 +82,12 @@ func TestSessionRecoveryPolicyBoundsAmbiguousFailures(t *testing.T) {
 			reason: ReasonMessagePollFailed, expected: 2},
 		// A session is not what refused the message, so escalation must not
 		// rename a durable conflict after itself (issue #165). It keeps the
-		// session and reports what actually happened, past the bound.
+		// diagnostic reason even when the retry bound forces replacement.
 		{name: "durable commit conflict is named past the escalation bound", policy: policy,
 			state:  SessionFailureState{Consecutive: 9, Since: start},
 			err:    fmt.Errorf("commit demand message 100000004: %w", operations.ErrConflict),
 			now:    start.Add(time.Hour),
-			reason: ReasonDemandCommitConflict, expected: 10},
+			reason: ReasonDemandCommitConflict, discard: true, expected: 10},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -155,7 +155,7 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		return err
 	} else if record.JobID != "" && event.JobID != "" && record.JobID != event.JobID {
 		// A deterministic synthetic-ID collision must never merge two jobs.
-		return operations.ErrConflict
+		return &operations.DemandConflict{Check: operations.ConflictDemandJobIdentity, MessageType: event.Kind, RequestID: event.RunnerRequestID, JobID: event.JobID, Runner: event.RunnerName, Instance: event.RunnerName}
 	}
 	mergeDemandEvent(&record, event, now)
 	record.LogicalKey = demandLogicalKey(record.Owner, record.Repository, record.WorkflowRunID, record.DisplayName, record.WorkflowRef, record.Labels, record.JobID)
@@ -337,7 +337,13 @@ func (s *Store) RunnerActiveJob(ctx context.Context, scaleSetID int64, runnerNam
 
 // ProjectDemandEvent advances the owned VM from the highest durable demand
 // rank, not merely from the delivered event. This makes redelivery monotonic.
-func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event operations.DemandEvent) error {
+func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event operations.DemandEvent) (err error) {
+	defer func() {
+		var detail *operations.DemandConflict
+		if errors.As(err, &detail) {
+			detail.MessageType, detail.RequestID, detail.JobID, detail.Runner = event.Kind, event.RunnerRequestID, event.JobID, event.RunnerName
+		}
+	}()
 	if scaleSetID <= 0 || !event.Valid() {
 		return operations.ErrInvalid
 	}
@@ -371,7 +377,7 @@ func (s *Store) ProjectDemandEvent(ctx context.Context, scaleSetID int64, event 
 		for _, candidate := range instances {
 			if candidate.Repo == repo && candidate.Demand.JobID == record.RunnerRequestID {
 				if instance.ID != "" {
-					return operations.ErrConflict
+					return &operations.DemandConflict{Check: operations.ConflictReservationDuplicate, Instance: instance.ID, Other: candidate.ID}
 				}
 				instance = candidate
 			}
@@ -415,7 +421,7 @@ func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instanc
 	for _, candidate := range instances {
 		if candidate.Repo == repo && candidate.Demand.JobID == requestID {
 			if source.ID != "" {
-				return operations.Instance{}, operations.ErrConflict
+				return operations.Instance{}, &operations.DemandConflict{Check: operations.ConflictReservationDuplicate, Instance: source.ID, Other: candidate.ID}
 			}
 			source = candidate
 		}
@@ -427,14 +433,14 @@ func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instanc
 		return s.rebindRunnerDemand(ctx, target, record)
 	}
 	if source.Platform != target.Platform || source.Profile != target.Profile || source.Route != target.Route || source.Resources != target.Resources {
-		return operations.Instance{}, operations.ErrConflict
+		return operations.Instance{}, &operations.DemandConflict{Check: operations.ConflictBindingShapeMismatch, Instance: target.ID}
 	}
 
 	sourceNext, targetNext := source, target
 	sourceNext.Repo, targetNext.Repo = target.Repo, source.Repo
 	sourceNext.Demand, targetNext.Demand = target.Demand, source.Demand
 	if !sourceNext.SchedulingMetadataValid() || !targetNext.SchedulingMetadataValid() {
-		return operations.Instance{}, operations.ErrConflict
+		return operations.Instance{}, &operations.DemandConflict{Check: operations.ConflictBindingMetadataInvalid, Instance: target.ID}
 	}
 	sourceBefore, _ := encodeSchedulingMetadata(source)
 	targetBefore, _ := encodeSchedulingMetadata(target)
@@ -455,7 +461,11 @@ func (s *Store) alignRunnerDemand(ctx context.Context, target operations.Instanc
 		}
 		changed, _ := result.RowsAffected()
 		if changed != 1 {
-			return operations.ErrConflict
+			check := operations.ConflictBindingSourceCAS
+			if point == "runner-demand.target" {
+				check = operations.ConflictBindingTargetCAS
+			}
+			return &operations.DemandConflict{Check: check, Instance: current.ID}
 		}
 		return nil
 	}
@@ -550,7 +560,7 @@ func (s *Store) rebindRunnerDemand(ctx context.Context, target operations.Instan
 	}
 	changed, _ := result.RowsAffected()
 	if changed != 1 {
-		return operations.Instance{}, operations.ErrConflict
+		return operations.Instance{}, &operations.DemandConflict{Check: operations.ConflictBindingRebindCAS, Instance: target.ID}
 	}
 	next.UpdatedAt = now
 	return next, nil

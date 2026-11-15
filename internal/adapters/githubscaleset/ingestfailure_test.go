@@ -121,7 +121,7 @@ func TestTheDescriptionAgreesWithTheReasonAccessor(t *testing.T) {
 			t.Fatalf("description reason %q disagrees with detail %q", got, want)
 		}
 	}
-	if described := githubscaleset.DescribeIngestFailure(nil); described != (githubscaleset.IngestFailure{}) {
+	if described := githubscaleset.DescribeIngestFailure(nil); described.Reason != "" || len(described.Conflicts) != 0 {
 		t.Fatalf("no error is no failure: %#v", described)
 	}
 }

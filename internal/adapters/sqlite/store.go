@@ -1047,7 +1047,7 @@ func (s *Store) Advance(ctx context.Context, change lifecycle.StateChange) (oper
 	}
 	changed, err := result.RowsAffected()
 	if err != nil || changed != 1 {
-		return operations.Instance{}, operations.ErrConflict
+		return operations.Instance{}, &operations.DemandConflict{Check: operations.ConflictInstanceStateTransition, Instance: change.InstanceID, From: change.ExpectedState, To: change.NextState}
 	}
 	if _, err := s.txExec(ctx, tx, "advance.history", `INSERT INTO transition_history(instance_id,from_state,to_state,version,operation_id,created_at) VALUES(?,?,?,?,NULL,?)`,
 		change.InstanceID, change.ExpectedState, change.NextState, change.ExpectedVersion+1, now.UnixNano()); err != nil {
@@ -1202,7 +1202,7 @@ func (s *Store) Transition(ctx context.Context, transition operations.Transition
 			return operations.Instance{}, operations.Operation{}, err
 		}
 		if instance.State != transition.NextState || instance.Version < transition.ExpectedVersion+1 {
-			return operations.Instance{}, operations.Operation{}, operations.ErrConflict
+			return operations.Instance{}, operations.Operation{}, &operations.DemandConflict{Check: operations.ConflictTransitionIdempotentState, Instance: transition.InstanceID, From: transition.ExpectedState, To: transition.NextState}
 		}
 		return instance, existing, nil
 	}
@@ -1218,7 +1218,7 @@ func (s *Store) Transition(ctx context.Context, transition operations.Transition
 	}
 	changed, err := result.RowsAffected()
 	if err != nil || changed != 1 {
-		return operations.Instance{}, operations.Operation{}, operations.ErrConflict
+		return operations.Instance{}, operations.Operation{}, &operations.DemandConflict{Check: operations.ConflictTransitionInstanceCAS, Instance: transition.InstanceID, From: transition.ExpectedState, To: transition.NextState}
 	}
 	operation := transition.Operation
 	operation.Status = operations.OperationPending
