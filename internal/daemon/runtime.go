@@ -1853,6 +1853,15 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 			}
 		}
 	}
+	// Diagnose from the complete REST view, before own-share attribution can
+	// hide work GitHub assigned nowhere. This adds only local reads.
+	if err == nil && r.health != nil && r.observation != "" {
+		var findings []string
+		findings, err = coordinator.UndeliveredJobs(ctx, r.bindings, observation.Snapshot, r.health.Snapshot().QueueSLO)
+		if err == nil {
+			r.health.SetUndeliveredJobs(r.observation, findings)
+		}
+	}
 	// Classified before recording, so the observation detail and the loop
 	// failure reason are always the same closed reason (issue #458).
 	err = classifyReconcileFailure(err)

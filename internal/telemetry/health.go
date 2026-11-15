@@ -341,6 +341,7 @@ type HostPressureMetric struct {
 
 // Snapshot is an immutable point-in-time copy suitable for rendering.
 type Snapshot struct {
+	UndeliveredJobs    []string
 	Revision           uint64
 	Now                time.Time
 	LastLoopTick       time.Time
@@ -433,6 +434,7 @@ type Health struct {
 	mode                Mode
 	queues              map[string]QueueMetrics
 	scopeQueues         []ScopeQueueMetrics
+	undeliveredJobs     map[string][]string
 	parkedScaleSets     []ParkedScaleSetMetric
 	scaleSetInstances   []ScaleSetInstanceMetric
 	strandedScaleSets   []StrandedScaleSetMetric
@@ -1217,7 +1219,8 @@ func (h *Health) Snapshot() Snapshot {
 	defer h.mu.RUnlock()
 	return Snapshot{
 		Revision: h.revision, Now: now, LastLoopTick: h.lastLoopTick, LastSuccessfulTick: h.lastSuccessfulTick,
-		Mode: h.mode, Queues: cloneMap(h.queues), ScopeQueues: cloneScopeQueues(h.scopeQueues),
+		Mode: h.mode, Queues: cloneMap(h.queues), UndeliveredJobs: h.undeliveredJobFindings(now),
+		ScopeQueues:  cloneScopeQueues(h.scopeQueues),
 		Instances:    cloneMap(h.instances),
 		Observations: cloneMap(h.observations), OperationRetries: h.operationRetries,
 		DeadOperations: h.deadOperations, OperationFailures: append([]OperationFailure(nil), h.operationFailures...),
@@ -1544,7 +1547,7 @@ func (h *Health) Ingest() HealthResult { return ingestResult(h.Snapshot()) }
 // ingestResult is the check as a pure function of one snapshot, so the status
 // document and the health accessor can never disagree.
 func ingestResult(snapshot Snapshot) HealthResult {
-	var reasons []string
+	reasons := append([]string(nil), snapshot.UndeliveredJobs...)
 	// A set this node binds that GitHub has stopped delivering for is the same
 	// fault as an undelivered queue and is reported on the same row, even when
 	// the queue SLO is disabled: the node's own queue for such a set is EMPTY --

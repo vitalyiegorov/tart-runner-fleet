@@ -82,3 +82,25 @@ func TestIssue428EveryMatchingNodeGatedLeavesTheJobUnassigned(t *testing.T) {
 			world.unassigned, len(world.jobs))
 	}
 }
+
+// #520 extends the all-gated case through recovery. This broker model never
+// retries an arrival assigned nowhere. It characterizes the reported failure,
+// not a claim that GitHub promises this behavior.
+func TestIssue520AllGatedArrivalRemainsUnassignedAfterRecovery(t *testing.T) {
+	cfg := gatedWorld()
+	cfg.SiblingsFull = true
+	trace := simTrace{Seed: 520, Ticks: 60, Config: cfg.Name, Events: []simEvent{
+		{Tick: 1, Kind: eventHostTenant, Count: gatedTenant},
+		{Tick: 4, Kind: eventArrive, Repo: "a/repo", Profile: "large", Event: "push"},
+		{Tick: 20, Kind: eventHostTenant, Count: 0},
+		{Tick: 40, Kind: eventArrive, Repo: "a/repo", Profile: "large", Event: "pull_request"},
+	}}
+	world := newWorld(t, cfg, trace)
+	defer world.close()
+	if findings := world.run(); len(findings) > 0 {
+		t.Fatalf("property violation: %s", findings[0])
+	}
+	if world.unassigned != 1 || len(world.jobs) != 1 || world.jobs[0].startedAt.IsZero() {
+		t.Fatalf("old arrival must remain unassigned while new work starts: unassigned=%d jobs=%+v", world.unassigned, world.jobs)
+	}
+}
