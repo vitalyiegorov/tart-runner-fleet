@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,11 +22,14 @@ const artifactIssuer = "https://token.actions.githubusercontent.com"
 var errArtifactAuth = errors.New("artifact authorization refused")
 
 // artifactPrincipal is derived only from a verified runtime token, never RPC IDs.
-type artifactPrincipal struct{ repo, run, job string }
+// githubRun is the signed run_id claim: one GitHub run across its attempts,
+// while run is the attempt's backend run. Empty when the claim is absent.
+type artifactPrincipal struct{ repo, run, job, githubRun string }
 type artifactClaims struct {
 	jwt.RegisteredClaims
 	Repository string `json:"repository_id"`
 	Scope      string `json:"scp"`
+	RunID      string `json:"run_id"`
 }
 
 // The parser's global clock is deliberately not used; the verifier owns time.
@@ -58,6 +62,9 @@ func (v *artifactVerifier) verify(ctx context.Context, auth string) (artifactPri
 		return artifactPrincipal{}, errArtifactAuth
 	}
 	p := artifactPrincipal{repo: claims.Repository}
+	if id, e := strconv.ParseInt(claims.RunID, 10, 64); e == nil && id > 0 && id <= 1<<53-1 && strconv.FormatInt(id, 10) == claims.RunID {
+		p.githubRun = claims.RunID
+	}
 	count := 0
 	for _, scope := range strings.Fields(claims.Scope) {
 		if !strings.HasPrefix(scope, "Actions.Results:") {
