@@ -113,8 +113,8 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			if _, err = r.IngestChanged(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if !health.Ingest().OK {
-				t.Fatalf("resolved finding persisted: %v", health.Ingest())
+			if got := health.Ingest(); !got.OK || len(got.Reasons) != 0 {
+				t.Fatalf("resolved finding persisted: %v", got)
 			}
 		})
 	}
