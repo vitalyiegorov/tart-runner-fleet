@@ -2,11 +2,12 @@ package config
 
 import (
 	"errors"
-	"path"
+	"regexp"
+	"strings"
 	"time"
 )
 
-// OrphanRequeue grants no authority by default. Patterns use path.Match syntax.
+// OrphanRequeue grants no authority by default. Patterns are case-insensitive * and ? globs; / is ordinary.
 type OrphanRequeue struct {
 	Mode             string            `json:"mode,omitempty"`
 	ThresholdMinutes int               `json:"thresholdMinutes,omitempty"`
@@ -29,7 +30,7 @@ func (c OrphanRequeue) Validate() error {
 	}
 	for _, x := range c.Exclusions {
 		for _, pattern := range []string{x.Repository, x.Workflow, x.Job} {
-			if _, err := path.Match(pattern, ""); err != nil {
+			if strings.ContainsAny(pattern, `[]\`) {
 				return errors.New("invalid orphanRequeue exclusion pattern")
 			}
 		}
@@ -76,11 +77,17 @@ func orphanPattern(pattern, value string) bool {
 	if pattern == "" {
 		return true
 	}
-	ok, _ := path.Match(pattern, value)
+	pattern = strings.ToLower(pattern)
+	value = strings.ToLower(value)
+	expression := strings.ReplaceAll(strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, ".*"), `\?`, ".")
+	ok, _ := regexp.MatchString("(?s)^"+expression+"$", value)
 	return ok
 }
 
 func (g GitHub) validateOrphanRequeue() error {
+	if (g.OrphanRequeue.ThresholdMinutes > 0 || g.OrphanRequeue.Mode == "act" || g.OrphanRequeue.Mode == "observe") && g.OrphanRequeue.Threshold(0) < g.ParkedScaleSetAuditInterval() {
+		return errors.New("orphanRequeue threshold must cover the scale-set audit interval")
+	}
 	if err := g.OrphanRequeue.Validate(); err != nil {
 		return err
 	}

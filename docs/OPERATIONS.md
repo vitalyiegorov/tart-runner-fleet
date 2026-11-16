@@ -2772,25 +2772,31 @@ The default is off. On the authority node, configure `github.orphanRequeue`:
   "cooldownMinutes": 30,
   "runsPerHour": 3,
   "exclusions": [
-    {"repository": "budgie-at/budgie", "workflow": "ios-simulator-farm"},
-    {"repository": "budgie-at/budgie", "workflow": "android-emulator-farm"}
+    {"repository": "budgie-at/budgie", "workflow": "Pull Request"},
+    {"repository": "budgie-at/budgie", "workflow": "Media smoke"},
+    {"repository": "budgie-at/budgie", "workflow": "Store screenshots"}
   ]
 }
 ```
 
-Exclusions use Go path.Match patterns; omitted fields match everything, supplied
-fields must all match, and a job pattern matching any job excludes the whole run.
-Workflow matches the workflow run's display name, not its YAML filename. Verify
-those names in REST for the consumer. Exclusions default empty. Budgie's farm
+Exclusions use case-insensitive whole-string globs: * matches any sequence,
+? matches one character, and / is an ordinary character. Character classes and
+escapes are rejected. Omitted fields match everything; supplied fields must all match, and a job pattern matching any job excludes the whole run.
+Workflow matches the workflow run's display name, not its YAML filename. Match the display name returned by the workflow/run API, never the
+concurrency group (which is not a workflow name). These Budgie names were
+verified with gh api repos/budgie-at/budgie/actions/workflows. Exclusions default empty. Budgie's farm
 workflows can legitimately wait in `concurrency: queue: max`; REST cannot identify
 that hold. Add exclusions before considering act mode.
 
 Use `fleet doctor --output json` to inspect the ingest detail: mode, intended
 actions, recent outcomes and permission remedy. Recovery requires canonical REST
-inventory, configured scopes and the existing fresh scale-set audit. The lowest
-matching scale-set owner acts; siblings report only. Threshold is never smaller
-than the queue SLO. Reservations, failures and held attempts consume cooldown and
-the rolling node-wide hourly limit, including across restart.
+inventory, configured scopes and the existing fresh scale-set audit. The node at rank k among matching scale-set IDs becomes eligible at threshold +
+k × cooldown, so an offline/off lowest owner cannot veto recovery forever.
+Threshold is never smaller than the queue SLO and must cover the audit interval.
+Recovery requires assigned=0 audits within twice the REST interval or after the
+job crossed the threshold. Every queued/waiting job must also exceed the threshold.
+Observe and act share durable claims and per-run cooldown. Held and excluded outcomes do not consume the rolling budget. Observe assessments also consume this budget. A run can
+have at most two successful reruns; doctor then reports gave_up.
 
 In GitHub **Settings → Developer settings → GitHub Apps → the fleet App →
 Permissions & events → Repository permissions**, change **Actions** from Read-only
@@ -2807,7 +2813,7 @@ After reviewing observe evidence, exclusions, rollback and the documented
 read/cancel race, the owner may explicitly switch `mode` to `act`. This code
 change does not switch any node. Shadow/canary/daemon-observe never act. Rollback
 is `mode: off`; this stops future attempts and does not undo an already cancelled
-run. A missing grant or REST 403 produces a doctor remedy and pauses that scope
+run. A missing grant or permission-only REST 403 produces a doctor remedy and pauses that scope
 for an hour, durably; after granting, allow that pause and token refresh to expire.
 
 Cancellation affects an entire run. A fresh running job vetoes it, but a job can
@@ -2816,3 +2822,20 @@ conditional cancellation. Cancellation completion polling is bounded to one
 minute; an interrupted/failed attempt is recorded, not retried every poll. Inspect
 recent history and the run before manual intervention. No production cutover is
 proven by local tests.
+
+Recovery continuation (#520): after GitHub accepts cancellation, polling and
+rerun use a cancellation-independent context bounded to one minute. Every
+unresolved cancellation, including an uncertain cancel response, records
+cancelled_not_rerun; unfinished reserved and
+cancelled_not_rerun records resume independently of queued inventory after
+cooldown, including after restart. The original run attempt is durable (SQLite
+migration 16). A newer attempt or a still-active run on resume is a no-op; only the original completed/cancelled
+attempt can be rerun. Doctor includes gh run rerun <id> --failed -R <repo> for
+unresolved cancellation and stale reservations. Retry-After responses defer the
+REST refresh instead of being classified as missing permission. All run and
+job pages are reread immediately before cancel; any observed transition vetoes
+it. For P job pages, the oldest final job observation precedes up to P−1
+remaining page GETs and one cancel POST. Each request has a default client
+deadline of 15 seconds: 15×P seconds of request deadlines plus local scheduling
+and processing, without a server-side atomicity or acceptance-time guarantee.
+An unobserved job start in this window can still be interrupted.

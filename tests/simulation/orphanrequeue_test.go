@@ -8,6 +8,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
 
 type orphanBrokerRecovery struct {
@@ -78,5 +79,35 @@ func TestIssue520AutomaticRequeueReoffersAllGatedArrival(t *testing.T) {
 	}
 	if w.jobs[0].startedAt.IsZero() {
 		t.Fatal("rerun offer never started")
+	}
+}
+
+// A cancelled run disappears from REST queued inventory. Recovery must still
+// generate a fresh offer from its durable reservation after a process restart.
+func TestOrphanCancelledReservationReoffersWithoutInventory(t *testing.T) {
+	cfg := gatedWorld()
+	w := newWorld(t, cfg, simTrace{Seed: 5202, Ticks: 1, Config: cfg.Name})
+	defer w.close()
+	var binding app.Binding
+	for _, b := range cfg.Bindings {
+		if b.Profile.ID == "large" {
+			binding = b
+		}
+	}
+	r := operations.OrphanRequeue{Scope: binding.Scope, Repository: "a/repo", RunID: 521, RunAttempt: 1, At: w.now.Add(-time.Hour), Outcome: "cancelled_not_rerun"}
+	ok, err := w.store.ClaimOrphanRequeue(w.ctx, r, 30*time.Minute, 3)
+	if err != nil || !ok {
+		t.Fatalf("claim=%v %v", ok, err)
+	}
+	if err := w.store.FinishOrphanRequeue(w.ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	broker := &orphanBrokerRecovery{world: w}
+	recovery := app.OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: w.store, API: broker}
+	if _, err := recovery.Reconcile(w.ctx, app.DemandCoordinator{Now: func() time.Time { return w.now }}, []app.Binding{binding}, nil, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if broker.calls != 1 || len(w.jobs) != 1 {
+		t.Fatalf("calls=%d jobs=%d", broker.calls, len(w.jobs))
 	}
 }

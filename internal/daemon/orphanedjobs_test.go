@@ -25,7 +25,7 @@ import (
 )
 
 func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
-	for _, scenario := range []string{"old broker fresh audit", "sibling backlog", "diagnostic error", "wording", "recover observe", "recover act"} {
+	for _, scenario := range []string{"old broker fresh audit", "sibling backlog", "diagnostic error", "wording", "recover observe", "recover act", "recover rate limit", "recover stale audit"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
@@ -47,7 +47,11 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			observer, err := githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test", Repositories: []githubscaleset.Repository{{Owner: "owner", Name: "repo"}}, Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "test", nil }), HTTP: runtimeDoerFunc(func(req *http.Request) (*http.Response, error) {
 				if req.URL.Path == "/repos/owner/repo/actions/runs/420/jobs" {
 					if queued {
-						return runtimeResponse(`{"jobs":[{"id":42,"name":"Plan","status":"queued","labels":["self-hosted","macos-builder"],"created_at":"2026-01-01T00:00:00Z"}]}`), nil
+						created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+						if scenario == "recover stale audit" {
+							created = now.Add(-20 * time.Minute)
+						}
+						return runtimeResponse(fmt.Sprintf(`{"jobs":[{"id":42,"name":"Plan","status":"queued","labels":["self-hosted","macos-builder"],"created_at":%q}]}`, created.Format(time.RFC3339))), nil
 					}
 					return runtimeResponse(`{"jobs":[]}`), nil
 				}
@@ -67,14 +71,28 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			if scenario == "sibling backlog" {
 				client.listed[1].Statistics.AssignedJobs = 1
 			}
-			auditor := parkedScaleSetAuditor{config: auditConfig(), key: githubscaleset.NewPrivateKeySecret("pem"), open: func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil }, interval: 15 * time.Minute, health: health, now: func() time.Time { return now }}
+			auditor := parkedScaleSetAuditor{config: auditConfig(), key: githubscaleset.NewPrivateKeySecret("pem"), open: func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil }, interval: 15 * time.Minute, health: health, now: func() time.Time {
+				if scenario == "recover stale audit" {
+					return now.Add(-30 * time.Minute)
+				}
+				return now
+			}}
 			if err := auditor.Ingest(ctx); err != nil {
 				t.Fatal(err)
 			}
 			binding := app.Binding{Scope: "suuudokuuu", ScaleSetID: 1, SharedLabels: true, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
 			r := restQueueIngester{coordinator: app.DemandCoordinator{Store: store, Now: func() time.Time { return now }}, bindings: []app.Binding{binding}, observer: observer, interval: time.Second, auditInterval: 15 * time.Minute, health: health, observation: "github-rest-scope", now: func() time.Time { return now }}
 			if strings.HasPrefix(scenario, "recover ") {
-				r.recovery = &app.OrphanRecovery{Config: config.OrphanRequeue{Mode: strings.TrimPrefix(scenario, "recover ")}, Store: store, API: deniedOrphanRecovery{}}
+				mode := strings.TrimPrefix(scenario, "recover ")
+				api := deniedOrphanRecovery{}
+				if scenario == "recover rate limit" {
+					mode = "act"
+					api.err = &githubscaleset.APIError{Kind: githubscaleset.Authorization, Status: 403, RetryAfter: 90 * time.Second}
+				}
+				if scenario == "recover stale audit" {
+					mode = "act"
+				}
+				r.recovery = &app.OrphanRecovery{Config: config.OrphanRequeue{Mode: mode}, Store: store, API: api}
 			}
 			var reported bytes.Buffer
 			r.reporter = newFailureReporter(&reported, func() time.Time { return now })
@@ -92,6 +110,12 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			}
 			if !health.Ingest().OK {
 				t.Fatal("candidate must leave ingest passing")
+			}
+			if scenario == "recover rate limit" && r.next.Sub(now) != 90*time.Second {
+				t.Fatalf("recovery ignored Retry-After: %s", r.next.Sub(now))
+			}
+			if scenario == "recover stale audit" && strings.Contains(strings.Join(findings, " "), "grant Actions: write") {
+				t.Fatal("old pre-job audit authorized recovery")
 			}
 			if scenario == "recover act" && !strings.Contains(strings.Join(findings, " "), "grant Actions: write") {
 				t.Fatal(findings)
@@ -148,9 +172,12 @@ func (s *diagnosticReadErrorStore) ActiveDemands(ctx context.Context, id int64) 
 	return s.Store.ActiveDemands(ctx, id)
 }
 
-type deniedOrphanRecovery struct{}
+type deniedOrphanRecovery struct{ err error }
 
-func (deniedOrphanRecovery) RequeueOrphan(context.Context, githubscaleset.WorkflowJob, func(string, []string) bool, bool) (string, error) {
+func (a deniedOrphanRecovery) RequeueOrphan(context.Context, githubscaleset.WorkflowJob, func(string, []string) bool, bool) (string, error) {
+	if a.err != nil {
+		return "", a.err
+	}
 	return "permission_denied", nil
 }
 

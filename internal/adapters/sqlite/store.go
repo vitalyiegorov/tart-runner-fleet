@@ -859,6 +859,20 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 15: %w", err)
 		}
 	}
+	if version < 16 {
+		var present int
+		if err := s.txRow(ctx, tx, "migrate.v16.inspect", `SELECT COUNT(*) FROM pragma_table_info('orphan_requeues') WHERE name='run_attempt'`).Scan(&present); err != nil {
+			return err
+		}
+		if present == 0 {
+			if _, err := s.txExec(ctx, tx, "migrate.v16.column", `ALTER TABLE orphan_requeues ADD COLUMN run_attempt INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migration 16: %w", err)
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v16.record", `INSERT INTO schema_migrations(version,applied_at) VALUES(16,?)`, s.instant().UnixNano()); err != nil {
+			return fmt.Errorf("record migration 16: %w", err)
+		}
+	}
 	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
 	// creates and first seeds the table, so it always exists by this point; an
 	// operator deleting the row (incident 2026-07-22, which wedged every tick on

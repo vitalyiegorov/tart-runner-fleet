@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
@@ -19,11 +20,11 @@ import (
 func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded func(string, []string) bool, act bool) (outcome string, err error) {
 	defer func() {
 		var api *APIError
-		if errors.As(err, &api) && api.Kind == Authorization {
+		if errors.As(err, &api) && api.Kind == Authorization && api.RetryAfter == 0 && outcome != "cancelled_not_rerun" {
 			outcome, err = "permission_denied", nil
 		}
 	}()
-	if job.ID <= 0 || job.RunID <= 0 || job.RunAttempt <= 0 {
+	if (!job.ResumeOrphan && job.ID <= 0) || job.RunID <= 0 || job.RunAttempt <= 0 {
 		return "noop", nil
 	}
 	if act {
@@ -48,6 +49,7 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	base := fmt.Sprintf("/repos/%s/%s/actions/runs/%d", url.PathEscape(job.Repository.Owner), url.PathEscape(job.Repository.Name), job.RunID)
 	var run orphanRunResponse
 	readRun := func() error {
+		fresh.cache = map[string]cachedPage{}
 		endpoint, _ := fresh.resolve(base)
 		page, e := fresh.page(ctx, endpoint.String())
 		if e != nil {
@@ -58,6 +60,15 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	}
 	if err := readRun(); err != nil {
 		return "", err
+	}
+	if job.ResumeOrphan {
+		if run.Status == "queued" || run.Status == "in_progress" {
+			return "noop", nil
+		}
+		if !act {
+			return "held", nil
+		}
+		return fresh.resumeOrphan(ctx, base, job)
 	}
 	if run.ID != job.RunID || run.Attempt != job.RunAttempt || run.Name == "" || (run.Status != "queued" && run.Status != "in_progress") {
 		return "noop", nil
@@ -81,61 +92,99 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 			return "held", nil
 		}
 	}
-	if !domain.CanRequeueOrphan(run.Status, jobs, job.ID) || excluded(run.Name, names) {
+	if excluded(run.Name, names) {
+		return "excluded", nil
+	}
+	if !domain.CanRequeueOrphan(run.Status, jobs, job.ID, job.OrphanBefore) {
 		return "held", nil
 	}
-	// Reject a rerun that raced the jobs listing.
+	initialRun := run
+	// Reject any transition that raced the jobs listing.
 	if err := readRun(); err != nil {
 		return "", err
 	}
-	if run.Attempt != job.RunAttempt || (run.Status != "queued" && run.Status != "in_progress") {
+	if run != initialRun {
 		return "noop", nil
+	}
+	fresh.cache = map[string]cachedPage{}
+	var final []domain.OrphanRunJob
+	if err := fresh.pages(ctx, base+"/jobs?filter=latest&per_page=100", &page, func() { final = append(final, page.Jobs...); page.Jobs = nil }); err != nil {
+		return "", err
+	}
+	if !slices.Equal(jobs, final) || !domain.CanRequeueOrphan(run.Status, final, job.ID, job.OrphanBefore) {
+		return "held", nil
 	}
 	if !act {
 		return "would_requeue", nil
 	}
 	status, err := fresh.orphanPost(ctx, base+"/cancel")
 	if err != nil {
-		return "", err
+		var api *APIError
+		if errors.As(err, &api) && api.Status >= 400 && api.Status < 500 {
+			return "", err
+		}
+		return "cancelled_not_rerun", err
 	}
 	if status == http.StatusConflict || status == http.StatusUnprocessableEntity {
 		return "noop", nil
 	}
-	// Bounded by both request deadlines and a one-minute overall deadline.
-	pollCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	return fresh.resumeOrphan(ctx, base, job)
+}
+
+// resumeOrphan never cancels. The durable attempt ties retries to the cancelled
+// attempt; a newer attempt is already recovered and must remain untouched.
+func (o *Observer) resumeOrphan(ctx context.Context, base string, job WorkflowJob) (outcome string, err error) {
+	pollCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	for i := 0; i < 12; i++ {
-		endpoint, _ := fresh.resolve(base)
-		answer, err := fresh.page(pollCtx, endpoint.String())
-		if err != nil {
-			return "", err
+	return o.pollOrphan(pollCtx, base, job)
+}
+
+func (o *Observer) pollOrphan(pollCtx context.Context, base string, job WorkflowJob) (outcome string, err error) {
+	outcome = "cancelled_not_rerun"
+	for {
+		o.cache = map[string]cachedPage{}
+		endpoint, _ := o.resolve(base)
+		answer, e := o.page(pollCtx, endpoint.String())
+		if e != nil {
+			return outcome, e
 		}
-		run = orphanRunResponse{}
-		if err := json.Unmarshal(answer.body, &run); err != nil {
-			return "", err
+		var run orphanRunResponse
+		if e := json.Unmarshal(answer.body, &run); e != nil {
+			return outcome, e
 		}
-		if run.ID != job.RunID || run.Attempt != job.RunAttempt {
+		if run.ID != job.RunID {
+			return outcome, errors.New("unexpected orphan run")
+		}
+		if run.Attempt > job.RunAttempt {
 			return "noop", nil
 		}
+		if run.Attempt != job.RunAttempt {
+			return outcome, errors.New("unexpected orphan attempt")
+		}
 		if run.Status == "completed" {
-			status, err := fresh.orphanPost(pollCtx, base+"/rerun-failed-jobs")
-			if err != nil {
-				return "", err
-			}
-			if status == http.StatusConflict || status == http.StatusUnprocessableEntity {
+			if run.Conclusion != "cancelled" {
 				return "noop", nil
 			}
+			status, e := o.orphanPost(pollCtx, base+"/rerun-failed-jobs")
+			if e != nil {
+				return outcome, e
+			}
+			if status == http.StatusConflict || status == http.StatusUnprocessableEntity {
+				return outcome, nil
+			}
 			return "rerun", nil
+		}
+		if run.Status != "queued" && run.Status != "in_progress" {
+			return outcome, nil
 		}
 		timer := time.NewTimer(5 * time.Second)
 		select {
 		case <-pollCtx.Done():
 			timer.Stop()
-			return "", pollCtx.Err()
+			return outcome, pollCtx.Err()
 		case <-timer.C:
 		}
 	}
-	return "", errors.New("orphan cancellation did not complete within one minute")
 }
 func (o *Observer) orphanPost(ctx context.Context, path string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.timeout)
@@ -162,8 +211,9 @@ func (o *Observer) orphanPost(ctx context.Context, path string) (int, error) {
 }
 
 type orphanRunResponse struct {
-	ID      int64
-	Status  string
-	Name    string
-	Attempt int `json:"run_attempt"`
+	ID         int64
+	Conclusion string
+	Status     string
+	Name       string
+	Attempt    int `json:"run_attempt"`
 }

@@ -7,6 +7,8 @@ type OrphanRequeue struct {
 	Scope      string
 	Repository string
 	RunID      int64
+	RunAttempt int
+	RetryAt    time.Time
 	At         time.Time
 	Outcome    string
 }

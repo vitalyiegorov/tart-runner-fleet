@@ -1881,6 +1881,7 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 		}
 		if diagnosisErr == nil && r.recovery != nil {
 			coordinator.AuditedAssignments = r.auditedAssignments(r.now())
+			r.recovery.AuditMaxAge = 2 * r.interval
 			recoveryFindings, recoveryErr := r.recovery.Reconcile(ctx, coordinator, r.bindings, observation.Snapshot, r.health.Snapshot().QueueSLO)
 			findings = append(findings, recoveryFindings...)
 			if r.reporter != nil && len(recoveryFindings) > 0 && r.reporter.admit("orphan-requeue\x00"+r.observation) {
@@ -1889,6 +1890,9 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 				}
 			}
 			if recoveryErr != nil {
+				if next := r.now().Add(r.pace(r.now(), githubscaleset.Observation{Err: recoveryErr})); next.After(r.next) {
+					r.next = next
+				}
 				findings = append(findings, "orphan requeue unavailable; inspect recovery history before retrying")
 			}
 		}
@@ -1974,7 +1978,7 @@ func (r *restQueueIngester) auditedAssignments(now time.Time) []app.ScaleSetAssi
 	}
 	var rows []app.ScaleSetAssignment
 	for _, row := range snapshot.AuditedScaleSets {
-		rows = append(rows, app.ScaleSetAssignment{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name, Labels: row.Labels, Assigned: row.Assigned, Fresh: fresh(row.ObservedAt)})
+		rows = append(rows, app.ScaleSetAssignment{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name, Labels: row.Labels, Assigned: row.Assigned, ObservedAt: row.ObservedAt, Fresh: fresh(row.ObservedAt)})
 	}
 	return rows
 }

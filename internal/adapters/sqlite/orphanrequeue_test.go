@@ -77,3 +77,75 @@ func TestOrphanRequeueStoreFailsClosedOnUnavailableState(t *testing.T) {
 		t.Fatal("unavailable update accepted")
 	}
 }
+
+func TestOrphanHeldBudgetAndLifetimeCap(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	for i := range 4 {
+		r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: int64(i), At: at, Outcome: "held"}
+		ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3)
+		if err != nil || !ok {
+			t.Fatalf("held starved claim %d: %v", i, err)
+		}
+		if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 3 {
+		r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 99, At: at.Add(time.Duration(i) * time.Hour), Outcome: "rerun"}
+		ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3)
+		if err != nil || ok != (i < 2) {
+			t.Fatalf("lifetime claim %d = %v: %v", i, ok, err)
+		}
+		if ok {
+			if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rows, err := s.RecentOrphanRequeues(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gaveUp := false
+	for _, r := range rows {
+		if r.RunID == 99 && r.Outcome == "gave_up" {
+			gaveUp = true
+		}
+	}
+	if !gaveUp {
+		t.Fatal("lifetime cap missing from doctor history", rows)
+	}
+}
+
+func TestOrphanUnfinishedBeyondRecentHistory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	for i := range 12 {
+		r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: int64(i + 1), RunAttempt: 7, At: at.Add(time.Duration(i) * time.Hour), Outcome: "held"}
+		ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3)
+		if err != nil || !ok {
+			t.Fatal(err)
+		}
+		if i > 0 {
+			if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rows, err := s.RecentOrphanRequeues(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range rows {
+		if r.RunID == 1 && r.RunAttempt == 7 && r.Outcome == "reserved" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal(rows)
+	}
+}

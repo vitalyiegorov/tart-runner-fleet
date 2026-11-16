@@ -13,12 +13,13 @@ import (
 // ScaleSetAssignment is one audit reading, including whether its timestamp is fresh.
 // A missing or stale reading is unknown, never evidence of zero assignment.
 type ScaleSetAssignment struct {
-	Scope    string
-	ID       int64
-	Name     string
-	Labels   []string
-	Assigned int
-	Fresh    bool
+	ObservedAt time.Time
+	Scope      string
+	ID         int64
+	Name       string
+	Labels     []string
+	Assigned   int
+	Fresh      bool
 }
 
 // orphanCandidates is the shared ADR 0098 predicate; REST cannot identify concurrency holds.

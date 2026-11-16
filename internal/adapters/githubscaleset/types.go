@@ -33,14 +33,16 @@ type WorkflowRun struct {
 }
 
 type WorkflowJob struct {
-	ID         int64
-	RunID      int64
-	Repository Repository
-	Name       string
-	Status     string
-	Labels     []string
-	RunAttempt int
-	CreatedAt  time.Time
+	ResumeOrphan bool
+	OrphanBefore time.Time
+	ID           int64
+	RunID        int64
+	Repository   Repository
+	Name         string
+	Status       string
+	Labels       []string
+	RunAttempt   int
+	CreatedAt    time.Time
 	// QueueTimeExact is false when GitHub omitted both job timestamps and the
 	// run creation time had to be used as an upper bound. Inferred timestamps
 	// remain observable but must not trigger a runner queue SLO.

@@ -88,6 +88,7 @@ func TestIssue520AutomaticOrphanRequeue(t *testing.T) {
 			case "off":
 				cfg.Mode = "off"
 			case "sibling owner":
+				snapshot.jobs[0].CreatedAt = restShareEpoch.Add(-20 * time.Minute)
 				c.AuditedAssignments = append(c.AuditedAssignments, ScaleSetAssignment{Scope: "sudoku-repo", ID: 0, Labels: job.Labels, Fresh: true})
 			case "rate":
 				for i := range 3 {
@@ -195,18 +196,18 @@ func TestOrphanOwnerElectsAcrossDifferentJobLabels(t *testing.T) {
 	second.Labels = []string{"self-hosted", "other"}
 	snapshot := fakeQueueSnapshot{jobs: []githubscaleset.WorkflowJob{first, second}}
 	rows := []ScaleSetAssignment{{Scope: low.Scope, ID: 1, Labels: first.Labels, Fresh: true}, {Scope: high.Scope, ID: 2, Labels: second.Labels, Fresh: true}}
-	if !orphanOwner(rows, []Binding{low}, snapshot, first) || orphanOwner(rows, []Binding{high}, snapshot, second) {
+	if !orphanOwner(rows, []Binding{low}, snapshot, first, 20*time.Minute, 15*time.Minute, 30*time.Minute) || orphanOwner(rows, []Binding{high}, snapshot, second, 20*time.Minute, 15*time.Minute, 30*time.Minute) {
 		t.Fatal("nodes disagreed on actor")
 	}
 	rows[0].Fresh = false
-	if orphanOwner(rows, []Binding{high}, snapshot, second) {
+	if orphanOwner(rows, []Binding{high}, snapshot, second, 20*time.Minute, 15*time.Minute, 30*time.Minute) {
 		t.Fatal("stale sibling elected actor")
 	}
 	snapshot.jobs = append(snapshot.jobs, first)
 	snapshot.jobs[2].RunID = 421
 	rows[0].Fresh = true
 	rows = append(rows, ScaleSetAssignment{Scope: "foreign", ID: 0, Fresh: true})
-	if !orphanOwner(rows, []Binding{low}, snapshot, first) {
+	if !orphanOwner(rows, []Binding{low}, snapshot, first, 20*time.Minute, 15*time.Minute, 30*time.Minute) {
 		t.Fatal("unrelated run/scope interfered")
 	}
 }
@@ -226,5 +227,119 @@ func TestOrphanCandidateAmbiguityCannotAuthorizeRecovery(t *testing.T) {
 	}
 	if localAuditMatch(ScaleSetAssignment{ID: 99}, []Binding{low}, job) {
 		t.Fatal("unrelated binding counted as local")
+	}
+}
+
+func TestOrphanObserveCooldownAndStagger(t *testing.T) {
+	for _, scenario := range []string{"observe cooldown", "offline owner", "stale audit"} {
+		t.Run(scenario, func(t *testing.T) {
+			job := restJob(42, 78*time.Minute)
+			rows := []ScaleSetAssignment{{Scope: "sudoku-repo", ID: 1, Fresh: true}, {Scope: "sudoku-repo", ID: 0, Labels: job.Labels, Fresh: true}}
+			if scenario == "stale audit" {
+				rows[0].Fresh = false
+			}
+			c := DemandCoordinator{Store: newShardedDemandStore(), Now: func() time.Time { return restShareEpoch }, AuditedAssignments: rows}
+			api := &requeueAPI{}
+			mode := "act"
+			if scenario == "observe cooldown" {
+				mode = "observe"
+				c.AuditedAssignments = rows[:1]
+			}
+			r := OrphanRecovery{Config: config.OrphanRequeue{Mode: mode}, Store: &requeueMemory{}, API: api}
+			snapshot := fakeQueueSnapshot{at: restShareEpoch, jobs: []githubscaleset.WorkflowJob{job}}
+			for range 2 {
+				if _, err := r.Reconcile(context.Background(), c, []Binding{sharedLabelBinding(1)}, snapshot, time.Minute); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := 1
+			if scenario == "stale audit" {
+				want = 0
+			}
+			if api.attempts != want {
+				t.Fatalf("attempts=%d want %d", api.attempts, want)
+			}
+		})
+	}
+}
+
+func TestOrphanRecoveryAuditAge(t *testing.T) {
+	now := restShareEpoch
+	threshold := now.Add(-time.Minute)
+	for _, test := range []struct {
+		at   time.Time
+		want bool
+	}{
+		{now.Add(-30 * time.Minute), false},
+		{now.Add(-30 * time.Second), true},
+		{now.Add(-2 * time.Minute), false},
+		{time.Time{}, false},
+		{now.Add(time.Second), false},
+	} {
+		if got := recoveryAuditFresh(test.at, now, threshold, time.Minute); got != test.want {
+			t.Fatalf("at %s: %v", test.at, got)
+		}
+	}
+	if !recoveryAuditFresh(now.Add(-2*time.Minute), now, now.Add(-3*time.Minute), time.Minute) {
+		t.Fatal("audit after threshold rejected")
+	}
+}
+
+func TestOrphanRecoveryResumesWithoutQueueAndReportsRemedy(t *testing.T) {
+	ledger := &requeueMemory{records: []operations.OrphanRequeue{{Scope: "sudoku-repo", Repository: "o/r", RunID: 420, RunAttempt: 1, At: restShareEpoch.Add(-time.Hour), Outcome: "cancelled_not_rerun"}}}
+	api := &requeueAPI{}
+	r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: ledger, API: api}
+	findings, err := r.Reconcile(context.Background(), DemandCoordinator{Now: func() time.Time { return restShareEpoch }}, []Binding{sharedLabelBinding(1)}, nil, time.Minute)
+	if err != nil || api.calls != 1 || ledger.records[0].Outcome != "rerun" {
+		t.Fatalf("calls=%d records=%v err=%v", api.calls, ledger.records, err)
+	}
+	found := false
+	for _, f := range findings {
+		if f == "gh run rerun 420 --failed -R o/r" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal(findings)
+	}
+}
+
+type resumeResultAPI struct {
+	outcome string
+	err     error
+}
+
+func (a resumeResultAPI) RequeueOrphan(context.Context, githubscaleset.WorkflowJob, func(string, []string) bool, bool) (string, error) {
+	return a.outcome, a.err
+}
+
+func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
+	for _, scenario := range []string{"api error", "permission", "finish error", "legacy attempt", "invalid repository"} {
+		t.Run(scenario, func(t *testing.T) {
+			record := operations.OrphanRequeue{Scope: "sudoku-repo", Repository: "o/r", RunID: 420, RunAttempt: 1, At: restShareEpoch.Add(-time.Hour), Outcome: "reserved"}
+			if scenario == "legacy attempt" {
+				record.RunAttempt = 0
+			}
+			if scenario == "invalid repository" {
+				record.Repository = "invalid"
+			}
+			memory := &requeueMemory{records: []operations.OrphanRequeue{record}}
+			store := failingRequeueStore{requeueMemory: memory}
+			api := resumeResultAPI{outcome: "permission_denied"}
+			if scenario == "api error" {
+				api = resumeResultAPI{err: context.Canceled}
+			}
+			if scenario == "finish error" {
+				store.fail = "finish"
+			}
+			r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: store, API: api}
+			_, err := r.Reconcile(context.Background(), DemandCoordinator{Now: func() time.Time { return restShareEpoch }}, []Binding{sharedLabelBinding(1)}, nil, time.Minute)
+			if (err != nil) != (scenario == "api error" || scenario == "finish error") {
+				t.Fatal(err)
+			}
+			if (scenario == "api error" || scenario == "permission") && memory.records[0].Outcome != "cancelled_not_rerun" {
+				t.Fatal(memory.records)
+			}
+		})
 	}
 }

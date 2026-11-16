@@ -42,3 +42,14 @@ func TestOrphanRequeueRequiresAuditedInventory(t *testing.T) {
 		t.Fatal("config accepted invalid mode")
 	}
 }
+
+func TestOrphanExclusionCaseAndSlash(t *testing.T) {
+	c := OrphanRequeue{Exclusions: []OrphanExclusion{{Repository: "BUDGIE-AT/*", Workflow: "PULL*"}}}
+	if !c.Excluded("budgie-at/budgie", "Pull Request / CI", nil) {
+		t.Fatal("exclusion failed open")
+	}
+	g := GitHub{OrphanRequeue: OrphanRequeue{ThresholdMinutes: 1}}
+	if g.validateOrphanRequeue() == nil {
+		t.Fatal("threshold below audit interval accepted")
+	}
+}
