@@ -8,7 +8,8 @@ type OrphanRequeue struct {
 	Repository string
 	RunID      int64
 	RunAttempt int
-	RetryAt    time.Time
-	At         time.Time
-	Outcome    string
+	// RetryAt requests durable hourly admission for a cancelled_not_rerun retry.
+	RetryAt time.Time
+	At      time.Time
+	Outcome string
 }

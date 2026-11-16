@@ -2796,7 +2796,10 @@ Threshold is never smaller than the queue SLO and must cover the audit interval.
 Recovery requires assigned=0 audits within twice the REST interval or after the
 job crossed the threshold. Every queued/waiting job must also exceed the threshold.
 Observe and act share durable claims and per-run cooldown. Held and excluded outcomes do not consume the rolling budget. Observe assessments also consume this budget. A run can
-have at most two successful reruns; doctor then reports gave_up.
+have at most two successful or uncertain mutations in the local lifetime ledger;
+reserved and cancelled_not_rerun consume this budget. Doctor reports gave_up
+for recovered runs at the cap. Independently, GitHub run_attempt >= 3 vetoes
+new mutations on every node, including resumes.
 
 In GitHub **Settings → Developer settings → GitHub Apps → the fleet App →
 Permissions & events → Repository permissions**, change **Actions** from Read-only
@@ -2826,16 +2829,19 @@ proven by local tests.
 Recovery continuation (#520): after GitHub accepts cancellation, polling and
 rerun use a cancellation-independent context bounded to one minute. Every
 unresolved cancellation, including an uncertain cancel response, records
-cancelled_not_rerun; unfinished reserved and
-cancelled_not_rerun records resume independently of queued inventory after
-cooldown, including after restart. The original run attempt is durable (SQLite
-migration 16). A newer attempt or a still-active run on resume is a no-op; only the original completed/cancelled
-attempt can be rerun. Doctor includes gh run rerun <id> --failed -R <repo> for
-unresolved cancellation and stale reservations. Retry-After responses defer the
-REST refresh instead of being classified as missing permission. All run and
-job pages are reread immediately before cancel; any observed transition vetoes
-it. For P job pages, the oldest final job observation precedes up to P−1
-remaining page GETs and one cancel POST. Each request has a default client
-deadline of 15 seconds: 15×P seconds of request deadlines plus local scheduling
-and processing, without a server-side atomicity or acceptance-time guarantee.
-An unobserved job start in this window can still be interrupted.
+cancelled_not_rerun; only cancelled_not_rerun resumes automatically after
+cooldown, independently of inventory and across restart. Every resume commits
+a fresh hourly charge first; prior charges remain durable, while the unfinished
+lifetime reservation transfers to the new row. Stale reserved rows require the
+doctor remedy because the daemon cannot prove it sent cancel.
+The original run attempt is durable (SQLite migration 16). An observed newer
+attempt retains the rerun budget charge without mutation. A still-active original
+attempt or deleted run (NotFound) terminates as noop. Only the original
+completed/cancelled attempt below run_attempt 3 can be rerun.
+Doctor includes gh run rerun <id> --failed -R <repo> for unresolved cancellation
+and stale reservations. Retry-After responses defer the REST refresh instead of
+being classified as missing permission. The final run read, all final job pages
+and cancel POST share one 15-second deadline; any observed transition vetoes
+cancel. This bounds the client request window regardless of page count, without
+a server-side atomicity or acceptance-time guarantee. An unobserved job start in
+this window can still be interrupted.

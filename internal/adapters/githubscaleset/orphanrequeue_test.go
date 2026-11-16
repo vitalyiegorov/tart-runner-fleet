@@ -190,6 +190,9 @@ func TestOrphanRequeuePartialFailuresNeverProceed(t *testing.T) {
 				t.Fatal(err)
 			}
 			outcome, err := observer.RequeueOrphan(ctx, WorkflowJob{OrphanBefore: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), ID: 42, RunID: 420, RunAttempt: 1, Repository: Repository{Owner: "owner", Name: "repo"}}, func(string, []string) bool { return false }, true)
+			if failure == "poll attempt" && outcome != "rerun" {
+				t.Fatalf("lost attempt charge: %s", outcome)
+			}
 			noop := failure == "confirm attempt" || failure == "poll attempt" || failure == "unsupported token" || failure == "poll canceled"
 			if (err == nil) != noop {
 				t.Fatalf("failure=%s outcome=%s err=%v", failure, outcome, err)
@@ -329,6 +332,9 @@ func TestOrphanResumeRejectsUncertainOrActiveAttempt(t *testing.T) {
 			if scenario == "wrong run" || scenario == "older attempt" || scenario == "unknown state" {
 				want = "cancelled_not_rerun"
 			}
+			if scenario == "new attempt" {
+				want = "rerun"
+			}
 			if scenario == "observe" {
 				want = "held"
 			}
@@ -356,5 +362,92 @@ func TestOrphanContinuationDeadlineRetainsRecovery(t *testing.T) {
 	outcome, err := o.pollOrphan(ctx, "/repos/o/r/actions/runs/420", WorkflowJob{RunID: 420, RunAttempt: 1})
 	if outcome != "cancelled_not_rerun" || !errors.Is(err, context.Canceled) || posts != 0 {
 		t.Fatalf("%s %v posts=%d", outcome, err, posts)
+	}
+}
+
+func TestOrphanResumeTerminalAndAdvancedAttempts(t *testing.T) {
+	for _, scenario := range []string{"deleted", "deleted polling", "advanced queued", "advanced completed", "cap", "resume cap"} {
+		t.Run(scenario, func(t *testing.T) {
+			posts, reads := 0, 0
+			o, _ := NewObserver(ObserverConfig{BaseURL: "https://api.test", Tokens: actionToken{true}, HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodPost {
+					posts++
+					return response(202, "{}", ""), nil
+				}
+				reads++
+				if scenario == "deleted" || scenario == "deleted polling" && reads == 2 {
+					return response(404, "{}", ""), nil
+				}
+				status, attempt := "completed", 1
+				if scenario == "advanced queued" {
+					status = "queued"
+					attempt = 2
+				}
+				if scenario == "advanced completed" {
+					attempt = 2
+				}
+				if scenario == "cap" || scenario == "resume cap" {
+					status = "queued"
+					attempt = 3
+				}
+				if scenario == "resume cap" {
+					status = "completed"
+				}
+				return response(200, fmt.Sprintf(`{"id":420,"name":"build","run_attempt":%d,"status":%q,"conclusion":"cancelled"}`, attempt, status), ""), nil
+			})})
+			job := WorkflowJob{ID: 42, RunID: 420, RunAttempt: 1, ResumeOrphan: scenario != "cap", Repository: Repository{Owner: "o", Name: "r"}}
+			if scenario == "cap" || scenario == "resume cap" {
+				job.RunAttempt = 3
+			}
+			outcome, err := o.RequeueOrphan(context.Background(), job, func(string, []string) bool { return false }, true)
+			want := "noop"
+			if strings.HasPrefix(scenario, "advanced") {
+				want = "rerun"
+			}
+			if err != nil || outcome != want || posts != 0 {
+				t.Fatalf("outcome=%s err=%v posts=%d", outcome, err, posts)
+			}
+		})
+	}
+}
+func TestOrphanFinalReadsAndCancelShareDeadline(t *testing.T) {
+	reads, lists := 0, 0
+	var deadline time.Time
+	o, _ := NewObserver(ObserverConfig{BaseURL: "https://api.test", Tokens: actionToken{true}, HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost || reads >= 2 {
+			d, ok := req.Context().Deadline()
+			if !ok || time.Until(d) > 15*time.Second {
+				t.Fatal("missing shared 15s deadline")
+			}
+			if deadline.IsZero() {
+				deadline = d
+			} else if !d.Equal(deadline) {
+				t.Fatalf("deadline extended: %v -> %v", deadline, d)
+			}
+		}
+		if req.Method == http.MethodPost {
+			return response(409, "{}", ""), nil
+		}
+		if strings.HasSuffix(req.URL.Path, "/jobs") {
+			lists++
+			link := ""
+			if req.URL.Query().Get("page") == "" {
+				link = `</repos/o/r/actions/runs/420/jobs?page=2>; rel="next"`
+			}
+			return response(200, `{"jobs":[{"id":42,"name":"build","status":"queued","created_at":"2020-01-01T00:00:00Z"}]}`, link), nil
+		}
+		reads++
+		if reads == 2 {
+			d, ok := req.Context().Deadline()
+			if !ok || time.Until(d) > 15*time.Second {
+				t.Fatal("final run read unbounded")
+			}
+			deadline = d
+		}
+		return response(200, `{"id":420,"name":"build","run_attempt":1,"status":"queued"}`, ""), nil
+	})})
+	_, err := o.RequeueOrphan(context.Background(), WorkflowJob{ID: 42, RunID: 420, RunAttempt: 1, OrphanBefore: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Repository: Repository{Owner: "o", Name: "r"}}, func(string, []string) bool { return false }, true)
+	if err != nil || lists != 4 {
+		t.Fatalf("lists=%d err=%v", lists, err)
 	}
 }

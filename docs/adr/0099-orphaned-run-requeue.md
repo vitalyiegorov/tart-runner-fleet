@@ -36,28 +36,35 @@ cannot match these names.
 
 Observe and act use one claim/finish path. All outcomes retain per-run cooldown;
 held and excluded do not consume the three-per-hour node
-mutation budget. Two successful reruns exhaust a run's lifetime budget; doctor
-reports gave_up. A permission-only 403 pauses the scope for an hour, while
+mutation budget. Two successful or uncertain mutations exhaust a run's local
+lifetime budget; reserved and cancelled_not_rerun count conservatively. An
+observed attempt advance retains the rerun charge. GitHub run_attempt >= 3 independently vetoes
+new mutations on every node, including resumes. Doctor reports gave_up for
+recovered runs at the cap. A permission-only 403 pauses the scope for an hour, while
 Retry-After defers REST via the existing pacing rule.
 
 SQLite migration 16 adds the original run attempt to migration 15's durable
 reservation ledger. After accepted cancel, polling/rerun and outcome persistence
 ignore caller cancellation and have one-minute bounds. Every unresolved
-post-cancel failure or uncertain cancel response becomes cancelled_not_rerun. Unfinished reserved and
-cancelled_not_rerun records are reconciled independently of queued inventory
-after cooldown, across restart. Only the original completed/cancelled attempt
-can be rerun; a newer attempt or a still-active run on resume is a no-op. Pre-migration records without attempt
-evidence require the doctor command, not a guessed rerun. Doctor prints
+post-cancel failure or uncertain cancel response becomes cancelled_not_rerun.
+Only cancelled_not_rerun records resume automatically, independently of queued
+inventory after cooldown and across restart. Each resume must first commit a
+fresh hourly admission; the previous row becomes noop while the new row carries
+the unfinished lifetime reservation. All hourly charges remain durable. Stale
+reserved rows require the doctor remedy: the daemon cannot prove it sent cancel.
+Only the original completed/cancelled attempt can be rerun; a newer attempt counts
+as recovered without mutation. A still-active original attempt or a deleted run
+(NotFound) terminates as noop. Pre-migration records without attempt evidence
+require the doctor command, not a guessed rerun. Doctor prints
 gh run rerun <id> --failed -R <repo> for these outcomes and stale reservations.
 
-**Residual race:** GitHub offers no atomic cancel-if-idle API. For P job
-pages, the oldest final job observation precedes up to P−1 further page GETs
-and one cancel POST. The default per-request client deadline is 15 seconds:
-one page leaves one POST (15 seconds of request deadline); P pages leave up to
-15×P seconds of request deadlines, plus local scheduling and processing. There
-is no server-side atomicity or finite acceptance-time guarantee. All observed
-live jobs veto; an unobserved start in that window can still be interrupted.
-These changes cannot satisfy a literal guarantee of never interrupting a live job.
+**Residual race:** GitHub offers no atomic cancel-if-idle API. The final run
+read, all final job pages and cancel POST share one 15-second context deadline,
+regardless of page count. This bounds the client request window, including local
+processing; it supplies no server-side atomicity or finite acceptance-time
+guarantee. All observed live jobs veto; an unobserved start in that window can
+still be interrupted. These changes cannot satisfy a literal guarantee of never
+interrupting a live job.
 
 ## Simplicity and proof
 

@@ -149,3 +149,102 @@ func TestOrphanUnfinishedBeyondRecentHistory(t *testing.T) {
 		t.Fatal(rows)
 	}
 }
+
+func TestOrphanUncertainMutationsConsumeLifetimeBudget(t *testing.T) {
+	for _, outcome := range []string{"reserved", "cancelled_not_rerun"} {
+		t.Run(outcome, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 42, At: time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC), Outcome: outcome}
+			for i := range 3 {
+				ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3)
+				if err != nil || ok != (i < 2) {
+					t.Fatalf("claim %d=%v err=%v", i, ok, err)
+				}
+				if ok {
+					if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r.At = r.At.Add(2 * time.Hour)
+			}
+		})
+	}
+}
+func TestOrphanResumeDurableHourlyAdmission(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 42, At: at, Outcome: "cancelled_not_rerun", RunAttempt: 1}
+	if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 1); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	r.RetryAt = at.Add(2 * time.Hour)
+	if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 1); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	rows, err := s.RecentOrphanRequeues(ctx, "s")
+	if err != nil || len(rows) != 2 || !rows[0].At.Equal(r.RetryAt) || rows[0].Outcome != "cancelled_not_rerun" {
+		t.Fatalf("%v %v", rows, err)
+	}
+	// A restart sees the admitted mutation even if no HTTP outcome was persisted.
+	r.At = r.RetryAt
+	r.RetryAt = r.At.Add(30 * time.Minute)
+	if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 1); err != nil || ok {
+		t.Fatalf("hourly bypass: %v %v", ok, err)
+	}
+}
+
+func TestOrphanResumeRetainsEveryHourlyCharge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 42, At: time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC), Outcome: "cancelled_not_rerun"}
+	if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		r.RetryAt = r.At.Add(10 * time.Minute)
+		ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3)
+		if err != nil || ok != (i < 2) {
+			t.Fatalf("retry %d=%v err=%v", i, ok, err)
+		}
+		r.At = r.RetryAt
+	}
+}
+
+func TestOrphanResumeAdmissionRollsBackOnStorageFailure(t *testing.T) {
+	for _, point := range []string{"orphan.resume.begin", "orphan.resume.claim", "orphan.resume.transfer", "orphan.resume.commit"} {
+		t.Run(point, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 42, At: time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC), Outcome: "cancelled_not_rerun"}
+			if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3); err != nil || !ok {
+				t.Fatal(ok, err)
+			}
+			if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			r.RetryAt = r.At.Add(2 * time.Hour)
+			s.injectFault = func(p string) error {
+				if p == point {
+					return context.Canceled
+				}
+				return nil
+			}
+			if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Minute, 3); err == nil || ok {
+				t.Fatal(ok, err)
+			}
+			s.injectFault = nil
+			rows, err := s.RecentOrphanRequeues(ctx, "s")
+			if err != nil || len(rows) != 1 || rows[0].Outcome != "cancelled_not_rerun" || !rows[0].At.Equal(r.At) {
+				t.Fatalf("%v %v", rows, err)
+			}
+		})
+	}
+}

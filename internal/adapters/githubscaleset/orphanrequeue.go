@@ -20,6 +20,10 @@ import (
 func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded func(string, []string) bool, act bool) (outcome string, err error) {
 	defer func() {
 		var api *APIError
+		if errors.As(err, &api) && api.Kind == NotFound {
+			outcome, err = "noop", nil
+			return
+		}
 		if errors.As(err, &api) && api.Kind == Authorization && api.RetryAfter == 0 && outcome != "cancelled_not_rerun" {
 			outcome, err = "permission_denied", nil
 		}
@@ -48,7 +52,7 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	fresh.touched = nil
 	base := fmt.Sprintf("/repos/%s/%s/actions/runs/%d", url.PathEscape(job.Repository.Owner), url.PathEscape(job.Repository.Name), job.RunID)
 	var run orphanRunResponse
-	readRun := func() error {
+	readRun := func(ctx context.Context) error {
 		fresh.cache = map[string]cachedPage{}
 		endpoint, _ := fresh.resolve(base)
 		page, e := fresh.page(ctx, endpoint.String())
@@ -58,10 +62,16 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 		run = orphanRunResponse{}
 		return json.Unmarshal(page.body, &run)
 	}
-	if err := readRun(); err != nil {
+	if err := readRun(ctx); err != nil {
 		return "", err
 	}
 	if job.ResumeOrphan {
+		if run.ID == job.RunID && run.Attempt > job.RunAttempt {
+			return "rerun", nil
+		}
+		if run.Attempt >= 3 {
+			return "noop", nil
+		}
 		if run.Status == "queued" || run.Status == "in_progress" {
 			return "noop", nil
 		}
@@ -70,7 +80,7 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 		}
 		return fresh.resumeOrphan(ctx, base, job)
 	}
-	if run.ID != job.RunID || run.Attempt != job.RunAttempt || run.Name == "" || (run.Status != "queued" && run.Status != "in_progress") {
+	if run.ID != job.RunID || run.Attempt >= 3 || run.Attempt != job.RunAttempt || run.Name == "" || (run.Status != "queued" && run.Status != "in_progress") {
 		return "noop", nil
 	}
 	var page struct {
@@ -99,8 +109,11 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 		return "held", nil
 	}
 	initialRun := run
+	// Bound the final run read, all final job pages and cancel together.
+	finalCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	// Reject any transition that raced the jobs listing.
-	if err := readRun(); err != nil {
+	if err := readRun(finalCtx); err != nil {
 		return "", err
 	}
 	if run != initialRun {
@@ -108,7 +121,7 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	}
 	fresh.cache = map[string]cachedPage{}
 	var final []domain.OrphanRunJob
-	if err := fresh.pages(ctx, base+"/jobs?filter=latest&per_page=100", &page, func() { final = append(final, page.Jobs...); page.Jobs = nil }); err != nil {
+	if err := fresh.pages(finalCtx, base+"/jobs?filter=latest&per_page=100", &page, func() { final = append(final, page.Jobs...); page.Jobs = nil }); err != nil {
 		return "", err
 	}
 	if !slices.Equal(jobs, final) || !domain.CanRequeueOrphan(run.Status, final, job.ID, job.OrphanBefore) {
@@ -117,7 +130,7 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	if !act {
 		return "would_requeue", nil
 	}
-	status, err := fresh.orphanPost(ctx, base+"/cancel")
+	status, err := fresh.orphanPost(finalCtx, base+"/cancel")
 	if err != nil {
 		var api *APIError
 		if errors.As(err, &api) && api.Status >= 400 && api.Status < 500 {
@@ -156,10 +169,13 @@ func (o *Observer) pollOrphan(pollCtx context.Context, base string, job Workflow
 			return outcome, errors.New("unexpected orphan run")
 		}
 		if run.Attempt > job.RunAttempt {
-			return "noop", nil
+			return "rerun", nil
 		}
 		if run.Attempt != job.RunAttempt {
 			return outcome, errors.New("unexpected orphan attempt")
+		}
+		if run.Attempt >= 3 {
+			return "noop", nil
 		}
 		if run.Status == "completed" {
 			if run.Conclusion != "cancelled" {

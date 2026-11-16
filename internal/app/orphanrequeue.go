@@ -51,13 +51,22 @@ func (r OrphanRecovery) Reconcile(ctx context.Context, c DemandCoordinator, bind
 	}
 	if r.Config.Mode == "act" {
 		for _, record := range history {
-			if (record.Outcome != "reserved" && record.Outcome != "cancelled_not_rerun") || c.now().Sub(record.At) < r.Config.Cooldown() {
+			if record.Outcome != "cancelled_not_rerun" || c.now().Sub(record.At) < r.Config.Cooldown() {
 				continue
 			}
 			parts := strings.SplitN(record.Repository, "/", 2)
 			if len(parts) != 2 || record.RunAttempt <= 0 {
 				continue
 			}
+			record.RetryAt = c.now()
+			claimed, err := r.Store.ClaimOrphanRequeue(ctx, record, r.Config.Cooldown(), r.Config.Limit())
+			if err != nil {
+				return findings, err
+			}
+			if !claimed {
+				continue
+			}
+			record.At = record.RetryAt
 			outcome, actionErr := r.API.RequeueOrphan(ctx, githubscaleset.WorkflowJob{ResumeOrphan: true, RunID: record.RunID, RunAttempt: record.RunAttempt, Repository: githubscaleset.Repository{Owner: parts[0], Name: parts[1]}}, func(string, []string) bool { return false }, true)
 			if outcome != "rerun" && outcome != "noop" {
 				outcome = "cancelled_not_rerun"

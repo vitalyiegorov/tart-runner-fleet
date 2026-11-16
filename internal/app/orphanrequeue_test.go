@@ -17,15 +17,30 @@ func (s *requeueMemory) RecentOrphanRequeues(context.Context, string) ([]operati
 }
 func (s *requeueMemory) ClaimOrphanRequeue(_ context.Context, r operations.OrphanRequeue, cooldown time.Duration, limit int) (bool, error) {
 	count := 0
+	now := r.At
+	if !r.RetryAt.IsZero() {
+		now = r.RetryAt
+	}
 	for _, old := range s.records {
-		if old.Repository == r.Repository && old.RunID == r.RunID && r.At.Sub(old.At) < cooldown {
+		if old.Repository == r.Repository && old.RunID == r.RunID && now.Sub(old.At) < cooldown {
 			return false, nil
 		}
-		if r.At.Sub(old.At) < time.Hour {
+		if now.Sub(old.At) < time.Hour {
 			count++
 		}
 	}
 	if count >= limit {
+		return false, nil
+	}
+	if !r.RetryAt.IsZero() {
+		for i, old := range s.records {
+			if old.RunID == r.RunID && old.Repository == r.Repository && old.At.Equal(r.At) {
+				r.At = r.RetryAt
+				s.records[i].Outcome = "noop"
+				s.records = append(s.records, r)
+				return true, nil
+			}
+		}
 		return false, nil
 	}
 	s.records = append(s.records, r)
@@ -290,7 +305,7 @@ func TestOrphanRecoveryResumesWithoutQueueAndReportsRemedy(t *testing.T) {
 	api := &requeueAPI{}
 	r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: ledger, API: api}
 	findings, err := r.Reconcile(context.Background(), DemandCoordinator{Now: func() time.Time { return restShareEpoch }}, []Binding{sharedLabelBinding(1)}, nil, time.Minute)
-	if err != nil || api.calls != 1 || ledger.records[0].Outcome != "rerun" {
+	if err != nil || api.calls != 1 || ledger.records[len(ledger.records)-1].Outcome != "rerun" {
 		t.Fatalf("calls=%d records=%v err=%v", api.calls, ledger.records, err)
 	}
 	found := false
@@ -316,7 +331,7 @@ func (a resumeResultAPI) RequeueOrphan(context.Context, githubscaleset.WorkflowJ
 func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
 	for _, scenario := range []string{"api error", "permission", "finish error", "legacy attempt", "invalid repository"} {
 		t.Run(scenario, func(t *testing.T) {
-			record := operations.OrphanRequeue{Scope: "sudoku-repo", Repository: "o/r", RunID: 420, RunAttempt: 1, At: restShareEpoch.Add(-time.Hour), Outcome: "reserved"}
+			record := operations.OrphanRequeue{Scope: "sudoku-repo", Repository: "o/r", RunID: 420, RunAttempt: 1, At: restShareEpoch.Add(-time.Hour), Outcome: "cancelled_not_rerun"}
 			if scenario == "legacy attempt" {
 				record.RunAttempt = 0
 			}
@@ -337,8 +352,40 @@ func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
 			if (err != nil) != (scenario == "api error" || scenario == "finish error") {
 				t.Fatal(err)
 			}
-			if (scenario == "api error" || scenario == "permission") && memory.records[0].Outcome != "cancelled_not_rerun" {
+			if (scenario == "api error" || scenario == "permission") && memory.records[len(memory.records)-1].Outcome != "cancelled_not_rerun" {
 				t.Fatal(memory.records)
+			}
+		})
+	}
+}
+
+func TestOrphanResumeAdmissionAndReservedRemedy(t *testing.T) {
+	for _, outcome := range []string{"reserved", "cancelled_not_rerun"} {
+		t.Run(outcome, func(t *testing.T) {
+			ledger := &requeueMemory{records: []operations.OrphanRequeue{{Scope: "sudoku-repo", Repository: "o/r", RunID: 420, RunAttempt: 1, At: restShareEpoch.Add(-2 * time.Hour), Outcome: outcome}}}
+			for i := range 3 {
+				if outcome == "reserved" {
+					break
+				}
+				ledger.records = append(ledger.records, operations.OrphanRequeue{Repository: "other/r", RunID: int64(i), At: restShareEpoch, Outcome: "rerun"})
+			}
+			api := &requeueAPI{}
+			r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: ledger, API: api}
+			c := DemandCoordinator{Store: newShardedDemandStore(), Now: func() time.Time { return restShareEpoch }}
+			findings, err := r.Reconcile(context.Background(), c, []Binding{sharedLabelBinding(1)}, fakeQueueSnapshot{at: restShareEpoch}, time.Minute)
+			if err != nil || api.attempts != 0 {
+				t.Fatalf("attempts=%d err=%v", api.attempts, err)
+			}
+			if outcome == "reserved" {
+				found := false
+				for _, f := range findings {
+					if f == "gh run rerun 420 --failed -R o/r" {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal(findings)
+				}
 			}
 		})
 	}
