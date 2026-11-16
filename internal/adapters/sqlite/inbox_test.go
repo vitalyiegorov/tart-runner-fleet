@@ -446,7 +446,7 @@ func TestDemandInboxValidationAndEmptySnapshot(t *testing.T) {
 }
 
 func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
-	for _, point := range []string{"inbox.begin", "inbox.cursor.generation", "inbox.load", "inbox.demand.load", "inbox.group",
+	for _, point := range []string{"inbox.begin", "inbox.cursor.generation", "inbox.load", "inbox.demand.load", "inbox.group.episode", "inbox.group",
 		"inbox.group.load", "inbox.project", "inbox.record", "inbox.cursor", "inbox.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)
@@ -1152,5 +1152,30 @@ func TestDemandInboxRerunCorrelatedBeforeDeliveryKeepsRESTIdentity(t *testing.T)
 	record, err := store.DemandRecord(ctx, 1, 11)
 	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
 		t.Fatalf("delivery erased the REST-correlated rerun: %#v, %v", record, err)
+	}
+}
+
+// A late event for the finished request between REST correlation and the
+// rerun's delivery must not make the correlated group look stale.
+func TestDemandInboxLateFinishedEventKeepsRESTCorrelatedRerun(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	rerun := rerunAfterFinishedAttempt(t, store)
+	queued := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: rerun.Labels, Status: "queued", CreatedAt: time.Unix(9900, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(9950, 0).UTC(), []operations.GitHubJobObservation{queued}); err != nil {
+		t.Fatal(err)
+	}
+	late := demandEvent(operations.DemandJobCompleted, 10)
+	late.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{late}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyDemandBatch(ctx, 1, 4, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
+		t.Fatalf("late finished event erased the REST-correlated rerun: %#v, %v", record, err)
 	}
 }

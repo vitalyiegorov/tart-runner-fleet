@@ -171,12 +171,12 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 			// not inherit the finished attempt's queue age or workflow job (#524).
 			// A rotated request for a still-queued job finds its predecessor
 			// live, a job REST saw before the broker has no member yet, and a
-			// rerun REST correlated after the old attempt finished is newer than
-			// every finished member; all keep the canonical identity.
+			// rerun REST already correlated carries an attempt no finished member
+			// has; all keep the canonical identity.
 			if _, err := s.txExec(ctx, tx, "inbox.group.episode", `UPDATE demand_groups SET first_queue_time=?,workflow_job_id=0,run_attempt=0,updated_at=?
 				WHERE scale_set_id=? AND logical_key=?
 				AND EXISTS(SELECT 1 FROM runner_demands d WHERE d.scale_set_id=demand_groups.scale_set_id AND d.logical_key=demand_groups.logical_key
-					AND d.runner_request_id<>? AND (d.status_rank>=? OR d.expired_at<>0) AND d.updated_at>=demand_groups.updated_at)
+					AND d.runner_request_id<>? AND (d.status_rank>=? OR d.expired_at<>0) AND d.run_attempt=demand_groups.run_attempt)
 				AND NOT EXISTS(SELECT 1 FROM runner_demands d WHERE d.scale_set_id=demand_groups.scale_set_id AND d.logical_key=demand_groups.logical_key
 					AND d.runner_request_id<>? AND d.status_rank<? AND d.expired_at=0)`,
 				queue, now.UnixNano(), scaleSetID, record.LogicalKey, record.RunnerRequestID, demandRank(operations.DemandJobCompleted),
