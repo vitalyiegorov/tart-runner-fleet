@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 )
 
 // ScaleSetAssignment is one audit reading, including whether its timestamp is fresh.
@@ -19,14 +21,14 @@ type ScaleSetAssignment struct {
 	Fresh    bool
 }
 
-// UndeliveredJobs reports candidates only: REST cannot identify concurrency holds.
-func (c DemandCoordinator) UndeliveredJobs(ctx context.Context, bindings []Binding, snapshot GitHubQueueSnapshot, slo time.Duration) ([]string, error) {
+// orphanCandidates is the shared ADR 0098 predicate; REST cannot identify concurrency holds.
+func (c DemandCoordinator) orphanCandidates(ctx context.Context, bindings []Binding, snapshot GitHubQueueSnapshot, slo time.Duration) ([]githubscaleset.WorkflowJob, error) {
 	if snapshot == nil || slo <= 0 || len(c.AuditedAssignments) == 0 {
 		return nil, nil
 	}
 	now := c.now()
 	readings := map[int64]map[string]bool{}
-	var findings []string
+	var candidates []githubscaleset.WorkflowJob
 	for _, job := range snapshot.QueuedJobs() {
 		if job.Status != "queued" || !job.QueueTimeExact || job.CreatedAt.IsZero() || now.Sub(job.CreatedAt) < slo {
 			continue
@@ -55,9 +57,22 @@ func (c DemandCoordinator) UndeliveredJobs(ctx context.Context, bindings []Bindi
 			}
 		}
 		if orphaned {
-			repo := job.Repository.Owner + "/" + job.Repository.Name
-			findings = append(findings, fmt.Sprintf("%s run %d job %d: queued for %.0fm; unassigned job candidate: every matching audited set reports assigned=0 with no local runner demand. Rule out a concurrency group hold and a sibling backlog first. Operator remedy only after confirming the run is not held by a concurrency group: gh run cancel %d -R %s; then gh run rerun %d --failed -R %s", repo, job.RunID, job.ID, now.Sub(job.CreatedAt).Minutes(), job.RunID, repo, job.RunID, repo))
+			candidates = append(candidates, job)
 		}
+	}
+	return candidates, nil
+}
+
+// UndeliveredJobs retains ADR 0098's read-only candidate diagnosis.
+func (c DemandCoordinator) UndeliveredJobs(ctx context.Context, bindings []Binding, snapshot GitHubQueueSnapshot, slo time.Duration) ([]string, error) {
+	candidates, err := c.orphanCandidates(ctx, bindings, snapshot, slo)
+	if err != nil {
+		return nil, err
+	}
+	var findings []string
+	for _, job := range candidates {
+		repo := job.Repository.Owner + "/" + job.Repository.Name
+		findings = append(findings, fmt.Sprintf("%s run %d job %d: queued for %.0fm; unassigned job candidate: every matching audited set reports assigned=0 with no local runner demand. Rule out a concurrency group hold and a sibling backlog first. Operator remedy only after confirming the run is not held by a concurrency group: gh run cancel %d -R %s; then gh run rerun %d --failed -R %s", repo, job.RunID, job.ID, c.now().Sub(job.CreatedAt).Minutes(), job.RunID, repo, job.RunID, repo))
 	}
 	sort.Strings(findings)
 	return findings, nil

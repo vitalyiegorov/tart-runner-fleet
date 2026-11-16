@@ -4,23 +4,28 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/domain"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/reconcile"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/scalesetaudit"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/telemetry"
 )
 
 func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
-	for _, scenario := range []string{"old broker fresh audit", "sibling backlog", "diagnostic error", "wording"} {
+	for _, scenario := range []string{"old broker fresh audit", "sibling backlog", "diagnostic error", "wording", "recover observe", "recover act"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
@@ -68,6 +73,9 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			}
 			binding := app.Binding{Scope: "suuudokuuu", ScaleSetID: 1, SharedLabels: true, Profile: domain.Profile{ID: "builder", Route: "macos-builder", Platform: domain.PlatformMacOS}}
 			r := restQueueIngester{coordinator: app.DemandCoordinator{Store: store, Now: func() time.Time { return now }}, bindings: []app.Binding{binding}, observer: observer, interval: time.Second, auditInterval: 15 * time.Minute, health: health, observation: "github-rest-scope", now: func() time.Time { return now }}
+			if strings.HasPrefix(scenario, "recover ") {
+				r.recovery = &app.OrphanRecovery{Config: config.OrphanRequeue{Mode: strings.TrimPrefix(scenario, "recover ")}, Store: store, API: deniedOrphanRecovery{}}
+			}
 			var reported bytes.Buffer
 			r.reporter = newFailureReporter(&reported, func() time.Time { return now })
 			if scenario == "diagnostic error" {
@@ -77,13 +85,16 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			if _, err = r.IngestChanged(ctx); err != nil {
 				t.Fatal(err)
 			}
-			want := scenario == "old broker fresh audit" || scenario == "wording"
+			want := scenario == "old broker fresh audit" || scenario == "wording" || strings.HasPrefix(scenario, "recover ")
 			findings := health.Snapshot().UndeliveredJobs
 			if (len(findings) > 0) != want {
 				t.Fatalf("candidate=%v want=%v", findings, want)
 			}
 			if !health.Ingest().OK {
 				t.Fatal("candidate must leave ingest passing")
+			}
+			if scenario == "recover act" && !strings.Contains(strings.Join(findings, " "), "grant Actions: write") {
+				t.Fatal(findings)
 			}
 			if scenario == "wording" {
 				for _, text := range []string{"candidate", "concurrency group", "sibling backlog", "only after confirming the run is not held by a concurrency group"} {
@@ -113,7 +124,7 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 			if _, err = r.IngestChanged(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if got := health.Ingest(); !got.OK || len(got.Reasons) != 0 {
+			if got := health.Ingest(); !got.OK || (!strings.HasPrefix(scenario, "recover ") && len(got.Reasons) != 0) {
 				t.Fatalf("resolved finding persisted: %v", got)
 			}
 		})
@@ -135,4 +146,69 @@ func (s *diagnosticReadErrorStore) ActiveDemands(ctx context.Context, id int64) 
 		return nil, errors.New("diagnosis unavailable")
 	}
 	return s.Store.ActiveDemands(ctx, id)
+}
+
+type deniedOrphanRecovery struct{}
+
+func (deniedOrphanRecovery) RequeueOrphan(context.Context, githubscaleset.WorkflowJob, func(string, []string) bool, bool) (string, error) {
+	return "permission_denied", nil
+}
+
+func TestOrphanRecoveryWiringRequiresDurableActionAdapter(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		t.Run(fmt.Sprint(supported), func(t *testing.T) {
+			path := writeMultiScopeConfig(t)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = bytes.Replace(raw, []byte(`"canonicalJobInventory": true`), []byte(`"canonicalJobInventory": true, "orphanRequeue":{"mode":"observe"}`), 1)
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d := testDependencies(t)
+			d.newScaleSet = func(context.Context, githubscaleset.GitHubAppScaleSetConfig) (scaleSetSource, error) {
+				return &fakeSource{}, nil
+			}
+			d.newRESTObserver = func(githubscaleset.ObserverConfig) (queueObserver, error) {
+				if !supported {
+					return &scriptedQueueObserver{}, nil
+				}
+				return githubscaleset.NewObserver(githubscaleset.ObserverConfig{BaseURL: "https://api.test", Tokens: githubscaleset.TokenSourceFunc(func(context.Context) (string, error) { return "test", nil }), HTTP: runtimeDoerFunc(func(*http.Request) (*http.Response, error) { return runtimeResponse(`{"workflow_runs":[]}`), nil })})
+			}
+			ready := make(chan struct{})
+			var once sync.Once
+			d.inventory = func(runtimeStore, config.Config, app.RecoveryObserver, *updateDrainController) app.Inventory {
+				return notifyingInventory{ready: ready, once: &once}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- runWithDependencies(ctx, options{ConfigPath: path, DatabasePath: filepath.Join(t.TempDir(), "fleet.db"), HealthAddress: "127.0.0.1:0", Mode: reconcile.Authority}, d)
+			}()
+			if !supported {
+				select {
+				case err := <-done:
+					if err == nil || !strings.Contains(err.Error(), "orphan recovery requires") {
+						t.Fatalf("err=%v", err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("unsupported action adapter was accepted")
+				}
+				return
+			}
+			select {
+			case <-ready:
+				cancel()
+			case err := <-done:
+				t.Fatalf("runtime stopped early: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("runtime never became ready")
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }

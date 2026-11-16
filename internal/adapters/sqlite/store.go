@@ -851,6 +851,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 14: %w", err)
 		}
 	}
+	if version < 15 {
+		if _, err := s.txExec(ctx, tx, "migrate.v15.table", `CREATE TABLE IF NOT EXISTS orphan_requeues (scope TEXT NOT NULL, repository TEXT NOT NULL, run_id INTEGER NOT NULL, at INTEGER NOT NULL, outcome TEXT NOT NULL, PRIMARY KEY(repository,run_id,at))`); err != nil {
+			return fmt.Errorf("migration 15: %w", err)
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v15.record", `INSERT INTO schema_migrations(version,applied_at) VALUES(15,?)`, s.instant().UnixNano()); err != nil {
+			return fmt.Errorf("record migration 15: %w", err)
+		}
+	}
 	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
 	// creates and first seeds the table, so it always exists by this point; an
 	// operator deleting the row (incident 2026-07-22, which wedged every tick on

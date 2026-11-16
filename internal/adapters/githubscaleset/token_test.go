@@ -168,3 +168,27 @@ func TestInstallationTokenSourceFailureResponsesAndEarlyRefresh(t *testing.T) {
 		t.Fatalf("early refresh requests = %d", requests)
 	}
 }
+
+func TestInstallationActionsWriteUsesGrantedPermissions(t *testing.T) {
+	key := testPrivateKey(t)
+	defer key.Destroy()
+	for _, permission := range []string{"write", "read", ""} {
+		source, err := NewInstallationTokenSource(InstallationTokenConfig{APIBaseURL: "https://api.test", ClientID: "client", InstallationID: 1, PrivateKey: key, Clock: fixedClock(time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)), HTTP: doerFunc(func(*http.Request) (*http.Response, error) {
+			return response(http.StatusCreated, `{"token":"test","expires_at":"2026-07-17T13:00:00Z","permissions":{"actions":"`+permission+`"}}`, ""), nil
+		})})
+		if err != nil {
+			t.Fatal(err)
+		}
+		write, err := source.ActionsWrite(context.Background())
+		if err != nil || write != (permission == "write") {
+			t.Fatalf("permission=%s write=%v err=%v", permission, write, err)
+		}
+	}
+	source, err := NewInstallationTokenSource(InstallationTokenConfig{APIBaseURL: "https://api.test", ClientID: "client", InstallationID: 1, PrivateKey: NewPrivateKeySecret("invalid")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.ActionsWrite(context.Background()); err == nil {
+		t.Fatal("authentication error ignored")
+	}
+}
