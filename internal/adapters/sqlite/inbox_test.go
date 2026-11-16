@@ -1179,3 +1179,34 @@ func TestDemandInboxLateFinishedEventKeepsRESTCorrelatedRerun(t *testing.T) {
 		t.Fatalf("late finished event erased the REST-correlated rerun: %#v, %v", record, err)
 	}
 }
+
+// When the first attempt finished before REST ever correlated it, REST's
+// exact queue time for the rerun replaces the uncorrelated group's age.
+func TestDemandInboxRerunCorrelatedAfterUncorrelatedAttemptTakesRESTAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	first.QueueTime = time.Unix(50, 0).UTC()
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first, done}); err != nil {
+		t.Fatal(err)
+	}
+	queued := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(9900, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(9950, 0).UTC(), []operations.GitHubJobObservation{queued}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
+		t.Fatalf("rerun kept the uncorrelated attempt's age: %#v, %v", record, err)
+	}
+}

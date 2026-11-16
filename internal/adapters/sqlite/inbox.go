@@ -1015,6 +1015,10 @@ func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetI
 			ON CONFLICT(scale_set_id,logical_key) DO UPDATE SET
 			first_queue_time=CASE
 				WHEN excluded.run_attempt>0 AND demand_groups.run_attempt>0 AND excluded.run_attempt<>demand_groups.run_attempt THEN excluded.first_queue_time
+				-- An uncorrelated group (attempt 0) may hold a finished attempt's
+				-- age; REST's exact creation time for the attempt it now proves
+				-- is never later than that attempt's own delivery (#524).
+				WHEN excluded.run_attempt>0 AND demand_groups.run_attempt=0 AND excluded.first_queue_time>0 THEN excluded.first_queue_time
 				WHEN demand_groups.first_queue_time=0 THEN excluded.first_queue_time
 				WHEN excluded.first_queue_time=0 THEN demand_groups.first_queue_time
 				ELSE MIN(demand_groups.first_queue_time,excluded.first_queue_time) END,
