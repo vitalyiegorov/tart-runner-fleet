@@ -446,7 +446,7 @@ func TestDemandInboxValidationAndEmptySnapshot(t *testing.T) {
 }
 
 func TestDemandInboxInjectedDatabaseFailuresAreAtomic(t *testing.T) {
-	for _, point := range []string{"inbox.begin", "inbox.cursor.generation", "inbox.load", "inbox.demand.load", "inbox.group",
+	for _, point := range []string{"inbox.begin", "inbox.cursor.generation", "inbox.load", "inbox.demand.load", "inbox.group.episode", "inbox.group",
 		"inbox.group.load", "inbox.project", "inbox.record", "inbox.cursor", "inbox.commit"} {
 		t.Run(point, func(t *testing.T) {
 			store := testStore(t)
@@ -989,5 +989,280 @@ func TestDemandRecordValidationLookupAndCorruption(t *testing.T) {
 	record, err := store.DemandRecord(ctx, 1, 1)
 	if err != nil || record.Status != operations.DemandJobAssigned {
 		t.Fatalf("demand record = %#v, %v", record, err)
+	}
+}
+
+// Regression for #524: a re-run attempt's job reuses the run, display name and
+// labels of the attempt GitHub already finished, so it lands in the same demand
+// group. The broker delivers it seconds after the rerun starts, usually before
+// any REST snapshot sees it queued, and it must not inherit the finished
+// attempt's queue time or workflow job id.
+func TestDemandInboxBrokerDeliveryOfRerunStartsFreshQueueAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	first.QueueTime = time.Unix(50, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{done}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != rerun.QueueTime || record.WorkflowJobID != 0 || record.RunAttempt != 0 {
+		t.Fatalf("rerun delivery inherited the finished attempt: %#v, %v", record, err)
+	}
+}
+
+// A rotated request for a job that is still queued keeps the canonical queue
+// age REST already proved, even when the rotation arrives after correlation.
+func TestDemandInboxRotationAfterCorrelationKeepsOriginalAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	rotated := demandEvent(operations.DemandJobAvailable, 11)
+	rotated.JobID = "rotated-uuid"
+	rotated.DisplayName = "build"
+	rotated.QueueTime = time.Unix(900, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{rotated}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != observed.CreatedAt || record.WorkflowJobID != 100 || record.RunAttempt != 1 {
+		t.Fatalf("rotation lost the correlated identity: %#v, %v", record, err)
+	}
+}
+
+// REST can see a job queued before the broker delivers it (#520); the first
+// delivery joins that group and keeps the exact REST queue time and identity.
+func TestDemandInboxFirstDeliveryAfterRESTKeepsExactAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	labels := []string{"self-hosted", "linux"}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	event := demandEvent(operations.DemandJobAvailable, 10)
+	event.DisplayName = "build"
+	event.Labels = labels
+	event.QueueTime = time.Unix(4000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 10)
+	if err != nil || record.FirstQueueTime != observed.CreatedAt || record.WorkflowJobID != 100 || record.RunAttempt != 1 {
+		t.Fatalf("first delivery lost REST identity: %#v, %v", record, err)
+	}
+}
+
+// rerunAfterFinishedAttempt drives request 10 through a REST-correlated,
+// completed first attempt and returns the rerun's first broker delivery.
+func rerunAfterFinishedAttempt(t *testing.T, store *Store) operations.DemandEvent {
+	t.Helper()
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	first.QueueTime = time.Unix(50, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{done}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	return rerun
+}
+
+// A late redelivery for the finished attempt's request must not drag the
+// current episode back to the old queue age.
+func TestDemandInboxLateFinishedRequestKeepsRerunAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	rerun := rerunAfterFinishedAttempt(t, store)
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	late := demandEvent(operations.DemandJobCompleted, 10)
+	late.DisplayName = "build"
+	late.QueueTime = time.Unix(50, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 4, []operations.DemandEvent{late}); err != nil {
+		t.Fatal(err)
+	}
+	started := rerun
+	started.Kind = operations.DemandJobStarted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 5, []operations.DemandEvent{started}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != rerun.QueueTime {
+		t.Fatalf("finished request restored the old episode age: %#v, %v", record, err)
+	}
+}
+
+// REST may correlate the queued rerun before the broker delivers it; that
+// delivery joins the current episode instead of erasing its identity.
+func TestDemandInboxRerunCorrelatedBeforeDeliveryKeepsRESTIdentity(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	rerun := rerunAfterFinishedAttempt(t, store)
+	queued := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: rerun.Labels, Status: "queued", CreatedAt: time.Unix(9900, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Now().Add(time.Hour).UTC(), []operations.GitHubJobObservation{queued}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
+		t.Fatalf("delivery erased the REST-correlated rerun: %#v, %v", record, err)
+	}
+}
+
+// A late event for the finished request between REST correlation and the
+// rerun's delivery must not make the correlated group look stale.
+func TestDemandInboxLateFinishedEventKeepsRESTCorrelatedRerun(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	rerun := rerunAfterFinishedAttempt(t, store)
+	queued := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: rerun.Labels, Status: "queued", CreatedAt: time.Unix(9900, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(9950, 0).UTC(), []operations.GitHubJobObservation{queued}); err != nil {
+		t.Fatal(err)
+	}
+	late := demandEvent(operations.DemandJobCompleted, 10)
+	late.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{late}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyDemandBatch(ctx, 1, 4, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
+		t.Fatalf("late finished event erased the REST-correlated rerun: %#v, %v", record, err)
+	}
+}
+
+// When the first attempt finished before REST ever correlated it, REST's
+// exact queue time for the rerun replaces the uncorrelated group's age.
+func TestDemandInboxRerunCorrelatedAfterUncorrelatedAttemptTakesRESTAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	first.QueueTime = time.Unix(50, 0).UTC()
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first, done}); err != nil {
+		t.Fatal(err)
+	}
+	queued := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(9900, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(9950, 0).UTC(), []operations.GitHubJobObservation{queued}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
+		t.Fatalf("rerun kept the uncorrelated attempt's age: %#v, %v", record, err)
+	}
+}
+
+// REST revives an expired ghost only for the attempt it belonged to: an
+// expired request from an earlier attempt must not take a rerun's identity
+// and become a live peer that blocks the next episode.
+func TestDemandInboxRESTDoesNotReviveEarlierAttemptGhost(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE runner_demands SET expired_at=70 WHERE scale_set_id=1 AND runner_request_id=10`); err != nil {
+		t.Fatal(err)
+	}
+	rerun := observed
+	rerun.WorkflowJobID, rerun.RunAttempt, rerun.CreatedAt = 200, 2, time.Unix(9900, 0).UTC()
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(9950, 0).UTC(), []operations.GitHubJobObservation{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	var attempt, expiredAt int64
+	if err := store.db.QueryRow(`SELECT run_attempt,expired_at FROM runner_demands WHERE scale_set_id=1 AND runner_request_id=10`).Scan(&attempt, &expiredAt); err != nil || attempt != 1 || expiredAt != 70 {
+		t.Fatalf("earlier-attempt ghost revived as the rerun: attempt=%d expired_at=%d %v", attempt, expiredAt, err)
+	}
+}
+
+// The same-attempt ghost is still revived when REST sees its job queued.
+func TestDemandInboxRESTRevivesSameAttemptGhost(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE runner_demands SET expired_at=70 WHERE scale_set_id=1 AND runner_request_id=10`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(80, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	var expiredAt int64
+	if err := store.db.QueryRow(`SELECT expired_at FROM runner_demands WHERE scale_set_id=1 AND runner_request_id=10`).Scan(&expiredAt); err != nil || expiredAt != 0 {
+		t.Fatalf("same-attempt ghost not revived: expired_at=%d %v", expiredAt, err)
 	}
 }
