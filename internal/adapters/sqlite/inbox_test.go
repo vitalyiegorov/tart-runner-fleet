@@ -1080,3 +1080,77 @@ func TestDemandInboxFirstDeliveryAfterRESTKeepsExactAge(t *testing.T) {
 		t.Fatalf("first delivery lost REST identity: %#v, %v", record, err)
 	}
 }
+
+// rerunAfterFinishedAttempt drives request 10 through a REST-correlated,
+// completed first attempt and returns the rerun's first broker delivery.
+func rerunAfterFinishedAttempt(t *testing.T, store *Store) operations.DemandEvent {
+	t.Helper()
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	first.QueueTime = time.Unix(50, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{done}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	return rerun
+}
+
+// A late redelivery for the finished attempt's request must not drag the
+// current episode back to the old queue age.
+func TestDemandInboxLateFinishedRequestKeepsRerunAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	rerun := rerunAfterFinishedAttempt(t, store)
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	late := demandEvent(operations.DemandJobCompleted, 10)
+	late.DisplayName = "build"
+	late.QueueTime = time.Unix(50, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 4, []operations.DemandEvent{late}); err != nil {
+		t.Fatal(err)
+	}
+	started := rerun
+	started.Kind = operations.DemandJobStarted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 5, []operations.DemandEvent{started}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != rerun.QueueTime {
+		t.Fatalf("finished request restored the old episode age: %#v, %v", record, err)
+	}
+}
+
+// REST may correlate the queued rerun before the broker delivers it; that
+// delivery joins the current episode instead of erasing its identity.
+func TestDemandInboxRerunCorrelatedBeforeDeliveryKeepsRESTIdentity(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	rerun := rerunAfterFinishedAttempt(t, store)
+	queued := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: rerun.Labels, Status: "queued", CreatedAt: time.Unix(9900, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Now().Add(time.Hour).UTC(), []operations.GitHubJobObservation{queued}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != queued.CreatedAt || record.WorkflowJobID != 200 || record.RunAttempt != 2 {
+		t.Fatalf("delivery erased the REST-correlated rerun: %#v, %v", record, err)
+	}
+}

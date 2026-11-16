@@ -157,22 +157,26 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		// A deterministic synthetic-ID collision must never merge two jobs.
 		return &operations.DemandConflict{Check: operations.ConflictDemandJobIdentity, MessageType: event.Kind, RequestID: event.RunnerRequestID, JobID: event.JobID, Runner: event.RunnerName, Instance: event.RunnerName}
 	}
-	previousKey := record.LogicalKey
+	previousKey, previousRank := record.LogicalKey, demandRank(record.Status)
 	mergeDemandEvent(&record, event, now)
 	record.LogicalKey = demandLogicalKey(record.Owner, record.Repository, record.WorkflowRunID, record.DisplayName, record.WorkflowRef, record.Labels, record.JobID)
-	if record.LogicalKey != "" {
+	// A late event for a request that already finished belongs to a closed
+	// episode: it keeps its own row and never touches the group's age (#524).
+	finished := previousKey != "" && previousKey == record.LogicalKey && previousRank >= demandRank(operations.DemandJobCompleted)
+	if record.LogicalKey != "" && !finished {
 		queue := toNanos(record.QueueTime)
 		if record.LogicalKey != previousKey {
 			// A request joining a group whose earlier members all finished is a
 			// new episode (a rerun attempt reuses run, name and labels): it must
 			// not inherit the finished attempt's queue age or workflow job (#524).
 			// A rotated request for a still-queued job finds its predecessor
-			// live, and a job REST saw before the broker has no member yet; both
-			// keep the canonical identity.
+			// live, a job REST saw before the broker has no member yet, and a
+			// rerun REST correlated after the old attempt finished is newer than
+			// every finished member; all keep the canonical identity.
 			if _, err := s.txExec(ctx, tx, "inbox.group.episode", `UPDATE demand_groups SET first_queue_time=?,workflow_job_id=0,run_attempt=0,updated_at=?
 				WHERE scale_set_id=? AND logical_key=?
 				AND EXISTS(SELECT 1 FROM runner_demands d WHERE d.scale_set_id=demand_groups.scale_set_id AND d.logical_key=demand_groups.logical_key
-					AND d.runner_request_id<>? AND (d.status_rank>=? OR d.expired_at<>0))
+					AND d.runner_request_id<>? AND (d.status_rank>=? OR d.expired_at<>0) AND d.updated_at>=demand_groups.updated_at)
 				AND NOT EXISTS(SELECT 1 FROM runner_demands d WHERE d.scale_set_id=demand_groups.scale_set_id AND d.logical_key=demand_groups.logical_key
 					AND d.runner_request_id<>? AND d.status_rank<? AND d.expired_at=0)`,
 				queue, now.UnixNano(), scaleSetID, record.LogicalKey, record.RunnerRequestID, demandRank(operations.DemandJobCompleted),
@@ -1020,14 +1024,15 @@ func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetI
 		}
 		// Seeing the job queued is positive REST evidence: it records the join
 		// that makes a later absence meaningful and revokes any absence or
-		// expiry a previous snapshot concluded.
+		// expiry a previous snapshot concluded. A request the broker already
+		// completed belongs to a finished episode and keeps its identity (#524).
 		if _, err := s.txExec(ctx, tx, "githubjobs.project", `UPDATE runner_demands SET
 			first_queue_time=(SELECT first_queue_time FROM demand_groups WHERE scale_set_id=? AND logical_key=?),
 			workflow_job_id=(SELECT workflow_job_id FROM demand_groups WHERE scale_set_id=? AND logical_key=?),
 			run_attempt=(SELECT run_attempt FROM demand_groups WHERE scale_set_id=? AND logical_key=?),updated_at=?,
 			corroborated_at=?,absent_since=0,absent_observations=0,expired_at=0
-			WHERE scale_set_id=? AND logical_key=?`, scaleSetID, key, scaleSetID, key, scaleSetID, key,
-			observedAt.UTC().UnixNano(), observedAt.UTC().UnixNano(), scaleSetID, key); err != nil {
+			WHERE scale_set_id=? AND logical_key=? AND status_rank<?`, scaleSetID, key, scaleSetID, key, scaleSetID, key,
+			observedAt.UTC().UnixNano(), observedAt.UTC().UnixNano(), scaleSetID, key, demandRank(operations.DemandJobCompleted)); err != nil {
 			return false, fmt.Errorf("project GitHub job correlation: %w", err)
 		}
 	}
