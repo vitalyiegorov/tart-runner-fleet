@@ -2763,7 +2763,9 @@ records why prevention remains deferred and what evidence is still needed.
 
 ### Automatic orphaned-run recovery (#520, ADR 0099)
 
-The default is off. On the authority node, configure `github.orphanRequeue`:
+The default is off and publishes no inactive recovery finding. Configured
+observe/act recovery that cannot execute in this daemon reports that it is
+inactive. On the authority node, configure `github.orphanRequeue`:
 
 ```json
 {
@@ -2830,7 +2832,9 @@ Recovery continuation (#520): after GitHub accepts cancellation, polling and
 rerun use a cancellation-independent context bounded to one minute. Every
 unresolved cancellation, including an uncertain cancel response, records
 cancelled_not_rerun; only cancelled_not_rerun resumes automatically after
-cooldown, independently of inventory and across restart. Every resume commits
+cooldown, independently of inventory and across restart. Permission-denied
+resumes retain the unfinished reservation while pausing the scope for one hour,
+then remain resumable even if exclusions have since changed. Every resume commits
 a fresh hourly charge first; prior charges remain durable, while the unfinished
 lifetime reservation transfers to the new row. Stale reserved rows require the
 doctor remedy because the daemon cannot prove it sent cancel.

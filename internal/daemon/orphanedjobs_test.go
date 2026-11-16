@@ -25,7 +25,7 @@ import (
 )
 
 func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
-	for _, scenario := range []string{"old broker fresh audit", "sibling backlog", "diagnostic error", "wording", "recover observe", "recover act", "recover rate limit", "recover stale audit"} {
+	for _, scenario := range []string{"old broker fresh audit", "sibling backlog", "diagnostic error", "wording", "recover observe", "recover act", "recover rate limit", "recover stale audit", "inactive unset", "inactive off", "inactive observe", "inactive act"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
@@ -94,6 +94,13 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 				}
 				r.recovery = &app.OrphanRecovery{Config: config.OrphanRequeue{Mode: mode}, Store: store, API: api}
 			}
+			if strings.HasPrefix(scenario, "inactive ") {
+				r.orphanMode = strings.TrimPrefix(scenario, "inactive ")
+				if r.orphanMode == "unset" {
+					r.orphanMode = ""
+				}
+				queued = false
+			}
 			var reported bytes.Buffer
 			r.reporter = newFailureReporter(&reported, func() time.Time { return now })
 			if scenario == "diagnostic error" {
@@ -104,7 +111,16 @@ func TestIssue520RESTIngestPublishesDoctorFindingWithoutDemand(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := scenario == "old broker fresh audit" || scenario == "wording" || strings.HasPrefix(scenario, "recover ")
+			if scenario == "inactive observe" || scenario == "inactive act" {
+				want = true
+			}
 			findings := health.Snapshot().UndeliveredJobs
+			if strings.HasPrefix(scenario, "inactive ") {
+				if (len(findings) > 0) != want {
+					t.Fatalf("inactive mode %q findings=%v want=%v", r.orphanMode, findings, want)
+				}
+				return
+			}
 			if (len(findings) > 0) != want {
 				t.Fatalf("candidate=%v want=%v", findings, want)
 			}

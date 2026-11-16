@@ -47,6 +47,16 @@ func (s *requeueMemory) ClaimOrphanRequeue(_ context.Context, r operations.Orpha
 	return true, nil
 }
 func (s *requeueMemory) FinishOrphanRequeue(_ context.Context, r operations.OrphanRequeue) error {
+	if !r.RetryAt.IsZero() {
+		if r.Outcome == "permission_denied" {
+			for i, old := range s.records {
+				if old.Repository == r.Repository && old.RunID == r.RunID && old.At.Equal(r.At) {
+					s.records[i].Outcome = "cancelled_not_rerun"
+				}
+			}
+		}
+		r.At = r.RetryAt
+	}
 	s.records[len(s.records)-1] = r
 	return nil
 }
@@ -352,7 +362,11 @@ func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
 			if (err != nil) != (scenario == "api error" || scenario == "finish error") {
 				t.Fatal(err)
 			}
-			if (scenario == "api error" || scenario == "permission") && memory.records[len(memory.records)-1].Outcome != "cancelled_not_rerun" {
+			want := "cancelled_not_rerun"
+			if scenario == "permission" {
+				want = "permission_denied"
+			}
+			if (scenario == "api error" || scenario == "permission") && memory.records[len(memory.records)-1].Outcome != want {
 				t.Fatal(memory.records)
 			}
 		})

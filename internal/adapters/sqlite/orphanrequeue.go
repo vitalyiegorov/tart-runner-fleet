@@ -44,7 +44,17 @@ func (s *Store) ClaimOrphanRequeue(ctx context.Context, r operations.OrphanReque
 	return n == 1, err
 }
 func (s *Store) FinishOrphanRequeue(ctx context.Context, r operations.OrphanRequeue) error {
-	_, err := s.dbExec(ctx, "orphan.finish", `UPDATE orphan_requeues SET outcome=?,at=? WHERE repository=? AND run_id=? AND at=?`, r.Outcome, max(r.At.UnixNano(), r.RetryAt.UnixNano()), r.Repository, r.RunID, r.At.UnixNano())
+	at := r.At
+	if !r.RetryAt.IsZero() {
+		at = r.RetryAt
+	}
+	// A denied resume keeps its hourly charge and scope pause, but restores
+	// the original unfinished reservation so it can resume after that pause.
+	restore := !r.RetryAt.IsZero() && r.Outcome == "permission_denied"
+	_, err := s.dbExec(ctx, "orphan.finish", `UPDATE orphan_requeues
+ SET outcome=CASE WHEN at=? THEN ? ELSE 'cancelled_not_rerun' END
+ WHERE repository=? AND run_id=? AND (at=? OR (? AND at=? AND outcome='noop'))`,
+		at.UnixNano(), r.Outcome, r.Repository, r.RunID, at.UnixNano(), restore, r.At.UnixNano())
 	return err
 }
 

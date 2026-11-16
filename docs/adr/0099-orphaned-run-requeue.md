@@ -15,7 +15,9 @@ standing offer: #297 showed busy-node assignment can strand work for 11 hours.
 `github.orphanRequeue.mode` is `off` by default. `observe` performs fresh REST
 safety checks and reports the intended action without mutation. `act` runs only
 in daemon authority mode, additionally requiring the installation token's granted
-`actions: write` permission. Shadow, canary and daemon observe gain no authority.
+`actions: write` permission. Shadow, canary and daemon observe gain no authority. Only configured observe/act
+recovery that cannot execute in this daemon publishes an inactive finding; unset
+and off remain silent.
 
 Candidates must be queued for max(queue SLO, configured threshold), default
 15 minutes. Every matching local and sibling scale set must have fresh audited
@@ -50,7 +52,12 @@ post-cancel failure or uncertain cancel response becomes cancelled_not_rerun.
 Only cancelled_not_rerun records resume automatically, independently of queued
 inventory after cooldown and across restart. Each resume must first commit a
 fresh hourly admission; the previous row becomes noop while the new row carries
-the unfinished lifetime reservation. All hourly charges remain durable. Stale
+the unfinished lifetime reservation. A permission-denied resume records
+permission_denied at its admission time and atomically restores the original
+cancelled_not_rerun reservation. The scope pauses for one hour; after that pause
+the cancelled run remains resumable without queued inventory, even if exclusions
+have since changed. A denied attempt never counts as a rerun. All hourly charges
+remain durable. Stale
 reserved rows require the doctor remedy: the daemon cannot prove it sent cancel.
 Only the original completed/cancelled attempt can be rerun; a newer attempt counts
 as recovered without mutation. A still-active original attempt or a deleted run

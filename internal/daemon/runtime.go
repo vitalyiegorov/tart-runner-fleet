@@ -1876,7 +1876,7 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 				r.reporter.logger.Warn("unassigned job diagnosis unavailable", "observation", r.observation)
 			}
 		}
-		if r.recovery == nil && r.orphanMode != "" {
+		if r.recovery == nil && (r.orphanMode == "observe" || r.orphanMode == "act") {
 			findings = append(findings, "orphan requeue mode="+r.orphanMode+" (inactive in this daemon)")
 		}
 		if diagnosisErr == nil && r.recovery != nil {

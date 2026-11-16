@@ -66,13 +66,11 @@ func (r OrphanRecovery) Reconcile(ctx context.Context, c DemandCoordinator, bind
 			if !claimed {
 				continue
 			}
-			record.At = record.RetryAt
 			outcome, actionErr := r.API.RequeueOrphan(ctx, githubscaleset.WorkflowJob{ResumeOrphan: true, RunID: record.RunID, RunAttempt: record.RunAttempt, Repository: githubscaleset.Repository{Owner: parts[0], Name: parts[1]}}, func(string, []string) bool { return false }, true)
-			if outcome != "rerun" && outcome != "noop" {
+			if outcome != "rerun" && outcome != "noop" && outcome != "permission_denied" {
 				outcome = "cancelled_not_rerun"
 			}
 			record.Outcome = outcome
-			record.RetryAt = c.now()
 			finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 			finishErr := r.Store.FinishOrphanRequeue(finishCtx, record)
 			cancel()

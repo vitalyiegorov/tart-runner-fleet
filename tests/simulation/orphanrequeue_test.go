@@ -12,11 +12,15 @@ import (
 )
 
 type orphanBrokerRecovery struct {
-	world *world
-	calls int
+	world  *world
+	calls  int
+	denied bool
 }
 
 func (b *orphanBrokerRecovery) RequeueOrphan(_ context.Context, _ githubscaleset.WorkflowJob, excluded func(string, []string) bool, act bool) (string, error) {
+	if b.denied {
+		return "permission_denied", nil
+	}
 	if excluded("build", []string{"large"}) {
 		return "held", nil
 	}
@@ -109,5 +113,70 @@ func TestOrphanCancelledReservationReoffersWithoutInventory(t *testing.T) {
 	}
 	if broker.calls != 1 || len(w.jobs) != 1 {
 		t.Fatalf("calls=%d jobs=%d", broker.calls, len(w.jobs))
+	}
+}
+
+func TestOrphanDeniedResumePausesScopeThenReoffersWithoutInventory(t *testing.T) {
+	cfg := gatedWorld()
+	w := newWorld(t, cfg, simTrace{Seed: 5202, Ticks: 1, Config: cfg.Name})
+	defer w.close()
+	var binding app.Binding
+	for _, b := range cfg.Bindings {
+		if b.Profile.ID == "large" {
+			binding = b
+		}
+	}
+	r := operations.OrphanRequeue{Scope: binding.Scope, Repository: "a/repo", RunID: 521, RunAttempt: 1, At: w.now.Add(-time.Hour), Outcome: "cancelled_not_rerun"}
+	ok, err := w.store.ClaimOrphanRequeue(w.ctx, r, 30*time.Minute, 3)
+	if err != nil || !ok {
+		t.Fatalf("claim=%v %v", ok, err)
+	}
+	if err := w.store.FinishOrphanRequeue(w.ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	broker := &orphanBrokerRecovery{world: w, denied: true}
+	recovery := app.OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: w.store, API: broker}
+	if _, err := recovery.Reconcile(w.ctx, app.DemandCoordinator{Now: func() time.Time { return w.now }}, []app.Binding{binding}, nil, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := w.store.RecentOrphanRequeues(w.ctx, binding.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied, unfinished := false, false
+	for _, row := range rows {
+		denied = denied || row.Outcome == "permission_denied"
+		unfinished = unfinished || row.Outcome == "cancelled_not_rerun"
+		if row.Outcome == "rerun" {
+			t.Fatal("denied resume counted as rerun")
+		}
+	}
+	if !denied || !unfinished {
+		t.Fatalf("denied=%v unfinished=%v history=%v", denied, unfinished, rows)
+	}
+	// A new coordinator/recovery reads only durable state, as after restart.
+	broker.denied = false
+	recovery = app.OrphanRecovery{Config: config.OrphanRequeue{Mode: "act", Exclusions: []config.OrphanExclusion{{Workflow: "*"}}}, Store: w.store, API: broker}
+	for _, elapsed := range []time.Duration{30 * time.Minute, time.Hour - time.Nanosecond, time.Hour} {
+		now := w.now.Add(elapsed)
+		coordinator := app.DemandCoordinator{Now: func() time.Time { return now }}
+		if _, err := recovery.Reconcile(w.ctx, coordinator, []app.Binding{binding}, nil, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if elapsed == time.Hour {
+			want = 1
+		}
+		if broker.calls != want || len(w.jobs) != want {
+			t.Fatalf("at %s calls=%d jobs=%d want=%d", elapsed, broker.calls, len(w.jobs), want)
+		}
+		// Fresh candidate claims in the same scope must also respect the pause.
+		other := operations.OrphanRequeue{Scope: binding.Scope, Repository: "a/repo", RunID: 999, At: now}
+		if elapsed < time.Hour {
+			if ok, err := w.store.ClaimOrphanRequeue(w.ctx, other, time.Minute, 3); err != nil || ok {
+				t.Fatalf("scope not paused: %v %v", ok, err)
+			}
+		}
 	}
 }
