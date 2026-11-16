@@ -157,10 +157,29 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		// A deterministic synthetic-ID collision must never merge two jobs.
 		return &operations.DemandConflict{Check: operations.ConflictDemandJobIdentity, MessageType: event.Kind, RequestID: event.RunnerRequestID, JobID: event.JobID, Runner: event.RunnerName, Instance: event.RunnerName}
 	}
+	previousKey := record.LogicalKey
 	mergeDemandEvent(&record, event, now)
 	record.LogicalKey = demandLogicalKey(record.Owner, record.Repository, record.WorkflowRunID, record.DisplayName, record.WorkflowRef, record.Labels, record.JobID)
 	if record.LogicalKey != "" {
 		queue := toNanos(record.QueueTime)
+		if record.LogicalKey != previousKey {
+			// A request joining a group whose earlier members all finished is a
+			// new episode (a rerun attempt reuses run, name and labels): it must
+			// not inherit the finished attempt's queue age or workflow job (#524).
+			// A rotated request for a still-queued job finds its predecessor
+			// live, and a job REST saw before the broker has no member yet; both
+			// keep the canonical identity.
+			if _, err := s.txExec(ctx, tx, "inbox.group.episode", `UPDATE demand_groups SET first_queue_time=?,workflow_job_id=0,run_attempt=0,updated_at=?
+				WHERE scale_set_id=? AND logical_key=?
+				AND EXISTS(SELECT 1 FROM runner_demands d WHERE d.scale_set_id=demand_groups.scale_set_id AND d.logical_key=demand_groups.logical_key
+					AND d.runner_request_id<>? AND (d.status_rank>=? OR d.expired_at<>0))
+				AND NOT EXISTS(SELECT 1 FROM runner_demands d WHERE d.scale_set_id=demand_groups.scale_set_id AND d.logical_key=demand_groups.logical_key
+					AND d.runner_request_id<>? AND d.status_rank<? AND d.expired_at=0)`,
+				queue, now.UnixNano(), scaleSetID, record.LogicalKey, record.RunnerRequestID, demandRank(operations.DemandJobCompleted),
+				record.RunnerRequestID, demandRank(operations.DemandJobCompleted)); err != nil {
+				return fmt.Errorf("reset demand group episode: %w", err)
+			}
+		}
 		if _, err := s.txExec(ctx, tx, "inbox.group", `INSERT INTO demand_groups(scale_set_id,logical_key,first_queue_time,workflow_job_id,run_attempt,updated_at)
 			VALUES(?,?,?,0,0,?) ON CONFLICT(scale_set_id,logical_key) DO UPDATE SET
 			first_queue_time=CASE WHEN demand_groups.run_attempt>0 THEN demand_groups.first_queue_time WHEN demand_groups.first_queue_time=0 THEN excluded.first_queue_time WHEN excluded.first_queue_time=0 THEN demand_groups.first_queue_time ELSE MIN(demand_groups.first_queue_time,excluded.first_queue_time) END,

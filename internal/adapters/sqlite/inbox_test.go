@@ -991,3 +991,92 @@ func TestDemandRecordValidationLookupAndCorruption(t *testing.T) {
 		t.Fatalf("demand record = %#v, %v", record, err)
 	}
 }
+
+// Regression for #524: a re-run attempt's job reuses the run, display name and
+// labels of the attempt GitHub already finished, so it lands in the same demand
+// group. The broker delivers it seconds after the rerun starts, usually before
+// any REST snapshot sees it queued, and it must not inherit the finished
+// attempt's queue time or workflow job id.
+func TestDemandInboxBrokerDeliveryOfRerunStartsFreshQueueAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	first.QueueTime = time.Unix(50, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{done}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != rerun.QueueTime || record.WorkflowJobID != 0 || record.RunAttempt != 0 {
+		t.Fatalf("rerun delivery inherited the finished attempt: %#v, %v", record, err)
+	}
+}
+
+// A rotated request for a job that is still queued keeps the canonical queue
+// age REST already proved, even when the rotation arrives after correlation.
+func TestDemandInboxRotationAfterCorrelationKeepsOriginalAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	rotated := demandEvent(operations.DemandJobAvailable, 11)
+	rotated.JobID = "rotated-uuid"
+	rotated.DisplayName = "build"
+	rotated.QueueTime = time.Unix(900, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{rotated}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil || record.FirstQueueTime != observed.CreatedAt || record.WorkflowJobID != 100 || record.RunAttempt != 1 {
+		t.Fatalf("rotation lost the correlated identity: %#v, %v", record, err)
+	}
+}
+
+// REST can see a job queued before the broker delivers it (#520); the first
+// delivery joins that group and keeps the exact REST queue time and identity.
+func TestDemandInboxFirstDeliveryAfterRESTKeepsExactAge(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	labels := []string{"self-hosted", "linux"}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	event := demandEvent(operations.DemandJobAvailable, 10)
+	event.DisplayName = "build"
+	event.Labels = labels
+	event.QueueTime = time.Unix(4000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{event}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.DemandRecord(ctx, 1, 10)
+	if err != nil || record.FirstQueueTime != observed.CreatedAt || record.WorkflowJobID != 100 || record.RunAttempt != 1 {
+		t.Fatalf("first delivery lost REST identity: %#v, %v", record, err)
+	}
+}
