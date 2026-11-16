@@ -1029,14 +1029,17 @@ func (s *Store) reconcileGitHubJobsTx(ctx context.Context, tx *sql.Tx, scaleSetI
 		// Seeing the job queued is positive REST evidence: it records the join
 		// that makes a later absence meaningful and revokes any absence or
 		// expiry a previous snapshot concluded. A request the broker already
-		// completed belongs to a finished episode and keeps its identity (#524).
+		// completed belongs to a finished episode and keeps its identity, and
+		// an expired ghost is revived only for the attempt it belonged to (or
+		// when either attempt is unknown), never as another attempt (#524).
 		if _, err := s.txExec(ctx, tx, "githubjobs.project", `UPDATE runner_demands SET
 			first_queue_time=(SELECT first_queue_time FROM demand_groups WHERE scale_set_id=? AND logical_key=?),
 			workflow_job_id=(SELECT workflow_job_id FROM demand_groups WHERE scale_set_id=? AND logical_key=?),
 			run_attempt=(SELECT run_attempt FROM demand_groups WHERE scale_set_id=? AND logical_key=?),updated_at=?,
 			corroborated_at=?,absent_since=0,absent_observations=0,expired_at=0
-			WHERE scale_set_id=? AND logical_key=? AND status_rank<?`, scaleSetID, key, scaleSetID, key, scaleSetID, key,
-			observedAt.UTC().UnixNano(), observedAt.UTC().UnixNano(), scaleSetID, key, demandRank(operations.DemandJobCompleted)); err != nil {
+			WHERE scale_set_id=? AND logical_key=? AND status_rank<? AND (expired_at=0 OR run_attempt=0 OR ? IN (0,run_attempt))`,
+			scaleSetID, key, scaleSetID, key, scaleSetID, key, observedAt.UTC().UnixNano(), observedAt.UTC().UnixNano(),
+			scaleSetID, key, demandRank(operations.DemandJobCompleted), attempt); err != nil {
 			return false, fmt.Errorf("project GitHub job correlation: %w", err)
 		}
 	}

@@ -1210,3 +1210,59 @@ func TestDemandInboxRerunCorrelatedAfterUncorrelatedAttemptTakesRESTAge(t *testi
 		t.Fatalf("rerun kept the uncorrelated attempt's age: %#v, %v", record, err)
 	}
 }
+
+// REST revives an expired ghost only for the attempt it belonged to: an
+// expired request from an earlier attempt must not take a rerun's identity
+// and become a live peer that blocks the next episode.
+func TestDemandInboxRESTDoesNotReviveEarlierAttemptGhost(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE runner_demands SET expired_at=70 WHERE scale_set_id=1 AND runner_request_id=10`); err != nil {
+		t.Fatal(err)
+	}
+	rerun := observed
+	rerun.WorkflowJobID, rerun.RunAttempt, rerun.CreatedAt = 200, 2, time.Unix(9900, 0).UTC()
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(9950, 0).UTC(), []operations.GitHubJobObservation{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	var attempt, expiredAt int64
+	if err := store.db.QueryRow(`SELECT run_attempt,expired_at FROM runner_demands WHERE scale_set_id=1 AND runner_request_id=10`).Scan(&attempt, &expiredAt); err != nil || attempt != 1 || expiredAt != 70 {
+		t.Fatalf("earlier-attempt ghost revived as the rerun: attempt=%d expired_at=%d %v", attempt, expiredAt, err)
+	}
+}
+
+// The same-attempt ghost is still revived when REST sees its job queued.
+func TestDemandInboxRESTRevivesSameAttemptGhost(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	observed := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE runner_demands SET expired_at=70 WHERE scale_set_id=1 AND runner_request_id=10`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(80, 0).UTC(), []operations.GitHubJobObservation{observed}); err != nil {
+		t.Fatal(err)
+	}
+	var expiredAt int64
+	if err := store.db.QueryRow(`SELECT expired_at FROM runner_demands WHERE scale_set_id=1 AND runner_request_id=10`).Scan(&expiredAt); err != nil || expiredAt != 0 {
+		t.Fatalf("same-attempt ghost not revived: expired_at=%d %v", expiredAt, err)
+	}
+}
