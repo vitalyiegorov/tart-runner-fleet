@@ -38,9 +38,10 @@ type InstallationTokenSource struct {
 	clock          Clock
 	timeout        time.Duration
 
-	mu      sync.Mutex
-	token   string
-	expires time.Time
+	mu           sync.Mutex
+	token        string
+	expires      time.Time
+	actionsWrite bool
 }
 
 func NewInstallationTokenSource(config InstallationTokenConfig) (*InstallationTokenSource, error) {
@@ -103,8 +104,9 @@ func (s *InstallationTokenSource) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("request installation token: GitHub status %d", resp.StatusCode)
 	}
 	var payload struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
+		Token       string            `json:"token"`
+		ExpiresAt   time.Time         `json:"expires_at"`
+		Permissions map[string]string `json:"permissions"`
 	}
 	decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload)
 	closeErr := resp.Body.Close()
@@ -118,6 +120,7 @@ func (s *InstallationTokenSource) Token(ctx context.Context) (string, error) {
 		return "", errors.New("invalid installation token response")
 	}
 	s.token, s.expires = payload.Token, payload.ExpiresAt.UTC()
+	s.actionsWrite = payload.Permissions["actions"] == "write"
 	return s.token, nil
 }
 
@@ -130,4 +133,15 @@ func APIBaseURL(configURL string) (string, error) {
 		return "https://api.github.com", nil
 	}
 	return parsed.Scheme + "://" + parsed.Host + "/api/v3", nil
+}
+
+// ActionsWrite refreshes credentials before checking the permissions GitHub
+// actually granted, rather than trusting configuration or App settings.
+func (s *InstallationTokenSource) ActionsWrite(ctx context.Context) (bool, error) {
+	if _, err := s.Token(ctx); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.actionsWrite, nil
 }

@@ -951,7 +951,20 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 				if err != nil {
 					return err
 				}
-				ingesters = append(ingesters, &restQueueIngester{coordinator: coordinator, bindings: scopeBindings,
+				var recovery *app.OrphanRecovery
+				if opts.Mode == reconcile.Authority && cfg.GitHub.OrphanRequeue.Mode != "" && cfg.GitHub.OrphanRequeue.Mode != "off" {
+					ledger, ledgerOK := store.(app.OrphanRequeueStore)
+					api, apiOK := observer.(app.OrphanRequeueAPI)
+					if !ledgerOK || !apiOK {
+						return errors.New("orphan recovery requires durable store and REST action adapter")
+					}
+					recovery = &app.OrphanRecovery{Config: cfg.GitHub.OrphanRequeue, Store: ledger, API: api}
+				}
+				orphanMode := cfg.GitHub.OrphanRequeue.Mode
+				if orphanMode == "" {
+					orphanMode = "off"
+				}
+				ingesters = append(ingesters, &restQueueIngester{orphanMode: orphanMode, recovery: recovery, coordinator: coordinator, bindings: scopeBindings,
 					observer: observer, interval: max(30*time.Second, cfg.PollInterval), health: health,
 					auditInterval: cfg.GitHub.ParkedScaleSetAuditInterval(),
 					observation:   telemetry.RESTInventoryObservationPrefix + scope, now: d.now, reporter: reporter})
@@ -1754,6 +1767,8 @@ func scaleSetMetrics(result scalesetaudit.Result, parkedOnly bool) []telemetry.P
 }
 
 type restQueueIngester struct {
+	orphanMode    string
+	recovery      *app.OrphanRecovery
 	auditInterval time.Duration
 	coordinator   app.DemandCoordinator
 	bindings      []app.Binding
@@ -1861,6 +1876,26 @@ func (r *restQueueIngester) IngestChanged(ctx context.Context) (bool, error) {
 				r.reporter.logger.Warn("unassigned job diagnosis unavailable", "observation", r.observation)
 			}
 		}
+		if r.recovery == nil && (r.orphanMode == "observe" || r.orphanMode == "act") {
+			findings = append(findings, "orphan requeue mode="+r.orphanMode+" (inactive in this daemon)")
+		}
+		if diagnosisErr == nil && r.recovery != nil {
+			coordinator.AuditedAssignments = r.auditedAssignments(r.now())
+			r.recovery.AuditMaxAge = 2 * r.interval
+			recoveryFindings, recoveryErr := r.recovery.Reconcile(ctx, coordinator, r.bindings, observation.Snapshot, r.health.Snapshot().QueueSLO)
+			findings = append(findings, recoveryFindings...)
+			if r.reporter != nil && len(recoveryFindings) > 0 && r.reporter.admit("orphan-requeue\x00"+r.observation) {
+				for _, finding := range recoveryFindings {
+					r.reporter.logger.Info("orphan recovery", "finding", finding)
+				}
+			}
+			if recoveryErr != nil {
+				if next := r.now().Add(r.pace(r.now(), githubscaleset.Observation{Err: recoveryErr})); next.After(r.next) {
+					r.next = next
+				}
+				findings = append(findings, "orphan requeue unavailable; inspect recovery history before retrying")
+			}
+		}
 		r.health.SetUndeliveredJobs(r.observation, findings)
 	}
 	// Classified before recording, so the observation detail and the loop
@@ -1943,7 +1978,7 @@ func (r *restQueueIngester) auditedAssignments(now time.Time) []app.ScaleSetAssi
 	}
 	var rows []app.ScaleSetAssignment
 	for _, row := range snapshot.AuditedScaleSets {
-		rows = append(rows, app.ScaleSetAssignment{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name, Labels: row.Labels, Assigned: row.Assigned, Fresh: fresh(row.ObservedAt)})
+		rows = append(rows, app.ScaleSetAssignment{Scope: row.Scope, ID: int64(row.ScaleSetID), Name: row.Name, Labels: row.Labels, Assigned: row.Assigned, ObservedAt: row.ObservedAt, Fresh: fresh(row.ObservedAt)})
 	}
 	return rows
 }

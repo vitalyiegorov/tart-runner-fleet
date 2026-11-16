@@ -499,6 +499,7 @@ type GitHubScope struct {
 }
 
 type GitHub struct {
+	OrphanRequeue OrphanRequeue `json:"orphanRequeue,omitzero"`
 	// Legacy single-scope fields remain decodable for observe-mode and rolling
 	// migration. Authority mode rejects mixing them with the scoped model.
 	ConfigURL       string     `json:"configUrl"`
@@ -1298,6 +1299,9 @@ func cloneBudget(seconds *int) *int {
 func (c Config) ExecutesLinux() bool { return len(c.Linux.Profiles) > 0 }
 
 func (c Config) Validate() error {
+	if err := c.GitHub.validateOrphanRequeue(); err != nil {
+		return err
+	}
 	if c.PollInterval <= 0 || c.ReservationAge <= 0 {
 		return errors.New("intervals must be positive")
 	}

@@ -5,6 +5,9 @@
 Accepted, issue #520. Amends ADR 0084's accepted all-gated trade-off and
 ADR 0056's ingest diagnosis. ADR 0034's node boundary remains intact.
 
+ADR 0099 subsequently adds opt-in automatic recovery using this exact candidate
+predicate. The operator-only decision below remains the default (`mode: off`).
+
 ## Evidence and limits
 
 Three incidents on 2026-11-15 had old queued REST jobs, assigned=0 on all

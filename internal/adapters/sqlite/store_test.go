@@ -491,7 +491,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 	}
 	var version int
 	var journal string
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	if err := store.db.QueryRow(`PRAGMA journal_mode`).Scan(&journal); err != nil || journal != "wal" {
@@ -523,7 +523,7 @@ func TestMigrationVersionWALPermissionsAndUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+	if err := upgraded.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("upgrade version=%d err=%v", version, err)
 	}
 }
@@ -555,7 +555,7 @@ func TestMigrationNineOrdersDeadAcquireProvisionIntoCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	var version int
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	instance, err := store.Instance(ctx, "orphan")
@@ -644,7 +644,7 @@ func TestMigrationSevenRequeuesV071DeregisterDeadLetterExactlyOnce(t *testing.T)
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	assertDrainMigrationRequeuedOnce(t, store, "v071-drain", 5, 14)
+	assertDrainMigrationRequeuedOnce(t, store, "v071-drain", 5, 16)
 }
 
 func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing.T) {
@@ -660,7 +660,7 @@ func TestMigrationEightRequeuesExhaustedOwnedDrainAfterReplacementJob(t *testing
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	assertDrainMigrationRequeuedOnce(t, store, "replacement-job-drain", 12, 14)
+	assertDrainMigrationRequeuedOnce(t, store, "replacement-job-drain", 12, 16)
 }
 
 func seedOwnedDeadDrain(t *testing.T, store *Store, instanceID string, operationID string, ownership string, instanceVersion int, attempts int, now int64) {
@@ -1075,7 +1075,7 @@ func TestMigrationFaultInjectionRollsBackEveryStage(t *testing.T) {
 		"migrate.v2", "migrate.v2.record", "migrate.v3", "migrate.v3.record", "migrate.v4", "migrate.v4.record",
 		"migrate.v5", "migrate.v5.record", "migrate.v6", "migrate.v6.record",
 		"migrate.v12.column.corroborated_at", "migrate.v12.corroborated_at", "migrate.v12.snapshots", "migrate.v12.record",
-		"migrate.reseed", "migrate.commit", "migrate.quick",
+		"migrate.v15.table", "migrate.v15.record", "migrate.v16.inspect", "migrate.v16.column", "migrate.v16.record", "migrate.reseed", "migrate.commit", "migrate.quick",
 	}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {
@@ -1387,7 +1387,7 @@ func TestMigrationThirteenIsIdempotentOnAnAlreadyGenerationalLedger(t *testing.T
 		t.Fatalf("re-running migration 13: %v", err)
 	}
 	var version, rows, columns int
-	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 14 {
+	if err := store.db.QueryRow(`SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil || version != 16 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM scale_set_inbox`).Scan(&rows); err != nil || rows != 1 {
