@@ -65,6 +65,9 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	if err := readRun(ctx); err != nil {
 		return "", err
 	}
+	if run.Event == "dynamic" {
+		return "not_rerunnable", nil
+	}
 	if job.ResumeOrphan {
 		if run.ID == job.RunID && run.Attempt > job.RunAttempt {
 			return "rerun", nil
@@ -227,6 +230,7 @@ func (o *Observer) orphanPost(ctx context.Context, path string) (int, error) {
 }
 
 type orphanRunResponse struct {
+	Event      string
 	ID         int64
 	Conclusion string
 	Status     string

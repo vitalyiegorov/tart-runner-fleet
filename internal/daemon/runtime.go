@@ -823,6 +823,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 	yieldState := newSessionYieldState(sessionYieldPolicy{Enabled: cfg.SessionYield.Enabled,
 		BlockedFor: cfg.SessionYield.BlockedFor, HealthyFor: cfg.SessionYield.HealthyFor})
 	ingesters := make([]app.Ingester, 0, len(bindings))
+	var recoveryAuditor *parkedScaleSetAuditor
 	closers := make([]scaleSetSource, 0, len(bindings))
 	// Only truthful capacity is lowered to the residual (issue #388). Without
 	// canonical inventory the configured capacity is deliberately inflated for
@@ -921,11 +922,12 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			// perform, which is worse than the silence it replaces.
 			if auditInterval := cfg.GitHub.ParkedScaleSetAuditInterval(); opts.Mode == reconcile.Authority &&
 				auditInterval > 0 && len(cfg.GitHub.Scopes) > 0 {
-				ingesters = append(ingesters, &parkedScaleSetAuditor{config: cfg, key: privateKey,
+				recoveryAuditor = &parkedScaleSetAuditor{config: cfg, key: privateKey,
 					open: func(admin githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) {
 						return githubscaleset.NewAuditor(admin)
 					},
-					version: opts.Version, interval: auditInterval, health: health, now: d.now})
+					version: opts.Version, interval: auditInterval, health: health, now: d.now}
+				ingesters = append(ingesters, recoveryAuditor)
 			}
 		}
 		if canonicalRESTInventory {
@@ -959,6 +961,9 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 						return errors.New("orphan recovery requires durable store and REST action adapter")
 					}
 					recovery = &app.OrphanRecovery{Config: cfg.GitHub.OrphanRequeue, Store: ledger, API: api}
+					if recoveryAuditor != nil {
+						recovery.RequestAudit = recoveryAuditor.RequestFresh
+					}
 				}
 				orphanMode := cfg.GitHub.OrphanRequeue.Mode
 				if orphanMode == "" {
@@ -1624,14 +1629,16 @@ type boundIngester struct {
 // It never wakes the scheduler: nothing it learns is this node's demand. A
 // parked set is by construction a set this node does not serve.
 type parkedScaleSetAuditor struct {
-	config   config.Config
-	key      *githubscaleset.PrivateKeySecret
-	open     func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error)
-	version  string
-	interval time.Duration
-	health   *telemetry.Health
-	now      func() time.Time
-	next     time.Time
+	mu            sync.Mutex
+	nextRequested time.Time
+	config        config.Config
+	key           *githubscaleset.PrivateKeySecret
+	open          func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error)
+	version       string
+	interval      time.Duration
+	health        *telemetry.Health
+	now           func() time.Time
+	next          time.Time
 	// holding is how long each bound set has read "GitHub holds work, no runner
 	// registered, no instance here". A reading shorter than the node's boot
 	// timeout is an ordinary boot; one longer than it is issue #336, and the
@@ -1644,7 +1651,10 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 		return operations.ErrInvalid
 	}
 	now := a.now().UTC()
-	if wait := a.next.Sub(now); wait > 0 {
+	a.mu.Lock()
+	wait := a.next.Sub(now)
+	a.mu.Unlock()
+	if wait > 0 {
 		timer := time.NewTimer(wait)
 		defer timer.Stop()
 		select {
@@ -1654,10 +1664,29 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 		}
 		now = a.now().UTC()
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	// `now` is the START of this audit, and it schedules the next one: the cadence
 	// is measured between attempts, so a slow or failed audit cannot push the
 	// following one out by its own duration.
 	a.next = now.Add(a.interval)
+	return a.audit(ctx, now)
+}
+
+// RequestFresh shares the periodic audit and bounds extra attempts across scopes,
+// including failures. It leaves the periodic schedule intact.
+func (a *parkedScaleSetAuditor) RequestFresh(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now().UTC()
+	if now.Before(a.nextRequested) {
+		return nil
+	}
+	a.nextRequested = now.Add(max(time.Minute, a.interval/3))
+	return a.audit(ctx, now)
+}
+
+func (a *parkedScaleSetAuditor) audit(ctx context.Context, now time.Time) error {
 	result, err := scalesetaudit.Run(ctx, scalesetaudit.Request{Config: a.config, Key: a.key, Open: a.open,
 		Version: a.version, Now: func() time.Time { return now }, Local: a.local})
 	if err != nil {

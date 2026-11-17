@@ -20,10 +20,11 @@ type OrphanRequeueAPI interface {
 	RequeueOrphan(context.Context, githubscaleset.WorkflowJob, func(string, []string) bool, bool) (string, error)
 }
 type OrphanRecovery struct {
-	AuditMaxAge time.Duration
-	Config      config.OrphanRequeue
-	Store       OrphanRequeueStore
-	API         OrphanRequeueAPI
+	RequestAudit func(context.Context) error
+	AuditMaxAge  time.Duration
+	Config       config.OrphanRequeue
+	Store        OrphanRequeueStore
+	API          OrphanRequeueAPI
 }
 
 func (r OrphanRecovery) Reconcile(ctx context.Context, c DemandCoordinator, bindings []Binding, snapshot GitHubQueueSnapshot, slo time.Duration) ([]string, error) {
@@ -67,7 +68,7 @@ func (r OrphanRecovery) Reconcile(ctx context.Context, c DemandCoordinator, bind
 				continue
 			}
 			outcome, actionErr := r.API.RequeueOrphan(ctx, githubscaleset.WorkflowJob{ResumeOrphan: true, RunID: record.RunID, RunAttempt: record.RunAttempt, Repository: githubscaleset.Repository{Owner: parts[0], Name: parts[1]}}, func(string, []string) bool { return false }, true)
-			if outcome != "rerun" && outcome != "noop" && outcome != "permission_denied" {
+			if outcome != "rerun" && outcome != "noop" && outcome != "permission_denied" && outcome != "not_rerunnable" {
 				outcome = "cancelled_not_rerun"
 			}
 			record.Outcome = outcome
@@ -84,14 +85,21 @@ func (r OrphanRecovery) Reconcile(ctx context.Context, c DemandCoordinator, bind
 	if err != nil {
 		return findings, err
 	}
+	auditRequested := false
 	for _, job := range candidates {
 		repo := job.Repository.Owner + "/" + job.Repository.Name
 		rows := append([]ScaleSetAssignment(nil), c.AuditedAssignments...)
 		for i := range rows {
 			rows[i].Fresh = rows[i].Fresh && recoveryAuditFresh(rows[i].ObservedAt, c.now(), job.CreatedAt.Add(r.Config.Threshold(slo)), r.AuditMaxAge)
 		}
-		if !orphanOwner(rows, bindings, snapshot, job, c.now().Sub(job.CreatedAt), r.Config.Threshold(slo), r.Config.Cooldown()) {
-			findings = append(findings, fmt.Sprintf("orphan requeue %s run %d: sibling owner", repo, job.RunID))
+		if reason := orphanOwner(rows, bindings, snapshot, job, c.now().Sub(job.CreatedAt), r.Config.Threshold(slo), r.Config.Cooldown()); reason != "" {
+			findings = append(findings, fmt.Sprintf("orphan requeue %s run %d: %s", repo, job.RunID, reason))
+			if reason == "awaiting fresh audit" && !auditRequested && r.RequestAudit != nil {
+				auditRequested = true
+				if err := r.RequestAudit(ctx); err != nil {
+					return findings, err
+				}
+			}
 			continue
 		}
 		excluded := func(workflow string, jobs []string) bool { return r.Config.Excluded(repo, workflow, jobs) }
@@ -132,7 +140,7 @@ func (r OrphanRecovery) Reconcile(ctx context.Context, c DemandCoordinator, bind
 
 // Rank over every queued job in the run, including separate routing labels.
 // Higher ranks become eligible after a stagger; no peer liveness protocol.
-func orphanOwner(rows []ScaleSetAssignment, bindings []Binding, snapshot GitHubQueueSnapshot, candidate githubscaleset.WorkflowJob, age, threshold, cooldown time.Duration) bool {
+func orphanOwner(rows []ScaleSetAssignment, bindings []Binding, snapshot GitHubQueueSnapshot, candidate githubscaleset.WorkflowJob, age, threshold, cooldown time.Duration) string {
 	ids := map[int64]bool{}
 	for _, job := range snapshot.QueuedJobs() {
 		if job.RunID != candidate.RunID || job.Repository != candidate.Repository {
@@ -142,24 +150,35 @@ func orphanOwner(rows []ScaleSetAssignment, bindings []Binding, snapshot GitHubQ
 			if !strings.EqualFold(row.Scope, bindings[0].Scope) || (!containsFold(job.Labels, row.Name) && !advertisesEveryRoutingLabel(row.Labels, job.Labels) && !localAuditMatch(row, bindings, job)) {
 				continue
 			}
-			if !row.Fresh || row.Assigned != 0 {
-				return false
+			if !row.Fresh {
+				return "awaiting fresh audit"
+			}
+			if row.Assigned != 0 {
+				return fmt.Sprintf("assigned to set %d", row.ID)
 			}
 			ids[row.ID] = true
 		}
 	}
+	bestRank := len(ids)
 	for _, b := range bindings {
+		if !ids[b.ScaleSetID] {
+			continue
+		}
 		rank := 0
 		for id := range ids {
 			if id < b.ScaleSetID {
 				rank++
 			}
 		}
-		if ids[b.ScaleSetID] && age >= threshold+time.Duration(rank)*cooldown {
-			return true
+		if age >= threshold+time.Duration(rank)*cooldown {
+			return ""
 		}
+		bestRank = min(bestRank, rank)
 	}
-	return false
+	if bestRank == len(ids) {
+		return "awaiting fresh audit"
+	}
+	return fmt.Sprintf("sibling owner (rank %d)", bestRank)
 }
 func localAuditMatch(row ScaleSetAssignment, bindings []Binding, job githubscaleset.WorkflowJob) bool {
 	matched, err := matchingBindings(bindings, job)

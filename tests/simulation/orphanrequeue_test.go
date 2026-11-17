@@ -36,7 +36,7 @@ func (b *orphanBrokerRecovery) RequeueOrphan(_ context.Context, _ githubscaleset
 
 // The broker's old arrival is not automatically retried at rejoin. Feed that
 // missing REST job through production recovery and model rerun as a new offer.
-func TestIssue520AutomaticRequeueReoffersAllGatedArrival(t *testing.T) {
+func TestIssue526FreshAuditReoffersAllGatedArrival(t *testing.T) {
 	cfg := gatedWorld()
 	cfg.SiblingsFull = true
 	trace := simTrace{Seed: 5201, Ticks: 40, Config: cfg.Name, Events: []simEvent{{Tick: 1, Kind: eventHostTenant, Count: gatedTenant}, {Tick: 4, Kind: eventArrive, Repo: "a/repo", Profile: "large", Event: "push"}, {Tick: 20, Kind: eventHostTenant}}}
@@ -58,9 +58,17 @@ func TestIssue520AutomaticRequeueReoffersAllGatedArrival(t *testing.T) {
 	snapshot := simSnapshotView{snapshot: &simSnapshot{at: w.now, jobs: []githubscaleset.WorkflowJob{job}}}
 	coordinator := app.DemandCoordinator{Store: w.store, Now: func() time.Time { return w.now }, AuditedAssignments: []app.ScaleSetAssignment{{Scope: binding.Scope, ID: binding.ScaleSetID, Labels: binding.ScaleSetLabels, Fresh: true}}}
 	broker := &orphanBrokerRecovery{world: w}
-	recovery := app.OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: w.store, API: broker}
+	audits := 0
+	recovery := app.OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, AuditMaxAge: 2 * time.Minute, Store: w.store, API: broker, RequestAudit: func(context.Context) error {
+		audits++
+		coordinator.AuditedAssignments[0].ObservedAt = w.now
+		return nil
+	}}
 	if _, err := recovery.Reconcile(w.ctx, coordinator, []app.Binding{binding}, snapshot, time.Minute); err != nil {
 		t.Fatal(err)
+	}
+	if audits != 1 || broker.calls != 0 {
+		t.Fatalf("audits=%d calls=%d before fresh reconcile", audits, broker.calls)
 	}
 	if _, err := recovery.Reconcile(w.ctx, coordinator, []app.Binding{binding}, snapshot, time.Minute); err != nil {
 		t.Fatal(err)

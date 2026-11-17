@@ -15,7 +15,7 @@ type actionToken struct{ write bool }
 func (actionToken) Token(context.Context) (string, error)        { return "test", nil }
 func (t actionToken) ActionsWrite(context.Context) (bool, error) { return t.write, nil }
 func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
-	for _, scenario := range []string{"act", "observe", "running", "waiting", "unknown", "excluded", "missing target", "new attempt", "completed", "forbidden", "no permission", "cancel conflict", "rerun conflict", "pagination running", "read failure", "missing name", "missing job name", "invalid candidate"} {
+	for _, scenario := range []string{"dynamic act", "dynamic observe", "act", "observe", "running", "waiting", "unknown", "excluded", "missing target", "new attempt", "completed", "forbidden", "no permission", "cancel conflict", "rerun conflict", "pagination running", "read failure", "missing name", "missing job name", "invalid candidate"} {
 		t.Run(scenario, func(t *testing.T) {
 			posts := []string{}
 			cancelled := false
@@ -70,11 +70,15 @@ func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
 				if scenario == "new attempt" {
 					attempt = 2
 				}
+				event := "push"
+				if strings.HasPrefix(scenario, "dynamic") {
+					event = "dynamic"
+				}
 				name := "farm"
 				if scenario == "missing name" {
 					name = ""
 				}
-				return response(200, fmt.Sprintf(`{"id":420,"name":%q,"conclusion":"cancelled","run_attempt":%d,"status":%q,"created_at":"2020-01-01T00:00:00Z"}`, name, attempt, status), ""), nil
+				return response(200, fmt.Sprintf(`{"id":420,"name":%q,"event":%q,"conclusion":"cancelled","run_attempt":%d,"status":%q,"created_at":"2020-01-01T00:00:00Z"}`, name, event, attempt, status), ""), nil
 			})})
 			if err != nil {
 				t.Fatal(err)
@@ -83,9 +87,12 @@ func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
 			if scenario == "invalid candidate" {
 				job.ID = 0
 			}
-			outcome, err := observer.RequeueOrphan(context.Background(), job, func(w string, _ []string) bool { return scenario == "excluded" && w == "farm" }, scenario != "observe")
+			outcome, err := observer.RequeueOrphan(context.Background(), job, func(w string, _ []string) bool { return scenario == "excluded" && w == "farm" }, scenario != "observe" && scenario != "dynamic observe")
 			if (err != nil) != (scenario == "read failure") {
 				t.Fatalf("outcome=%s err=%v", outcome, err)
+			}
+			if strings.HasPrefix(scenario, "dynamic") && outcome != "not_rerunnable" {
+				t.Fatalf("dynamic outcome=%s posts=%v", outcome, posts)
 			}
 			want := 0
 			switch scenario {

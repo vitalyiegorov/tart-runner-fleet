@@ -382,3 +382,39 @@ func TestASetWithNoPublishedQueueRowMakesNoStrandedFinding(t *testing.T) {
 		t.Fatalf("an unobserved queue makes no finding: %#v", rows)
 	}
 }
+
+func TestIssue526RecoveryAuditIsBounded(t *testing.T) {
+	for _, interval := range []time.Duration{15 * time.Minute, time.Minute} {
+		t.Run(interval.String(), func(t *testing.T) {
+			now := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+			health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeAuditClient{}
+			a := &parkedScaleSetAuditor{config: auditConfig(), key: githubscaleset.NewPrivateKeySecret("pem"), open: func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil }, interval: interval, health: health, now: func() time.Time { return now }}
+			if err := a.Ingest(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := a.RequestFresh(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if client.lists != 2 {
+				t.Fatalf("listings=%d want periodic + one extra", client.lists)
+			}
+			now = now.Add(max(time.Minute, interval/3))
+			client.listErr = context.Canceled
+			if err := a.RequestFresh(context.Background()); err == nil {
+				t.Fatal("audit failure hidden")
+			}
+			if err := a.RequestFresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if client.lists != 3 {
+				t.Fatal("failed audit was not rate limited")
+			}
+		})
+	}
+}
