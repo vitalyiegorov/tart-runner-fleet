@@ -36,7 +36,7 @@ is ordinary (no character classes or escapes). Budgie's verified workflow names
 are Pull Request, Media smoke and Store screenshots; concurrency group names
 cannot match these names.
 
-Observe and act use one claim/finish path. All outcomes except `not_rerunnable` retain per-run cooldown;
+Observe and act use one claim/finish path. All outcomes retain per-run cooldown;
 held, excluded and not_rerunnable do not consume the three-per-hour node
 mutation budget. Two successful or uncertain mutations exhaust a run's local
 lifetime budget; reserved and cancelled_not_rerun count conservatively. An
@@ -91,16 +91,19 @@ no scheduler/capacity policy, deployment or authority promotion changes.
 
 GitHub-managed runs with event `dynamic` cannot be retried. Decode the run event
 on the uncached safety read and return `not_rerunnable` before cancellation in
-observe and act mode, including legacy resumes. Doctor names the run and this
-outcome. It consumes neither mutation budget nor per-run cooldown; the durable
+observe and act mode, including legacy resumes. Immediately before a potential
+cancel (or observe verdict), read the workflow without cached evidence and require
+state `active`; disabled or unknown states also return `not_rerunnable`. Doctor
+names the run and this outcome. It consumes no mutation budget and retains per-run cooldown; the durable
 reservation still precedes any possible mutation. No schema migration is needed.
 
 A threshold-aged ADR 0098 candidate whose otherwise fresh, zero-assigned audit
 rows fail recovery's stricter age check requests one out-of-cycle audit. The
-daemon shares the periodic auditor across scopes, serializes its publications,
+daemon signals the periodic auditor through a coalescing one-slot wake channel,
 and admits extra attempts at most once per max(1 minute, audit interval / 3),
-including failed attempts. The periodic cadence remains intact. Recovery waits
-for the next reconcile to consume the new evidence; failed audits preserve the
+including failed attempts. The ingester owns audits and their health errors;
+recovery never waits for network I/O. The periodic cadence remains intact.
+Recovery waits for the next reconcile to consume the new evidence; failed audits preserve the
 last completed observation and never authorize action. No new configuration,
 capacity offer, or authority is introduced.
 

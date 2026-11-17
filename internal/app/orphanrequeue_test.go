@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -486,5 +488,40 @@ func TestIssue526AuditRequestFailureStaysClosed(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), c, []Binding{sharedLabelBinding(1)}, fakeQueueSnapshot{jobs: []githubscaleset.WorkflowJob{restJob(42, time.Hour)}}, time.Minute)
 	if err == nil || api.calls != 0 {
 		t.Fatalf("err=%v calls=%d", err, api.calls)
+	}
+}
+
+type issue526RecoveryAPI struct{ runs []int64 }
+
+func (a *issue526RecoveryAPI) RequeueOrphan(_ context.Context, job githubscaleset.WorkflowJob, _ func(string, []string) bool, _ bool) (string, error) {
+	a.runs = append(a.runs, job.RunID)
+	if job.RunID == 420 {
+		return "not_rerunnable", nil
+	}
+	return "rerun", nil
+}
+func TestIssue526DynamicDoesNotStarvePush(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	now := restShareEpoch
+	c := DemandCoordinator{Store: newShardedDemandStore(), Now: func() time.Time { return now }, AuditedAssignments: []ScaleSetAssignment{{Scope: "sudoku-repo", ID: 1, Fresh: true}}}
+	dynamic, push := restJob(42, 78*time.Minute), restJob(43, 78*time.Minute)
+	dynamic.RunID = 420
+	push.RunID = 430
+	snapshot := fakeQueueSnapshot{at: now, jobs: []githubscaleset.WorkflowJob{dynamic, push}}
+	api := &issue526RecoveryAPI{}
+	r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: ledger, API: api}
+	for range 2 {
+		if _, err := r.Reconcile(ctx, c, []Binding{sharedLabelBinding(1)}, snapshot, 10*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Second)
+	}
+	if fmt.Sprint(api.runs) != "[420 430]" {
+		t.Fatalf("claimed runs=%v", api.runs)
 	}
 }

@@ -33,7 +33,7 @@ func (s *Store) ClaimOrphanRequeue(ctx context.Context, r operations.OrphanReque
 		return s.claimOrphanResume(ctx, r, cooldown, limit)
 	}
 	result, err := s.dbExec(ctx, "orphan.claim", `INSERT INTO orphan_requeues(scope,repository,run_id,at,outcome,run_attempt)
- SELECT ?,?,?,?,'reserved',? WHERE NOT EXISTS (SELECT 1 FROM orphan_requeues WHERE repository=? AND run_id=? AND at>? AND outcome != 'not_rerunnable')
+ SELECT ?,?,?,?,'reserved',? WHERE NOT EXISTS (SELECT 1 FROM orphan_requeues WHERE repository=? AND run_id=? AND at>?)
  AND (SELECT COUNT(*) FROM orphan_requeues WHERE repository=? AND run_id=? AND outcome IN ('rerun','reserved','cancelled_not_rerun'))<2
  AND (SELECT COUNT(*) FROM orphan_requeues WHERE at>? AND outcome NOT IN ('held','excluded','not_rerunnable'))<?
  AND NOT EXISTS (SELECT 1 FROM orphan_requeues WHERE scope=? AND outcome='permission_denied' AND at>?)`, r.Scope, r.Repository, r.RunID, r.At.UnixNano(), r.RunAttempt, r.Repository, r.RunID, r.At.Add(-cooldown).UnixNano(), r.Repository, r.RunID, r.At.Add(-time.Hour).UnixNano(), limit, r.Scope, r.At.Add(-time.Hour).UnixNano())

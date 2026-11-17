@@ -130,6 +130,19 @@ func (o *Observer) RequeueOrphan(ctx context.Context, job WorkflowJob, excluded 
 	if !slices.Equal(jobs, final) || !domain.CanRequeueOrphan(run.Status, final, job.ID, job.OrphanBefore) {
 		return "held", nil
 	}
+	// Workflow state is fresh evidence too: disabled workflows cannot be rerun.
+	endpoint, _ := fresh.resolve(fmt.Sprintf("/repos/%s/%s/actions/workflows/%d", url.PathEscape(job.Repository.Owner), url.PathEscape(job.Repository.Name), run.WorkflowID))
+	answer, err := fresh.page(finalCtx, endpoint.String())
+	if err != nil {
+		return "", err
+	}
+	var workflow struct{ State string }
+	if err := json.Unmarshal(answer.body, &workflow); err != nil {
+		return "", err
+	}
+	if workflow.State != "active" {
+		return "not_rerunnable", nil
+	}
 	if !act {
 		return "would_requeue", nil
 	}
@@ -230,6 +243,7 @@ func (o *Observer) orphanPost(ctx context.Context, path string) (int, error) {
 }
 
 type orphanRunResponse struct {
+	WorkflowID int64 `json:"workflow_id"`
 	Event      string
 	ID         int64
 	Conclusion string

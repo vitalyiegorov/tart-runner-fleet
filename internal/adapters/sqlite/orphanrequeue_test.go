@@ -254,6 +254,7 @@ func TestIssue526NotRerunnableConsumesNoMutationBudget(t *testing.T) {
 	ctx := context.Background()
 	r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 42, At: time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC), Outcome: "not_rerunnable"}
 	for range 4 {
+		r.RunID++
 		if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Hour, 1); err != nil || !ok {
 			t.Fatalf("non-mutation blocked claim: %v %v", ok, err)
 		}
@@ -261,5 +262,21 @@ func TestIssue526NotRerunnableConsumesNoMutationBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.At = r.At.Add(time.Second)
+	}
+}
+
+func TestIssue526NotRerunnableRetainsCooldown(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	r := operations.OrphanRequeue{Scope: "s", Repository: "o/r", RunID: 420, At: time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC), Outcome: "not_rerunnable"}
+	if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Hour, 1); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	if err := s.FinishOrphanRequeue(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	r.At = r.At.Add(time.Second)
+	if ok, err := s.ClaimOrphanRequeue(ctx, r, time.Hour, 1); err != nil || ok {
+		t.Fatalf("cooldown bypassed: %v %v", ok, err)
 	}
 }

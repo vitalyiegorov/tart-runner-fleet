@@ -922,7 +922,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			// perform, which is worse than the silence it replaces.
 			if auditInterval := cfg.GitHub.ParkedScaleSetAuditInterval(); opts.Mode == reconcile.Authority &&
 				auditInterval > 0 && len(cfg.GitHub.Scopes) > 0 {
-				recoveryAuditor = &parkedScaleSetAuditor{config: cfg, key: privateKey,
+				recoveryAuditor = &parkedScaleSetAuditor{wake: make(chan struct{}, 1), config: cfg, key: privateKey,
 					open: func(admin githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) {
 						return githubscaleset.NewAuditor(admin)
 					},
@@ -1629,7 +1629,7 @@ type boundIngester struct {
 // It never wakes the scheduler: nothing it learns is this node's demand. A
 // parked set is by construction a set this node does not serve.
 type parkedScaleSetAuditor struct {
-	mu            sync.Mutex
+	wake          chan struct{}
 	nextRequested time.Time
 	config        config.Config
 	key           *githubscaleset.PrivateKeySecret
@@ -1651,39 +1651,36 @@ func (a *parkedScaleSetAuditor) Ingest(ctx context.Context) error {
 		return operations.ErrInvalid
 	}
 	now := a.now().UTC()
-	a.mu.Lock()
-	wait := a.next.Sub(now)
-	a.mu.Unlock()
-	if wait > 0 {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
+	for now.Before(a.next) {
+		timer := time.NewTimer(a.next.Sub(now))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
+		case <-a.wake:
+			timer.Stop()
+			now = a.now().UTC()
+			if now.Before(a.nextRequested) {
+				continue
+			}
+			a.nextRequested = now.Add(max(time.Minute, a.interval/3))
+			return a.audit(ctx, now)
 		case <-timer.C:
+			now = a.now().UTC()
 		}
-		now = a.now().UTC()
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	// `now` is the START of this audit, and it schedules the next one: the cadence
-	// is measured between attempts, so a slow or failed audit cannot push the
-	// following one out by its own duration.
+	// Periodic cadence is measured between attempt starts, including failures.
 	a.next = now.Add(a.interval)
 	return a.audit(ctx, now)
 }
 
-// RequestFresh shares the periodic audit and bounds extra attempts across scopes,
-// including failures. It leaves the periodic schedule intact.
-func (a *parkedScaleSetAuditor) RequestFresh(ctx context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := a.now().UTC()
-	if now.Before(a.nextRequested) {
-		return nil
+// RequestFresh coalesces recovery requests; only Ingest performs network I/O.
+func (a *parkedScaleSetAuditor) RequestFresh(context.Context) error {
+	select {
+	case a.wake <- struct{}{}:
+	default:
 	}
-	a.nextRequested = now.Add(max(time.Minute, a.interval/3))
-	return a.audit(ctx, now)
+	return nil
 }
 
 func (a *parkedScaleSetAuditor) audit(ctx context.Context, now time.Time) error {
