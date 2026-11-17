@@ -382,3 +382,111 @@ func TestASetWithNoPublishedQueueRowMakesNoStrandedFinding(t *testing.T) {
 		t.Fatalf("an unobserved queue makes no finding: %#v", rows)
 	}
 }
+
+func TestIssue526RecoveryAuditIsBounded(t *testing.T) {
+	for _, interval := range []time.Duration{15 * time.Minute, time.Minute} {
+		t.Run(interval.String(), func(t *testing.T) {
+			now := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+			health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeAuditClient{}
+			a := &parkedScaleSetAuditor{wake: make(chan struct{}, 1), config: auditConfig(), key: githubscaleset.NewPrivateKeySecret("pem"), open: func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil }, interval: interval, health: health, now: func() time.Time { return now }}
+			if err := a.Ingest(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				if err := a.RequestFresh(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if client.lists != 1 {
+				t.Fatal("request ran synchronous audit")
+			}
+			periodic := a.next
+			if err := a.Ingest(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if a.next != periodic {
+				t.Fatal("wake changed periodic cadence")
+			}
+			if client.lists != 2 {
+				t.Fatalf("listings=%d want periodic + one extra", client.lists)
+			}
+			now = now.Add(max(time.Minute, interval/3))
+			// A short interval may have a periodic audit due at this instant.
+			if !now.Before(a.next) {
+				if err := a.Ingest(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeFailure := client.lists
+			client.listErr = context.Canceled
+			if err := a.RequestFresh(context.Background()); err != nil {
+				t.Fatal("audit error surfaced to recovery", err)
+			}
+			if err := a.Ingest(context.Background()); err == nil {
+				t.Fatal("audit failure hidden from audit health")
+			}
+			afterFailure := a.next
+			// Suppressed wakes must leave Ingest waiting for the periodic timer.
+			a.RequestFresh(context.Background())
+			cancelled, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clockReads := 0
+			a.now = func() time.Time {
+				clockReads++
+				// Cancel only after Ingest consumes the suppressed wake.
+				if clockReads == 2 {
+					cancel()
+				}
+				return now
+			}
+			if err := a.Ingest(cancelled); !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			if a.next != afterFailure {
+				t.Fatal("suppressed wake changed cadence")
+			}
+			if client.lists != beforeFailure+1 {
+				t.Fatal("failed audit was not rate limited")
+			}
+		})
+	}
+}
+
+func TestIssue526RecoveryRequestNeverWaitsForAudit(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	client := &fakeAuditClient{}
+	client.spend = func() {
+		if client.lists == 1 {
+			close(started)
+			<-release
+		}
+	}
+	health, err := telemetry.NewHealth(wallClock{}, telemetry.HealthConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &parkedScaleSetAuditor{wake: make(chan struct{}, 1), config: auditConfig(), key: githubscaleset.NewPrivateKeySecret("pem"), open: func(githubscaleset.GitHubAppAdminConfig) (scalesetaudit.Client, error) { return client, nil }, interval: time.Minute, health: health, now: time.Now}
+	done := make(chan error, 1)
+	go func() { done <- a.Ingest(context.Background()) }()
+	<-started
+	requested := make(chan error, 1)
+	go func() { requested <- a.RequestFresh(context.Background()) }()
+	select {
+	case err := <-requested:
+		if err != nil {
+			t.Error(err)
+		}
+		close(release)
+	case <-time.After(time.Second):
+		close(release)
+		<-requested
+		t.Error("RequestFresh blocked behind an in-flight audit")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

@@ -2,10 +2,14 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/githubscaleset"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/adapters/sqlite"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/operations"
 )
@@ -67,10 +71,14 @@ type requeueAPI struct {
 	running  bool
 	workflow string
 	denied   bool
+	dynamic  bool
 }
 
 func (a *requeueAPI) RequeueOrphan(_ context.Context, _ githubscaleset.WorkflowJob, excluded func(string, []string) bool, act bool) (string, error) {
 	a.attempts++
+	if a.dynamic {
+		return "not_rerunnable", nil
+	}
 	if a.denied {
 		return "permission_denied", nil
 	}
@@ -84,7 +92,7 @@ func (a *requeueAPI) RequeueOrphan(_ context.Context, _ githubscaleset.WorkflowJ
 	return "rerun", nil
 }
 func TestIssue520AutomaticOrphanRequeue(t *testing.T) {
-	for _, scenario := range []string{"act", "running", "excluded", "observe", "off", "sibling owner", "cooldown restart", "rate", "permission", "threshold", "queue slo", "dedupe jobs"} {
+	for _, scenario := range []string{"act", "running", "excluded", "observe", "off", "sibling owner", "cooldown restart", "rate", "permission", "threshold", "queue slo", "dedupe jobs", "not rerunnable"} {
 		t.Run(scenario, func(t *testing.T) {
 			store := newShardedDemandStore()
 			c := DemandCoordinator{Store: store, Now: func() time.Time { return restShareEpoch }, AuditedAssignments: []ScaleSetAssignment{{Scope: "sudoku-repo", ID: 1, Fresh: true}}}
@@ -95,6 +103,8 @@ func TestIssue520AutomaticOrphanRequeue(t *testing.T) {
 			cfg := config.OrphanRequeue{Mode: "act"}
 			slo := 10 * time.Minute
 			switch scenario {
+			case "not rerunnable":
+				api.dynamic = true
 			case "threshold":
 				snapshot.jobs[0].CreatedAt = restShareEpoch.Add(-12 * time.Minute)
 			case "queue slo":
@@ -146,6 +156,12 @@ func TestIssue520AutomaticOrphanRequeue(t *testing.T) {
 			}
 			if api.calls != want {
 				t.Fatalf("calls=%d want %d", api.calls, want)
+			}
+			if scenario == "not rerunnable" && !strings.Contains(strings.Join(findings, " "), fmt.Sprintf("run %d", job.RunID)) {
+				t.Fatal(findings)
+			}
+			if scenario == "not rerunnable" && !strings.Contains(strings.Join(findings, " "), "not_rerunnable") {
+				t.Fatal(findings)
 			}
 			if scenario != "off" && len(findings) == 0 {
 				t.Fatal("missing doctor mode/outcome")
@@ -221,18 +237,18 @@ func TestOrphanOwnerElectsAcrossDifferentJobLabels(t *testing.T) {
 	second.Labels = []string{"self-hosted", "other"}
 	snapshot := fakeQueueSnapshot{jobs: []githubscaleset.WorkflowJob{first, second}}
 	rows := []ScaleSetAssignment{{Scope: low.Scope, ID: 1, Labels: first.Labels, Fresh: true}, {Scope: high.Scope, ID: 2, Labels: second.Labels, Fresh: true}}
-	if !orphanOwner(rows, []Binding{low}, snapshot, first, 20*time.Minute, 15*time.Minute, 30*time.Minute) || orphanOwner(rows, []Binding{high}, snapshot, second, 20*time.Minute, 15*time.Minute, 30*time.Minute) {
+	if orphanOwner(rows, []Binding{low}, snapshot, first, 20*time.Minute, 15*time.Minute, 30*time.Minute) != "" || orphanOwner(rows, []Binding{high}, snapshot, second, 20*time.Minute, 15*time.Minute, 30*time.Minute) == "" {
 		t.Fatal("nodes disagreed on actor")
 	}
 	rows[0].Fresh = false
-	if orphanOwner(rows, []Binding{high}, snapshot, second, 20*time.Minute, 15*time.Minute, 30*time.Minute) {
+	if orphanOwner(rows, []Binding{high}, snapshot, second, 20*time.Minute, 15*time.Minute, 30*time.Minute) == "" {
 		t.Fatal("stale sibling elected actor")
 	}
 	snapshot.jobs = append(snapshot.jobs, first)
 	snapshot.jobs[2].RunID = 421
 	rows[0].Fresh = true
 	rows = append(rows, ScaleSetAssignment{Scope: "foreign", ID: 0, Fresh: true})
-	if !orphanOwner(rows, []Binding{low}, snapshot, first, 20*time.Minute, 15*time.Minute, 30*time.Minute) {
+	if orphanOwner(rows, []Binding{low}, snapshot, first, 20*time.Minute, 15*time.Minute, 30*time.Minute) != "" {
 		t.Fatal("unrelated run/scope interfered")
 	}
 }
@@ -339,7 +355,7 @@ func (a resumeResultAPI) RequeueOrphan(context.Context, githubscaleset.WorkflowJ
 }
 
 func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
-	for _, scenario := range []string{"api error", "permission", "finish error", "legacy attempt", "invalid repository"} {
+	for _, scenario := range []string{"api error", "permission", "finish error", "legacy attempt", "invalid repository", "not rerunnable"} {
 		t.Run(scenario, func(t *testing.T) {
 			record := operations.OrphanRequeue{Scope: "sudoku-repo", Repository: "o/r", RunID: 420, RunAttempt: 1, At: restShareEpoch.Add(-time.Hour), Outcome: "cancelled_not_rerun"}
 			if scenario == "legacy attempt" {
@@ -354,6 +370,9 @@ func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
 			if scenario == "api error" {
 				api = resumeResultAPI{err: context.Canceled}
 			}
+			if scenario == "not rerunnable" {
+				api.outcome = "not_rerunnable"
+			}
 			if scenario == "finish error" {
 				store.fail = "finish"
 			}
@@ -366,7 +385,10 @@ func TestOrphanResumeKeepsUnfinishedOnFailure(t *testing.T) {
 			if scenario == "permission" {
 				want = "permission_denied"
 			}
-			if (scenario == "api error" || scenario == "permission") && memory.records[len(memory.records)-1].Outcome != want {
+			if scenario == "not rerunnable" {
+				want = "not_rerunnable"
+			}
+			if (scenario == "api error" || scenario == "permission" || scenario == "not rerunnable") && memory.records[len(memory.records)-1].Outcome != want {
 				t.Fatal(memory.records)
 			}
 		})
@@ -402,5 +424,104 @@ func TestOrphanResumeAdmissionAndReservedRemedy(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestIssue526OrphanOwnerReasons(t *testing.T) {
+	job := restJob(42, 20*time.Minute)
+	snapshot := fakeQueueSnapshot{jobs: []githubscaleset.WorkflowJob{job}}
+	b := sharedLabelBinding(2)
+	for _, tc := range []struct {
+		name string
+		rows []ScaleSetAssignment
+		want string
+	}{
+		{"missing", nil, "awaiting fresh audit"},
+		{"stale", []ScaleSetAssignment{{Scope: b.Scope, ID: 2}}, "awaiting fresh audit"},
+		{"assigned", []ScaleSetAssignment{{Scope: b.Scope, ID: 2, Fresh: true, Assigned: 1}}, "assigned to set 2"},
+		{"sibling", []ScaleSetAssignment{{Scope: b.Scope, ID: 2, Fresh: true}, {Scope: b.Scope, ID: 1, Labels: job.Labels, Fresh: true}}, "sibling owner (rank 1)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := orphanOwner(tc.rows, []Binding{b}, snapshot, job, 20*time.Minute, 15*time.Minute, 30*time.Minute)
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIssue526ThresholdRequestsAuditThenRecovers(t *testing.T) {
+	now := restShareEpoch
+	job := restJob(42, 14*time.Minute)
+	c := DemandCoordinator{Store: newShardedDemandStore(), Now: func() time.Time { return now }, AuditedAssignments: []ScaleSetAssignment{{Scope: "sudoku-repo", ID: 1, Fresh: true, ObservedAt: now.Add(-10 * time.Minute)}}}
+	snapshot := fakeQueueSnapshot{at: now, jobs: []githubscaleset.WorkflowJob{job}}
+	api := &requeueAPI{}
+	requests := 0
+	r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, AuditMaxAge: 2 * time.Minute, Store: &requeueMemory{}, API: api, RequestAudit: func(context.Context) error { requests++; c.AuditedAssignments[0].ObservedAt = now; return nil }}
+	reconcile := func() []string {
+		t.Helper()
+		findings, err := r.Reconcile(context.Background(), c, []Binding{sharedLabelBinding(1)}, snapshot, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return findings
+	}
+	reconcile()
+	if requests != 0 || api.calls != 0 {
+		t.Fatal("recovery before threshold")
+	}
+	now = now.Add(time.Minute)
+	findings := reconcile()
+	if requests != 1 || api.calls != 0 || !strings.Contains(strings.Join(findings, " "), "awaiting fresh audit") {
+		t.Fatalf("requests=%d calls=%d findings=%v", requests, api.calls, findings)
+	}
+	reconcile()
+	if requests != 1 || api.calls != 1 {
+		t.Fatalf("requests=%d calls=%d", requests, api.calls)
+	}
+}
+
+func TestIssue526AuditRequestFailureStaysClosed(t *testing.T) {
+	c := DemandCoordinator{Store: newShardedDemandStore(), Now: func() time.Time { return restShareEpoch }, AuditedAssignments: []ScaleSetAssignment{{Scope: "sudoku-repo", ID: 1, Fresh: true}}}
+	api := &requeueAPI{}
+	r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, AuditMaxAge: time.Minute, Store: &requeueMemory{}, API: api, RequestAudit: func(context.Context) error { return context.Canceled }}
+	_, err := r.Reconcile(context.Background(), c, []Binding{sharedLabelBinding(1)}, fakeQueueSnapshot{jobs: []githubscaleset.WorkflowJob{restJob(42, time.Hour)}}, time.Minute)
+	if err == nil || api.calls != 0 {
+		t.Fatalf("err=%v calls=%d", err, api.calls)
+	}
+}
+
+type issue526RecoveryAPI struct{ runs []int64 }
+
+func (a *issue526RecoveryAPI) RequeueOrphan(_ context.Context, job githubscaleset.WorkflowJob, _ func(string, []string) bool, _ bool) (string, error) {
+	a.runs = append(a.runs, job.RunID)
+	if job.RunID == 420 {
+		return "not_rerunnable", nil
+	}
+	return "rerun", nil
+}
+func TestIssue526DynamicDoesNotStarvePush(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	now := restShareEpoch
+	c := DemandCoordinator{Store: newShardedDemandStore(), Now: func() time.Time { return now }, AuditedAssignments: []ScaleSetAssignment{{Scope: "sudoku-repo", ID: 1, Fresh: true}}}
+	dynamic, push := restJob(42, 78*time.Minute), restJob(43, 78*time.Minute)
+	dynamic.RunID = 420
+	push.RunID = 430
+	snapshot := fakeQueueSnapshot{at: now, jobs: []githubscaleset.WorkflowJob{dynamic, push}}
+	api := &issue526RecoveryAPI{}
+	r := OrphanRecovery{Config: config.OrphanRequeue{Mode: "act"}, Store: ledger, API: api}
+	for range 2 {
+		if _, err := r.Reconcile(ctx, c, []Binding{sharedLabelBinding(1)}, snapshot, 10*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Second)
+	}
+	if fmt.Sprint(api.runs) != "[420 430]" {
+		t.Fatalf("claimed runs=%v", api.runs)
 	}
 }

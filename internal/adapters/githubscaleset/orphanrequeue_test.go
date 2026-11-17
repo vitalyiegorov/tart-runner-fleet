@@ -15,7 +15,7 @@ type actionToken struct{ write bool }
 func (actionToken) Token(context.Context) (string, error)        { return "test", nil }
 func (t actionToken) ActionsWrite(context.Context) (bool, error) { return t.write, nil }
 func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
-	for _, scenario := range []string{"act", "observe", "running", "waiting", "unknown", "excluded", "missing target", "new attempt", "completed", "forbidden", "no permission", "cancel conflict", "rerun conflict", "pagination running", "read failure", "missing name", "missing job name", "invalid candidate"} {
+	for _, scenario := range []string{"workflow error", "workflow malformed", "workflow unknown", "disabled act", "disabled observe", "dynamic act", "dynamic observe", "act", "observe", "running", "waiting", "unknown", "excluded", "missing target", "new attempt", "completed", "forbidden", "no permission", "cancel conflict", "rerun conflict", "pagination running", "read failure", "missing name", "missing job name", "invalid candidate"} {
 		t.Run(scenario, func(t *testing.T) {
 			posts := []string{}
 			cancelled := false
@@ -30,6 +30,25 @@ func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
 					}
 					cancelled = true
 					return response(202, `{}`, ""), nil
+				}
+				if strings.Contains(req.URL.Path, "/workflows/") {
+					if req.URL.Path != "/repos/owner/repo/actions/workflows/99" || req.Header.Get("If-None-Match") != "" {
+						t.Fatal("workflow read must be fresh and use workflow_id")
+					}
+					if scenario == "workflow error" {
+						return response(500, "{}", ""), nil
+					}
+					if scenario == "workflow malformed" {
+						return response(200, "{", ""), nil
+					}
+					state := "active"
+					if scenario == "workflow unknown" {
+						state = ""
+					}
+					if strings.HasPrefix(scenario, "disabled") {
+						state = "disabled_manually"
+					}
+					return response(200, fmt.Sprintf(`{"state":%q}`, state), ""), nil
 				}
 				if strings.HasSuffix(req.URL.Path, "/jobs") {
 					status := "queued"
@@ -70,11 +89,15 @@ func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
 				if scenario == "new attempt" {
 					attempt = 2
 				}
+				event := "push"
+				if strings.HasPrefix(scenario, "dynamic") {
+					event = "dynamic"
+				}
 				name := "farm"
 				if scenario == "missing name" {
 					name = ""
 				}
-				return response(200, fmt.Sprintf(`{"id":420,"name":%q,"conclusion":"cancelled","run_attempt":%d,"status":%q,"created_at":"2020-01-01T00:00:00Z"}`, name, attempt, status), ""), nil
+				return response(200, fmt.Sprintf(`{"id":420,"workflow_id":99,"name":%q,"event":%q,"conclusion":"cancelled","run_attempt":%d,"status":%q,"created_at":"2020-01-01T00:00:00Z"}`, name, event, attempt, status), ""), nil
 			})})
 			if err != nil {
 				t.Fatal(err)
@@ -83,9 +106,12 @@ func TestIssue520FreshRunGatesAndCancelBeforeRerun(t *testing.T) {
 			if scenario == "invalid candidate" {
 				job.ID = 0
 			}
-			outcome, err := observer.RequeueOrphan(context.Background(), job, func(w string, _ []string) bool { return scenario == "excluded" && w == "farm" }, scenario != "observe")
-			if (err != nil) != (scenario == "read failure") {
+			outcome, err := observer.RequeueOrphan(context.Background(), job, func(w string, _ []string) bool { return scenario == "excluded" && w == "farm" }, scenario != "observe" && scenario != "dynamic observe" && scenario != "disabled observe")
+			if (err != nil) != (scenario == "read failure" || scenario == "workflow error" || scenario == "workflow malformed") {
 				t.Fatalf("outcome=%s err=%v", outcome, err)
+			}
+			if (strings.HasPrefix(scenario, "dynamic") || strings.HasPrefix(scenario, "disabled") || scenario == "workflow unknown") && outcome != "not_rerunnable" {
+				t.Fatalf("non-rerunnable outcome=%s posts=%v", outcome, posts)
 			}
 			want := 0
 			switch scenario {
@@ -141,7 +167,7 @@ func TestOrphanRequeuePartialFailuresNeverProceed(t *testing.T) {
 			posts := 0
 			tokens := &stagedActionToken{}
 			if failure == "cancel token" {
-				tokens.failAt = 5
+				tokens.failAt = 6
 			}
 			tokens.permissionError = failure == "permission check"
 			var source TokenSource = tokens
@@ -158,6 +184,9 @@ func TestOrphanRequeuePartialFailuresNeverProceed(t *testing.T) {
 						return nil, context.Canceled
 					}
 					return response(202, `{}`, ""), nil
+				}
+				if strings.Contains(req.URL.Path, "/workflows/") {
+					return response(200, `{"state":"active"}`, ""), nil
 				}
 				if strings.HasSuffix(req.URL.Path, "/jobs") {
 					if failure == "jobs" {
@@ -234,6 +263,9 @@ func TestOrphanFinalEvidenceAndResume(t *testing.T) {
 						return orphanFreshResponse(409, "{}", ""), nil
 					}
 					return orphanFreshResponse(202, "{}", ""), nil
+				}
+				if strings.Contains(req.URL.Path, "/workflows/") {
+					return response(200, `{"state":"active"}`, ""), nil
 				}
 				if strings.HasSuffix(req.URL.Path, "/jobs") {
 					lists++
@@ -427,6 +459,9 @@ func TestOrphanFinalReadsAndCancelShareDeadline(t *testing.T) {
 		}
 		if req.Method == http.MethodPost {
 			return response(409, "{}", ""), nil
+		}
+		if strings.Contains(req.URL.Path, "/workflows/") {
+			return response(200, `{"state":"active"}`, ""), nil
 		}
 		if strings.HasSuffix(req.URL.Path, "/jobs") {
 			lists++

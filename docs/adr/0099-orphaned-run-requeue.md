@@ -37,7 +37,7 @@ are Pull Request, Media smoke and Store screenshots; concurrency group names
 cannot match these names.
 
 Observe and act use one claim/finish path. All outcomes retain per-run cooldown;
-held and excluded do not consume the three-per-hour node
+held, excluded and not_rerunnable do not consume the three-per-hour node
 mutation budget. Two successful or uncertain mutations exhaust a run's local
 lifetime budget; reserved and cancelled_not_rerun count conservatively. An
 observed attempt advance retains the rerun charge. GitHub run_attempt >= 3 independently vetoes
@@ -86,3 +86,34 @@ interrupting a live job.
 
 No existing fleet.v1 field or enum changes. Doctor detail is additive text;
 no scheduler/capacity policy, deployment or authority promotion changes.
+
+## Issue #526: recovery class safety and audit latency
+
+GitHub-managed runs with event `dynamic` cannot be retried. Decode the run event
+on the uncached safety read and return `not_rerunnable` before cancellation in
+observe and act mode, including legacy resumes. Immediately before a potential
+cancel (or observe verdict), read the workflow without cached evidence and require
+state `active`; disabled or unknown states also return `not_rerunnable`. Doctor
+names the run and this outcome. It consumes no mutation budget and retains per-run cooldown; the durable
+reservation still precedes any possible mutation. No schema migration is needed.
+
+A threshold-aged ADR 0098 candidate whose otherwise fresh, zero-assigned audit
+rows fail recovery's stricter age check requests one out-of-cycle audit. The
+daemon signals the periodic auditor through a coalescing one-slot wake channel,
+and admits extra attempts at most once per max(1 minute, audit interval / 3),
+including failed attempts. The ingester owns audits and their health errors;
+recovery never waits for network I/O. The periodic cadence remains intact.
+Recovery waits for the next reconcile to consume the new evidence; failed audits preserve the
+last completed observation and never authorize action. No new configuration,
+capacity offer, or authority is introduced.
+
+Ownership returns its blocking reason: `awaiting fresh audit`, `assigned to set N`,
+or `sibling owner (rank N)`. Missing readings stay unknown. All existing run/job
+checks, stagger, exclusions, cooldown, caps and permission pause remain enforced.
+
+The three review questions: reuse the auditor rather than add another polling
+mechanism; one callback and shared rate limit express the latency fix without a
+new knob; deterministic HTTP, ledger, coordinator and daemon tests plus the
+all-gated broker simulation exercise the safety and recovery paths. These are
+fleet defects, not simulation oracle or world-model defects. Observe/shadow
+authority limits and fleet.v1 fields remain unchanged.
