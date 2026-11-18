@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, #494. Amends ADR 0005 on mixed-profile-cohort nodes (ADR 0024).
+Accepted, #494 (first wave; residual in #529). Amends ADR 0005 on mixed-profile-cohort nodes (ADR 0024).
 
 ## Context
 
@@ -45,8 +45,9 @@ No new state, knob or pass.
 
 ## Consequences
 
-A feasible maestro no longer idles behind a builder that is waiting on busy
-Linux. The builder's extra wait is bounded by one backfill wave. That is a cardinality
+The first fitting macOS wave no longer idles behind a builder that is waiting
+on busy Linux. Later arrivals still do: once the wave is spent, the next fitting
+maestro waits for the Linux jobs to end, as in #494. That residual is #529. The builder's extra wait is bounded by one backfill wave. That is a cardinality
 bound like ADR 0005's, but wider: up to MaxActive spawns of one profile rather
 than one aged smallest-tier job. Like ADR 0005 it is not a duration bound. Single-cohort nodes are unchanged.
 
@@ -54,7 +55,9 @@ Known limit: the gate asks whether live macOS of another profile exists, not
 whether that work is what keeps the head from fitting. If the head could not fit
 even with every such instance gone (external load, or a head more than twice the
 backfill profile), fitting maestros run in serialized waves instead of
-continuously. It never wedges, because the gate opens once that work ends. With the
+continuously. The wait is bounded by the running wave's duration, because the
+gate opens once that work ends, but the simulation's property (a) may still
+report it as a wedge. With the
 scheduler test profiles (builder 8 CPU, maestro 4 CPU) it cannot occur.
 
 Evidence: `TestIssue494MacHandoffLivenessSeed19` (simulation replay, red before
