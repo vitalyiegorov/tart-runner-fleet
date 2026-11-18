@@ -624,6 +624,13 @@ func (w *world) queueJob(job *simJob) *simJob {
 // labels and scale set, under the next run attempt. The broker announces it like
 // any arrival, and REST reports it with the new attempt whenever its next poll
 // lands. Only the latest attempt of a run can be re-run.
+// terminal is GitHub's view of a finished job: done, cancelled, or silently
+// cancelled while the broker still advertises it (ADR 0026). Rerun eligibility
+// and completed-run evidence share it.
+func (j *simJob) terminal() bool {
+	return j.status == jobDone || j.status == jobCancelled || j.silentCancel
+}
+
 func (w *world) rerun(selector int) {
 	if w.arrivalsStopped {
 		return
@@ -634,7 +641,7 @@ func (w *world) rerun(selector int) {
 	}
 	var finished []*simJob
 	for _, job := range w.jobs {
-		if (job.status == jobDone || job.status == jobCancelled) && job.attempt == latest[job.runID] {
+		if job.terminal() && job.attempt == latest[job.runID] {
 			finished = append(finished, job)
 		}
 	}
@@ -736,7 +743,7 @@ func (w *world) completedRuns(_ context.Context, candidates []githubscaleset.Wor
 			if job.runID != run.ID || job.owner != run.Repository.Owner || job.name != run.Repository.Name || job.attempt != attempt {
 				continue
 			}
-			if job.status != jobDone && job.status != jobCancelled && !job.silentCancel {
+			if !job.terminal() {
 				terminal = false
 				break
 			}

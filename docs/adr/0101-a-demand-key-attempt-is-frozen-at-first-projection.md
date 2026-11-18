@@ -67,5 +67,16 @@ For a rerun delivered before REST correlation, the key's attempt may read 1 whil
 GitHub's real attempt is 2. That is cosmetic in logs and identity only: every
 consumer that needs the real attempt reads `run_attempt`.
 
-Evidence: `TestIssue400RerunDemandKeyIsStableWhenRESTLearnsTheAttempt`. It is
-red before the change, both for the moving key and for the expiry guard.
+Known limit across a rollback: empty-exit backoff (ADR 0094) counts deleted
+instances by their bound key. An older binary derives a rerun's key from the
+learned `run_attempt`, so it does not see exits recorded under the frozen
+attempt, and that demand's backoff starts over. The extra starts are bounded by
+the tolerated empty-exit count before backoff resumes under the new key. A
+rollback is an exceptional, operator-visible event, so this is accepted rather
+than taught to older binaries.
+
+Evidence:
+- `TestIssue400RerunDemandKeyIsStableWhenRESTLearnsTheAttempt` is red before the
+  change, both for the moving key and for the expiry guard.
+- `TestIssue400LegacyQueuedDemandIsFrozenOnOpen` covers the open-time freeze.
+- `TestIssue400RerunDeliveredBeforeRESTBootsOneVM` is the simulation replay.
