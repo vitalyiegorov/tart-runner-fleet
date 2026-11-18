@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -98,14 +100,32 @@ func TestExecuteServesMetricsOnLoopbackOnly(t *testing.T) {
 	}
 }
 
+// handedOut records every port freeAddress has returned in this process, so two
+// addresses one test asks for (gate and metrics, say) can never collide.
+var handedOut sync.Map
+
+// freeAddress returns a loopback address free at the moment of the call, for a
+// process the test starts later. That gap cannot be closed, so the port comes
+// from below every kernel's ephemeral range (Linux 32768-60999, macOS
+// 49152-65535): a port the kernel hands out as the source of some parallel
+// test's outgoing connection can then never be the one picked here (#530).
 func freeAddress(t *testing.T) string {
 	t.Helper()
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for range 200 {
+		port := 20000 + rand.IntN(12000)
+		if _, taken := handedOut.LoadOrStore(port, true); taken {
+			continue
+		}
+		probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err != nil {
+			continue
+		}
+		address := probe.Addr().String()
+		_ = probe.Close()
+		return address
 	}
-	defer probe.Close()
-	return probe.Addr().String()
+	t.Fatal("no free loopback port below the ephemeral range")
+	return ""
 }
 
 func waitFor(t *testing.T, url string) string {
