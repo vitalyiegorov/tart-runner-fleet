@@ -2036,6 +2036,12 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 		if containsSpawn(plan.Operations[before:]) {
 			plan.Next.MacHandoff.BackfillAdmitted = true
 		}
+	} else if !hasConsumingForeignMacProfile(in.Instances.Value, handoff.Profile) {
+		// Issue #529: the head is still waiting on busy Linux, and the macOS wave
+		// it already lent has ended. Lend the next one. The head's extra wait
+		// stays one wave: when Linux ends while a wave runs, the spent latch keeps
+		// planBehindInfeasibleMacHead from starting another (ADR 0100).
+		plan = macBackfillBesideHandoff(in, plan, macDemands)
 	}
 	return plan
 }
