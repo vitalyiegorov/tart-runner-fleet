@@ -46,8 +46,8 @@ switches safe in both directions. It rests on ADR 0011's gate:
   operation.
 - So when a binary opens the store, no VM is bound to any key yet. Freezing each
   row's current key is safe.
-- That covers a demand that is still **queued** across the switch. The plan
-  council on #532 showed this case matters: without the freeze, the new binary
+- That covers a demand that is still **queued** across the switch. The
+  code council on #532 showed this case matters: without the freeze, the new binary
   binds a VM to the derived key, REST learns the real attempt, and the key moves
   exactly as in the incident.
 - An older binary ignores the column. Rows it inserts are frozen by the next
