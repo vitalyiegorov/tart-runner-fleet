@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,6 +100,10 @@ func TestExecuteServesMetricsOnLoopbackOnly(t *testing.T) {
 	}
 }
 
+// handedOut records every port freeAddress has returned in this process, so two
+// addresses one test asks for (gate and metrics, say) can never collide.
+var handedOut sync.Map
+
 // freeAddress returns a loopback address free at the moment of the call, for a
 // process the test starts later. That gap cannot be closed, so the port comes
 // from below every kernel's ephemeral range (Linux 32768-60999, macOS
@@ -107,7 +112,11 @@ func TestExecuteServesMetricsOnLoopbackOnly(t *testing.T) {
 func freeAddress(t *testing.T) string {
 	t.Helper()
 	for range 200 {
-		probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(20000+rand.IntN(12000))))
+		port := 20000 + rand.IntN(12000)
+		if _, taken := handedOut.LoadOrStore(port, true); taken {
+			continue
+		}
+		probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 		if err != nil {
 			continue
 		}
