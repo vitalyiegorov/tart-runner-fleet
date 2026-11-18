@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, #494 (first wave; residual in #529). Amends ADR 0005 on mixed-profile-cohort nodes (ADR 0024).
+Accepted, #494; extended by #529. Amends ADR 0005 on mixed-profile-cohort nodes (ADR 0024).
 
 ## Context
 
@@ -26,8 +26,10 @@ The busy-Linux arm was the only path that did not.
 The handoff's existing one-shot budget may be spent on the next macOS profile
 behind the head when no Linux backfill is admitted and the node allows mixed
 cohorts. That profile gets one wave of spawns that fit beside the live work:
-up to its MaxActive, with no aging requirement, and without drains. The `BackfillAdmitted` latch is shared, so a handoff still
-admits at most one backfill wave, Linux or macOS, and that wave is never mixed.
+up to its MaxActive, with no aging requirement, and without drains. The
+`BackfillAdmitted` latch is shared. The Linux backfill stays one-shot. macOS
+backfill waves never overlap: since #529 the next starts only once no
+other-profile macOS instance is live. A wave is never mixed.
 (Other passes in the same tick, such as `fillLinuxRemainder` under mixed-platform
 admission, may still add Linux spawns beside it.)
 
@@ -45,9 +47,17 @@ No new state, knob or pass.
 
 ## Consequences
 
-The first fitting macOS wave no longer idles behind a builder that is waiting
-on busy Linux. Later arrivals still do: once the wave is spent, the next fitting
-maestro waits for the Linux jobs to end, as in #494. That residual is #529. The builder's extra wait is bounded by one backfill wave. That is a cardinality
+A fitting macOS wave no longer idles behind a builder that is waiting on busy
+Linux.
+
+#529 extends this to later arrivals. Once the lent wave has ended, with no
+other-profile macOS instance live, and Linux still blocks the head, the handoff
+lends the next fitting wave. The Linux one-shot backfill stays one-shot. Waves
+never overlap: a new one is lent only when the previous one is gone.
+
+The builder is waiting on the Linux jobs either way. When they end while a wave
+runs, the spent latch stops `planBehindInfeasibleMacHead` from starting another,
+so the builder's extra wait beyond Linux is still bounded by one backfill wave. That is a cardinality
 bound like ADR 0005's, but wider: up to MaxActive spawns of one profile rather
 than one aged smallest-tier job. Like ADR 0005 it is not a duration bound. Single-cohort nodes are unchanged.
 

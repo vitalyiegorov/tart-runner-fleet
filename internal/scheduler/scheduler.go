@@ -88,8 +88,10 @@ type State struct {
 
 // MacHandoff durably bounds residual-capacity admission while Linux prevents
 // a selected macOS demand from starting. BackfillAdmitted is monotonic for one
-// selected demand: repeated ticks and newly arriving Linux work cannot create
-// an unbounded backfill stream ahead of macOS.
+// selected demand: the Linux backfill is one-shot, so newly arriving Linux work
+// cannot form an unbounded stream ahead of macOS. macOS backfill waves never
+// overlap: the next starts only once no other-profile macOS instance is live
+// (ADR 0100, #529).
 type MacHandoff struct {
 	Demand           domain.DemandKey
 	Profile          domain.ProfileID
@@ -2036,6 +2038,12 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 		if containsSpawn(plan.Operations[before:]) {
 			plan.Next.MacHandoff.BackfillAdmitted = true
 		}
+	} else if !hasConsumingForeignMacProfile(in.Instances.Value, handoff.Profile) {
+		// Issue #529: the head is still waiting on busy Linux, and the macOS wave
+		// it already lent has ended. Lend the next one. The head's extra wait
+		// stays one wave: when Linux ends while a wave runs, the spent latch keeps
+		// planBehindInfeasibleMacHead from starting another (ADR 0100).
+		plan = macBackfillBesideHandoff(in, plan, macDemands)
 	}
 	return plan
 }

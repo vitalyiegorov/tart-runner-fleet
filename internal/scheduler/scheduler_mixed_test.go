@@ -296,9 +296,16 @@ func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
 		t.Fatalf("latched handoff admitted a second wave: %#v", got)
 	}
 	// The tick above is also full on CPU. This one has room for another maestro
-	// (the first finished, Linux still busy), so only the latch can refuse it.
-	if got := spawnedKeys(tick(true, []domain.Demand{builderHead, laterMaestro}, busy, first.Next)); len(got) != 0 {
-		t.Fatalf("latched handoff admitted a second wave with room for it: %#v", got)
+	// beside the live one (only `large` busy: 12 - 4 - 4 = 4 CPU free), so only
+	// the latch can refuse it: a wave is still running.
+	largeAndMaestro := []domain.Instance{busy[0], withMaestro[len(busy)]}
+	if got := spawnedKeys(tick(true, []domain.Demand{builderHead, laterMaestro}, largeAndMaestro, first.Next)); len(got) != 0 {
+		t.Fatalf("latched handoff admitted a second wave while the first still runs: %#v", got)
+	}
+	// #529: the first wave has ended and Linux is still busy. The head is waiting
+	// on Linux regardless, so the next fitting maestro gets the next wave.
+	if got := spawnedKeys(tick(true, []domain.Demand{builderHead, laterMaestro}, busy, first.Next)); !reflect.DeepEqual(got, []domain.DemandKey{laterMaestro.Key}) {
+		t.Fatalf("handoff behind busy Linux did not lend the next wave once the first ended: %#v", got)
 	}
 
 	// Council finding on #528: once Linux ends, the head is blocked only by the
