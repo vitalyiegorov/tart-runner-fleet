@@ -25,24 +25,28 @@ The busy-Linux arm was the only path that did not.
 
 The handoff's existing one-shot budget may be spent on the next macOS profile
 behind the head when no Linux backfill is admitted and the node allows mixed
-cohorts. That profile gets one wave of spawns that fit beside the live work,
-without drains. The `BackfillAdmitted` latch is shared, so a handoff still
-admits at most one backfill wave, Linux or macOS. Linux and macOS spawns still
-never share a plan.
+cohorts. That profile gets one wave of spawns that fit beside the live work:
+up to its MaxActive, with no aging requirement, and without drains. The `BackfillAdmitted` latch is shared, so a handoff still
+admits at most one backfill wave, Linux or macOS, and that wave is never mixed.
+(Other passes in the same tick, such as `fillLinuxRemainder` under mixed-platform
+admission, may still add Linux spawns beside it.)
 
-The spent latch also binds `planBehindInfeasibleMacHead`. When the Linux jobs end
+The spent latch also binds `planBehindInfeasibleMacHead`, but only while live
+macOS work blocks the head. When the Linux jobs end
 while the backfilled wave still runs, the head is blocked only by that wave, and
 planning moves to that path. Without the carried latch, overlapping replacement
-waves could keep the head's vector from ever freeing.
+waves could keep the head's vector from ever freeing. With nothing macOS live
+the head is simply infeasible, and refusing there would bring back the wedge that
+path exists to prevent.
 
 No new state, knob or pass.
 
 ## Consequences
 
 A feasible maestro no longer idles behind a builder that is waiting on busy
-Linux. The builder's extra wait is bounded by one backfill wave, which is the
-same cardinality bound ADR 0005 accepts for Linux; like ADR 0005 it is not a
-duration bound. Single-cohort nodes are unchanged.
+Linux. The builder's extra wait is bounded by one backfill wave. That is a cardinality
+bound like ADR 0005's, but wider: up to MaxActive spawns of one profile rather
+than one aged smallest-tier job. Like ADR 0005 it is not a duration bound. Single-cohort nodes are unchanged.
 
 Evidence: `TestIssue494MacHandoffLivenessSeed19` (simulation replay, red before
 the change) and `TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux`

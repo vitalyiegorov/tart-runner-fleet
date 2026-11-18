@@ -304,6 +304,14 @@ func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
 	if got := spawnedKeys(linuxGone); len(got) != 0 {
 		t.Fatalf("spent handoff admitted a replacement wave after Linux ended: %#v", got)
 	}
+	// Second council finding: the spent latch binds only while live macOS work
+	// blocks the head. On an idle host the head is simply infeasible, and a
+	// fitting maestro must still be admitted, or the queue wedges.
+	idle := tick(true, []domain.Demand{builderHead, laterMaestro}, nil, linuxGone.Next)
+	if got := spawnedKeys(idle); !reflect.DeepEqual(got, []domain.DemandKey{laterMaestro.Key}) {
+		t.Fatalf("idle host behind an infeasible head = %#v, want the fitting maestro", got)
+	}
+
 	freed := input([]domain.Demand{builderHead, laterMaestro}, nil, linuxGone.Next)
 	freed.Config = mixedConfig()
 	freed.Config.MixedPlatformAdmission = true
