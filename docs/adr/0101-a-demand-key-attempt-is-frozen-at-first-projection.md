@@ -39,19 +39,28 @@ open, in the same self-heal pass that reseeds the scheduler state.
 `DemandKey()` still falls back to `run_attempt` when the frozen value is 0, but
 after an open no such row remains.
 
-Freezing on every open, not once in the migration, is what makes version
-switches safe in both directions. It rests on ADR 0011's gate:
-- Every generation swap goes through `Prepare`, rollback included, and
-  `Prepare` refuses unless the fleet is quiescent: no instance and no retrying
-  operation.
-- So when a binary opens the store, no VM is bound to any key yet. Freezing each
-  row's current key is safe.
-- That covers a demand that is still **queued** across the switch. The
-  code council on #532 showed this case matters: without the freeze, the new binary
+Freezing on every open, not once in the migration, is what makes moving
+**forward** safe. It rests on ADR 0011's gate:
+- The updater refuses downgrades, so the only way to a newer binary is
+  `Prepare`, which refuses unless the fleet is quiescent: no instance and no
+  retrying operation.
+- So when a newer binary opens the store, no VM is bound to any key yet, and
+  freezing each row's current key is safe.
+- That covers a demand that is still **queued** across the switch. The code
+  council on #532 showed this case matters: without the freeze, the new binary
   binds a VM to the derived key, REST learns the real attempt, and the key moves
   exactly as in the incident.
-- An older binary ignores the column. Rows it inserts are frozen by the next
-  newer open.
+- Rows with `key_attempt = 0` exist only after an older binary ran, and getting
+  back to a newer binary always goes through `Prepare` again. So the freeze never
+  touches a key a running binary has bound a VM to.
+
+The one way **back** is the updater's in-transaction rollback, after the
+candidate's activation, readiness or commit fails. It does not pass `Prepare`.
+The candidate may already have bound a VM to a frozen key, and the restored older
+binary then derives that demand's key from `run_attempt`. If REST learns the
+real attempt in that window, #400 can recur under the rolled-back binary. That is
+the behaviour every older binary already had. The newer binary's own guarantees
+are unaffected.
 
 Rejected:
 - **Drop the attempt from the key.** The request id already differs between
