@@ -873,6 +873,24 @@ func (s *Store) Migrate(ctx context.Context) error {
 			return fmt.Errorf("record migration 16: %w", err)
 		}
 	}
+	if version < 17 {
+		// #400: the run attempt a demand's scheduling key carries is frozen at
+		// first projection. No backfill in the migration: the open-time freeze
+		// below handles every row still at 0, including rows a rolled-back binary
+		// writes.
+		var present int
+		if err := s.txRow(ctx, tx, "migrate.v17.inspect", `SELECT COUNT(*) FROM pragma_table_info('runner_demands') WHERE name='key_attempt'`).Scan(&present); err != nil {
+			return err
+		}
+		if present == 0 {
+			if _, err := s.txExec(ctx, tx, "migrate.v17.column", `ALTER TABLE runner_demands ADD COLUMN key_attempt INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migration 17: %w", err)
+			}
+		}
+		if _, err := s.txExec(ctx, tx, "migrate.v17.record", `INSERT INTO schema_migrations(version,applied_at) VALUES(17,?)`, s.instant().UnixNano()); err != nil {
+			return fmt.Errorf("record migration 17: %w", err)
+		}
+	}
 	// Self-heal the seeded scheduler_state singleton on every open. Migration 2
 	// creates and first seeds the table, so it always exists by this point; an
 	// operator deleting the row (incident 2026-07-22, which wedged every tick on
@@ -880,6 +898,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 	// IGNORE without disturbing a live row.
 	if _, err := s.txExec(ctx, tx, "migrate.reseed", seedSchedulerState); err != nil {
 		return fmt.Errorf("reseed scheduler state: %w", err)
+	}
+	// #400 / ADR 0101: freeze every demand key still derived from run_attempt,
+	// on every open. Rows from before migration 17 or written by a rolled-back
+	// binary carry key_attempt=0; an open follows a quiescent swap, so no VM is
+	// bound yet and their current key is the one to freeze before scheduling
+	// resumes.
+	if _, err := s.txExec(ctx, tx, "migrate.freeze-key-attempt", `UPDATE runner_demands SET key_attempt=MAX(run_attempt,1) WHERE key_attempt=0`); err != nil {
+		return fmt.Errorf("freeze demand key attempts: %w", err)
 	}
 	if err := s.commit(tx, "migrate.commit"); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)

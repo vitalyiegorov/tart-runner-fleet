@@ -199,8 +199,10 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 	// Fresh broker evidence retracts every REST-derived absence conclusion for
 	// this request: a re-advertised job is by definition not a ghost, and an
 	// expiry that the broker contradicts must never survive it.
-	_, err = s.txExec(ctx, tx, "inbox.project", `INSERT INTO runner_demands(scale_set_id,runner_request_id,status,status_rank,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	// key_attempt is written on insert only: the scheduling key a VM is bound to
+	// must not move when REST later learns the real run attempt (#400).
+	_, err = s.txExec(ctx, tx, "inbox.project", `INSERT INTO runner_demands(scale_set_id,runner_request_id,status,status_rank,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at,key_attempt)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,MAX(?,1))
 		ON CONFLICT(scale_set_id,runner_request_id) DO UPDATE SET status=excluded.status,status_rank=excluded.status_rank,owner=excluded.owner,
 		repository=excluded.repository,workflow_run_id=excluded.workflow_run_id,job_id=excluded.job_id,display_name=excluded.display_name,
 		workflow_ref=excluded.workflow_ref,logical_key=excluded.logical_key,event_name=excluded.event_name,labels=excluded.labels,
@@ -210,7 +212,7 @@ func (s *Store) applyDemandEvent(ctx context.Context, tx *sql.Tx, scaleSetID int
 		record.ScaleSetID, record.RunnerRequestID, record.Status, demandRank(record.Status), record.Owner, record.Repository,
 		record.WorkflowRunID, record.JobID, record.DisplayName, record.WorkflowRef, record.LogicalKey, record.EventName, labels,
 		toNanos(record.QueueTime), toNanos(record.FirstQueueTime), record.WorkflowJobID, record.RunAttempt, record.RunnerID,
-		record.RunnerName, record.Result, record.UpdatedAt.UnixNano())
+		record.RunnerName, record.Result, record.UpdatedAt.UnixNano(), record.RunAttempt)
 	if err != nil {
 		return fmt.Errorf("project demand event: %w", err)
 	}
@@ -290,7 +292,7 @@ func (s *Store) ActiveDemands(ctx context.Context, scaleSetID int64) ([]operatio
 	if scaleSetID <= 0 {
 		return nil, operations.ErrInvalid
 	}
-	rows, err := s.dbQuery(ctx, "inbox.active.query", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at
+	rows, err := s.dbQuery(ctx, "inbox.active.query", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at,key_attempt
 		FROM runner_demands WHERE scale_set_id=? AND status_rank<? AND expired_at=0 ORDER BY COALESCE(NULLIF(first_queue_time,0),queue_time),runner_request_id`, scaleSetID, demandRank(operations.DemandJobCompleted))
 	if err != nil {
 		return nil, fmt.Errorf("list active demands: %w", err)
@@ -326,7 +328,7 @@ func (s *Store) DemandCursor(ctx context.Context, scaleSetID int64) (int64, erro
 }
 
 func (s *Store) demandRecord(ctx context.Context, tx *sql.Tx, scaleSetID, requestID int64) (operations.DemandRecord, error) {
-	return scanDemand(s.txRow(ctx, tx, "inbox.demand.load", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at
+	return scanDemand(s.txRow(ctx, tx, "inbox.demand.load", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at,key_attempt
 		FROM runner_demands WHERE scale_set_id=? AND runner_request_id=?`, scaleSetID, requestID))
 }
 
@@ -334,7 +336,7 @@ func (s *Store) DemandRecord(ctx context.Context, scaleSetID, requestID int64) (
 	if scaleSetID <= 0 || requestID <= 0 {
 		return operations.DemandRecord{}, operations.ErrInvalid
 	}
-	return scanDemand(s.dbRow(ctx, "inbox.demand.lookup", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at
+	return scanDemand(s.dbRow(ctx, "inbox.demand.lookup", `SELECT scale_set_id,runner_request_id,status,owner,repository,workflow_run_id,job_id,display_name,workflow_ref,logical_key,event_name,labels,queue_time,first_queue_time,workflow_job_id,run_attempt,runner_id,runner_name,result,updated_at,key_attempt
 		FROM runner_demands WHERE scale_set_id=? AND runner_request_id=?`, scaleSetID, requestID))
 }
 
@@ -792,7 +794,7 @@ func scanDemand(row rowScanner) (operations.DemandRecord, error) {
 	var queueTime, firstQueueTime, updatedAt int64
 	err := row.Scan(&record.ScaleSetID, &record.RunnerRequestID, &status, &record.Owner, &record.Repository, &record.WorkflowRunID,
 		&record.JobID, &record.DisplayName, &record.WorkflowRef, &record.LogicalKey, &record.EventName, &labels, &queueTime,
-		&firstQueueTime, &record.WorkflowJobID, &record.RunAttempt, &record.RunnerID, &record.RunnerName, &record.Result, &updatedAt)
+		&firstQueueTime, &record.WorkflowJobID, &record.RunAttempt, &record.RunnerID, &record.RunnerName, &record.Result, &updatedAt, &record.KeyAttempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return operations.DemandRecord{}, operations.ErrNotFound
 	}
@@ -1175,7 +1177,7 @@ func (s *Store) ExpireCompletedRunDemands(ctx context.Context, scaleSetID int64,
  OR (json_extract(i.scheduling_metadata,'$.demand.Repo')=runner_demands.owner||'/'||runner_demands.repository
  AND json_extract(i.scheduling_metadata,'$.demand.RunID')=runner_demands.workflow_run_id
  AND json_extract(i.scheduling_metadata,'$.demand.JobID')=runner_demands.runner_request_id
- AND json_extract(i.scheduling_metadata,'$.demand.Attempt')=MAX(1,runner_demands.run_attempt)))))`,
+ AND json_extract(i.scheduling_metadata,'$.demand.Attempt')=CASE WHEN runner_demands.key_attempt>0 THEN runner_demands.key_attempt ELSE MAX(1,runner_demands.run_attempt) END))))`,
 		now.UnixNano(), now.UnixNano(), scaleSetID, run.Owner, run.Repository, run.RunID, run.Attempt,
 		demandRank(operations.DemandJobAvailable), demandRank(operations.DemandJobAssigned), demandRank(operations.DemandJobStarted), now.UnixNano(),
 		demandRank(operations.DemandJobAvailable), operations.StateDeleted, operations.StateFailed)

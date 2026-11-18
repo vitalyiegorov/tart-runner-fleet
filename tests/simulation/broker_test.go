@@ -358,7 +358,7 @@ func demandEventProgression(job *simJob) []operations.DemandEventKind {
 func (w *world) demandEvent(job *simJob, kind operations.DemandEventKind) operations.DemandEvent {
 	event := operations.DemandEvent{Kind: kind, RunnerRequestID: job.requestID, Owner: job.owner,
 		Repository: job.name, WorkflowRunID: job.runID, JobID: fmt.Sprintf("job-%d", job.requestID),
-		DisplayName: fmt.Sprintf("build-%d", job.requestID), WorkflowRef: "refs/heads/main",
+		DisplayName: job.displayName, WorkflowRef: "refs/heads/main",
 		EventName: job.event, Labels: w.jobLabels(job), QueueTime: job.queuedAt}
 	if kind != operations.DemandJobAvailable {
 		event.RunnerName = job.runner
@@ -535,9 +535,9 @@ func (w *world) captureSnapshot() {
 			continue
 		}
 		snapshot.jobs = append(snapshot.jobs, githubscaleset.WorkflowJob{
-			ID: job.requestID, RunID: job.runID, Name: fmt.Sprintf("build-%d", job.requestID),
+			ID: job.requestID, RunID: job.runID, Name: job.displayName,
 			Repository: githubscaleset.Repository{Owner: job.owner, Name: job.name},
-			Status:     "queued", Labels: w.jobLabels(job), RunAttempt: 1,
+			Status:     "queued", Labels: w.jobLabels(job), RunAttempt: job.attempt,
 			CreatedAt: job.queuedAt, QueueTimeExact: true,
 		})
 	}
@@ -600,13 +600,57 @@ func (w *world) arrive(repo string, profile domain.ProfileID, event string) *sim
 	}
 	owner, name := splitRepo(repo)
 	w.nextRunID++
+	return w.queueJob(&simJob{runID: w.nextRunID, attempt: 1, repo: repo, owner: owner, name: name,
+		binding: binding, event: event})
+}
+
+// queueJob gives a job its runner request and puts it in GitHub's queue. The
+// display name defaults to one unique per request, so a job shares a logical
+// key only with a rerun of itself.
+func (w *world) queueJob(job *simJob) *simJob {
 	w.nextReq++
-	job := &simJob{requestID: w.nextReq, runID: w.nextRunID, repo: repo, owner: owner, name: name,
-		binding: binding, event: event, queuedAt: w.now, status: jobQueued,
-		announced: map[operations.DemandEventKind]bool{}, emptyExits: w.emptyExitNext}
+	job.requestID, job.queuedAt, job.status = w.nextReq, w.now, jobQueued
+	if job.displayName == "" {
+		job.displayName = fmt.Sprintf("build-%d", job.requestID)
+	}
+	job.announced, job.emptyExits = map[operations.DemandEventKind]bool{}, w.emptyExitNext
 	w.emptyExitNext = 0
 	w.jobs = append(w.jobs, job)
 	return job
+}
+
+// rerun is a user re-running a finished workflow run (issue #400). GitHub queues
+// the same job again as a NEW runner request: same run, repository, name,
+// labels and scale set, under the next run attempt. The broker announces it like
+// any arrival, and REST reports it with the new attempt whenever its next poll
+// lands. Only the latest attempt of a run can be re-run.
+// terminal is GitHub's view of a finished job: done, cancelled, or silently
+// cancelled while the broker still advertises it (ADR 0026). Rerun eligibility
+// and completed-run evidence share it.
+func (j *simJob) terminal() bool {
+	return j.status == jobDone || j.status == jobCancelled || j.silentCancel
+}
+
+func (w *world) rerun(selector int) {
+	if w.arrivalsStopped {
+		return
+	}
+	latest := map[int64]int{}
+	for _, job := range w.jobs {
+		latest[job.runID] = max(latest[job.runID], job.attempt)
+	}
+	var finished []*simJob
+	for _, job := range w.jobs {
+		if job.terminal() && job.attempt == latest[job.runID] {
+			finished = append(finished, job)
+		}
+	}
+	if len(finished) == 0 {
+		return
+	}
+	prior := finished[selector%len(finished)]
+	w.queueJob(&simJob{runID: prior.runID, attempt: prior.attempt + 1, displayName: prior.displayName,
+		repo: prior.repo, owner: prior.owner, name: prior.name, binding: prior.binding, event: prior.event})
 }
 
 // bindingFor is GitHub's placement decision, not the fleet's. A profile served
@@ -681,15 +725,32 @@ func (w *world) advertisedCapacity(binding int) int {
 }
 
 // completedRuns is GitHub's terminal run-attempt view, independent of whether
-// the queued-job listing ever corroborated a demand.
+// the queued-job listing ever corroborated a demand. An unknown attempt (0) asks
+// about the run's latest attempt, as githubscaleset.Observer does, so a rerun
+// keeps a run open that its finished first attempt would otherwise close.
 func (w *world) completedRuns(_ context.Context, candidates []githubscaleset.WorkflowRun) ([]githubscaleset.WorkflowRun, error) {
 	var completed []githubscaleset.WorkflowRun
 	for _, run := range candidates[:min(10, len(candidates))] {
+		attempt, terminal := run.Attempt, false
+		if attempt == 0 {
+			for _, job := range w.jobs {
+				if job.runID == run.ID && job.owner == run.Repository.Owner && job.name == run.Repository.Name {
+					attempt = max(attempt, job.attempt)
+				}
+			}
+		}
 		for _, job := range w.jobs {
-			if job.runID == run.ID && job.owner == run.Repository.Owner && job.name == run.Repository.Name && (job.status == jobDone || job.status == jobCancelled || job.silentCancel) {
-				completed = append(completed, run)
+			if job.runID != run.ID || job.owner != run.Repository.Owner || job.name != run.Repository.Name || job.attempt != attempt {
+				continue
+			}
+			if !job.terminal() {
+				terminal = false
 				break
 			}
+			terminal = true
+		}
+		if terminal {
+			completed = append(completed, run)
 		}
 	}
 	return completed, nil
