@@ -1318,4 +1318,26 @@ func TestIssue400RerunDemandKeyIsStableWhenRESTLearnsTheAttempt(t *testing.T) {
 	if got := learned.DemandKey(); got != bound {
 		t.Fatalf("demand key moved under a bound instance: bound %+v, now %+v", bound, got)
 	}
+	active, err := store.ActiveDemands(ctx, 1)
+	if err != nil || len(active) != 1 || active[0].DemandKey() != bound {
+		t.Fatalf("active demand key differs from the bound key %+v: %#v, %v", bound, active, err)
+	}
+	// Plan council on #400: completed-run expiry re-derived the key from the
+	// learned attempt, so it did not see the VM bound to the frozen key and
+	// expired the demand from under it.
+	// Only an assigned or started demand is protected by a live incarnation; an
+	// available one of a completed run is expired by design.
+	assigned := rerun
+	assigned.Kind = operations.DemandJobAssigned
+	if _, err := store.ApplyDemandBatch(ctx, 1, 4, []operations.DemandEvent{assigned}); err != nil {
+		t.Fatal(err)
+	}
+	seedInstanceRow(t, store, "bound-vm", operations.StateRunning, time.Unix(10013, 0).UTC(), bound, "base@1")
+	// The store stamps updated_at with its own clock, and expiry only touches rows
+	// older than now, so judge well after it.
+	expired, err := store.ExpireCompletedRunDemands(ctx, 1, time.Now().UTC().Add(time.Hour),
+		operations.RunIdentity{Owner: "owner", Repository: "repo", RunID: 77, Attempt: 2})
+	if err != nil || expired != 0 {
+		t.Fatalf("completed-run expiry ignored the VM bound to the frozen key: expired=%d err=%v", expired, err)
+	}
 }

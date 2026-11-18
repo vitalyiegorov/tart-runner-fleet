@@ -414,10 +414,13 @@ type DemandRecord struct {
 	FirstQueueTime  time.Time
 	WorkflowJobID   int64
 	RunAttempt      int
-	RunnerID        int
-	RunnerName      string
-	Result          string
-	UpdatedAt       time.Time
+	// KeyAttempt is the run attempt frozen into DemandKey at first projection
+	// (#400); 0 means the row predates it and the key derives from RunAttempt.
+	KeyAttempt int
+	RunnerID   int
+	RunnerName string
+	Result     string
+	UpdatedAt  time.Time
 }
 
 // Repo is the durable row's repository slug in the one form the scheduler and
@@ -431,10 +434,19 @@ func (r DemandRecord) Repo() string { return r.Owner + "/" + r.Repository }
 // second time. A missing run attempt normalizes to the first attempt, because
 // GitHub omits the field for it.
 //
+// The attempt is therefore frozen when the row is first projected (#400): REST
+// can learn a rerun's real attempt after a VM was already bound to the key, and
+// a key that moved then named a demand no instance incarnated, so a second VM
+// booted. RunAttempt stays the learned value for everything that needs GitHub's
+// actual attempt; only rows that predate the frozen column derive from it.
+//
 // The key is only meaningful when Validate passes; callers that build a binding
 // from it must check, since an incomplete row cannot name an incarnation.
 func (r DemandRecord) DemandKey() domain.DemandKey {
-	attempt := r.RunAttempt
+	attempt := r.KeyAttempt
+	if attempt <= 0 {
+		attempt = r.RunAttempt
+	}
 	if attempt <= 0 {
 		attempt = 1
 	}
