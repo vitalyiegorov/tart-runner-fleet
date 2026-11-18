@@ -295,6 +295,11 @@ func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
 	if got := spawnedKeys(second); len(got) != 0 {
 		t.Fatalf("latched handoff admitted a second wave: %#v", got)
 	}
+	// The tick above is also full on CPU. This one has room for another maestro
+	// (the first finished, Linux still busy), so only the latch can refuse it.
+	if got := spawnedKeys(tick(true, []domain.Demand{builderHead, laterMaestro}, busy, first.Next)); len(got) != 0 {
+		t.Fatalf("latched handoff admitted a second wave with room for it: %#v", got)
+	}
 
 	// Council finding on #528: once Linux ends, the head is blocked only by the
 	// backfilled maestro and planning moves to planBehindInfeasibleMacHead. The
