@@ -384,10 +384,10 @@ func TestExecLauncherSupervisesRunnerAndPowersOffGuest(t *testing.T) {
 	runner := filepath.Join(root, "run.sh")
 	sudo := filepath.Join(root, "sudo")
 	shutdown := filepath.Join(root, "shutdown")
-	if err := os.WriteFile(runner, []byte("#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(runner, []byte("#!/bin/sh\nprintf finished > \"$RUNNER_MARKER.tmp\" && mv \"$RUNNER_MARKER.tmp\" \"$RUNNER_MARKER\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(sudo, []byte("#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER.tmp\" && mv \"$SHUTDOWN_MARKER.tmp\" \"$SHUTDOWN_MARKER\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(shutdown, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
@@ -432,9 +432,9 @@ func TestExecLauncherMovesSupervisorIntoManagedScopeWithoutJITInArguments(t *tes
 	sudo := filepath.Join(root, "sudo")
 	shutdown := filepath.Join(root, "shutdown")
 	for path, body := range map[string]string{
-		boundary: "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BOUNDARY_ARGS\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
-		runner:   "#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n",
-		sudo:     "#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER\"\n",
+		boundary: "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BOUNDARY_ARGS.tmp\" && mv \"$BOUNDARY_ARGS.tmp\" \"$BOUNDARY_ARGS\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+		runner:   "#!/bin/sh\nprintf finished > \"$RUNNER_MARKER.tmp\" && mv \"$RUNNER_MARKER.tmp\" \"$RUNNER_MARKER\"\n",
+		sudo:     "#!/bin/sh\nprintf '%s' \"$*\" > \"$SHUTDOWN_MARKER.tmp\" && mv \"$SHUTDOWN_MARKER.tmp\" \"$SHUTDOWN_MARKER\"\n",
 		shutdown: "#!/bin/sh\nexit 0\n",
 	} {
 		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
@@ -505,8 +505,8 @@ func TestExecLauncherRunsAContainerGuestWithoutSystemdOrPoweroff(t *testing.T) {
 	wrapper := filepath.Join(root, "systemd-run")
 	runner := filepath.Join(root, "run.sh")
 	for path, body := range map[string]string{
-		wrapper: "#!/bin/sh\nprintf ran > \"$WRAPPER_MARKER\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
-		runner:  "#!/bin/sh\nprintf finished > \"$RUNNER_MARKER\"\n",
+		wrapper: "#!/bin/sh\nprintf ran > \"$WRAPPER_MARKER.tmp\" && mv \"$WRAPPER_MARKER.tmp\" \"$WRAPPER_MARKER\"\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+		runner:  "#!/bin/sh\nprintf finished > \"$RUNNER_MARKER.tmp\" && mv \"$RUNNER_MARKER.tmp\" \"$RUNNER_MARKER\"\n",
 	} {
 		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 			t.Fatal(err)

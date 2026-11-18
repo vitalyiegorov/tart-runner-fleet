@@ -189,12 +189,17 @@ func TestFindingCountMaximizationOvertakesAgedWork(t *testing.T) {
 // platform at a time -- planLinux runs, then the macOS remainder -- so a younger
 // Linux demand takes a vector an older macOS demand was entitled to under the
 // cross-platform aged FIFO of ADR 0012.
+//
+// ADR 0100 closed this shape where busy LINUX blocks the head: the handoff's
+// one-shot backfill now offers the fitting macOS profile first. The pin moved to
+// the path that still arbitrates Linux first, planBehindInfeasibleMacHead, where
+// a busy macOS instance blocks the head and nothing Linux is live.
 func TestFindingCrossPlatformResidualArbitration(t *testing.T) {
 	t.Parallel()
 	config := findingConfig(nil)
 	// An aged macOS builder heads the global FIFO and cannot fit beside the live
-	// xl, so ADR 0017 opens the residual. Four cores remain.
-	live := []domain.Instance{findingInstance("xl-live", "a/repo", "xl", domain.InstanceRunning)}
+	// maestro, so ADR 0017 opens the residual. Four cores remain.
+	live := []domain.Instance{findingInstance("maestro-live", "a/repo", "maestro", domain.InstanceRunning)}
 	head := findingDemand("a/repo", 41, 90*time.Minute, "builder")
 	agedMaestro := findingDemand("b/repo", 42, 60*time.Minute, "maestro")
 	youngLarge := findingDemand("b/repo", 43, time.Minute, "large")
