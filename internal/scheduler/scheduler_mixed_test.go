@@ -296,6 +296,23 @@ func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
 		t.Fatalf("latched handoff admitted a second wave: %#v", got)
 	}
 
+	// Council finding on #528: once Linux ends, the head is blocked only by the
+	// backfilled maestro and planning moves to planBehindInfeasibleMacHead. The
+	// spent latch must hold there too, or replacement waves overlap forever.
+	maestroOnly := withMaestro[len(busy):]
+	linuxGone := tick(true, []domain.Demand{builderHead, laterMaestro}, maestroOnly, second.Next)
+	if got := spawnedKeys(linuxGone); len(got) != 0 {
+		t.Fatalf("spent handoff admitted a replacement wave after Linux ended: %#v", got)
+	}
+	freed := input([]domain.Demand{builderHead, laterMaestro}, nil, linuxGone.Next)
+	freed.Config = mixedConfig()
+	freed.Config.MixedPlatformAdmission = true
+	freed.Config.MixedProfileCohorts = true
+	freed.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 12, MemoryMB: 24_576, Slots: 4}}, testNow)
+	if got := spawnedKeys(PlanTick(freed)); len(got) == 0 || got[0] != builderHead.Key {
+		t.Fatalf("builder head did not start once its vector freed: %#v", got)
+	}
+
 	if got := spawnedKeys(tick(false, []domain.Demand{builderHead, maestro}, busy, State{})); len(got) != 0 {
 		t.Fatalf("single-cohort node must not mix maestro beside a builder handoff: %#v", got)
 	}

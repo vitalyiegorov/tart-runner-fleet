@@ -2060,8 +2060,11 @@ func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands [
 	if containsSpawn(plan.Operations[before:]) {
 		return plan
 	}
+	// A handoff whose one-shot wave was already spent (ADR 0100) admits no more
+	// macOS behind the head, or overlapping replacement waves could keep its
+	// vector from ever freeing.
 	remaining := demandsExcludingProfile(macDemands, chosenMacProfile(in, macDemands))
-	if len(remaining) > 0 {
+	if len(remaining) > 0 && !handoff.BackfillAdmitted {
 		plan = planMacOS(in, plan, remaining)
 	}
 	return plan

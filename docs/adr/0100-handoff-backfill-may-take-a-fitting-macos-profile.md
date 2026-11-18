@@ -30,6 +30,11 @@ without drains. The `BackfillAdmitted` latch is shared, so a handoff still
 admits at most one backfill wave, Linux or macOS. Linux and macOS spawns still
 never share a plan.
 
+The spent latch also binds `planBehindInfeasibleMacHead`. When the Linux jobs end
+while the backfilled wave still runs, the head is blocked only by that wave, and
+planning moves to that path. Without the carried latch, overlapping replacement
+waves could keep the head's vector from ever freeing.
+
 No new state, knob or pass.
 
 ## Consequences
