@@ -1075,7 +1075,7 @@ func TestMigrationFaultInjectionRollsBackEveryStage(t *testing.T) {
 		"migrate.v2", "migrate.v2.record", "migrate.v3", "migrate.v3.record", "migrate.v4", "migrate.v4.record",
 		"migrate.v5", "migrate.v5.record", "migrate.v6", "migrate.v6.record",
 		"migrate.v12.column.corroborated_at", "migrate.v12.corroborated_at", "migrate.v12.snapshots", "migrate.v12.record",
-		"migrate.v15.table", "migrate.v15.record", "migrate.v16.inspect", "migrate.v16.column", "migrate.v16.record", "migrate.reseed", "migrate.commit", "migrate.quick",
+		"migrate.v15.table", "migrate.v15.record", "migrate.v16.inspect", "migrate.v16.column", "migrate.v16.record", "migrate.v17.inspect", "migrate.v17.column", "migrate.v17.record", "migrate.reseed", "migrate.freeze-key-attempt", "migrate.commit", "migrate.quick",
 	}
 	for _, point := range points {
 		t.Run(point, func(t *testing.T) {
