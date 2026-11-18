@@ -255,3 +255,99 @@ func TestAppendPlannedSpawnsSkipsNonSpawnOps(t *testing.T) {
 		t.Fatalf("containsDrain misclassified operations")
 	}
 }
+
+// TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux is issue #494. A builder
+// head cannot fit while two Linux jobs run, and a maestro behind it fits beside
+// them. The handoff's one-shot backfill used to consider only Linux, so the
+// maestro waited for the Linux jobs to end. It now gets that one wave, under
+// the same latch: the next tick admits no further macOS backfill.
+func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
+	builderHead := demand("mac-a", 1, 17*time.Minute, "builder")
+	maestro := demand("mac-b", 2, 6*time.Minute, "maestro")
+	laterMaestro := demand("mac-b", 3, 5*time.Minute, "maestro")
+	busy := []domain.Instance{
+		{ID: "large", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "large", Route: "legacy",
+			Resources: testConfig().Profiles["large"].Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning},
+		{ID: "medium", Repo: "b/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+			Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning},
+	}
+	tick := func(mixedCohorts bool, demands []domain.Demand, instances []domain.Instance, prior State) Plan {
+		in := input(demands, instances, prior)
+		in.Config = mixedConfig()
+		in.Config.MixedPlatformAdmission = true
+		in.Config.MixedProfileCohorts = mixedCohorts
+		in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 2}}, testNow)
+		return PlanTick(in)
+	}
+
+	first := tick(true, []domain.Demand{builderHead, maestro}, busy, State{})
+	if got := spawnedKeys(first); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("handoff backfill = %#v, want the fitting maestro %#v", got, maestro.Key)
+	}
+	if first.Next.MacHandoff == nil || first.Next.MacHandoff.Demand != builderHead.Key || !first.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("handoff = %#v, want builder head held with the latch set", first.Next.MacHandoff)
+	}
+
+	withMaestro := append(append([]domain.Instance(nil), busy...), domain.Instance{ID: "maestro", Repo: "mac-b",
+		Demand: maestro.Key, Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: testConfig().Profiles["maestro"].Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning})
+	second := tick(true, []domain.Demand{builderHead, laterMaestro}, withMaestro, first.Next)
+	if got := spawnedKeys(second); len(got) != 0 {
+		t.Fatalf("latched handoff admitted a second wave: %#v", got)
+	}
+	// The tick above is also full on CPU. This one has room for another maestro
+	// (the first finished, Linux still busy), so only the latch can refuse it.
+	if got := spawnedKeys(tick(true, []domain.Demand{builderHead, laterMaestro}, busy, first.Next)); len(got) != 0 {
+		t.Fatalf("latched handoff admitted a second wave with room for it: %#v", got)
+	}
+
+	// Council finding on #528: once Linux ends, the head is blocked only by the
+	// backfilled maestro and planning moves to planBehindInfeasibleMacHead. The
+	// spent latch must hold there too, or replacement waves overlap forever.
+	maestroOnly := withMaestro[len(busy):]
+	linuxGone := tick(true, []domain.Demand{builderHead, laterMaestro}, maestroOnly, second.Next)
+	if got := spawnedKeys(linuxGone); len(got) != 0 {
+		t.Fatalf("spent handoff admitted a replacement wave after Linux ended: %#v", got)
+	}
+	// Second council finding: the spent latch binds only while live macOS work
+	// blocks the head. On an idle host the head is simply infeasible, and a
+	// fitting maestro must still be admitted, or the queue wedges.
+	idle := tick(true, []domain.Demand{builderHead, laterMaestro}, nil, linuxGone.Next)
+	if got := spawnedKeys(idle); !reflect.DeepEqual(got, []domain.DemandKey{laterMaestro.Key}) {
+		t.Fatalf("idle host behind an infeasible head = %#v, want the fitting maestro", got)
+	}
+
+	freed := input([]domain.Demand{builderHead, laterMaestro}, nil, linuxGone.Next)
+	freed.Config = mixedConfig()
+	freed.Config.MixedPlatformAdmission = true
+	freed.Config.MixedProfileCohorts = true
+	freed.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 12, MemoryMB: 24_576, Slots: 4}}, testNow)
+	if got := spawnedKeys(PlanTick(freed)); len(got) == 0 || got[0] != builderHead.Key {
+		t.Fatalf("builder head did not start once its vector freed: %#v", got)
+	}
+
+	if got := spawnedKeys(tick(false, []domain.Demand{builderHead, maestro}, busy, State{})); len(got) != 0 {
+		t.Fatalf("single-cohort node must not mix maestro beside a builder handoff: %#v", got)
+	}
+}
+
+// TestSpentHandoffLatchIgnoresTheHeadsOwnProfile is the round-2 council finding
+// on #528. A spent latch is retained while another repository's builder fills
+// the builder MaxActive and sits idle. The head is held by that limit, not by a
+// backfill wave, so the latch must not refuse a maestro that fits beside it.
+func TestSpentHandoffLatchIgnoresTheHeadsOwnProfile(t *testing.T) {
+	builderHead := demand("mac-a", 1, 17*time.Minute, "builder")
+	maestro := demand("mac-b", 2, 6*time.Minute, "maestro")
+	idleBuilder := domain.Instance{ID: "idle-builder", Repo: "mac-c", Platform: domain.PlatformMacOS, Profile: "builder",
+		Route: "macos-builder", Resources: testConfig().Profiles["builder"].Resources, State: domain.InstanceOnlineIdle,
+		Power: domain.InstancePowerRunning}
+	in := input([]domain.Demand{builderHead, maestro}, []domain.Instance{idleBuilder},
+		State{MacHandoff: &MacHandoff{Demand: builderHead.Key, Profile: builderHead.Profile, Since: testNow.Add(-time.Minute), BackfillAdmitted: true}})
+	in.Config = mixedConfig()
+	in.Config.MixedPlatformAdmission = true
+	in.Config.MixedProfileCohorts = true
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 4, MemoryMB: 12_288, Slots: 3}}, testNow)
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("spent latch beside an own-profile idle builder = %#v, want the fitting maestro", got)
+	}
+}

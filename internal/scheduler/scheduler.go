@@ -478,6 +478,17 @@ func hasConsumingPlatform(instances []domain.Instance, platform domain.Platform)
 	return false
 }
 
+// hasConsumingForeignMacProfile reports live macOS work of a profile other than
+// the given one: what a spent ADR 0100 latch waits on.
+func hasConsumingForeignMacProfile(instances []domain.Instance, profile domain.ProfileID) bool {
+	for _, instance := range instances {
+		if instance.Platform == domain.PlatformMacOS && instance.Profile != profile && instance.ConsumesHostResources() {
+			return true
+		}
+	}
+	return false
+}
+
 func assignmentRecoveries(now time.Time, config Config, instances []domain.Instance) []Operation {
 	var recoveries []Operation
 	for _, instance := range sortedInstances(instances) {
@@ -2012,13 +2023,32 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 	}
 	plan.Next.MacHandoff = &handoff
 	if !handoff.BackfillAdmitted {
+		before := len(plan.Operations)
 		backfill := boundedDrainBackfill(in, linuxDemands)
 		plan.Operations = append(plan.Operations, backfill...)
-		if len(backfill) > 0 {
+		if len(backfill) == 0 {
+			// Issue #494: a macOS profile behind the head that fits beside the
+			// live work gets the same one-shot wave, under the same latch, so it
+			// is not held until the busy Linux jobs end. No drains: it coexists
+			// or waits.
+			plan = macBackfillBesideHandoff(in, plan, macDemands)
+		}
+		if containsSpawn(plan.Operations[before:]) {
 			plan.Next.MacHandoff.BackfillAdmitted = true
 		}
 	}
 	return plan
+}
+
+func macBackfillBesideHandoff(in Input, plan Plan, macDemands []domain.Demand) Plan {
+	if !in.Config.MixedProfileCohorts {
+		return plan
+	}
+	remaining := demandsExcludingProfile(macDemands, macDemands[0].Profile)
+	if len(remaining) == 0 {
+		return plan
+	}
+	return appendMacSpawns(in, plan, demandsForProfile(remaining, chosenMacProfile(in, remaining)), nil)
 }
 
 // planBehindInfeasibleMacHead admits feasible work behind a macOS head an idle
@@ -2030,8 +2060,9 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 // RepoCaps), and — only when no Linux is admitted this tick, so the shared
 // envelope is never double-counted — the next feasible macOS profile behind the
 // head. The head keeps its FIFO priority and spawns the moment the host can fit
-// it. MacHandoff is retained for state continuity but the BackfillAdmitted latch
-// is never set here.
+// it. MacHandoff is retained for state continuity; the BackfillAdmitted latch is
+// never set here, and a latch spent by planMacHandoff binds only as ADR 0100
+// says (below).
 func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
 	macHead := priorityOrder(in, macDemands)[0]
 	handoff := macHandoffFor(in.Prior.MacHandoff, macHead, in.Now)
@@ -2041,8 +2072,14 @@ func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands [
 	if containsSpawn(plan.Operations[before:]) {
 		return plan
 	}
-	remaining := demandsExcludingProfile(macDemands, chosenMacProfile(in, macDemands))
-	if len(remaining) > 0 {
+	// A handoff whose one-shot wave was already spent (ADR 0100) admits no more
+	// macOS behind the head WHILE live macOS work of another profile blocks it,
+	// or overlapping replacement waves could keep its vector from ever freeing.
+	// The head's own profile does not count: it holds the head by MaxActive, not
+	// by a backfill wave. With neither, refusing would wedge.
+	remaining := demandsExcludingProfile(macDemands, macHead.Profile)
+	spent := handoff.BackfillAdmitted && hasConsumingForeignMacProfile(in.Instances.Value, macHead.Profile)
+	if len(remaining) > 0 && !spent {
 		plan = planMacOS(in, plan, remaining)
 	}
 	return plan
