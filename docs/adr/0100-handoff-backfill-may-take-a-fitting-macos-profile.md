@@ -26,8 +26,10 @@ The busy-Linux arm was the only path that did not.
 The handoff's existing one-shot budget may be spent on the next macOS profile
 behind the head when no Linux backfill is admitted and the node allows mixed
 cohorts. That profile gets one wave of spawns that fit beside the live work:
-up to its MaxActive, with no aging requirement, and without drains. The `BackfillAdmitted` latch is shared, so a handoff still
-admits at most one backfill wave, Linux or macOS, and that wave is never mixed.
+up to its MaxActive, with no aging requirement, and without drains. The
+`BackfillAdmitted` latch is shared. The Linux backfill stays one-shot. macOS
+backfill waves never overlap: since #529 the next starts only once no
+other-profile macOS instance is live. A wave is never mixed.
 (Other passes in the same tick, such as `fillLinuxRemainder` under mixed-platform
 admission, may still add Linux spawns beside it.)
 

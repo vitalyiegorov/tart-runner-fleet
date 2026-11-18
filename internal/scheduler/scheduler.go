@@ -88,8 +88,10 @@ type State struct {
 
 // MacHandoff durably bounds residual-capacity admission while Linux prevents
 // a selected macOS demand from starting. BackfillAdmitted is monotonic for one
-// selected demand: repeated ticks and newly arriving Linux work cannot create
-// an unbounded backfill stream ahead of macOS.
+// selected demand: the Linux backfill is one-shot, so newly arriving Linux work
+// cannot form an unbounded stream ahead of macOS. macOS backfill waves never
+// overlap: the next starts only once no other-profile macOS instance is live
+// (ADR 0100, #529).
 type MacHandoff struct {
 	Demand           domain.DemandKey
 	Profile          domain.ProfileID
