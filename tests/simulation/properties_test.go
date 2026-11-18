@@ -832,6 +832,13 @@ func noDoubleAdmissionChecker() checker {
 // identityUniquenessChecker guards the two identities the durable layer keys on:
 // the content-addressed operation identity, and the one live incarnation of a
 // demand. Both were the proximate cause of a wedge (ADR 0027, ADR 0028).
+//
+// An incarnation is judged by its RUNNER REQUEST -- repository, run, and request
+// id -- and not by the whole demand key. The request id alone already differs
+// between run attempts, so two instances naming one request under two attempts
+// are one job served twice: the second maestro of issue #400, booted when the
+// key's attempt moved under the first. Judged by the full key, they looked like
+// two demands.
 func identityUniquenessChecker() checker {
 	return func(_ *world, observation tickObservation) []finding {
 		var findings []finding
@@ -843,16 +850,19 @@ func identityUniquenessChecker() checker {
 			}
 			seen[operation.ID] = true
 		}
-		owners := map[domain.DemandKey]string{}
+		owners := map[domain.DemandKey]domain.Instance{}
 		for _, instance := range observation.Instances {
 			if !instance.IncarnatesDemand() {
 				continue
 			}
-			if previous, exists := owners[instance.Demand]; exists {
+			request := instance.Demand
+			request.Attempt = 0
+			if previous, exists := owners[request]; exists {
 				findings = append(findings, finding{Kind: findingIdentity, Tick: observation.Tick,
-					Detail: fmt.Sprintf("instances %s and %s both incarnate %s", previous, instance.ID, instance.Demand)})
+					Detail: fmt.Sprintf("instances %s (%s) and %s (%s) both incarnate runner request %d",
+						previous.ID, previous.Demand, instance.ID, instance.Demand, request.JobID)})
 			}
-			owners[instance.Demand] = instance.ID
+			owners[request] = instance
 		}
 		return findings
 	}

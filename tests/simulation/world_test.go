@@ -903,12 +903,17 @@ const (
 type simJob struct {
 	requestID int64
 	runID     int64
-	repo      string
-	owner     string
-	name      string
-	binding   int
-	event     string
-	queuedAt  time.Time
+	// attempt is the workflow run attempt this request belongs to, and
+	// displayName the job's name in that run. A rerun queues the same name again
+	// under the next attempt, as a new runner request (issue #400).
+	attempt     int
+	displayName string
+	repo        string
+	owner       string
+	name        string
+	binding     int
+	event       string
+	queuedAt    time.Time
 	// startedAt is when work actually began on a runner. queuedAt to startedAt is
 	// the wait a GitHub user sees, and the only honest measure of whether a demand
 	// the fleet released back to the queue was ever served.

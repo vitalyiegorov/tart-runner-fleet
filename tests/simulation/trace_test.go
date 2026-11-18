@@ -223,7 +223,17 @@ const (
 	// eventImageSwap is an operator rolling a rebuilt image out (a config change and
 	// a restart in production): new launches come from a new generation, and the
 	// jobs the old image could not take now run.
-	eventImageSwap    eventKind = "image_swap"
+	eventImageSwap eventKind = "image_swap"
+	// eventRerun is a user re-running a finished run (issue #400): the same job is
+	// queued again as a new runner request under the next run attempt. Count
+	// selects the finished job modulo their population. The broker can announce
+	// it before REST reports its attempt, which is the window in which its demand
+	// key once moved under a bound VM.
+	//
+	// It is trace-only, like wedged_bootstrap: adding it to faultThisTick's draw
+	// reshuffles every generated trace, and docs/TESTING.md admits a new kind to
+	// the draw only with a gate-width sweep green with it drawn.
+	eventRerun        eventKind = "rerun"
 	eventStopArrivals eventKind = "stop_arrivals"
 )
 
@@ -331,6 +341,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.arrive(event.Repo, event.Profile, event.Event)
 	case eventStopArrivals:
 		w.arrivalsStopped = true
+	case eventRerun:
+		w.rerun(event.Count)
 	case eventSilentCancel:
 		w.cancelJob(event.Count, true)
 	case eventLoudCancel:
