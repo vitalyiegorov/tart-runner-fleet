@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Amended by ADR 0100 on mixed-profile-cohort nodes.
 
 ## Context
 

@@ -255,3 +255,48 @@ func TestAppendPlannedSpawnsSkipsNonSpawnOps(t *testing.T) {
 		t.Fatalf("containsDrain misclassified operations")
 	}
 }
+
+// TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux is issue #494. A builder
+// head cannot fit while two Linux jobs run, and a maestro behind it fits beside
+// them. The handoff's one-shot backfill used to consider only Linux, so the
+// maestro waited for the Linux jobs to end. It now gets that one wave, under
+// the same latch: the next tick admits no further macOS backfill.
+func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
+	builderHead := demand("mac-a", 1, 17*time.Minute, "builder")
+	maestro := demand("mac-b", 2, 6*time.Minute, "maestro")
+	laterMaestro := demand("mac-b", 3, 5*time.Minute, "maestro")
+	busy := []domain.Instance{
+		{ID: "large", Repo: "a/repo", Platform: domain.PlatformLinux, Profile: "large", Route: "legacy",
+			Resources: testConfig().Profiles["large"].Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning},
+		{ID: "medium", Repo: "b/repo", Platform: domain.PlatformLinux, Profile: "medium", Route: "tiered",
+			Resources: testConfig().Profiles["medium"].Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning},
+	}
+	tick := func(mixedCohorts bool, demands []domain.Demand, instances []domain.Instance, prior State) Plan {
+		in := input(demands, instances, prior)
+		in.Config = mixedConfig()
+		in.Config.MixedPlatformAdmission = true
+		in.Config.MixedProfileCohorts = mixedCohorts
+		in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 6, MemoryMB: 12_288, Slots: 2}}, testNow)
+		return PlanTick(in)
+	}
+
+	first := tick(true, []domain.Demand{builderHead, maestro}, busy, State{})
+	if got := spawnedKeys(first); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("handoff backfill = %#v, want the fitting maestro %#v", got, maestro.Key)
+	}
+	if first.Next.MacHandoff == nil || first.Next.MacHandoff.Demand != builderHead.Key || !first.Next.MacHandoff.BackfillAdmitted {
+		t.Fatalf("handoff = %#v, want builder head held with the latch set", first.Next.MacHandoff)
+	}
+
+	withMaestro := append(append([]domain.Instance(nil), busy...), domain.Instance{ID: "maestro", Repo: "mac-b",
+		Demand: maestro.Key, Platform: domain.PlatformMacOS, Profile: "maestro", Route: "macos-maestro",
+		Resources: testConfig().Profiles["maestro"].Resources, State: domain.InstanceRunning, Power: domain.InstancePowerRunning})
+	second := tick(true, []domain.Demand{builderHead, laterMaestro}, withMaestro, first.Next)
+	if got := spawnedKeys(second); len(got) != 0 {
+		t.Fatalf("latched handoff admitted a second wave: %#v", got)
+	}
+
+	if got := spawnedKeys(tick(false, []domain.Demand{builderHead, maestro}, busy, State{})); len(got) != 0 {
+		t.Fatalf("single-cohort node must not mix maestro beside a builder handoff: %#v", got)
+	}
+}

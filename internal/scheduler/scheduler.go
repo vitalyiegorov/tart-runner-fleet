@@ -2012,13 +2012,32 @@ func planMacHandoff(in Input, plan Plan, linuxDemands, macDemands []domain.Deman
 	}
 	plan.Next.MacHandoff = &handoff
 	if !handoff.BackfillAdmitted {
+		before := len(plan.Operations)
 		backfill := boundedDrainBackfill(in, linuxDemands)
 		plan.Operations = append(plan.Operations, backfill...)
-		if len(backfill) > 0 {
+		if len(backfill) == 0 {
+			// Issue #494: a macOS profile behind the head that fits beside the
+			// live work gets the same one-shot wave, under the same latch, so it
+			// is not held until the busy Linux jobs end. No drains: it coexists
+			// or waits.
+			plan = macBackfillBesideHandoff(in, plan, macDemands)
+		}
+		if containsSpawn(plan.Operations[before:]) {
 			plan.Next.MacHandoff.BackfillAdmitted = true
 		}
 	}
 	return plan
+}
+
+func macBackfillBesideHandoff(in Input, plan Plan, macDemands []domain.Demand) Plan {
+	if !in.Config.MixedProfileCohorts {
+		return plan
+	}
+	remaining := demandsExcludingProfile(macDemands, macDemands[0].Profile)
+	if len(remaining) == 0 {
+		return plan
+	}
+	return appendMacSpawns(in, plan, demandsForProfile(remaining, chosenMacProfile(in, remaining)), nil)
 }
 
 // planBehindInfeasibleMacHead admits feasible work behind a macOS head an idle
