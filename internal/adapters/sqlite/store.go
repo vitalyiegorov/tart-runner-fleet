@@ -875,8 +875,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	if version < 17 {
 		// #400: the run attempt a demand's scheduling key carries is frozen at
-		// first projection. No backfill: 0 means "derive as before", which also
-		// covers rows a rolled-back binary writes.
+		// first projection. No backfill in the migration: the open-time freeze
+		// below handles every row still at 0, including rows a rolled-back binary
+		// writes.
 		var present int
 		if err := s.txRow(ctx, tx, "migrate.v17.inspect", `SELECT COUNT(*) FROM pragma_table_info('runner_demands') WHERE name='key_attempt'`).Scan(&present); err != nil {
 			return err

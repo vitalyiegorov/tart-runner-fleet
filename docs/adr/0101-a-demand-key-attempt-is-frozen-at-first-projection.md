@@ -56,23 +56,33 @@ Freezing on every open, not once in the migration, is what makes moving
 - A restart of the same newer binary can open the store with VMs bound, but every
   row that binary wrote is already frozen, so the freeze changes nothing.
 
-All of this assumes one daemon per database file, which is how the fleet is
-deployed. Each node runs exactly one supervisor, which the updater swaps per
-generation. Shadow and canary modes use their own files (`fleet-shadow.db`,
-`fleet-canary.db`). Nothing enforces it with a lock, and the store as a whole
-already depends on it: a second daemon on the same file would also project
-demands, run expiry and bind instances concurrently. A newer daemon opened by
-hand beside a live older authority could freeze a row the older binary later
-keys differently (council recheck on #532). Making the store single-writer is a
-separate decision, not this one.
+Deployment runs one daemon per database file. Each node runs exactly one
+supervisor, which the updater swaps per generation, and shadow and canary modes
+use their own files (`fleet-shadow.db`, `fleet-canary.db`).
+
+The store's authority lease refuses a second controller on the same file, but
+`Open` runs the migrations, and so this freeze, before the lease is taken.
+Observe and shadow modes take no lease at all. The freeze writes exactly the key
+the previous binary derives at that instant, so a sequential hand-over is safe
+even without quiescence. The residual case (council recheck on #532) needs all
+three of these at once:
+- a newer daemon started by hand beside a live older authority;
+- the older authority dying inside the lease wait;
+- a rerun correlated in that gap.
+Its cost is one idle VM. Making the store open single-writer is a separate
+decision, not this one.
 
 The one way **back** is the updater's in-transaction rollback, after the
 candidate's activation, readiness or commit fails. It does not pass `Prepare`.
-The candidate may already have bound a VM to a frozen key, and the restored older
-binary then derives that demand's key from `run_attempt`. If REST learns the
-real attempt in that window, #400 can recur under the rolled-back binary. That is
-the behaviour every older binary already had. The newer binary's own guarantees
-are unaffected.
+The candidate may already have bound VMs to frozen keys. The restored older
+binary derives each key from `run_attempt`. So any live VM whose demand has
+`key_attempt ≠ MAX(run_attempt,1)` at the rollback can be booted a second time,
+including a rerun the candidate bound *after* REST had already learned the real
+attempt, which an older binary that never left would not have duplicated.
+
+This is accepted. It is bounded to VMs the candidate bound between activation and
+a failed readiness check or commit, and the newer binary's own guarantees are
+unaffected.
 
 Rejected:
 - **Drop the attempt from the key.** The request id already differs between
