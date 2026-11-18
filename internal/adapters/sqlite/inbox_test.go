@@ -1266,3 +1266,56 @@ func TestDemandInboxRESTRevivesSameAttemptGhost(t *testing.T) {
 		t.Fatalf("same-attempt ghost not revived: expired_at=%d %v", expiredAt, err)
 	}
 }
+
+// TestIssue400RerunDemandKeyIsStableWhenRESTLearnsTheAttempt pins the
+// 2026-11-17 Mac mini incident. A rerun request is delivered before REST has
+// correlated it, so its run attempt is unknown and its scheduling key
+// normalizes to attempt 1. REST then reports attempt 2. A live instance bound
+// to the first key must still incarnate the demand, so the key may not move;
+// when it did, the scheduler booted a second maestro for the same request.
+func TestIssue400RerunDemandKeyIsStableWhenRESTLearnsTheAttempt(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+	first := demandEvent(operations.DemandJobAvailable, 10)
+	first.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{first}); err != nil {
+		t.Fatal(err)
+	}
+	attempt1 := operations.GitHubJobObservation{WorkflowJobID: 100, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 1, DisplayName: "build", Labels: first.Labels, Status: "queued", CreatedAt: time.Unix(50, 0).UTC(), QueueTimeExact: true}
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(60, 0).UTC(), []operations.GitHubJobObservation{attempt1}); err != nil {
+		t.Fatal(err)
+	}
+	done := first
+	done.Kind = operations.DemandJobCompleted
+	if _, err := store.ApplyDemandBatch(ctx, 1, 2, []operations.DemandEvent{done}); err != nil {
+		t.Fatal(err)
+	}
+	rerun := demandEvent(operations.DemandJobAvailable, 11)
+	rerun.JobID = "attempt-2-uuid"
+	rerun.DisplayName = "build"
+	rerun.QueueTime = time.Unix(10000, 0).UTC()
+	if _, err := store.ApplyDemandBatch(ctx, 1, 3, []operations.DemandEvent{rerun}); err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := delivered.DemandKey() // what a spawn at this moment binds the instance to
+	attempt2 := attempt1
+	attempt2.WorkflowJobID, attempt2.RunAttempt, attempt2.CreatedAt = 200, 2, time.Unix(10000, 0).UTC()
+	if _, err := store.ReconcileGitHubJobs(ctx, 1, time.Unix(10013, 0).UTC(), []operations.GitHubJobObservation{attempt2}); err != nil {
+		t.Fatal(err)
+	}
+	learned, err := store.DemandRecord(ctx, 1, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if learned.RunAttempt != 2 {
+		t.Fatalf("REST did not correlate the rerun: %#v", learned)
+	}
+	if got := learned.DemandKey(); got != bound {
+		t.Fatalf("demand key moved under a bound instance: bound %+v, now %+v", bound, got)
+	}
+}
