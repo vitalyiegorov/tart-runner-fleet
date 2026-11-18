@@ -53,6 +53,18 @@ Freezing on every open, not once in the migration, is what makes moving
 - Rows with `key_attempt = 0` exist only after an older binary ran, and getting
   back to a newer binary always goes through `Prepare` again. So the freeze never
   touches a key a running binary has bound a VM to.
+- A restart of the same newer binary can open the store with VMs bound, but every
+  row that binary wrote is already frozen, so the freeze changes nothing.
+
+All of this assumes one daemon per database file, which is how the fleet is
+deployed. Each node runs exactly one supervisor, which the updater swaps per
+generation. Shadow and canary modes use their own files (`fleet-shadow.db`,
+`fleet-canary.db`). Nothing enforces it with a lock, and the store as a whole
+already depends on it: a second daemon on the same file would also project
+demands, run expiry and bind instances concurrently. A newer daemon opened by
+hand beside a live older authority could freeze a row the older binary later
+keys differently (council recheck on #532). Making the store single-writer is a
+separate decision, not this one.
 
 The one way **back** is the updater's in-transaction rollback, after the
 candidate's activation, readiness or commit fails. It does not pass `Prepare`.
