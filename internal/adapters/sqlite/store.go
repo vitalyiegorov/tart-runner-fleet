@@ -898,6 +898,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.txExec(ctx, tx, "migrate.reseed", seedSchedulerState); err != nil {
 		return fmt.Errorf("reseed scheduler state: %w", err)
 	}
+	// #400 / ADR 0101: freeze every demand key still derived from run_attempt,
+	// on every open. Rows from before migration 17 or written by a rolled-back
+	// binary carry key_attempt=0; an open follows a quiescent swap, so no VM is
+	// bound yet and their current key is the one to freeze before scheduling
+	// resumes.
+	if _, err := s.txExec(ctx, tx, "migrate.freeze-key-attempt", `UPDATE runner_demands SET key_attempt=MAX(run_attempt,1) WHERE key_attempt=0`); err != nil {
+		return fmt.Errorf("freeze demand key attempts: %w", err)
+	}
 	if err := s.commit(tx, "migrate.commit"); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}

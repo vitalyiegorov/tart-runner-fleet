@@ -33,21 +33,25 @@ store's reservation check caught it only at JobStarted, as the
   the same frozen attempt, not the learned one, so there is one key derivation
   and not two.
 
-There is no backfill. `key_attempt = 0` means "derive as before", which covers
-rows from before the migration and rows a rolled-back binary writes; those keep
-today's behaviour.
+Rows from before migration 17, and rows a rolled-back binary writes, carry
+`key_attempt = 0`. Those rows are frozen at `MAX(run_attempt,1)` on every store
+open, in the same self-heal pass that reseeds the scheduler state.
+`DemandKey()` still falls back to `run_attempt` when the frozen value is 0, but
+after an open no such row remains.
 
-Schema compatibility alone would not make a version switch safe, because an
-older binary derives a key from `run_attempt` and could name a frozen row
-differently. What makes it safe is ADR 0011's gate:
+Freezing on every open, not once in the migration, is what makes version
+switches safe in both directions. It rests on ADR 0011's gate:
 - Every generation swap goes through `Prepare`, rollback included, and
   `Prepare` refuses unless the fleet is quiescent: no instance and no retrying
   operation.
-- So at the moment one binary hands over to another, no VM is bound to any key.
-- A demand still queued across the switch is simply keyed by whichever binary
-  spawns for it, once.
-- The incident's precondition, a VM bound to one key while the row's key moves,
-  cannot span a switch in either direction, with or without a backfill.
+- So when a binary opens the store, no VM is bound to any key yet. Freezing each
+  row's current key is safe.
+- That covers a demand that is still **queued** across the switch. The plan
+  council on #532 showed this case matters: without the freeze, the new binary
+  binds a VM to the derived key, REST learns the real attempt, and the key moves
+  exactly as in the incident.
+- An older binary ignores the column. Rows it inserts are frozen by the next
+  newer open.
 
 Rejected:
 - **Drop the attempt from the key.** The request id already differs between

@@ -1341,3 +1341,54 @@ func TestIssue400RerunDemandKeyIsStableWhenRESTLearnsTheAttempt(t *testing.T) {
 		t.Fatalf("completed-run expiry ignored the VM bound to the frozen key: expired=%d err=%v", expired, err)
 	}
 }
+
+// TestIssue400LegacyQueuedDemandIsFrozenOnOpen is the code council's finding on
+// #532. A demand still queued across an upgrade, or written by a rolled-back
+// binary, has key_attempt=0 and derives its key from run_attempt. Quiescence
+// means no VM is bound at the switch, but the new binary binds one afterwards;
+// if REST then learns the real attempt, that key must not move.
+func TestIssue400LegacyQueuedDemandIsFrozenOnOpen(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fleet.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := demandEvent(operations.DemandJobAvailable, 11)
+	queued.DisplayName = "build"
+	if _, err := store.ApplyDemandBatch(ctx, 1, 1, []operations.DemandEvent{queued}); err != nil {
+		t.Fatal(err)
+	}
+	// What a pre-migration or rolled-back binary leaves behind.
+	if _, err := store.db.Exec(`UPDATE runner_demands SET key_attempt=0 WHERE runner_request_id=11`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	before, err := reopened.DemandRecord(ctx, 1, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := before.DemandKey() // the key the new binary binds its VM to
+	learned := operations.GitHubJobObservation{WorkflowJobID: 200, Owner: "owner", Repository: "repo", WorkflowRunID: 77,
+		RunAttempt: 2, DisplayName: "build", Labels: queued.Labels, Status: "queued", CreatedAt: time.Unix(100, 0).UTC(), QueueTimeExact: true}
+	if _, err := reopened.ReconcileGitHubJobs(ctx, 1, time.Unix(110, 0).UTC(), []operations.GitHubJobObservation{learned}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := reopened.DemandRecord(ctx, 1, 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.RunAttempt != 2 {
+		t.Fatalf("REST did not correlate the legacy demand: %#v", after)
+	}
+	if got := after.DemandKey(); got != bound {
+		t.Fatalf("legacy demand key moved after REST learned the attempt: bound %+v, now %+v", bound, got)
+	}
+}
