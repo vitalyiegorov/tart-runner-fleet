@@ -330,3 +330,24 @@ func TestMacHandoffAdmitsOneFittingMacWaveBesideBusyLinux(t *testing.T) {
 		t.Fatalf("single-cohort node must not mix maestro beside a builder handoff: %#v", got)
 	}
 }
+
+// TestSpentHandoffLatchIgnoresTheHeadsOwnProfile is the round-2 council finding
+// on #528. A spent latch is retained while another repository's builder fills
+// the builder MaxActive and sits idle. The head is held by that limit, not by a
+// backfill wave, so the latch must not refuse a maestro that fits beside it.
+func TestSpentHandoffLatchIgnoresTheHeadsOwnProfile(t *testing.T) {
+	builderHead := demand("mac-a", 1, 17*time.Minute, "builder")
+	maestro := demand("mac-b", 2, 6*time.Minute, "maestro")
+	idleBuilder := domain.Instance{ID: "idle-builder", Repo: "mac-c", Platform: domain.PlatformMacOS, Profile: "builder",
+		Route: "macos-builder", Resources: testConfig().Profiles["builder"].Resources, State: domain.InstanceOnlineIdle,
+		Power: domain.InstancePowerRunning}
+	in := input([]domain.Demand{builderHead, maestro}, []domain.Instance{idleBuilder},
+		State{MacHandoff: &MacHandoff{Demand: builderHead.Key, Profile: builderHead.Profile, Since: testNow.Add(-time.Minute), BackfillAdmitted: true}})
+	in.Config = mixedConfig()
+	in.Config.MixedPlatformAdmission = true
+	in.Config.MixedProfileCohorts = true
+	in.Host = domain.Fresh(domain.Host{Available: domain.Resources{CPU: 4, MemoryMB: 12_288, Slots: 3}}, testNow)
+	if got := spawnedKeys(PlanTick(in)); !reflect.DeepEqual(got, []domain.DemandKey{maestro.Key}) {
+		t.Fatalf("spent latch beside an own-profile idle builder = %#v, want the fitting maestro", got)
+	}
+}

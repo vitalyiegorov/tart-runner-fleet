@@ -478,6 +478,17 @@ func hasConsumingPlatform(instances []domain.Instance, platform domain.Platform)
 	return false
 }
 
+// hasConsumingForeignMacProfile reports live macOS work of a profile other than
+// the given one: what a spent ADR 0100 latch waits on.
+func hasConsumingForeignMacProfile(instances []domain.Instance, profile domain.ProfileID) bool {
+	for _, instance := range instances {
+		if instance.Platform == domain.PlatformMacOS && instance.Profile != profile && instance.ConsumesHostResources() {
+			return true
+		}
+	}
+	return false
+}
+
 func assignmentRecoveries(now time.Time, config Config, instances []domain.Instance) []Operation {
 	var recoveries []Operation
 	for _, instance := range sortedInstances(instances) {
@@ -2049,8 +2060,9 @@ func macBackfillBesideHandoff(in Input, plan Plan, macDemands []domain.Demand) P
 // RepoCaps), and — only when no Linux is admitted this tick, so the shared
 // envelope is never double-counted — the next feasible macOS profile behind the
 // head. The head keeps its FIFO priority and spawns the moment the host can fit
-// it. MacHandoff is retained for state continuity but the BackfillAdmitted latch
-// is never set here.
+// it. MacHandoff is retained for state continuity; the BackfillAdmitted latch is
+// never set here, and a latch spent by planMacHandoff binds only as ADR 0100
+// says (below).
 func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands []domain.Demand) Plan {
 	macHead := priorityOrder(in, macDemands)[0]
 	handoff := macHandoffFor(in.Prior.MacHandoff, macHead, in.Now)
@@ -2061,11 +2073,12 @@ func planBehindInfeasibleMacHead(in Input, plan Plan, linuxDemands, macDemands [
 		return plan
 	}
 	// A handoff whose one-shot wave was already spent (ADR 0100) admits no more
-	// macOS behind the head WHILE live macOS work blocks it, or overlapping
-	// replacement waves could keep its vector from ever freeing. With nothing
-	// macOS live the head is simply infeasible, and refusing would wedge.
-	spent := handoff.BackfillAdmitted && hasConsumingPlatform(in.Instances.Value, domain.PlatformMacOS)
-	remaining := demandsExcludingProfile(macDemands, chosenMacProfile(in, macDemands))
+	// macOS behind the head WHILE live macOS work of another profile blocks it,
+	// or overlapping replacement waves could keep its vector from ever freeing.
+	// The head's own profile does not count: it holds the head by MaxActive, not
+	// by a backfill wave. With neither, refusing would wedge.
+	remaining := demandsExcludingProfile(macDemands, macHead.Profile)
+	spent := handoff.BackfillAdmitted && hasConsumingForeignMacProfile(in.Instances.Value, macHead.Profile)
 	if len(remaining) > 0 && !spent {
 		plan = planMacOS(in, plan, remaining)
 	}
