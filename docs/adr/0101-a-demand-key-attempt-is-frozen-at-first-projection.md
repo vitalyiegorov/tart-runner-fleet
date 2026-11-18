@@ -35,7 +35,19 @@ store's reservation check caught it only at JobStarted, as the
 
 There is no backfill. `key_attempt = 0` means "derive as before", which covers
 rows from before the migration and rows a rolled-back binary writes; those keep
-today's behaviour. An older binary ignores the extra column, so rollback is safe.
+today's behaviour.
+
+Schema compatibility alone would not make a version switch safe, because an
+older binary derives a key from `run_attempt` and could name a frozen row
+differently. What makes it safe is ADR 0011's gate:
+- Every generation swap goes through `Prepare`, rollback included, and
+  `Prepare` refuses unless the fleet is quiescent: no instance and no retrying
+  operation.
+- So at the moment one binary hands over to another, no VM is bound to any key.
+- A demand still queued across the switch is simply keyed by whichever binary
+  spawns for it, once.
+- The incident's precondition, a VM bound to one key while the row's key moves,
+  cannot span a switch in either direction, with or without a backfill.
 
 Rejected:
 - **Drop the attempt from the key.** The request id already differs between
