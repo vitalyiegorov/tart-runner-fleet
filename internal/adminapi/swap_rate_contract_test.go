@@ -21,7 +21,8 @@ func TestHostPressurePublishesThePageOutRate(t *testing.T) {
 		t.Fatalf("marshal host pressure: %v", err)
 	}
 	document := string(encoded)
-	for _, field := range []string{`"swapUsedMiB"`, `"swapOuts"`, `"swapOutRatePerSecond"`, `"swapOutRateObserved"`} {
+	for _, field := range []string{`"swapUsedMiB"`, `"swapOuts"`, `"swapOutRatePerSecond"`, `"swapOutRateObserved"`,
+		`"memoryStallPercent"`, `"memoryStallObserved"`} {
 		if !strings.Contains(document, field) {
 			t.Fatalf("fleet.v1 host pressure omits %s: %s", field, document)
 		}

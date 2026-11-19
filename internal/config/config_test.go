@@ -59,11 +59,14 @@ func TestDecodeLegacyConfiguration(t *testing.T) {
 		t.Fatalf("Encode(legacy) = %v", err)
 	}
 	if strings.Contains(encoded.String(), `"admissionPolicy"`) || strings.Contains(encoded.String(), `"minFreeInodePercent"`) ||
-		strings.Contains(encoded.String(), `"swapOutPagesPerSecond"`) {
+		strings.Contains(encoded.String(), `"swapOutPagesPerSecond"`) ||
+		strings.Contains(encoded.String(), `"memoryStallPercent"`) ||
+		strings.Contains(encoded.String(), `"swapOutHardPagesPerSecond"`) {
 		t.Fatalf("legacy Decode->Encode introduced a field older strict releases reject:\n%s", encoded.String())
 	}
 	wantGuards := Guards{MinFreeDiskGiB: 60, MinFreeInodePercent: 5, MinAvailableMemoryMiB: 1024, MaxSwapUsedMiB: 2048,
-		SwapOutPagesPerSecond: 10, MaxLoadAverage: 9, MinCPUIdlePercent: 5}
+		SwapOutPagesPerSecond: 10, SwapOutHardPagesPerSecond: 1000, MemoryStallPercent: 10, MaxLoadAverage: 9,
+		MinCPUIdlePercent: 5}
 	if cfg.Guards != wantGuards {
 		t.Fatalf("legacy guard defaults = %+v, want %+v", cfg.Guards, wantGuards)
 	}
@@ -269,17 +272,24 @@ func TestValidateRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 		"invalid load number":      func(c *Config) { c.Guards.MaxLoadAverage = math.NaN() },
 		// Zero cannot survive a round trip for the inode floor's reason: Encode
 		// omits it and decoding restores the default.
-		"zero swap-out threshold":     func(c *Config) { c.Guards.SwapOutPagesPerSecond = 0 },
-		"negative swap-out threshold": func(c *Config) { c.Guards.SwapOutPagesPerSecond = -1 },
-		"swap-out threshold NaN":      func(c *Config) { c.Guards.SwapOutPagesPerSecond = math.NaN() },
-		"infinite swap-out threshold": func(c *Config) { c.Guards.SwapOutPagesPerSecond = math.Inf(1) },
-		"too many linux runners":      func(c *Config) { c.Linux.MaxInstances = 17 },
-		"unfillable linux slots":      func(c *Config) { c.Linux.MaxInstances = 9 },
-		"invalid root disk mode":      func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
-		"relative shared path":        func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
-		"invalid mac admission":       func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
-		"unbounded session retry":     func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
-		"excessive session retry":     func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
+		"zero swap-out threshold":              func(c *Config) { c.Guards.SwapOutPagesPerSecond = 0 },
+		"negative swap-out threshold":          func(c *Config) { c.Guards.SwapOutPagesPerSecond = -1 },
+		"swap-out threshold NaN":               func(c *Config) { c.Guards.SwapOutPagesPerSecond = math.NaN() },
+		"infinite swap-out threshold":          func(c *Config) { c.Guards.SwapOutPagesPerSecond = math.Inf(1) },
+		"hard rate below the paging threshold": func(c *Config) { c.Guards.SwapOutHardPagesPerSecond = 9.5 },
+		"hard rate NaN":                        func(c *Config) { c.Guards.SwapOutHardPagesPerSecond = math.NaN() },
+		"infinite hard rate":                   func(c *Config) { c.Guards.SwapOutHardPagesPerSecond = math.Inf(1) },
+		"zero memory stall":                    func(c *Config) { c.Guards.MemoryStallPercent = 0 },
+		"negative memory stall":                func(c *Config) { c.Guards.MemoryStallPercent = -1 },
+		"memory stall NaN":                     func(c *Config) { c.Guards.MemoryStallPercent = math.NaN() },
+		"memory stall over 100":                func(c *Config) { c.Guards.MemoryStallPercent = 100.5 },
+		"too many linux runners":               func(c *Config) { c.Linux.MaxInstances = 17 },
+		"unfillable linux slots":               func(c *Config) { c.Linux.MaxInstances = 9 },
+		"invalid root disk mode":               func(c *Config) { c.MacOS.RootDiskOptions = "sync=unsafe" },
+		"relative shared path":                 func(c *Config) { c.MacOS.SharedDirectoryPath = "relative/cache" },
+		"invalid mac admission":                func(c *Config) { c.MacOS.AdmissionPolicy = "invalid" },
+		"unbounded session retry":              func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 0 },
+		"excessive session retry":              func(c *Config) { c.SessionRecovery.MaxConsecutiveFailures = 101 },
 		"impatient session window": func(c *Config) {
 			c.SessionRecovery.FailureWindow = 29 * time.Second
 		},
@@ -856,5 +866,82 @@ func TestSwapOutThresholdRejectsExplicitZero(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatalf("an explicit swapOutPagesPerSecond of 0 was accepted as %v", cfg.Guards.SwapOutPagesPerSecond)
+	}
+}
+
+// TestMemoryStallThresholdDefaultsAndRoundTrips is issue #480's configuration
+// half: every node corroborates swap pressure against the named default unless
+// its file states a threshold, a stated one survives a rewrite, and the default
+// is never written, so a rewritten file stays decodable by an older release.
+func TestMemoryStallThresholdDefaultsAndRoundTrips(t *testing.T) {
+	if Default().Guards.MemoryStallPercent != executor.DefaultMemoryStallPercent {
+		t.Fatalf("default memory stall threshold = %v", Default().Guards.MemoryStallPercent)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, Default()); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if strings.Contains(encoded.String(), `"memoryStallPercent"`) {
+		t.Fatalf("the default memory stall threshold was written:\n%s", encoded.String())
+	}
+	cfg := Default()
+	cfg.Guards.MemoryStallPercent = 25
+	encoded.Reset()
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"memoryStallPercent": 25`) {
+		t.Fatalf("a stated memory stall threshold was not written:\n%s", encoded.String())
+	}
+	decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode = %v", err)
+	}
+	if decoded.Guards.MemoryStallPercent != 25 {
+		t.Fatalf("decoded memory stall threshold = %v", decoded.Guards.MemoryStallPercent)
+	}
+	raw := strings.Replace(encoded.String(), `"memoryStallPercent": 25`, `"memoryStallPercent": 0`, 1)
+	zero, err := Decode(strings.NewReader(raw))
+	if err == nil {
+		err = zero.Validate()
+	}
+	if err == nil {
+		t.Fatalf("an explicit memoryStallPercent of 0 was accepted as %v", zero.Guards.MemoryStallPercent)
+	}
+}
+
+// TestSwapOutHardRateDefaultsAndRoundTrips: the hard rate defaults to 1000,
+// may equal the paging threshold (the 2026-11-19 stopgap sets both to 1000),
+// survives a rewrite when stated, and is never written at its default.
+func TestSwapOutHardRateDefaultsAndRoundTrips(t *testing.T) {
+	if Default().Guards.SwapOutHardPagesPerSecond != executor.DefaultSwapOutHardPagesPerSecond {
+		t.Fatalf("default hard rate = %v", Default().Guards.SwapOutHardPagesPerSecond)
+	}
+	var encoded bytes.Buffer
+	if err := Encode(&encoded, Default()); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if strings.Contains(encoded.String(), `"swapOutHardPagesPerSecond"`) {
+		t.Fatalf("the default hard rate was written:\n%s", encoded.String())
+	}
+	cfg := Default()
+	cfg.Guards.SwapOutPagesPerSecond, cfg.Guards.SwapOutHardPagesPerSecond = 1000, 1000
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a hard rate equal to the paging threshold was refused: %v", err)
+	}
+	cfg.Guards.SwapOutHardPagesPerSecond = 4000
+	encoded.Reset()
+	if err := Encode(&encoded, cfg); err != nil {
+		t.Fatalf("Encode = %v", err)
+	}
+	if !strings.Contains(encoded.String(), `"swapOutHardPagesPerSecond": 4000`) {
+		t.Fatalf("a stated hard rate was not written:\n%s", encoded.String())
+	}
+	decoded, err := Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode = %v", err)
+	}
+	if decoded.Guards.SwapOutHardPagesPerSecond != 4000 {
+		t.Fatalf("decoded hard rate = %v", decoded.Guards.SwapOutHardPagesPerSecond)
 	}
 }

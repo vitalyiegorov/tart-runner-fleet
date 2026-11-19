@@ -15,6 +15,10 @@
 //   - Load and idle CPU are soft throttles. A single unreadable file must never
 //     fail-close the fleet, so each falls back to its last good reading and then
 //     to a permissive default.
+//   - Memory stall (`/proc/pressure/memory`) only corroborates swap pressure
+//     (issue #480, ADR 0102). A kernel without PSI has no such file, so an
+//     unreadable one is reported as unobserved, never as a last good reading and
+//     never as a degraded observation.
 //
 // Free disk is the one measurement `/proc` does not carry: the kernel exposes
 // per-filesystem free space only through `statfs(2)`, whose struct differs by
@@ -50,16 +54,17 @@ import (
 // The procfs files this probe reads, relative to the root of the injected
 // filesystem so that os.DirFS("/") and a test fixture address them alike.
 const (
-	memInfoPath      = "proc/meminfo"
-	vmStatPath       = "proc/vmstat"
-	statPath         = "proc/stat"
-	loadAveragePath  = "proc/loadavg"
-	kibibytesPerMB   = 1024
-	kibibytesPerGB   = 1024 * 1024
-	permissiveLoad   = 0
-	permissiveIdle   = 100
-	defaultDiskPath  = "/"
-	defaultProbeWait = 3 * time.Second
+	memInfoPath        = "proc/meminfo"
+	vmStatPath         = "proc/vmstat"
+	statPath           = "proc/stat"
+	loadAveragePath    = "proc/loadavg"
+	memoryPressurePath = "proc/pressure/memory"
+	kibibytesPerMB     = 1024
+	kibibytesPerGB     = 1024 * 1024
+	permissiveLoad     = 0
+	permissiveIdle     = 100
+	defaultDiskPath    = "/"
+	defaultProbeWait   = 3 * time.Second
 )
 
 // DiskRunner is `df`, bound to its binary. It is an executor.CommandRunner
@@ -140,6 +145,7 @@ func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 	hasPrior := !p.last.ObservedAt.IsZero()
 	rate, rateObserved := p.pageOutRate(now, pageOuts, hasPrior)
 	idle, processors := p.processorPressure(hasPrior)
+	stall, stallObserved := p.memoryStall()
 	snapshot := executor.HostSnapshot{
 		Freshness:            executor.Fresh,
 		ObservedAt:           now,
@@ -151,6 +157,8 @@ func (p *Probe) Snapshot(ctx context.Context) executor.HostSnapshot {
 		SwapOuts:             pageOuts,
 		SwapOutRatePerSecond: rate,
 		SwapOutRateObserved:  rateObserved,
+		MemoryStallPercent:   stall,
+		MemoryStallObserved:  stallObserved,
 		CPUidlePercent:       idle,
 		LoadAverage:          p.loadAverage(hasPrior),
 		PhysicalCPU:          processors,
@@ -226,6 +234,21 @@ func (p *Probe) loadAverage(hasPrior bool) float64 {
 		return p.last.LoadAverage
 	}
 	return permissiveLoad
+}
+
+// memoryStall reads the memory stall the swap guard corroborates with. It is
+// advisory and has no fallback: a stall from an earlier tick is not evidence
+// about this one, so anything unreadable is simply unobserved.
+func (p *Probe) memoryStall() (float64, bool) {
+	body, err := p.read(memoryPressurePath)
+	if err != nil {
+		return 0, false
+	}
+	stall, err := parseMemoryStall(string(body))
+	if err != nil {
+		return 0, false
+	}
+	return stall, true
 }
 
 type memoryFacts struct {
@@ -372,6 +395,32 @@ func parsePageOuts(body string) (int64, error) {
 		return pages, nil
 	}
 	return 0, errors.New("vmstat pswpout is missing")
+}
+
+// parseMemoryStall reads the `some` line's avg10 from a PSI file: the share of
+// the last ten seconds in which at least one task was stalled waiting on
+// memory. `full` (every task stalled) is deliberately not read: a host whose
+// interactive tenant is waiting on memory is already one CI must not add to.
+func parseMemoryStall(body string) (float64, error) {
+	for _, line := range strings.Split(body, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "some" {
+			continue
+		}
+		for _, field := range fields[1:] {
+			value, found := strings.CutPrefix(field, "avg10=")
+			if !found {
+				continue
+			}
+			stall, err := strconv.ParseFloat(value, 64)
+			if err != nil || !(stall >= 0 && stall <= 100) {
+				return 0, errors.New("memory pressure avg10 is not a percentage")
+			}
+			return stall, nil
+		}
+		return 0, errors.New("memory pressure some line has no avg10")
+	}
+	return 0, errors.New("memory pressure some line is missing")
 }
 
 // processorTime is one sample of the machine's aggregate CPU time accounting.

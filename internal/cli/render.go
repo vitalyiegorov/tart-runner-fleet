@@ -188,7 +188,9 @@ func admissionState(allowed bool) string {
 //
 // An unmeasured rate is named, never printed as 0/s: it is the fail-closed case
 // where the level blocks on its own, and reading it as a quiet host is the one
-// mistake this line exists to prevent.
+// mistake this line exists to prevent. An observed memory stall follows it,
+// because it too must reach its threshold before the level refuses (ADR 0102);
+// a host that does not report one prints nothing extra.
 // inodeState renders the free share of the guest-storage filesystem's inodes.
 // A zero total is a filesystem with no fixed inode limit (btrfs), or a daemon
 // older than issue #423; neither has a share to print.
@@ -200,10 +202,14 @@ func inodeState(pressure adminapi.HostPressure) string {
 }
 
 func pagingState(pressure adminapi.HostPressure) string {
-	if !pressure.SwapOutRateObserved {
-		return "paging unmeasured"
+	paging := "paging unmeasured"
+	if pressure.SwapOutRateObserved {
+		paging = fmt.Sprintf("paging %s/s", strconv.FormatFloat(pressure.SwapOutRatePerSecond, 'f', -1, 64))
 	}
-	return fmt.Sprintf("paging %s/s", strconv.FormatFloat(pressure.SwapOutRatePerSecond, 'f', -1, 64))
+	if pressure.MemoryStallObserved {
+		paging += fmt.Sprintf(", stall %s%%", strconv.FormatFloat(pressure.MemoryStallPercent, 'f', -1, 64))
+	}
+	return paging
 }
 
 // renderOperations keeps the terse counts a healthy fleet shows and appends the

@@ -320,6 +320,8 @@ func statusEnvelope(snapshot Snapshot, controllerVersion, controllerMode string,
 				SwapOuts:             snapshot.HostPressure.SwapOuts,
 				SwapOutRatePerSecond: snapshot.HostPressure.SwapOutRatePerSecond,
 				SwapOutRateObserved:  snapshot.HostPressure.SwapOutRateObserved,
+				MemoryStallPercent:   snapshot.HostPressure.MemoryStallPercent,
+				MemoryStallObserved:  snapshot.HostPressure.MemoryStallObserved,
 				CPUIdlePercent:       snapshot.HostPressure.CPUIdlePercent,
 				LoadAverage:          snapshot.HostPressure.LoadAverage, AdmissionAllowed: snapshot.HostPressure.AdmissionAllowed,
 				AdmissionReason: snapshot.HostPressure.AdmissionReason,
@@ -847,6 +849,13 @@ func renderMetrics(snapshot Snapshot) string {
 	writeHelpType("fleet_host_swapout_rate_observed",
 		"Whether the swap-out rate could be measured; 0 means the guardrail fell back to the swap level, never that the host is quiet.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_swapout_rate_observed %d\n", boolGauge(snapshot.HostPressure.SwapOutRateObserved))
+	writeHelpType("fleet_host_memory_stall_percent",
+		"Host memory stall (PSI some avg10) that corroborates swap pressure; meaningful only when fleet_host_memory_stall_observed is 1.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_memory_stall_percent %s\n",
+		strconv.FormatFloat(snapshot.HostPressure.MemoryStallPercent, 'f', -1, 64))
+	writeHelpType("fleet_host_memory_stall_observed",
+		"Whether the host reports a memory stall; 0 means the swap guardrail decided on swap level and rate alone, never that the host is quiet.", "gauge")
+	fmt.Fprintf(&output, "fleet_host_memory_stall_observed %d\n", boolGauge(snapshot.HostPressure.MemoryStallObserved))
 	writeHelpType("fleet_host_cpu_idle_percent", "Host CPU idle percentage at the latest admission snapshot.", "gauge")
 	fmt.Fprintf(&output, "fleet_host_cpu_idle_percent %s\n", strconv.FormatFloat(snapshot.HostPressure.CPUIdlePercent, 'f', -1, 64))
 	writeHelpType("fleet_host_load_average", "Host one-minute load average at the latest admission snapshot.", "gauge")

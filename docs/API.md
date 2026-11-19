@@ -140,6 +140,18 @@ daemons that published only the level. The same two facts are exported as
 `fleet_host_swapout_rate_pages_per_second` and
 `fleet_host_swapout_rate_observed`.
 
+`hostPressure.memoryStallPercent` and `hostPressure.memoryStallObserved` are the
+memory stall that corroborates swap pressure (issue #480, ADR 0102): Linux PSI
+`some avg10` from `/proc/pressure/memory`, the share of the last ten seconds in
+which a task waited on memory. With the stall observed, swap over the ceiling at
+a swap-out rate below `swapOutHardPagesPerSecond` (or unmeasured) refuses only
+when the stall is also at or above `memoryStallPercent`; at or above the hard
+rate the stall is not consulted.
+`memoryStallObserved: false` is a host that does not report one (macOS, a
+kernel without PSI), on which the level and the rate decide alone; it never
+means a quiet host. Both fields are additive. The same two facts are exported
+as `fleet_host_memory_stall_percent` and `fleet_host_memory_stall_observed`.
+
 `scopeQueues[].tiers` is the priority-tier breakdown of one scope's queue: the
 tier each waiting demand was classified into, its depth, and its oldest enqueue
 time, ordered highest tier first. `default` is the tier every unmatched demand

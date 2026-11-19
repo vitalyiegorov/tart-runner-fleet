@@ -56,6 +56,17 @@ type HostSnapshot struct {
 	// rather than read an unmeasured rate as a quiet host.
 	SwapOutRatePerSecond float64
 	SwapOutRateObserved  bool
+	// MemoryStallPercent is the share of the last ten seconds in which at least
+	// one task waited on memory: Linux PSI's `some avg10` from
+	// /proc/pressure/memory. It is what says whether swap over the ceiling is
+	// pressure or cold residue the kernel keeps rotating (issue #480, ADR 0102).
+	//
+	// It is advisory. MemoryStallObserved false is a host that does not report
+	// it (macOS, a kernel without PSI) or a reading the probe could not parse;
+	// it never degrades the observation, and the swap guard then decides exactly
+	// as it did before the stall existed.
+	MemoryStallPercent  float64
+	MemoryStallObserved bool
 	// PhysicalCPU and PhysicalMemoryMB are the machine's real totals, used to
 	// bound aggregate fleet reservations by the host that actually exists rather
 	// than by a configured constant. Zero means the fact could not be read and
@@ -86,8 +97,16 @@ type Guardrails struct {
 	// SwapOutPagesPerSecond is the swap-out rate at or above which a host over
 	// its swap ceiling is paging out. Zero is DefaultSwapOutPagesPerSecond.
 	SwapOutPagesPerSecond float64
-	MaxLoadAverage        float64
-	MinCPUidlePercent     float64
+	// SwapOutHardPagesPerSecond is the swap-out rate at or above which a host
+	// over its swap ceiling is under pressure whatever its memory stall reads.
+	// Zero is DefaultSwapOutHardPagesPerSecond.
+	SwapOutHardPagesPerSecond float64
+	// MemoryStallPercent is the observed memory stall at or above which swap
+	// over the ceiling and paging below the hard rate is pressure. Zero is
+	// DefaultMemoryStallPercent.
+	MemoryStallPercent float64
+	MaxLoadAverage     float64
+	MinCPUidlePercent  float64
 }
 
 // DefaultSwapOutPagesPerSecond is the swap-out rate, averaged over the interval
@@ -96,6 +115,22 @@ type Guardrails struct {
 // page every twenty seconds (0.046/s) a Linux kernel trickles out of a host
 // with 23 GB available, and far below the thousands a thrashing host pages out.
 const DefaultSwapOutPagesPerSecond = 10
+
+// DefaultMemoryStallPercent is the observed memory stall (PSI `some avg10`) at
+// or above which a host over its swap ceiling and paging out below the hard
+// rate is under pressure (issue #480, ADR 0102). Cold residue on 2026-11-19 read 0.54% and 0.18%;
+// Android's lmkd treats about 7% as medium pressure and systemd-oomd acts at
+// 60% sustained for 30 seconds, so 10% sits above residue and below the point
+// where either acts. It is not calibrated against a recorded thrash.
+const DefaultMemoryStallPercent = 10
+
+// DefaultSwapOutHardPagesPerSecond is the swap-out rate at or above which no
+// memory stall reading can exempt a host (issue #480, ADR 0102). Omarchy paged
+// out 9563 pages/s at a stall of 1.67% on 2026-11-19 while a model trained, so
+// a low stall does not rule out real paging; cold residue rotated out at about
+// 50 pages/s. 1000 is the rate the owner's stopgap already trusted as the line
+// between the two.
+const DefaultSwapOutHardPagesPerSecond = 1000
 
 type AdmissionRequest struct {
 	MemoryMB int64
@@ -118,7 +153,8 @@ type AdmissionDecision struct {
 // available (issue #451, ADR 0089).
 //
 // An unmeasured rate fails closed. Without a prior sample the level is the only
-// evidence there is, and it must still block.
+// evidence there is, and it must still block, unless an observed memory stall
+// says the level is residue (pagingCorroborated, ADR 0102).
 func (g Guardrails) activelyPagingOut(snapshot HostSnapshot) bool {
 	if !snapshot.SwapOutRateObserved {
 		return true
@@ -128,6 +164,34 @@ func (g Guardrails) activelyPagingOut(snapshot HostSnapshot) bool {
 		threshold = DefaultSwapOutPagesPerSecond
 	}
 	return snapshot.SwapOutRatePerSecond >= threshold
+}
+
+// pagingCorroborated reports whether paging out over the ceiling is pressure
+// rather than cold residue. Swap used and a modest swap-out rate both
+// mis-measure a host whose swap is full of cold pages: the level never drains
+// and the kernel keeps rotating those pages out, at 50 a second on
+// ubuntu-vitalii on 2026-11-19 while no task waited on memory (issue #480, ADR
+// 0102). The stall measures the waiting, but only below the hard rate: Omarchy
+// paged out 9563 pages/s at a 1.67% stall the same day, so a measured rate at
+// or above SwapOutHardPagesPerSecond is pressure whatever the stall reads.
+//
+// An unobserved stall corroborates, so a host that does not report one keeps
+// ADR 0089's rule exactly. A stall observed below the threshold also overrides
+// an unmeasured rate: it is a positive single-sample reading that the level is
+// residue, so the first tick after a restart admits a quiet host.
+func (g Guardrails) pagingCorroborated(snapshot HostSnapshot) bool {
+	hard := g.SwapOutHardPagesPerSecond
+	if hard <= 0 {
+		hard = DefaultSwapOutHardPagesPerSecond
+	}
+	if !snapshot.MemoryStallObserved || (snapshot.SwapOutRateObserved && snapshot.SwapOutRatePerSecond >= hard) {
+		return true
+	}
+	threshold := g.MemoryStallPercent
+	if threshold <= 0 {
+		threshold = DefaultMemoryStallPercent
+	}
+	return snapshot.MemoryStallPercent >= threshold
 }
 
 // inodesBelowFloor reports whether the filesystem's free inodes are under the
@@ -156,7 +220,8 @@ func (g Guardrails) Evaluate(snapshot HostSnapshot, request AdmissionRequest) Ad
 	if snapshot.AvailableMemoryMB-request.MemoryMB < g.MinAvailableMemoryMB {
 		return AdmissionDecision{Reason: "memory reserve"}
 	}
-	if g.MaxSwapUsedMB > 0 && snapshot.SwapUsedMB > g.MaxSwapUsedMB && g.activelyPagingOut(snapshot) {
+	if g.MaxSwapUsedMB > 0 && snapshot.SwapUsedMB > g.MaxSwapUsedMB && g.activelyPagingOut(snapshot) &&
+		g.pagingCorroborated(snapshot) {
 		return AdmissionDecision{Reason: "swap pressure"}
 	}
 	if g.MaxLoadAverage > 0 && snapshot.LoadAverage > g.MaxLoadAverage && snapshot.CPUidlePercent < g.MinCPUidlePercent {

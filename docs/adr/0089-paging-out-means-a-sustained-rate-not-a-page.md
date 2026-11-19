@@ -7,6 +7,12 @@ Amends [ADR 0018](0018-second-pilot-elastic-host-envelope.md)'s "Swap pressure
 is measured as a rate, not a level". The swap ceiling (`maxSwapUsedMb`) and the
 fail-closed handling of an unmeasured rate do not change. This changes how
 sensitive an admission guard is, so deploying it needs the owner's explicit OK.
+Amended by [ADR 0102](0102-swap-pressure-is-corroborated-by-memory-stall.md):
+on a host that reports a memory stall (Linux PSI), a rate below
+`swapOutHardPagesPerSecond` (default 1000) is pressure only when that stall is
+at or above `memoryStallPercent`, and an unmeasured rate beside a stall
+measured below it no longer fails closed. "Not built" below no longer
+applies to PSI.
 
 ## Context
 

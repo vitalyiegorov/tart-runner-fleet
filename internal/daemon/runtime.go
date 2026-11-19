@@ -587,8 +587,10 @@ func newDependencies(goos string) dependencies {
 				Guards: executor.Guardrails{MinFreeDiskGB: int64(cfg.Guards.MinFreeDiskGiB),
 					MinFreeInodePercent:  cfg.Guards.MinFreeInodePercent,
 					MinAvailableMemoryMB: int64(cfg.Guards.MinAvailableMemoryMiB), MaxSwapUsedMB: int64(cfg.Guards.MaxSwapUsedMiB),
-					SwapOutPagesPerSecond: cfg.Guards.SwapOutPagesPerSecond,
-					MaxLoadAverage:        cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
+					SwapOutPagesPerSecond:     cfg.Guards.SwapOutPagesPerSecond,
+					SwapOutHardPagesPerSecond: cfg.Guards.SwapOutHardPagesPerSecond,
+					MemoryStallPercent:        cfg.Guards.MemoryStallPercent,
+					MaxLoadAverage:            cfg.Guards.MaxLoadAverage, MinCPUidlePercent: cfg.Guards.MinCPUIdlePercent},
 				ElasticHostEnvelope: cfg.Guards.ElasticHostEnvelope,
 				HostBudget:          domain.Resources{CPU: cfg.HostBudget.CPU, MemoryMB: cfg.HostBudget.MemoryMiB},
 				Guest:               guestLivenessTracker(node, cfg, time.Now),
@@ -2308,7 +2310,9 @@ func (r *failureReporter) reportSessionYield(action, reason string, failures int
 // the guardrails' closed vocabulary, never from free text.
 //
 // A closure also carries the memory the live guests hold beside the host's own
-// figures, so a refusal can be read against overcommit (knee-doctor#1352).
+// figures, so a refusal can be read against overcommit (knee-doctor#1352), and
+// the memory stall that corroborated it, so a swap refusal shows whether any
+// task was waiting on memory (issue #480).
 func (r *failureReporter) reportAdmissionGate(edge admissionTransition, result app.TickResult) {
 	if r == nil || r.logger == nil {
 		return
@@ -2329,7 +2333,7 @@ func (r *failureReporter) reportAdmissionGate(edge admissionTransition, result a
 		pressure := result.Host.Pressure
 		attributes = append(attributes, "reason", edge.Reason, "guests", guests, "guestMemoryMiB", guestMemory,
 			"hostMemoryMiB", pressure.PhysicalMemoryMB, "availableMemoryMiB", pressure.AvailableMemoryMB,
-			"swapUsedMiB", pressure.SwapUsedMB)
+			"swapUsedMiB", pressure.SwapUsedMB, "memoryStall", memoryStallState(pressure))
 	}
 	if edge.Previous != "" {
 		if !edge.PreviousAllowed {
@@ -2342,6 +2346,15 @@ func (r *failureReporter) reportAdmissionGate(edge admissionTransition, result a
 		return
 	}
 	r.logger.Warn("admission gate closed", attributes...)
+}
+
+// memoryStallState renders the stall for a log line: a percentage, or
+// "unobserved" on a host that does not report one, never a quiet 0.
+func memoryStallState(pressure domain.HostPressure) string {
+	if !pressure.MemoryStallObserved {
+		return "unobserved"
+	}
+	return strconv.FormatFloat(pressure.MemoryStallPercent, 'f', -1, 64) + "%"
 }
 
 // reportSequenceReset records that a broker restarted its message-id sequence
@@ -2987,6 +3000,7 @@ func (e engineTicker) recordMetrics(result app.TickResult) {
 			FreeDiskGiB: pressure.FreeDiskGB, SwapUsedMiB: pressure.SwapUsedMB, SwapOuts: pressure.SwapOuts,
 			FreeInodes: pressure.FreeInodes, TotalInodes: pressure.TotalInodes,
 			SwapOutRatePerSecond: pressure.SwapOutRatePerSecond, SwapOutRateObserved: pressure.SwapOutRateObserved,
+			MemoryStallPercent: pressure.MemoryStallPercent, MemoryStallObserved: pressure.MemoryStallObserved,
 			CPUIdlePercent: pressure.CPUIdlePercent, LoadAverage: pressure.LoadAverage,
 			AdmissionAllowed: pressure.AdmissionAllowed, AdmissionReason: pressure.AdmissionReason,
 			AdmissionSince: e.gate.Since()})

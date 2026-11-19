@@ -72,6 +72,7 @@ func (w *world) advancePhysics() {
 	w.inodeExhausted = decay(w.inodeExhausted)
 	w.swapResidue = decay(w.swapResidue)
 	w.swapThrash = decay(w.swapThrash)
+	w.swapColdResidue = decay(w.swapColdResidue)
 	w.tartUnavailable = decay(w.tartUnavailable)
 	w.linuxRefused = decay(w.linuxRefused)
 	for id, remaining := range w.wedgedDrain {
