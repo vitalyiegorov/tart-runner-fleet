@@ -112,7 +112,7 @@ func fakeCurl(t *testing.T, script string) string {
 }
 
 func TestCurlFetchReadsWhatCurlWrites(t *testing.T) {
-	status, body, err := CurlFetch(fakeCurl(t, `printf 'answer\n200'`))(context.Background(), "http://gate/")
+	status, body, err := CurlFetch(fakeCurl(t, `[ "$1" = --disable ] || exit 9; printf 'answer\n200'`))(context.Background(), "http://gate/")
 	if err != nil || status != 200 || string(body) != "answer" {
 		t.Fatalf("status = %d, body = %q, err = %v", status, body, err)
 	}
