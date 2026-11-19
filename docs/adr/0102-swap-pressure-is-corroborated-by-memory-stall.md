@@ -166,8 +166,9 @@ reserve` guard is untouched and still runs first.
 
 Revert the change. On one node, setting `swapOutHardPagesPerSecond` equal to
 `swapOutPagesPerSecond` restores ADR 0089's rule for every measured rate with no
-release; adding `memoryStallPercent: 0.001` restores it for an unmeasured rate
-too.
+release. No setting restores it for an unmeasured rate: a host whose PSI reads
+0% is admitted whatever `memoryStallPercent` is, so the fail-closed rule for an
+unmeasured rate (ADR 0018) returns only by reverting the release.
 
 ## Not built
 

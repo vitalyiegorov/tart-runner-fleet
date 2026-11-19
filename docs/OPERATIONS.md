@@ -148,9 +148,11 @@ rule above unchanged; its status line shows no stall and the closure log reads
 `memoryStall=unobserved`. The stall never closes the gate on its own: under the
 ceiling, or below the paging threshold, admission is allowed whatever it reads.
 To switch the stall off for measured rates on one node, set
-`swapOutHardPagesPerSecond` equal to `swapOutPagesPerSecond`; to switch it off
-for an unmeasured rate too, also set `memoryStallPercent` to a tiny value such as
-`0.001`. Note that the 2026-11-19 stopgap (`swapOutPagesPerSecond: 1000` on
+`swapOutHardPagesPerSecond` equal to `swapOutPagesPerSecond`. A low
+`memoryStallPercent` only narrows the unmeasured-rate exemption: a host reading
+0% stall is still admitted on its first tick after a restart, so only reverting
+the release restores ADR 0089's fail-closed rule for an unmeasured rate exactly.
+Note that the 2026-11-19 stopgap (`swapOutPagesPerSecond: 1000` on
 ubuntu-vitalii and Omarchy) does the first of these by accident, so those nodes
 should return to the defaults once this rule is deployed.
 
