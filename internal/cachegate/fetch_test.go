@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -95,5 +97,46 @@ func TestCurlFetchReadsTheStatusOfAnEmptyAnswer(t *testing.T) {
 	status, body, err := CurlFetch(curlFor(t))(context.Background(), server.URL)
 	if err != nil || status != http.StatusNoContent || len(body) != 0 {
 		t.Fatalf("status = %d, body = %q, err = %v", status, body, err)
+	}
+}
+
+// fakeCurl writes a script that prints what a curl would, so CurlFetch's reading of
+// curl's output is covered on a runner with no curl.
+func fakeCurl(t *testing.T, script string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "curl")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil { // #nosec G306 -- a test script.
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestCurlFetchReadsWhatCurlWrites(t *testing.T) {
+	status, body, err := CurlFetch(fakeCurl(t, `printf 'answer\n200'`))(context.Background(), "http://gate/")
+	if err != nil || status != 200 || string(body) != "answer" {
+		t.Fatalf("status = %d, body = %q, err = %v", status, body, err)
+	}
+	_, body, err = CurlFetch(fakeCurl(t, `head -c 2000 /dev/zero | tr '\0' a; printf '\n200'`))(context.Background(), "http://gate/")
+	if err != nil || len(body) != maxIdentityAnswer {
+		t.Fatalf("an oversized answer was not bounded: %d bytes, err = %v", len(body), err)
+	}
+}
+
+func TestCurlFetchFailsClosedOnWhatCurlCannotTell(t *testing.T) {
+	cases := map[string]string{
+		"failed":    `echo 'curl: (7) Failed to connect' >&2; exit 7`,
+		"no status": `printf 'no newline'`,
+		"garbage":   `printf 'answer\nnot-a-status'`,
+	}
+	for name, script := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := CurlFetch(fakeCurl(t, script))(context.Background(), "http://gate/"); err == nil {
+				t.Fatal("no error")
+			}
+		})
+	}
+	_, _, err := CurlFetch(fakeCurl(t, `echo 'curl: (7) Failed to connect' >&2; exit 7`))(context.Background(), "http://gate/")
+	if err == nil || !strings.Contains(err.Error(), "Failed to connect") {
+		t.Fatalf("the cause was lost: %v", err)
 	}
 }
