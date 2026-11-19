@@ -2,6 +2,7 @@ package cachegate
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"regexp"
@@ -109,21 +110,24 @@ func (v Verifier) NPMReady(ctx context.Context) bool {
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, v.Gate.JoinPath(NPMPingPath).String(), nil)
-	if err != nil {
-		return false
-	}
-	response, err := directClient().Do(request) // #nosec G704 -- the URL is the node's pinned gate.
-	if err != nil {
-		return false
-	}
-	_ = response.Body.Close()
-	return response.StatusCode == http.StatusOK
+	status, _, err := v.fetch()(ctx, v.Gate.JoinPath(NPMPingPath).String())
+	return err == nil && status == http.StatusOK
 }
 
-// directClient talks to the address it is given and to nothing else: no proxy, and
-// no redirect. Only the address the node pinned may answer.
-func directClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{DisableKeepAlives: true},
+// directFetch is Fetch through Go's own client: no proxy, and no redirect. Only the
+// address the node pinned may answer.
+func directFetch(ctx context.Context, target string) (int, []byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request) // #nosec G704 -- the URL is the node's pinned gate.
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxIdentityAnswer))
+	return response.StatusCode, body, err
 }

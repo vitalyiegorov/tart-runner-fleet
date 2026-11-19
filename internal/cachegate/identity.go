@@ -109,22 +109,38 @@ type identityAnswer struct {
 
 func challenge(nonce []byte) []byte { return append([]byte(identityMessage), nonce...) }
 
+// Fetch makes one GET to the node's pinned gate and returns the status and at most
+// maxIdentityAnswer bytes of the body. It never follows a redirect or uses a proxy.
+type Fetch func(ctx context.Context, target string) (status int, body []byte, err error)
+
+// maxIdentityAnswer bounds what a proof reads. A real answer is about 100 bytes.
+const maxIdentityAnswer = 1024
+
 // Verifier asks a gate to sign a fresh nonce with the key a node pinned. An
 // answer that does not verify, an error and a timeout all read as not our gate:
 // the caller routes guests away from an address it cannot vouch for. A successful
 // check says the gate holds the key now, and the traffic that follows is still
 // plain HTTP on a LAN the check has just placed us on.
+//
+// Fetch is how the check reaches the gate; nil means Go's own client. A macOS node
+// passes CurlFetch, because Local Network privacy refuses an ad-hoc signed launchd
+// agent's own LAN connections (issue #537).
 type Verifier struct {
 	Gate    *url.URL
 	Public  ed25519.PublicKey
 	Timeout time.Duration
 	Random  io.Reader
+	Fetch   Fetch
 }
 
 // Verified reports whether the gate proved its identity.
-func (v Verifier) Verified(ctx context.Context) bool {
+func (v Verifier) Verified(ctx context.Context) bool { return v.Prove(ctx) == nil }
+
+// Prove asks the gate for its proof and says why it was refused, so a node can log
+// the cause instead of only that the gate did not prove itself.
+func (v Verifier) Prove(ctx context.Context) error {
 	if len(v.Public) != ed25519.PublicKeySize {
-		return false
+		return errors.New("no pinned public key")
 	}
 	random := v.Random
 	if random == nil {
@@ -132,7 +148,7 @@ func (v Verifier) Verified(ctx context.Context) bool {
 	}
 	nonce := make([]byte, nonceBytes)
 	if _, err := io.ReadFull(random, nonce); err != nil {
-		return false
+		return fmt.Errorf("challenge: %w", err)
 	}
 	timeout := v.Timeout
 	if timeout <= 0 {
@@ -141,17 +157,26 @@ func (v Verifier) Verified(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	target := v.Gate.JoinPath(IdentityPath).String() + "?nonce=" + hex.EncodeToString(nonce)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	status, body, err := v.fetch()(ctx, target)
 	if err != nil {
-		return false
+		return fmt.Errorf("identity request: %w", err)
 	}
-	response, err := directClient().Do(request) // #nosec G704 -- the URL is the node's pinned gate.
-	if err != nil {
-		return false
+	if status != http.StatusOK {
+		return fmt.Errorf("identity request answered HTTP %d", status)
 	}
-	defer func() { _ = response.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
 	var answer identityAnswer
-	return json.Unmarshal(body, &answer) == nil && response.StatusCode == http.StatusOK &&
-		ed25519.Verify(v.Public, challenge(nonce), answer.Signature)
+	if json.Unmarshal(body, &answer) != nil {
+		return errors.New("identity answer is not a signature")
+	}
+	if !ed25519.Verify(v.Public, challenge(nonce), answer.Signature) {
+		return errors.New("identity signature does not verify against the pinned key")
+	}
+	return nil
+}
+
+func (v Verifier) fetch() Fetch {
+	if v.Fetch != nil {
+		return v.Fetch
+	}
+	return directFetch
 }

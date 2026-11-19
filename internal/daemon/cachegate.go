@@ -13,17 +13,23 @@ import (
 
 // publishedGate asks the gate and tells the doctor row what it answered.
 type publishedGate struct {
-	verifier lifecycle.GateVerifier
+	verifier cachegate.Verifier
 	url      string
 	health   *telemetry.Health
 	now      func() time.Time
 	// container says this node's guests are containers, for which a failed proof
 	// rewrites nothing and changes only the npm setting.
 	container bool
+	// warn records why a proof failed; nil records nothing (issue #537).
+	warn func(string, ...any)
 }
 
 func (g publishedGate) Verified(ctx context.Context) bool {
-	verified := g.verifier.Verified(ctx)
+	err := g.verifier.Prove(ctx)
+	verified := err == nil
+	if err != nil && g.warn != nil {
+		g.warn("cache gate did not prove its identity", "gate", g.url, "error", err)
+	}
 	g.health.SetCacheGate(telemetry.CacheGateMetric{URL: g.url, Verified: verified, ProbedAt: g.now(), Container: g.container})
 	return verified
 }
@@ -54,25 +60,28 @@ func gateAddress(raw string) *url.URL {
 // newCacheGate is nil when the node configures no gate. Otherwise it asks once at
 // once, so the doctor row is true before the first guest launches. A value Validate
 // accepted cannot fail to parse, and one that somehow did verifies nothing.
-func newCacheGate(ctx context.Context, cfg config.Config, health *telemetry.Health, now func() time.Time) lifecycle.GateVerifier {
+//
+// fetch is how this node reaches its gate, and nil means Go's own client.
+func newCacheGate(ctx context.Context, cfg config.Config, health *telemetry.Health, now func() time.Time,
+	fetch cachegate.Fetch, warn func(string, ...any)) lifecycle.GateVerifier {
 	if cfg.CacheGate == (config.CacheGate{}) {
 		health.SetCacheGate(telemetry.CacheGateMetric{})
 		return nil
 	}
 	public, _ := cachegate.ParsePublicKey(cfg.CacheGate.PublicKey)
-	published := publishedGate{verifier: cachegate.Verifier{Gate: gateAddress(cfg.CacheGate.URL), Public: public}, url: cfg.CacheGate.URL,
-		health: health, now: now, container: cfg.CacheGate.NPMHost() == cachegate.NPMContainerHost}
+	published := publishedGate{verifier: cachegate.Verifier{Gate: gateAddress(cfg.CacheGate.URL), Public: public, Fetch: fetch},
+		url: cfg.CacheGate.URL, health: health, now: now, container: cfg.CacheGate.NPMHost() == cachegate.NPMContainerHost, warn: warn}
 	published.Verified(ctx)
 	return published
 }
 
 // newNPMRoute is nil when the node gives its guests no registry, which is the
 // default. Otherwise it asks once at once, for the same reason newCacheGate does.
-func newNPMRoute(ctx context.Context, cfg config.Config, health *telemetry.Health, now func() time.Time) *lifecycle.NPMRoute {
+func newNPMRoute(ctx context.Context, cfg config.Config, health *telemetry.Health, now func() time.Time, fetch cachegate.Fetch) *lifecycle.NPMRoute {
 	if cfg.CacheGate.NPMRegistry == "" {
 		return nil
 	}
-	ready := publishedNPM{verifier: cachegate.Verifier{Gate: gateAddress(cfg.CacheGate.URL)}, registry: cfg.CacheGate.NPMRegistry,
+	ready := publishedNPM{verifier: cachegate.Verifier{Gate: gateAddress(cfg.CacheGate.URL), Fetch: fetch}, registry: cfg.CacheGate.NPMRegistry,
 		health: health, now: now}
 	ready.Verified(ctx)
 	return &lifecycle.NPMRoute{Registry: cfg.CacheGate.NPMRegistry, Host: cfg.CacheGate.NPMHost(), Ready: ready}
@@ -87,4 +96,17 @@ func withCacheGate(bootstrapper lifecycle.Bootstrapper, gate lifecycle.GateVerif
 	}
 	stdin.Gate, stdin.NPM = gate, npm
 	return stdin
+}
+
+// appleCurl is the exempt client a macOS node proves its gate through (issue #537).
+const appleCurl = "/usr/bin/curl"
+
+// gateFetchFor is how a node on goos reaches its gate. Only macOS needs a client
+// other than Go's own: Local Network privacy refuses an ad-hoc signed launchd
+// agent's LAN connections, and an Apple platform binary is exempt.
+func gateFetchFor(goos string) cachegate.Fetch {
+	if goos != "darwin" {
+		return nil
+	}
+	return cachegate.CurlFetch(appleCurl)
 }
