@@ -28,7 +28,7 @@ func (g publishedGate) Verified(ctx context.Context) bool {
 	err := g.verifier.Prove(ctx)
 	verified := err == nil
 	if err != nil && g.warn != nil {
-		g.warn("cache gate did not prove its identity, so this guest uses GitHub's results service", "gate", g.url, "error", err)
+		g.warn("cache gate did not prove its identity", "gate", g.url, "error", err)
 	}
 	g.health.SetCacheGate(telemetry.CacheGateMetric{URL: g.url, Verified: verified, ProbedAt: g.now(), Container: g.container})
 	return verified

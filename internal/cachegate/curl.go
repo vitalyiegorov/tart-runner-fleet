@@ -13,12 +13,12 @@ import (
 // Local Network privacy answers an ad-hoc signed launchd agent's own LAN connection
 // with "no route to host", and an ad-hoc release never keeps a grant across
 // updates, while an Apple platform binary is exempt (issue #537). The flags keep
-// directFetch's contract: no proxy, no redirect, plain HTTP only, a bounded body.
+// directFetch's contract: no proxy, no redirect, http or https only, a bounded body.
 // --disable comes first so no .curlrc can change what curl writes.
 func CurlFetch(binary string) Fetch {
 	return func(ctx context.Context, target string) (int, []byte, error) {
 		var stderr bytes.Buffer
-		command := exec.CommandContext(ctx, binary, "--disable", "--silent", "--show-error", "--noproxy", "*", "--proto", "=http",
+		command := exec.CommandContext(ctx, binary, "--disable", "--silent", "--show-error", "--noproxy", "*", "--proto", "=http,https",
 			"--max-redirs", "0", "--max-filesize", strconv.Itoa(maxIdentityAnswer), "--output", "-",
 			"--write-out", "\n%{http_code}", "--url", target) // #nosec G204 -- a fixed binary and an argument vector.
 		command.Stderr = &stderr
