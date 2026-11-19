@@ -117,7 +117,9 @@ any-page rule flapped its gate shut for most of the day (issue #451,
 [ADR 0089](adr/0089-paging-out-means-a-sustained-rate-not-a-page.md)). A host
 paging out in earnest runs at thousands of pages a second. The key is optional
 and must be positive. To restore the any-page behaviour on one node, set it to a
-tiny value such as `0.001`. `fleet config policy` shows the effective value as
+tiny value such as `0.001`; on a host that reports a memory stall, also set
+`swapOutHardPagesPerSecond` to the same value, or a low stall still admits any
+rate below the hard threshold. `fleet config policy` shows the effective value as
 `hostPressureFloors.swapOutPagesPerSecond`.
 
 On Linux, swap full of cold pages defeats both of those signals: the level
