@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +24,7 @@ func gateTestHealth(t *testing.T) *telemetry.Health {
 
 func TestANodeWithNoGateGetsNoVerifierAndAKnownPosture(t *testing.T) {
 	health := gateTestHealth(t)
-	if gate := newCacheGate(context.Background(), config.Config{}, health, time.Now); gate != nil {
+	if gate := newCacheGate(context.Background(), config.Config{}, health, time.Now, nil, nil); gate != nil {
 		t.Fatalf("gate = %v", gate)
 	}
 	snapshot := health.Snapshot()
@@ -41,7 +44,7 @@ func TestAnUnreachableGateIsPublishedAsUnverifiedBeforeAnyLaunch(t *testing.T) {
 	at := time.Unix(100, 0)
 	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/",
 		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}
-	gate := newCacheGate(context.Background(), cfg, health, func() time.Time { return at })
+	gate := newCacheGate(context.Background(), cfg, health, func() time.Time { return at }, nil, nil)
 	snapshot := health.Snapshot()
 	if !snapshot.CacheGatePublished || snapshot.CacheGate.Verified || !snapshot.CacheGate.ProbedAt.Equal(at) ||
 		snapshot.CacheGate.URL != cfg.CacheGate.URL {
@@ -59,7 +62,7 @@ func TestAnUnreachableGateIsPublishedAsUnverifiedBeforeAnyLaunch(t *testing.T) {
 // must still read as not ours.
 func TestAnUnparseableGateFailsClosed(t *testing.T) {
 	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://bad host/", PublicKey: "bad"}}
-	if newCacheGate(context.Background(), cfg, gateTestHealth(t), time.Now).Verified(context.Background()) {
+	if newCacheGate(context.Background(), cfg, gateTestHealth(t), time.Now, nil, nil).Verified(context.Background()) {
 		t.Fatal("verified")
 	}
 }
@@ -69,7 +72,7 @@ type otherBootstrapper struct{ lifecycle.Bootstrapper }
 func TestANodeWithNoNPMRegistryGetsNoRoute(t *testing.T) {
 	health := gateTestHealth(t)
 	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/", PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}
-	if route := newNPMRoute(context.Background(), cfg, health, time.Now); route != nil {
+	if route := newNPMRoute(context.Background(), cfg, health, time.Now, nil); route != nil {
 		t.Fatalf("route = %+v", route)
 	}
 	if snapshot := health.Snapshot(); snapshot.CacheGate.NPMRegistry != "" {
@@ -85,8 +88,8 @@ func TestAnNPMRouteReachesBothKindsOfGuestAndPublishesItsAnswer(t *testing.T) {
 	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/",
 		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", NPMRegistry: registry}}
 	health := gateTestHealth(t)
-	gate := newCacheGate(context.Background(), cfg, health, func() time.Time { return at })
-	route := newNPMRoute(context.Background(), cfg, health, func() time.Time { return at })
+	gate := newCacheGate(context.Background(), cfg, health, func() time.Time { return at }, nil, nil)
+	route := newNPMRoute(context.Background(), cfg, health, func() time.Time { return at }, nil)
 	if route == nil || route.Registry != registry || route.Host != "host.containers.internal" {
 		t.Fatalf("route = %+v", route)
 	}
@@ -108,7 +111,7 @@ func TestATartRegistryIsNotAContainerGate(t *testing.T) {
 	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/",
 		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", NPMRegistry: registry}}
 	health := gateTestHealth(t)
-	route := newNPMRoute(context.Background(), cfg, health, time.Now)
+	route := newNPMRoute(context.Background(), cfg, health, time.Now, nil)
 	if route == nil || route.Host != "192.168.1.64" {
 		t.Fatalf("route = %+v", route)
 	}
@@ -121,5 +124,36 @@ func TestAnotherBootstrapperIsLeftAlone(t *testing.T) {
 	other := otherBootstrapper{}
 	if got := withCacheGate(other, publishedGate{}, nil); got != lifecycle.Bootstrapper(other) {
 		t.Fatalf("got %T", got)
+	}
+}
+
+// TestAMacNodeProvesItsGateThroughAppleCurl is issue #537: macOS Local Network
+// privacy answered the launchd agent's own proof with "no route to host" while the
+// gate was healthy, so every Mac guest fell back to GitHub and lost its artifacts.
+func TestAMacNodeProvesItsGateThroughAppleCurl(t *testing.T) {
+	if newDependencies("darwin").gateFetch == nil {
+		t.Fatal("a macOS node proves its gate through its own LAN connection")
+	}
+	if newDependencies("linux").gateFetch != nil {
+		t.Fatal("a Linux node gained a curl dependency it does not need")
+	}
+}
+
+// TestAFailedProofIsLoggedWithItsCause is issue #537: the doctor row said only that
+// the gate did not prove itself, and nothing recorded why.
+func TestAFailedProofIsLoggedWithItsCause(t *testing.T) {
+	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://127.0.0.1:1/",
+		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}
+	var logged []any
+	warn := func(_ string, args ...any) { logged = append(logged, args...) }
+	refused := func(context.Context, string) (int, []byte, error) {
+		return 0, nil, errors.New("connect: no route to host")
+	}
+	gate := newCacheGate(context.Background(), cfg, gateTestHealth(t), time.Now, refused, warn)
+	if gate.Verified(context.Background()) {
+		t.Fatal("verified")
+	}
+	if !strings.Contains(fmt.Sprint(logged...), "no route to host") {
+		t.Fatalf("logged %v", logged)
 	}
 }

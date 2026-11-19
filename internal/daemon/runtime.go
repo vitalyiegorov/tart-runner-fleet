@@ -21,6 +21,7 @@ import (
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/adminapi"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/app"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/autoupdate"
+	"github.com/vitalyiegorov/tart-runner-fleet/internal/cachegate"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/config"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/credentials"
 	"github.com/vitalyiegorov/tart-runner-fleet/internal/discharge"
@@ -498,6 +499,8 @@ type dependencies struct {
 	newReaper       func(runtimeStore, config.Config) discharge.VM
 	readiness       func(config.Config) lifecycle.Readiness
 	bootstrap       func(config.Config) lifecycle.Bootstrapper
+	// gateFetch is how this node reaches its cache gate; nil is Go's own client.
+	gateFetch cachegate.Fetch
 	// guestProbe is the fresh re-verification a guest-liveness drain performs at
 	// the moment it acts. It is the same probe the inventory runs each tick; the
 	// drain holds its own so a standing kill order re-derives its premise from
@@ -563,6 +566,7 @@ func newDependencies(goos string) dependencies {
 			return app.ValidateLocalHost(cfg, goos, os.Stat, app.HostProductVersion)
 		},
 		executes:   node.executes,
+		gateFetch:  gateFetchFor(goos),
 		preflight:  node.preflight,
 		linuxImage: node.linuxImage,
 		// #nosec G304 -- the config path is an explicit operator-controlled CLI input.
@@ -1015,7 +1019,8 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			Store: store, Owner: controllerLeaseOwner, MaxConcurrent: workerConcurrency(opts.Mode, cfg),
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
-					Registration: control, Bootstrap: withCacheGate(d.bootstrap(cfg), newCacheGate(ctx, cfg, health, d.now), newNPMRoute(ctx, cfg, health, d.now)), Bases: map[domain.Platform]string{
+					Registration: control, Bootstrap: withCacheGate(d.bootstrap(cfg),
+						newCacheGate(ctx, cfg, health, d.now, d.gateFetch, reporter.logger.Warn), newNPMRoute(ctx, cfg, health, d.now, d.gateFetch)), Bases: map[domain.Platform]string{
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,
