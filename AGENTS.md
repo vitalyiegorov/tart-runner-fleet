@@ -131,7 +131,7 @@ git diff --check
 Report the exact coverage percentage, changed invariants, migration/API impact,
 and whether observe/shadow authority limits remain intact. Do not claim a
 production cutover from unit or integration evidence.
-- PR and issue screenshots and videos go on GitHub itself: attach them with the GitHub CLI `--attach` flag (gh ≥ 2.99). `gh pr create|edit|comment` and `gh issue create|comment` accept repeatable `--attach './before.png#Alt text'`; reference the local path in the body and gh swaps in the uploaded URL. This works in private repos, so never push media to a branch (`pr-media`, `media/*`, `pr-assets/*`) or to another repo. Never upload real user data.
+- PR and issue screenshots and videos go on GitHub itself: attach them with the GitHub CLI `--attach` flag (gh ≥ 2.99). `gh pr create|edit|comment` and `gh issue create|comment` accept repeatable `--attach './before.png#Alt text'`; reference the local path in the body and gh swaps in the uploaded URL. This works in private repos, so never push media to a branch (`pr-media`, `media/*`, `pr-assets/*`) or to another repo. Never upload real user data. Uploading needs a user login (`gh auth login`); GitHub App installation tokens cannot upload attachments, so without a user login ask the owner to attach the media, never push it to a branch.
 
 ## Prohibited actions
 
