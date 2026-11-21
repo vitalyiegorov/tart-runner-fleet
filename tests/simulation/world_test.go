@@ -488,20 +488,29 @@ func (h simHost) Snapshot(context.Context) executor.HostSnapshot {
 		freeInodes = 0
 	}
 	// Residue is ubuntu-vitalii's 2026-10-28 swap (issue #451): almost four
-	// times the ceiling, trickling out 0.046 pages/s. Thrash is the same level
-	// with the host paging out in earnest. Thrash wins when both are live.
-	swapUsedMB, swapOutRate := int64(0), 0.0
+	// times the ceiling, trickling out 0.046 pages/s, on a probe with no memory
+	// stall reading. Cold residue is the same node on 2026-11-19 (issue #480):
+	// eight times the ceiling, 50 pages/s rotating out, and tasks stalled on
+	// memory 0.54% of the time. Thrash is the host paging out in earnest above
+	// the hard rate, at Omarchy's 2026-11-19 stall of 1.67%: real paging beside
+	// a low stall, which the hard rate alone must refuse. Thrash wins when
+	// several are live.
+	swapUsedMB, swapOutRate, stall, stallObserved := int64(0), 0.0, 0.0, false
 	if w.swapResidue > 0 {
 		swapUsedMB, swapOutRate = 4*w.cfg.Guards.MaxSwapUsedMB, 0.046
 	}
+	if w.swapColdResidue > 0 {
+		swapUsedMB, swapOutRate, stall, stallObserved = 8*w.cfg.Guards.MaxSwapUsedMB, 50, 0.54, true
+	}
 	if w.swapThrash > 0 {
-		swapUsedMB, swapOutRate = 4*w.cfg.Guards.MaxSwapUsedMB, 2_000
+		swapUsedMB, swapOutRate, stall, stallObserved = 4*w.cfg.Guards.MaxSwapUsedMB, 2_000, 1.67, true
 	}
 	return executor.HostSnapshot{
 		Freshness: executor.Fresh, ObservedAt: w.now, AvailableMemoryMB: available, FreeDiskGB: 400,
 		FreeInodes: freeInodes, TotalInodes: 60_850_176,
 		SwapUsedMB: swapUsedMB, SwapOuts: 0, CPUidlePercent: idle, LoadAverage: float64(usedCPU + w.tenantCPU),
 		SwapOutRatePerSecond: swapOutRate, SwapOutRateObserved: true,
+		MemoryStallPercent: stall, MemoryStallObserved: stallObserved,
 		PhysicalCPU: w.cfg.PhysicalCPU, PhysicalMemoryMB: w.cfg.PhysicalMemoryMB,
 	}
 }
@@ -778,6 +787,7 @@ type world struct {
 	inodeExhausted  int
 	swapResidue     int
 	swapThrash      int
+	swapColdResidue int
 	tartUnavailable int
 	// powerMisreport is how many more ticks the enumeration lies about each named
 	// VM being powered off (issue #246). It is keyed per VM because both production

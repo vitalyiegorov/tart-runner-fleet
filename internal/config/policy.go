@@ -141,13 +141,15 @@ type PolicyLinuxCapacity struct {
 // same reason every other field is: an unset floor and an absent key are the
 // same drift.
 type PolicyFloors struct {
-	MinFreeDiskGiB        int     `json:"minFreeDiskGb"`
-	MinFreeInodePercent   float64 `json:"minFreeInodePercent"`
-	MinAvailableMemoryMiB int     `json:"minAvailableMemoryMb"`
-	MaxSwapUsedMiB        int     `json:"maxSwapUsedMb"`
-	SwapOutPagesPerSecond float64 `json:"swapOutPagesPerSecond"`
-	MaxLoadAverage        float64 `json:"maxLoadAverage"`
-	MinCPUIdlePercent     float64 `json:"minCpuIdlePercent"`
+	MinFreeDiskGiB            int     `json:"minFreeDiskGb"`
+	MinFreeInodePercent       float64 `json:"minFreeInodePercent"`
+	MinAvailableMemoryMiB     int     `json:"minAvailableMemoryMb"`
+	MaxSwapUsedMiB            int     `json:"maxSwapUsedMb"`
+	SwapOutPagesPerSecond     float64 `json:"swapOutPagesPerSecond"`
+	SwapOutHardPagesPerSecond float64 `json:"swapOutHardPagesPerSecond"`
+	MemoryStallPercent        float64 `json:"memoryStallPercent"`
+	MaxLoadAverage            float64 `json:"maxLoadAverage"`
+	MinCPUIdlePercent         float64 `json:"minCpuIdlePercent"`
 }
 
 // PolicyMacOSBurst is the cross-platform admission policy in full. Every field
@@ -230,8 +232,10 @@ func ProjectPolicy(cfg Config) Policy {
 		HostPressureFloors: PolicyFloors{MinFreeDiskGiB: cfg.Guards.MinFreeDiskGiB,
 			MinFreeInodePercent:   cfg.Guards.MinFreeInodePercent,
 			MinAvailableMemoryMiB: cfg.Guards.MinAvailableMemoryMiB, MaxSwapUsedMiB: cfg.Guards.MaxSwapUsedMiB,
-			SwapOutPagesPerSecond: cfg.Guards.SwapOutPagesPerSecond,
-			MaxLoadAverage:        cfg.Guards.MaxLoadAverage, MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent},
+			SwapOutPagesPerSecond:     cfg.Guards.SwapOutPagesPerSecond,
+			SwapOutHardPagesPerSecond: cfg.Guards.SwapOutHardPagesPerSecond,
+			MemoryStallPercent:        cfg.Guards.MemoryStallPercent,
+			MaxLoadAverage:            cfg.Guards.MaxLoadAverage, MinCPUIdlePercent: cfg.Guards.MinCPUIdlePercent},
 		ElasticHostEnvelope:      cfg.Guards.ElasticHostEnvelope,
 		PressureMemoryAccounting: cfg.Guards.PressureMemoryAccounting,
 		MacOSBurst: PolicyMacOSBurst{Enabled: cfg.MacOS.Enabled,

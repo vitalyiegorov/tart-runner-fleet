@@ -55,7 +55,7 @@ func TestAdmissionGateClosureCarriesGuestAndHostMemory(t *testing.T) {
 		t.Fatalf("want one closure line, got %q", lines)
 	}
 	for _, fragment := range []string{`reason="swap pressure"`, "guests=2", "guestMemoryMiB=12288",
-		"hostMemoryMiB=24576", "availableMemoryMiB=8192", "swapUsedMiB=3072"} {
+		"hostMemoryMiB=24576", "availableMemoryMiB=8192", "swapUsedMiB=3072", "memoryStall=unobserved"} {
 		if !strings.Contains(lines[0], fragment) {
 			t.Fatalf("closure missing %q: %q", fragment, lines[0])
 		}
@@ -63,5 +63,21 @@ func TestAdmissionGateClosureCarriesGuestAndHostMemory(t *testing.T) {
 	ticker.recordMetrics(gateTick(gateClock.Add(1), true, "capacity available"))
 	if opened := gateLines(&buffer)[1]; strings.Contains(opened, "guestMemoryMiB") {
 		t.Fatalf("an opening is not a refusal and carries no memory: %q", opened)
+	}
+}
+
+// A swap closure on a host that reports a memory stall carries it, so the log
+// shows whether any task was waiting on memory when the gate closed (#480).
+func TestAdmissionGateClosureCarriesTheMemoryStall(t *testing.T) {
+	var buffer bytes.Buffer
+	ticker := engineTicker{health: reservationHealthForTest(t), reporter: newFailureReporter(&buffer, nil),
+		gate: &admissionGate{}}
+	tick := gateTick(gateClock, false, "swap pressure")
+	tick.Host.Pressure.MemoryStallPercent, tick.Host.Pressure.MemoryStallObserved = 42.5, true
+
+	ticker.recordMetrics(tick)
+
+	if lines := gateLines(&buffer); len(lines) != 1 || !strings.Contains(lines[0], "memoryStall=42.5%") {
+		t.Fatalf("closure missing the observed stall: %q", lines)
 	}
 }

@@ -555,10 +555,17 @@ type HostPressure struct {
 	// closed on the level there -- so the two must travel together.
 	SwapOutRatePerSecond float64
 	SwapOutRateObserved  bool
-	CPUIdlePercent       float64
-	LoadAverage          float64
-	AdmissionAllowed     bool
-	AdmissionReason      string
+	// MemoryStallPercent and MemoryStallObserved are the stall that
+	// corroborates swap pressure (issue #480, ADR 0102): with swap over the
+	// ceiling and the host paging out, an observed stall below the threshold
+	// is cold residue. Observed=false is a host that does not report it, on
+	// which the swap guard keeps ADR 0089's rule, never a quiet host.
+	MemoryStallPercent  float64
+	MemoryStallObserved bool
+	CPUIdlePercent      float64
+	LoadAverage         float64
+	AdmissionAllowed    bool
+	AdmissionReason     string
 	// FreeInodes and TotalInodes are the guest-storage filesystem's inode counts
 	// the inode reserve decides on (issue #423). TotalInodes zero is a
 	// filesystem with no fixed inode limit, such as btrfs.

@@ -56,7 +56,9 @@ canonical observe candidate may safely run beside the incumbent.
 Host admission uses two layers. Exact profile vectors enforce CPU, memory, and
 slot envelopes first. A fresh host probe then preserves `minFreeDiskGb`,
 `minFreeInodePercent` and `minAvailableMemoryMb`, treats swap as pressured only when swap used exceeds
-`maxSwapUsedMb` **and** the host is paging out at or above `swapOutPagesPerSecond`, and treats CPU as
+`maxSwapUsedMb` **and** the host is paging out at or above `swapOutPagesPerSecond` **and**, on a host
+that reports one and below `swapOutHardPagesPerSecond`, memory stall is at or above `memoryStallPercent`,
+and treats CPU as
 pressured only when both `maxLoadAverage` is exceeded and idle CPU falls below
 `minCpuIdlePercent`. Missing values decode to the safe defaults in
 `config/fleet.example.json`. Inspect the evidence through `fleet status` or
@@ -67,7 +69,7 @@ the bounded `fleet_host_*` metrics; do not infer pressure from queue age alone.
 | `minFreeDiskGb` | 60 | `disk reserve` | free bytes on the guest-storage filesystem fall below the floor |
 | `minFreeInodePercent` | 5 | `inode reserve` | free inodes fall below that percentage of the filesystem's total; not applicable when the filesystem has no fixed inode limit |
 | `minAvailableMemoryMb` | 1024 | `memory reserve` | available memory minus the request falls below the floor |
-| `maxSwapUsedMb` / `swapOutPagesPerSecond` | 2048 / 10 | `swap pressure` | swap used exceeds the ceiling **and** the swap-out rate is at or above the threshold, or is unmeasured |
+| `maxSwapUsedMb` / `swapOutPagesPerSecond` / `swapOutHardPagesPerSecond` / `memoryStallPercent` | 2048 / 10 / 1000 / 10 | `swap pressure` | swap used exceeds the ceiling **and** either the swap-out rate is at or above the hard rate, or it is at or above the threshold (or unmeasured) **and** the memory stall (Linux PSI `some avg10`) is at or above its threshold or is not reported |
 | `maxLoadAverage` / `minCpuIdlePercent` | 9 / 5 | `cpu pressure` | load exceeds the ceiling **and** idle CPU is below the floor |
 
 Free bytes do not show whether a file can be created. On 2026-10-25,
@@ -115,12 +117,50 @@ any-page rule flapped its gate shut for most of the day (issue #451,
 [ADR 0089](adr/0089-paging-out-means-a-sustained-rate-not-a-page.md)). A host
 paging out in earnest runs at thousands of pages a second. The key is optional
 and must be positive. To restore the any-page behaviour on one node, set it to a
-tiny value such as `0.001`. `fleet config policy` shows the effective value as
+tiny value such as `0.001`; on a host that reports a memory stall, also set
+`swapOutHardPagesPerSecond` to the same value, or a low stall still admits any
+rate below the hard threshold. `fleet config policy` shows the effective value as
 `hostPressureFloors.swapOutPagesPerSecond`.
+
+On Linux, swap full of cold pages defeats both of those signals: the level
+never drains, and the kernel keeps rotating cold pages out at tens a second
+while no task waits on memory. At 2026-11-19 08:56Z ubuntu-vitalii held
+8191/8191 MiB against a 1024 MiB ceiling, paged out about 50 pages/s with
+38402 MiB available, and ran no guest, while `/proc/pressure/memory` read
+`some avg10=0.54` (issue #480,
+[ADR 0102](adr/0102-swap-pressure-is-corroborated-by-memory-stall.md)). The
+swap guard therefore also needs the memory stall, the share of the last ten
+seconds in which a task waited on memory, to be at or above
+`memoryStallPercent` (default 10, in (0, 100]) — but only for a swap-out rate
+below `swapOutHardPagesPerSecond` (default 1000, at least
+`swapOutPagesPerSecond`). A low stall does not rule out real paging: at
+10:26Z the same day Omarchy paged out 9563 pages/s while a model trained, at a
+stall of 1.67%, and the hard rate keeps such a host closed whatever the stall
+reads. Status prints the stall after the rate,
+`swap 8191 MiB (paging 50/s, stall 0.54%)`; the metrics are
+`fleet_host_memory_stall_percent` and `fleet_host_memory_stall_observed`, and
+`fleet config policy` shows `hostPressureFloors.swapOutHardPagesPerSecond` and
+`hostPressureFloors.memoryStallPercent`. A stall
+measured below the threshold also admits when the rate is still unmeasured,
+which is the first tick after a restart.
+
+A host that reports no stall — macOS, or a Linux kernel without PSI (no
+`/proc/pressure/memory`, or booted with `psi=0`) — keeps the level-and-rate
+rule above unchanged; its status line shows no stall and the closure log reads
+`memoryStall=unobserved`. The stall never closes the gate on its own: under the
+ceiling, or below the paging threshold, admission is allowed whatever it reads.
+To switch the stall off for measured rates on one node, set
+`swapOutHardPagesPerSecond` equal to `swapOutPagesPerSecond`. A low
+`memoryStallPercent` only narrows the unmeasured-rate exemption: a host reading
+0% stall is still admitted on its first tick after a restart, so only reverting
+the release restores ADR 0089's fail-closed rule for an unmeasured rate exactly.
+Note that the 2026-11-19 stopgap (`swapOutPagesPerSecond: 1000` on
+ubuntu-vitalii and Omarchy) does the first of these by accident, so those nodes
+should return to the defaults once this rule is deployed.
 
 The daemon logs each edge of the admission gate once on stderr, never once per
 tick (issue #436). The lines look like this:
-`admission gate closed reason="swap pressure" guests=3 guestMemoryMiB=16384 hostMemoryMiB=24576 availableMemoryMiB=1210 swapUsedMiB=3072 openFor=1h10m0s`,
+`admission gate closed reason="swap pressure" guests=3 guestMemoryMiB=16384 hostMemoryMiB=24576 availableMemoryMiB=1210 swapUsedMiB=3072 memoryStall=42.5% openFor=1h10m0s`,
 `admission gate closed reason="disk reserve" guests=3 ... after="swap pressure" closedFor=1m0s`
 (the refusal reason changed while the gate stayed closed), and
 `admission gate opened after="swap pressure" closedFor=10m0s`. A closure names
