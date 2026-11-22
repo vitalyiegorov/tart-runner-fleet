@@ -105,8 +105,10 @@ carries the same figure.
 A rate needs two samples. When it cannot be established honestly — no prior
 observation, a non-advancing clock, or a counter reset by a reboot — it is
 reported as unmeasured (`paging unmeasured`,
-`fleet_host_swapout_rate_observed 0`) and the level blocks on its own. An
-unmeasured rate is never read as a quiet host.
+`fleet_host_swapout_rate_observed 0`). Swap over the ceiling blocks on its own
+when no memory stall reading is available. If the host reports a stall
+reading, the swap guard blocks at or above `memoryStallPercent` and admits
+below it. An unmeasured rate by itself does not establish that paging is quiet.
 
 "Paging out" means a rate at or above `swapOutPagesPerSecond` (default 10
 pages/s), averaged over the interval between two observations. It does not mean

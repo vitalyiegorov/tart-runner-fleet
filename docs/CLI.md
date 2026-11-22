@@ -150,10 +150,13 @@ rejected.
   that qualifies it, CPU idle, load, and the latest admission decision; JSON and
   Prometheus expose the same units. Swap reads `13593 MiB (paging 0/s)` — the
   level alone never decides admission — or `(paging unmeasured)` when there is
-  no second sample yet and the level blocks on its own. A host that reports a
-  memory stall (Linux PSI) adds it, as in `8191 MiB (paging 50/s, stall 0.54%)`:
-  below `swapOutHardPagesPerSecond`, swap over the ceiling refuses only when
-  that stall also reaches `memoryStallPercent` (ADR 0102).
+  no second sample is available. With an unmeasured rate, swap over the
+  ceiling blocks on its own only if the host reports no memory stall reading.
+  Hosts with Linux PSI show the stall, as in
+  `8191 MiB (paging 50/s, stall 0.54%)`. When the rate is unmeasured or in the
+  band from `swapOutPagesPerSecond` up to (but below)
+  `swapOutHardPagesPerSecond`, swap over the ceiling blocks on a host with a
+  stall reading only when the stall reaches `memoryStallPercent` (ADR 0102).
 - The JSON compatibility promise is identified by `apiVersion: fleet.v1`.
 - Tables use compact ages for reading; automation must use numeric age fields.
 - No token, private key, JIT configuration, operation payload, or unbounded
