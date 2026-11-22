@@ -425,6 +425,7 @@ func hostObservation(snapshot executor.HostSnapshot, capacity domain.Resources, 
 		FreeInodes: snapshot.FreeInodes, TotalInodes: snapshot.TotalInodes,
 		SwapUsedMB: snapshot.SwapUsedMB, SwapOuts: snapshot.SwapOuts,
 		SwapOutRatePerSecond: snapshot.SwapOutRatePerSecond, SwapOutRateObserved: snapshot.SwapOutRateObserved,
+		MemoryStallPercent: snapshot.MemoryStallPercent, MemoryStallObserved: snapshot.MemoryStallObserved,
 		CPUIdlePercent: snapshot.CPUidlePercent,
 		LoadAverage:    snapshot.LoadAverage, AdmissionAllowed: decision.Allowed, AdmissionReason: decision.Reason,
 		PhysicalMemoryMB: snapshot.PhysicalMemoryMB}

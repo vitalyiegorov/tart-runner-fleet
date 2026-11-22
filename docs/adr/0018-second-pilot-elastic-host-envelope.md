@@ -11,6 +11,11 @@ by its envelope, with four admissions per tick as the allocator's pace.
 Amended by [ADR 0089](0089-paging-out-means-a-sustained-rate-not-a-page.md):
 "paging out" in the swap section below is now a swap-out rate at or above a
 threshold (default 10 pages/s), not any non-zero rate.
+Amended by [ADR 0102](0102-swap-pressure-is-corroborated-by-memory-stall.md):
+on a host that reports a memory stall, a swap-out rate below a hard rate
+(default 1000 pages/s) is pressure only when that stall is at or above a
+threshold (default 10%), and an unmeasured rate no longer fails closed when the
+stall was measured below it.
 
 ## Context
 

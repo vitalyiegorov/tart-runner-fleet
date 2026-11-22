@@ -184,6 +184,12 @@ type Status struct {
 // from a single document. Observed=false means the rate could not be measured
 // (no prior sample, a non-advancing clock, or a counter reset by a reboot) and
 // the guard fell back to the level; it never means a quiet host.
+//
+// MemoryStallPercent and MemoryStallObserved are additive fleet.v1 fields
+// (issue #480, ADR 0102): Linux PSI `some avg10`, which must also reach the
+// configured threshold before swap over the ceiling refuses admission.
+// Observed=false is a host that does not report a stall (macOS, a kernel
+// without PSI), on which the level and the rate decide alone.
 type HostPressure struct {
 	AvailableMemoryMiB int64 `json:"availableMemoryMiB"`
 	FreeDiskGiB        int64 `json:"freeDiskGiB"`
@@ -196,6 +202,8 @@ type HostPressure struct {
 	SwapOuts             int64   `json:"swapOuts"`
 	SwapOutRatePerSecond float64 `json:"swapOutRatePerSecond"`
 	SwapOutRateObserved  bool    `json:"swapOutRateObserved"`
+	MemoryStallPercent   float64 `json:"memoryStallPercent"`
+	MemoryStallObserved  bool    `json:"memoryStallObserved"`
 	CPUIdlePercent       float64 `json:"cpuIdlePercent"`
 	LoadAverage          float64 `json:"loadAverage"`
 	AdmissionAllowed     bool    `json:"admissionAllowed"`

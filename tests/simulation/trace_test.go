@@ -73,8 +73,13 @@ const (
 	// trickling out about one page every twenty seconds. It is not pressure.
 	eventSwapResidue eventKind = "swap_residue"
 	// eventSwapThrash is the pressure the swap guard exists for: swap above the
-	// ceiling and the host paging out thousands of pages a second.
-	eventSwapThrash      eventKind = "swap_thrash"
+	// ceiling and the host paging out thousands of pages a second, at a memory
+	// stall low enough that only the hard rate refuses it (issue #480).
+	eventSwapThrash eventKind = "swap_thrash"
+	// eventSwapColdResidue is ubuntu-vitalii at 2026-11-19 08:56Z (issue #480):
+	// swap full far above the ceiling, the kernel rotating cold pages out at 50
+	// a second, and memory stall (PSI some avg10) at 0.54%. It is not pressure.
+	eventSwapColdResidue eventKind = "swap_cold_residue"
 	eventTartUnavailable eventKind = "tart_unavailable"
 	eventSlowBoot        eventKind = "slow_boot"
 	// eventWedgedBootstrap is the 2026-10-11 Mac Studio incident (ADR 0067): the
@@ -300,7 +305,7 @@ func faultThisTick(rng *rand.Rand, tick int) (simEvent, bool) {
 		eventSlowBoot, eventLongJob, eventOverrunJob, eventStalledRunner, eventWedgedDrain, eventUnstoppableGuest,
 		eventSilentGuest, eventSaturatedGuest, eventMisreportedPower, eventUnreadablePower,
 		eventSiblingReassign, eventSiblingSubstitute, eventSilentCancel, eventLoudCancel, eventInodeExhausted,
-		eventSwapResidue, eventSwapThrash, eventEmptyExit, eventRunnerRefused}
+		eventSwapResidue, eventSwapThrash, eventSwapColdResidue, eventEmptyExit, eventRunnerRefused}
 	kind := kinds[rng.Intn(len(kinds))]
 	return simEvent{Tick: tick, Kind: kind, Count: 1 + rng.Intn(6)}, true
 }
@@ -369,6 +374,8 @@ func (w *world) applyTraceEvent(event simEvent) {
 		w.swapResidue = event.Count
 	case eventSwapThrash:
 		w.swapThrash = event.Count
+	case eventSwapColdResidue:
+		w.swapColdResidue = event.Count
 	case eventTartUnavailable:
 		w.tartUnavailable = event.Count
 	case eventSlowBoot:

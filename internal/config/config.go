@@ -278,8 +278,19 @@ type Guards struct {
 	// MaxSwapUsedMiB is paging out. Any page at all closed the gate on a node
 	// with 23 GB available on 2026-10-28 (issue #451, ADR 0089).
 	SwapOutPagesPerSecond float64
-	MaxLoadAverage        float64
-	MinCPUIdlePercent     float64
+	// SwapOutHardPagesPerSecond is the swap-out rate at or above which a host
+	// over MaxSwapUsedMiB is under pressure whatever its memory stall reads.
+	// Omarchy paged out 9563 pages/s at a 1.67% stall on 2026-11-19 (issue
+	// #480, ADR 0102). It is never below SwapOutPagesPerSecond.
+	SwapOutHardPagesPerSecond float64
+	// MemoryStallPercent is the memory stall (PSI `some avg10`) at or above
+	// which a host over MaxSwapUsedMiB and paging out below the hard rate is
+	// under pressure. Swap full of cold pages closed an idle node at 0.54% on
+	// 2026-11-19 (issue #480, ADR 0102). A host that reports no stall ignores
+	// it.
+	MemoryStallPercent float64
+	MaxLoadAverage     float64
+	MinCPUIdlePercent  float64
 	// PressureMemoryAccounting selects the kernel memory-pressure availability
 	// signal in the macOS host probe instead of the legacy vm_stat page formula.
 	// Default false preserves legacy behavior byte-for-byte; it is enabled
@@ -687,7 +698,12 @@ type wireConfig struct {
 	MaxSwapUsedMiB        int     `json:"maxSwapUsedMb,omitempty"`
 	// SwapOutPagesPerSecond is omitted while it holds the shipped default, so a
 	// rewritten file stays decodable by a release older than issue #451.
-	SwapOutPagesPerSecond     *float64 `json:"swapOutPagesPerSecond,omitempty"`
+	SwapOutPagesPerSecond *float64 `json:"swapOutPagesPerSecond,omitempty"`
+	// SwapOutHardPagesPerSecond and MemoryStallPercent are omitted while they
+	// hold the shipped defaults, so a rewritten file stays decodable by a
+	// release older than issue #480.
+	SwapOutHardPagesPerSecond *float64 `json:"swapOutHardPagesPerSecond,omitempty"`
+	MemoryStallPercent        *float64 `json:"memoryStallPercent,omitempty"`
 	MaxLoadAverage            float64  `json:"maxLoadAverage,omitempty"`
 	MinCPUIdlePercent         float64  `json:"minCpuIdlePercent,omitempty"`
 	PressureMemoryAccounting  bool     `json:"pressureMemoryAccounting,omitempty"`
@@ -923,6 +939,14 @@ func Encode(w io.Writer, cfg Config) error {
 		threshold := cfg.Guards.SwapOutPagesPerSecond
 		wire.SwapOutPagesPerSecond = &threshold
 	}
+	if cfg.Guards.SwapOutHardPagesPerSecond != executor.DefaultSwapOutHardPagesPerSecond {
+		hard := cfg.Guards.SwapOutHardPagesPerSecond
+		wire.SwapOutHardPagesPerSecond = &hard
+	}
+	if cfg.Guards.MemoryStallPercent != executor.DefaultMemoryStallPercent {
+		stall := cfg.Guards.MemoryStallPercent
+		wire.MemoryStallPercent = &stall
+	}
 	if cfg.SessionRecovery.MaxConsecutiveFailures != defaultSessionMaxIngestFailures {
 		wire.GitHubSessionMaxIngestFailures = cfg.SessionRecovery.MaxConsecutiveFailures
 	}
@@ -1067,7 +1091,9 @@ func normalizeGuards(w wireConfig) Guards {
 	guards := Guards{MinFreeDiskGiB: w.MinFreeDiskGiB, MinFreeInodePercent: w.MinFreeInodePercent,
 		MinAvailableMemoryMiB: w.MinAvailableMemoryMiB,
 		MaxSwapUsedMiB:        w.MaxSwapUsedMiB, SwapOutPagesPerSecond: executor.DefaultSwapOutPagesPerSecond,
-		MaxLoadAverage: w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
+		SwapOutHardPagesPerSecond: executor.DefaultSwapOutHardPagesPerSecond,
+		MemoryStallPercent:        executor.DefaultMemoryStallPercent,
+		MaxLoadAverage:            w.MaxLoadAverage, MinCPUIdlePercent: w.MinCPUIdlePercent,
 		PressureMemoryAccounting: w.PressureMemoryAccounting, ElasticHostEnvelope: w.ElasticHostEnvelope}
 	if guards.MinFreeInodePercent == 0 {
 		guards.MinFreeInodePercent = defaultMinFreeInodePercent
@@ -1075,6 +1101,12 @@ func normalizeGuards(w wireConfig) Guards {
 	// Omitted means the default; a stated value, even 0, is kept for Validate.
 	if w.SwapOutPagesPerSecond != nil {
 		guards.SwapOutPagesPerSecond = *w.SwapOutPagesPerSecond
+	}
+	if w.SwapOutHardPagesPerSecond != nil {
+		guards.SwapOutHardPagesPerSecond = *w.SwapOutHardPagesPerSecond
+	}
+	if w.MemoryStallPercent != nil {
+		guards.MemoryStallPercent = *w.MemoryStallPercent
 	}
 	if guards.MinAvailableMemoryMiB == 0 {
 		guards.MinAvailableMemoryMiB = defaultMinAvailableMemoryMiB
@@ -1219,8 +1251,10 @@ func Default() Config {
 		Guards: Guards{MinFreeDiskGiB: 60, MinFreeInodePercent: defaultMinFreeInodePercent,
 			MinAvailableMemoryMiB: defaultMinAvailableMemoryMiB,
 			MaxSwapUsedMiB:        defaultMaxSwapUsedMiB, SwapOutPagesPerSecond: executor.DefaultSwapOutPagesPerSecond,
-			MaxLoadAverage:    defaultMaxLoadAverage,
-			MinCPUIdlePercent: defaultMinCPUIdlePercent},
+			SwapOutHardPagesPerSecond: executor.DefaultSwapOutHardPagesPerSecond,
+			MemoryStallPercent:        executor.DefaultMemoryStallPercent,
+			MaxLoadAverage:            defaultMaxLoadAverage,
+			MinCPUIdlePercent:         defaultMinCPUIdlePercent},
 		SessionRecovery: SessionRecovery{MaxConsecutiveFailures: defaultSessionMaxIngestFailures,
 			FailureWindow: defaultSessionFailureWindow},
 		SessionYield: SessionYield{Enabled: true, BlockedFor: defaultSessionYieldBlockedFor,
@@ -1401,7 +1435,10 @@ func (c Config) Validate() error {
 		c.Guards.MinCPUIdlePercent < 0 || c.Guards.MinCPUIdlePercent > 100 ||
 		math.IsNaN(c.Guards.MinCPUIdlePercent) || math.IsInf(c.Guards.MinCPUIdlePercent, 0) ||
 		!(c.Guards.MinFreeInodePercent > 0 && c.Guards.MinFreeInodePercent <= 100) ||
-		!(c.Guards.SwapOutPagesPerSecond > 0) || math.IsInf(c.Guards.SwapOutPagesPerSecond, 0) {
+		!(c.Guards.SwapOutPagesPerSecond > 0) || math.IsInf(c.Guards.SwapOutPagesPerSecond, 0) ||
+		!(c.Guards.SwapOutHardPagesPerSecond >= c.Guards.SwapOutPagesPerSecond) ||
+		math.IsInf(c.Guards.SwapOutHardPagesPerSecond, 0) ||
+		!(c.Guards.MemoryStallPercent > 0 && c.Guards.MemoryStallPercent <= 100) {
 		return errors.New("host pressure guards are invalid")
 	}
 	seenProfiles := map[string]struct{}{}

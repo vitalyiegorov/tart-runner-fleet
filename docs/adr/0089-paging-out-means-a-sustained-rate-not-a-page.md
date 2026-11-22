@@ -7,6 +7,12 @@ Amends [ADR 0018](0018-second-pilot-elastic-host-envelope.md)'s "Swap pressure
 is measured as a rate, not a level". The swap ceiling (`maxSwapUsedMb`) and the
 fail-closed handling of an unmeasured rate do not change. This changes how
 sensitive an admission guard is, so deploying it needs the owner's explicit OK.
+Amended by [ADR 0102](0102-swap-pressure-is-corroborated-by-memory-stall.md):
+on a host that reports a memory stall (Linux PSI), a rate below
+`swapOutHardPagesPerSecond` (default 1000) is pressure only when that stall is
+at or above `memoryStallPercent`, and an unmeasured rate beside a stall
+measured below it no longer fails closed. "Not built" below no longer
+applies to PSI.
 
 ## Context
 
@@ -85,9 +91,13 @@ defect is the rate test, not the level.
 
 ## Rollback
 
-Revert the change. Alternatively, on a single node, set
-`guards.swapOutPagesPerSecond` to a tiny positive value such as `0.001`. That
-restores the any-page behaviour with no release.
+Reverting this change restores the earlier any-page rule. On a node running
+ADR 0089 without ADR 0102, setting `guards.swapOutPagesPerSecond` to a tiny
+positive value such as `0.001` also restores that behavior. With ADR 0102 in
+effect, set both the soft and hard thresholds to the same tiny value to restore
+that behavior for measured rates. Restoring the original unmeasured-rate
+fallback requires reverting ADR 0102. See [its rollback
+instructions](0102-swap-pressure-is-corroborated-by-memory-stall.md#rollback).
 
 ## Not built
 

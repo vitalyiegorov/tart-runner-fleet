@@ -330,10 +330,15 @@ type HostPressureMetric struct {
 	// not a measurement of a quiet host.
 	SwapOutRatePerSecond float64
 	SwapOutRateObserved  bool
-	CPUIdlePercent       float64
-	LoadAverage          float64
-	AdmissionAllowed     bool
-	AdmissionReason      string
+	// MemoryStallPercent and MemoryStallObserved are the stall that
+	// corroborates swap pressure (ADR 0102). An unobserved stall is a host that
+	// does not report one, never a quiet host.
+	MemoryStallPercent  float64
+	MemoryStallObserved bool
+	CPUIdlePercent      float64
+	LoadAverage         float64
+	AdmissionAllowed    bool
+	AdmissionReason     string
 	// AdmissionSince is when the current admission state began (issue #436).
 	// Zero is a daemon that has not yet observed its gate.
 	AdmissionSince time.Time
@@ -1191,6 +1196,7 @@ func (h *Health) SetHostPressure(metric HostPressureMetric) error {
 		metric.CPUIdlePercent < 0 || metric.CPUIdlePercent > 100 || metric.LoadAverage < 0 ||
 		metric.SwapOutRatePerSecond < 0 || math.IsNaN(metric.SwapOutRatePerSecond) ||
 		math.IsInf(metric.SwapOutRatePerSecond, 0) ||
+		!(metric.MemoryStallPercent >= 0 && metric.MemoryStallPercent <= 100) ||
 		math.IsNaN(metric.CPUIdlePercent) || math.IsInf(metric.CPUIdlePercent, 0) ||
 		math.IsNaN(metric.LoadAverage) || math.IsInf(metric.LoadAverage, 0) || !validAdmissionReason(metric.AdmissionReason) {
 		return errInvalidMetric
