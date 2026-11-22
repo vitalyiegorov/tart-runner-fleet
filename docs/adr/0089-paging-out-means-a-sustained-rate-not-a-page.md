@@ -91,9 +91,13 @@ defect is the rate test, not the level.
 
 ## Rollback
 
-Revert the change. Alternatively, on a single node, set
-`guards.swapOutPagesPerSecond` to a tiny positive value such as `0.001`. That
-restores the any-page behaviour with no release.
+Reverting this change restores the earlier any-page rule. On a node running
+ADR 0089 without ADR 0102, setting `guards.swapOutPagesPerSecond` to a tiny
+positive value such as `0.001` also restores that behavior. With ADR 0102 in
+effect, set both the soft and hard thresholds to the same tiny value to restore
+that behavior for measured rates. Restoring the original unmeasured-rate
+fallback requires reverting ADR 0102. See [its rollback
+instructions](0102-swap-pressure-is-corroborated-by-memory-stall.md#rollback).
 
 ## Not built
 

@@ -148,10 +148,12 @@ rejected.
   observation name.
 - Human status shows free disk, reclaimable memory, swap with the page-out rate
   that qualifies it, CPU idle, load, and the latest admission decision; JSON and
-  Prometheus expose the same units. Swap reads `13593 MiB (paging 0/s)` — the
-  level alone never decides admission — or `(paging unmeasured)` when there is
-  no second sample is available. With an unmeasured rate, swap over the
-  ceiling blocks on its own only if the host reports no memory stall reading.
+  Prometheus expose the same units. Swap reads `13593 MiB (paging 0/s)` for
+  a measured rate. A measured rate below `swapOutPagesPerSecond` leaves the
+  swap guard open even if swap is above the ceiling. The CLI shows
+  `(paging unmeasured)` when it cannot calculate a rate. With an unmeasured
+  rate, swap over the ceiling blocks on its own only if the host reports no
+  memory stall reading.
   Hosts with Linux PSI show the stall, as in
   `8191 MiB (paging 50/s, stall 0.54%)`. When the rate is unmeasured or in the
   band from `swapOutPagesPerSecond` up to (but below)
