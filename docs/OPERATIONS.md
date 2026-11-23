@@ -2882,9 +2882,11 @@ Rollout order, each step before the next:
 
 1. Install the `fleet` binary that knows `roamingUrl` on the MacBook and
    restart its daemon. An older binary refuses a config with the unknown key.
-2. Check that `sudo -n true` succeeds in one Linux and one macOS guest of the
-   node: with `roamingUrl` set, every proven launch reads the guest's
-   `/etc/hosts` through `sudo -n`, and a refusal stops the runner.
+2. In one Linux and one macOS guest of the node, as the runner user, check that
+   `sudo -n cat /etc/hosts >/dev/null` succeeds and that `sudo -n -l` allows
+   `sed` and `grep` too: with `roamingUrl` set, every proven launch reads the
+   guest's `/etc/hosts` through `sudo -n` and may rewrite it with `sed`, and a
+   refusal stops the runner.
 3. Start the forward, and the gate through the pf-guarded LaunchDaemon above.
 4. Run the guest 403 check and the off-host check above.
 5. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
