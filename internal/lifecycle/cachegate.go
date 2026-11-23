@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -19,10 +20,54 @@ type GateVerifier interface {
 // ignores the job message's value, so with no override the variable would be
 // unset and artifacts would break. An image with no override has an unpatched
 // runner, which needs nothing.
-const resultsFallbackScript = `env=$HOME/actions-runner/.env
+//
+// On a node with a roaming gate (ADR 0097 amendment, issue #446), $1 is that gate's
+// origin and $2 its address, and the guest goes there instead when every check
+// passes. The gate must route the guest's traffic, so it is the guest's own host and
+// not something on whatever network the host roams to. An unsigned blob read crosses
+// the gate's SSH forward, and only the owner answers it with 403: a forward that is
+// down answers 503 and a gate with no artifact route 404 from GitHub, and an answer
+// curl does not finish is no answer. Then the image's
+// host.containers.internal line, the name the owner signs blob URLs for, is moved to
+// that address, and only then the results URL.
+const resultsFallbackScript = `set -eu
+env=$HOME/actions-runner/.env
 grep -q '^ACTIONS_RESULTS_URL=' "$env" 2>/dev/null || exit 0
-sed -i 's|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/|' "$env"
-grep -qx 'ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/' "$env"`
+url=https://results-receiver.actions.githubusercontent.com/
+if [ "$#" = 2 ] && ip route show default | grep -Fq " via $2 " &&
+  code=$(curl --silent --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null --write-out '%{http_code}' "$1/.trf/artifacts/blobs/0") &&
+  [ "$code" = 403 ] &&
+  sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$2 host.containers.internal/" /etc/hosts &&
+  sudo -n grep -Fqx "$2 host.containers.internal" /etc/hosts; then
+  url=$1/
+fi
+sed -i "s|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=$url|" "$env"
+grep -Fqx "ACTIONS_RESULTS_URL=$url" "$env"`
+
+// homeRestoreScript returns a guest an earlier attempt sent to the roaming gate ($1 at
+// $2) to the LAN gate this launch proved ($3 at $4), so a retried guest does not keep
+// a route this launch did not choose. A guest with neither setting is left alone, and
+// one whose settings cannot be read fails, so the runner stops.
+const homeRestoreScript = `set -eu
+env=$HOME/actions-runner/.env
+hosts=$(sudo -n cat /etc/hosts)
+status=1
+if [ -e "$env" ]; then
+  status=0
+  grep -Fqx "ACTIONS_RESULTS_URL=$1/" "$env" || status=$?
+fi
+case "$status" in
+  0) ;;
+  1) printf '%s\n' "$hosts" | grep -Fqx "$2 host.containers.internal" || exit 0 ;;
+  *) exit 1 ;;
+esac
+sed -i "s|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=$3/|" "$env"
+grep -Fqx "ACTIONS_RESULTS_URL=$3/" "$env"
+sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$4 host.containers.internal/" /etc/hosts
+sudo -n grep -Fqx "$4 host.containers.internal" /etc/hosts`
+
+// roamingScriptName is the roaming scripts' $0.
+const roamingScriptName = "trf-roaming-gate"
 
 // NPMRoute is the gate's npm cache as this node's guests reach it (ADR 0093). A nil
 // route, the default, means no guest is ever given a registry. Ready says the route
@@ -79,17 +124,33 @@ printf '%s\nregistry=%s\nnoproxy=%s\nno-proxy=%s\n' '` + npmMarker + `' "$1" "$2
 mv -f "$tmp" "$rc"`
 
 // selectGate is one launch's choice, on one fresh proof. An unproven gate moves the
-// guest's results to GitHub. Then any registry an earlier attempt left is removed, and a
-// failure there stops the runner: that guest may still name a gate this launch did not
-// prove. Only after that, a proven gate whose npm route answers gives the guest its
-// registry. A failure writing it costs only a cold job, because no setting means npmjs.
+// guest's results to the node's roaming gate when it has one and the guest reaches it,
+// and to GitHub otherwise; a proven one returns a guest an earlier attempt moved to the
+// roaming gate. A failure there stops the runner. Then any registry an earlier attempt
+// left is removed, and a failure there stops the runner too: that guest may still name
+// a gate this launch did not prove. Only after that, a proven gate whose npm route
+// answers gives the guest its registry. A failure writing it costs only a cold job,
+// because no setting means npmjs.
 func (b StdinBootstrapper) selectGate(ctx context.Context, name string) error {
 	if b.Gate == nil {
 		return nil
 	}
 	verified := b.Gate.Verified(ctx)
-	if !verified {
-		if err := b.guestScript(ctx, name, "results fallback failed", resultsFallbackScript); err != nil {
+	script := []string{resultsFallbackScript}
+	if b.Roaming != "" {
+		roaming, roamingErr := url.Parse(b.Roaming)
+		home, homeErr := url.Parse(b.Home)
+		if roamingErr != nil || homeErr != nil {
+			return errors.New("roaming gate unusable")
+		}
+		origin := strings.TrimSuffix(b.Roaming, "/")
+		script = []string{resultsFallbackScript, roamingScriptName, origin, roaming.Hostname()}
+		if verified {
+			script = []string{homeRestoreScript, roamingScriptName, origin, roaming.Hostname(), strings.TrimSuffix(b.Home, "/"), home.Hostname()}
+		}
+	}
+	if !verified || b.Roaming != "" {
+		if err := b.guestScript(ctx, name, "results fallback failed", script...); err != nil {
 			return err
 		}
 	}

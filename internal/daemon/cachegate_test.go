@@ -32,7 +32,7 @@ func TestANodeWithNoGateGetsNoVerifierAndAKnownPosture(t *testing.T) {
 		t.Fatalf("%+v", snapshot.CacheGate)
 	}
 	bootstrapper := lifecycle.StdinBootstrapper{}
-	if got := withCacheGate(bootstrapper, nil, nil).(lifecycle.StdinBootstrapper); got.Gate != nil || got.NPM != nil {
+	if got := withCacheGate(bootstrapper, nil, nil, config.CacheGate{}).(lifecycle.StdinBootstrapper); got.Gate != nil || got.NPM != nil {
 		t.Fatal("a node with no gate got one")
 	}
 }
@@ -53,7 +53,7 @@ func TestAnUnreachableGateIsPublishedAsUnverifiedBeforeAnyLaunch(t *testing.T) {
 	if gate.Verified(context.Background()) {
 		t.Fatal("verified")
 	}
-	if got := withCacheGate(lifecycle.StdinBootstrapper{}, gate, nil).(lifecycle.StdinBootstrapper); got.Gate == nil || got.NPM != nil {
+	if got := withCacheGate(lifecycle.StdinBootstrapper{}, gate, nil, config.CacheGate{}).(lifecycle.StdinBootstrapper); got.Gate == nil || got.NPM != nil {
 		t.Fatal("the bootstrapper did not get the gate")
 	}
 }
@@ -100,7 +100,7 @@ func TestAnNPMRouteReachesBothKindsOfGuestAndPublishesItsAnswer(t *testing.T) {
 	if snapshot.CacheGate.NPMRegistry != registry || snapshot.CacheGate.NPMReady || !snapshot.CacheGate.Container {
 		t.Fatalf("%+v", snapshot.CacheGate)
 	}
-	got := withCacheGate(lifecycle.StdinBootstrapper{ContainerGuest: true}, gate, route).(lifecycle.StdinBootstrapper)
+	got := withCacheGate(lifecycle.StdinBootstrapper{ContainerGuest: true}, gate, route, config.CacheGate{}).(lifecycle.StdinBootstrapper)
 	if got.Gate == nil || got.NPM != route || !got.ContainerGuest {
 		t.Fatalf("%+v", got)
 	}
@@ -120,9 +120,27 @@ func TestATartRegistryIsNotAContainerGate(t *testing.T) {
 	}
 }
 
+// TestARoamingGateReachesTheBootstrapper: a node that names its own forwarding gate
+// hands it, with its LAN gate, to every launch.
+func TestARoamingGateReachesTheBootstrapper(t *testing.T) {
+	cfg := config.Config{CacheGate: config.CacheGate{URL: "http://192.168.1.64:3017/",
+		PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", RoamingURL: "http://192.168.64.1:3017"}}
+	health := gateTestHealth(t)
+	newCacheGate(context.Background(), cfg, health, time.Now, func(context.Context, string) (int, []byte, error) {
+		return 0, nil, errors.New("off the LAN")
+	}, nil)
+	if got := health.Snapshot().CacheGate; got.Verified || got.Roaming != cfg.CacheGate.RoamingURL {
+		t.Fatalf("%+v", got)
+	}
+	got := withCacheGate(lifecycle.StdinBootstrapper{}, publishedGate{}, nil, cfg.CacheGate).(lifecycle.StdinBootstrapper)
+	if got.Roaming != cfg.CacheGate.RoamingURL || got.Home != cfg.CacheGate.URL {
+		t.Fatalf("%+v", got)
+	}
+}
+
 func TestAnotherBootstrapperIsLeftAlone(t *testing.T) {
 	other := otherBootstrapper{}
-	if got := withCacheGate(other, publishedGate{}, nil); got != lifecycle.Bootstrapper(other) {
+	if got := withCacheGate(other, publishedGate{}, nil, config.CacheGate{}); got != lifecycle.Bootstrapper(other) {
 		t.Fatalf("got %T", got)
 	}
 }

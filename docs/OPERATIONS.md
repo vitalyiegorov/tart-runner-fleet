@@ -1564,6 +1564,9 @@ grep 'identity public key' ~/.local/share/tart-runner-fleet/state/cache-gate.log
 ADR 0078's 2026-11-04 amendment gives the rollout order. To turn the check off,
 remove `cacheGate` from the node's config and restart its daemon.
 
+A node with `cacheGate.roamingUrl` says its guests use that roaming gate instead,
+or GitHub when they cannot use it; see "Roaming Tart guests" under ADR 0097 below.
+
 On a podman node that configures the gate for its npm cache, the reason says guests
 reach npm directly instead. Its Actions cache is image `ENV`, so a failed proof does
 not change it.
@@ -2623,9 +2626,11 @@ The artifact feature does nothing without explicit owner or forwarding flags.
 The shipped units remain unchanged. Do not enable it as part of a code rollout.
 The single owner is **ubuntu-vitalii**. Omarchy forwards artifact RPCs and blob
 PUT/GET to it; Mini/MacBook Linux guests using Omarchy follow the same route.
-Cache/npm still use their current local stores. macOS Tart, roaming MacBook
-(#446) and explicit `github-token` REST downloads keep using GitHub and cannot
-consume gate-only artifacts. Validate complete handoff reachability first.
+A roaming MacBook's guests reach the owner through the MacBook's own forwarding
+gate once `cacheGate.roamingUrl` is configured (see "Roaming Tart guests" below);
+until then they use GitHub. Cache/npm still use their current local stores.
+macOS Tart and explicit `github-token` REST downloads keep using GitHub and
+cannot consume gate-only artifacts. Validate complete handoff reachability first.
 
 For this repository, main releases publish in `ci.yml` after `Required CI`,
 using the same run's verified candidate without a REST token. The old
@@ -2636,7 +2641,7 @@ After routing both handoff legs to the gate, verify a new main CI run publishes
 both node archives before declaring rollout complete. Default-off uploads
 still face the existing GitHub quota. Producer and publisher must reach the
 same artifact owner: before enabling routing, confirm every `linux-go-4x8`
-provider reaches the gate (an off-LAN MacBook, #446, uploads to GitHub and its
+provider reaches the gate (an off-LAN MacBook, #446, without `roamingUrl` uploads to GitHub and its
 build cannot be published). Recover a failed publish with a complete CI re-run,
 not a failed-jobs-only re-run, until attempt sharing is proven; drain runs before
 changing routes or rolling back. If expiry/LRU removes a candidate, rerun the
@@ -2775,6 +2780,119 @@ streams outside the mutex. Completion, error and panic release the slot.
 Active GET payload buffers total at most 256 MiB (excluding allocator/SQLite
 overhead). A busy owner does not reject queued downloads with 503, preserving
 parallel E2E handoffs whose download client may not retry a busy response.
+
+### Roaming Tart guests (ADR 0097 amendment, #446)
+
+Evidence: knee-doctor job 137580595802 (run 45141478595, E2E Build) ran on the
+MacBook's `trf-linux-4x8-b72723b2c49059cb` while the MacBook was off the home
+LAN. Its pinned LAN gate failed the identity proof (`cache gate did not prove
+its identity`, 09:48 CET), so the launch rewrote the guest's `.env` to GitHub
+and `upload-artifact` hit GitHub's artifact quota. Omarchy's forwarder never saw
+the call.
+
+A Tart node may name its own forwarding gate as `cacheGate.roamingUrl`: the
+address its guests reach the host on, `http://192.168.64.1:3017` for Tart's
+default NAT. Validation accepts only plain HTTP at a private IP literal on port
+3017, the port of the owner's signed `--artifacts-origin`, never the LAN gate's
+address, never beside a LAN gate that is not plain HTTP at an address, and never
+on a podman node. When the LAN gate fails its proof, the launch checks from
+inside the guest that the guest's default route goes via that address, so it is
+the guest's own host, and that an unsigned read of `/.trf/artifacts/blobs/0`
+there gets the owner's 403 across the SSH forward (3 s). A forward that is down
+answers 503, and a gate with no artifact route sends the path to GitHub, which
+answers 404; any code but 403, or a curl failure, keeps the guest on GitHub. On
+403 it rewrites the image's `host.containers.internal` line in `/etc/hosts` to
+that address with `sudo -n`, because the owner signs blob URLs for that name,
+and then points `ACTIONS_RESULTS_URL` at the roaming gate. If any check fails or
+the hosts line cannot be moved, the guest uses GitHub exactly as before. A
+proven LAN gate returns a guest that an earlier attempt sent to the roaming gate
+to the LAN gate's address in both files, and stops the runner if it cannot, as
+the npm clear does. `fleet doctor` names the roaming gate in its `cache gate
+unreachable` reason.
+
+The roaming gate is an ordinary forwarding `fleet cache-gate` on the MacBook,
+plus the same SSH local forward Omarchy uses, both supervised by launchd and
+both an operational task needing owner approval (not run by this change):
+
+```sh
+ssh -N -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:3020:127.0.0.1:3021 ubuntu-vitalii
+
+fleet cache-gate --listen 0.0.0.0:3017 \
+  --upstream https://results-receiver.actions.githubusercontent.com \
+  --identity-key <state>/cache-gate-identity.key \
+  --artifacts-upstream http://127.0.0.1:3020 \
+  --write-budget-path <data volume> --write-min-free-bytes <minFreeDiskGb in bytes> \
+  --cache-write-peak-bytes 1
+```
+
+Cache calls go to GitHub, as they did for a roaming guest, but through the gate,
+so a pull request's cache save is refused there as on the LAN (ADR 0078); reads
+are unchanged. The gate's cache proxy sends the upstream's own Host, which
+GitHub requires and the loopback cache server ignores. Artifacts follow ADR
+0097 exactly: no GitHub fallback once a guest is routed, the owner's allowlist
+and JWT checks, and an explicit failure when the SSH forward is down.
+
+The listener must reach Tart guests on the `bridge100` NAT interface, which
+exists only while a VM runs, hence `0.0.0.0`. The gate is not the network
+boundary; a pf anchor is, and it is required before `roamingUrl` is set. It
+passes TCP 3017 in on `bridge100` from Tart's `192.168.64.0/24` and on `lo0`
+for the host's own checks, and drops it from every other source, whatever
+network the MacBook joins. So that the listener never runs without it, the
+gate runs from one root LaunchDaemon whose every start loads the anchor,
+enables pf, checks both, and only then drops to the fleet user and binds; a
+failed check exits, and launchd retries:
+
+```sh
+#!/bin/sh
+set -eu
+anchor=com.apple/trf-roaming-gate
+printf '%s\n' \
+  'pass in quick on lo0 proto tcp from any to any port 3017' \
+  'pass in quick on bridge100 proto tcp from 192.168.64.0/24 to any port 3017' \
+  'block drop in quick proto tcp from any to any port 3017' |
+  /sbin/pfctl -a "$anchor" -f -
+/sbin/pfctl -E >/dev/null 2>&1 || true
+/sbin/pfctl -s info 2>/dev/null | grep -q '^Status: Enabled'
+/sbin/pfctl -a "$anchor" -sr 2>/dev/null | grep -q 'block drop in quick proto tcp from any to any port = 3017'
+/sbin/pfctl -sr 2>/dev/null | grep -Fq 'anchor "com.apple/*" all'
+exec /usr/bin/sudo -n -u <fleet user> -- fleet cache-gate --listen 0.0.0.0:3017 ...
+```
+
+Verify it, with the forward and the gate running, before configuring
+`roamingUrl`, and after every reboot:
+
+```sh
+sudo pfctl -s info | grep '^Status: Enabled'
+sudo pfctl -a com.apple/trf-roaming-gate -sr   # exactly the three rules above
+# From a guest: the owner's refusal across the forward, 403.
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.64.1:3017/.trf/artifacts/blobs/0
+# From another machine on the MacBook's current network: must fail (timeout).
+curl --max-time 5 http://<MacBook's address on that network>:3017/.trf/artifacts/blobs/0
+```
+
+If the guest check times out, pf may see the guest's traffic on the bridge's
+member interface (`vmenetN`) rather than `bridge100`: compare the anchor's rule
+counters in `sudo pfctl -a com.apple/trf-roaming-gate -vvsr` with the members
+listed by `ifconfig bridge100`.
+
+Rollout order, each step before the next:
+
+1. Install the `fleet` binary that knows `roamingUrl` on the MacBook and
+   restart its daemon. An older binary refuses a config with the unknown key.
+2. In one Linux and one macOS guest of the node, as the runner user, check that
+   `sudo -n cat /etc/hosts >/dev/null` succeeds and that `sudo -n -l` allows
+   `sed` and `grep` too: with `roamingUrl` set, every proven launch reads the
+   guest's `/etc/hosts` through `sudo -n` and may rewrite it with `sed`, and a
+   refusal stops the runner.
+3. Start the forward, and the gate through the pf-guarded LaunchDaemon above.
+4. Run the guest 403 check and the off-host check above.
+5. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
+first, as for any artifact route change, then remove `roamingUrl` and restart
+the daemon, and only then roll the binary back; guests return to GitHub on the
+next launch.
 
 ### Old REST jobs assigned to no matching scale set (#520)
 

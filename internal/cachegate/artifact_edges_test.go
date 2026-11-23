@@ -121,6 +121,23 @@ func TestArtifactForwarderRefusesRedirectsAndUnavailableOwner(t *testing.T) {
 	}
 }
 
+// TestTheRoamingProbeTellsTheOwnerFromADeadForward pins what a roaming guest's probe
+// relies on (ADR 0097, #446): an unsigned read of blob 0 through a forwarding gate is
+// refused with 403 by the owner, and answered 503 by the gate when its forward is down.
+func TestTheRoamingProbeTellsTheOwnerFromADeadForward(t *testing.T) {
+	owner := httptest.NewServer(artifactOnly(newArtifactFixture(t).handler))
+	target, _ := url.Parse(owner.URL)
+	forward := artifactForwarder(target)
+	for _, want := range []int{http.StatusForbidden, http.StatusServiceUnavailable} {
+		w := httptest.NewRecorder()
+		forward.ServeHTTP(w, httptest.NewRequest(http.MethodGet, artifactBlob+"0", nil))
+		if w.Code != want {
+			t.Fatalf("status = %d, want %d", w.Code, want)
+		}
+		owner.Close()
+	}
+}
+
 func TestArtifactConfigurationIsDefaultOffAndStartupFailsClosed(t *testing.T) {
 	disabled := &artifactConfig{}
 	if !disabled.valid() {

@@ -221,6 +221,26 @@ func TestResultsCallsCarryGitHubsHost(t *testing.T) {
 	}
 }
 
+// TestCacheCallsCarryTheCacheUpstreamsHost: a roaming node's forwarding gate names
+// GitHub's results service as its cache upstream (ADR 0097, issue #446), whose front
+// end does not route the gate's own Host. A loopback cache server ignores Host.
+func TestCacheCallsCarryTheCacheUpstreamsHost(t *testing.T) {
+	hosts := make(chan string, 1)
+	cacheServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hosts <- r.Host }))
+	t.Cleanup(cacheServer.Close)
+	target, _ := url.Parse(cacheServer.URL)
+	gate := httptest.NewServer(Handler(target, target, io.Discard))
+	t.Cleanup(gate.Close)
+	resp, err := http.Post(gate.URL+cacheService+"GetCacheEntryDownloadURL", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := <-hosts; got != target.Host {
+		t.Fatalf("host=%q want %q", got, target.Host)
+	}
+}
+
 // TestRefusalLoggingIsRateLimited pins the second half of the review finding
 // on #408: refusals arrive before the cache server verifies a token, so their
 // log lines are bounded per window and the excess is counted, not written.
