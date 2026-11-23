@@ -2857,6 +2857,7 @@ printf '%s\n' \
 /sbin/pfctl -E >/dev/null 2>&1 || true
 /sbin/pfctl -s info 2>/dev/null | grep -q '^Status: Enabled'
 /sbin/pfctl -a "$anchor" -sr 2>/dev/null | grep -q 'block drop in quick proto tcp from any to any port = 3017'
+/sbin/pfctl -sr 2>/dev/null | grep -Fq 'anchor "com.apple/*" all'
 exec /usr/bin/sudo -n -u <fleet user> -- fleet cache-gate --listen 0.0.0.0:3017 ...
 ```
 
@@ -2881,9 +2882,12 @@ Rollout order, each step before the next:
 
 1. Install the `fleet` binary that knows `roamingUrl` on the MacBook and
    restart its daemon. An older binary refuses a config with the unknown key.
-2. Start the forward, and the gate through the pf-guarded LaunchDaemon above.
-3. Run the guest 403 check and the off-host check above.
-4. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
+2. Check that `sudo -n true` succeeds in one Linux and one macOS guest of the
+   node: with `roamingUrl` set, every proven launch reads the guest's
+   `/etc/hosts` through `sudo -n`, and a refusal stops the runner.
+3. Start the forward, and the gate through the pf-guarded LaunchDaemon above.
+4. Run the guest 403 check and the off-host check above.
+5. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
 first, as for any artifact route change, then remove `roamingUrl` and restart
 the daemon, and only then roll the binary back; guests return to GitHub on the
 next launch.

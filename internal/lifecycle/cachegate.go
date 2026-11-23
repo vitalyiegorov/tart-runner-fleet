@@ -61,10 +61,10 @@ case "$status" in
   1) printf '%s\n' "$hosts" | grep -Fqx "$2 host.containers.internal" || exit 0 ;;
   *) exit 1 ;;
 esac
-sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$4 host.containers.internal/" /etc/hosts
-sudo -n grep -Fqx "$4 host.containers.internal" /etc/hosts
 sed -i "s|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=$3/|" "$env"
-grep -Fqx "ACTIONS_RESULTS_URL=$3/" "$env"`
+grep -Fqx "ACTIONS_RESULTS_URL=$3/" "$env"
+sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$4 host.containers.internal/" /etc/hosts
+sudo -n grep -Fqx "$4 host.containers.internal" /etc/hosts`
 
 // roamingScriptName is the roaming scripts' $0.
 const roamingScriptName = "trf-roaming-gate"
