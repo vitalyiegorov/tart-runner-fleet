@@ -401,10 +401,21 @@ other storage system than its consumers, the split this ADR's rollout warns
 against, and the GitHub quota it exists to avoid.
 
 Decision: a Tart node may configure `cacheGate.roamingUrl`, the address at which
-its guests reach the node's own forwarding gate. When the LAN gate fails its
-proof, the launch asks that gate from inside the guest, moves the image's
-`host.containers.internal` line to its address, and only then points the results
-URL there. Anything short of that keeps the GitHub fallback unchanged. The
+its guests reach the node's own forwarding gate, on port 3017, the port of the
+owner's signed `--artifacts-origin`. When the LAN gate fails its proof, the
+launch checks from inside the guest that its default route goes via that
+address and that an unsigned blob read there gets the owner's 403 across the SSH
+forward, then moves the image's `host.containers.internal` line to its address,
+and only then points the results URL there. Anything short of that keeps the
+GitHub fallback unchanged. A proven LAN gate returns a guest an earlier attempt
+moved, or stops its runner.
+
+pf, not the gate, sets the network boundary. The gate listens on `0.0.0.0`
+because `bridge100` exists only while a VM runs, and it makes no authorization
+decision for artifacts. A pf anchor that passes TCP 3017 only on `bridge100`
+from `192.168.64.0/24` (and on loopback) is a required step before `roamingUrl`
+is set; OPERATIONS gives the rules, their check and the order: the binary first,
+then `roamingUrl`, and `roamingUrl` removed before a binary rollback. The
 roaming gate is the existing forwarding mode over the existing SSH local forward
 to the owner's artifact-only listener, so allowlist, auth, retention and the
 no-GitHub-fallback rule are this ADR's, unchanged. Its cache upstream is GitHub's
@@ -419,10 +430,13 @@ guests to Omarchy's full gate would carry cache over the tunnel, which ADR 0078
 and this ADR forbid.
 
 Owner's three questions: no new process kind, tunnel or store; one optional
-field, one guest script and one proxy constructor shared by both upstreams.
+field, the GitHub fallback script with two optional arguments, one restore
+script and one proxy constructor shared by both upstreams.
 Off by default, so a release changes nothing until an operator configures it.
-Tested by real-shell guest scripts (reach, unreachable, refused sudo, no
-override), config validation, daemon wiring, the doctor reason and the Host
+Tested by real-shell guest scripts (routed, forward down, no artifact route,
+unreachable, another host's address, refused sudo, no override, restored and
+failed restore on a retried guest), the owner's and the dead forward's answers
+to the probe, config validation, daemon wiring, the doctor reason and the Host
 test. This is lifecycle and gate wiring, not scheduler state, so the simulation
 is unchanged. No fleet.v1 or fleet.db change; observe/shadow and VM mutation
 authority are unchanged.

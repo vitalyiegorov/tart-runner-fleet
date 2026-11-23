@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,70 +50,92 @@ func (g *guestShell) file(t *testing.T, path string) string {
 	return string(raw)
 }
 
-// roamingGate answers the guest's probe as the node's own gate does, and returns the
-// route a node hands its launches for it.
-func roamingGate(t *testing.T) *Roaming {
+// homeGate is the LAN gate the image names, as the node's config does.
+const homeGate = "http://192.168.1.64:3017/"
+
+// roamingGate answers the guest's unsigned blob probe with status, as the node's own
+// gate does: 403 from the owner across the SSH forward, 503 when the forward is down.
+// The guest's default route goes through the gate's address.
+func roamingGate(t *testing.T, guest *guestShell, status int) string {
 	t.Helper()
-	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "bad challenge", http.StatusBadRequest)
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.trf/artifacts/blobs/0" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(status)
 	}))
 	t.Cleanup(gate.Close)
-	parsed, _ := url.Parse(gate.URL)
-	return &Roaming{URL: gate.URL, Host: parsed.Hostname()}
+	guest.standIn(t, "ip", `echo "default via 127.0.0.1 dev enp0s1 proto dhcp src 127.0.0.2 metric 100"`)
+	return gate.URL
 }
 
-func roamingLaunch(t *testing.T, guest *guestShell, roaming *Roaming) {
+func roamingLaunch(t *testing.T, guest *guestShell, roaming string, verified bool) error {
 	t.Helper()
-	bootstrap := StdinBootstrapper{Runner: guest, Gate: fixedGate(false), Roaming: roaming}
-	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
-		t.Fatal(err)
-	}
-	if !guest.started {
-		t.Fatal("the runner did not start")
-	}
+	bootstrap := StdinBootstrapper{Runner: guest, Gate: fixedGate(verified), Roaming: roaming, Home: homeGate}
+	return bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil)
 }
 
 // TestAnOffLANGuestSendsItsArtifactsToItsOwnHostsGate is the incident: the roaming
 // MacBook's guest (knee-doctor job 137580595802) was moved to GitHub and hit its
-// artifact quota. With a roaming gate the guest's results URL and the name the owner
-// signs blob URLs for both reach the node's own forwarding gate.
+// artifact quota. With the gate's forward up, the guest's results URL and the name the
+// owner signs blob URLs for both reach the node's own forwarding gate.
 func TestAnOffLANGuestSendsItsArtifactsToItsOwnHostsGate(t *testing.T) {
 	guest := roamingGuest(t, imageEnv)
-	roaming := roamingGate(t)
-	roamingLaunch(t, guest, roaming)
-	if got, want := guest.file(t, "actions-runner/.env"), "OTHER=1\nACTIONS_RESULTS_URL="+roaming.URL+"/\nLAST=2\n"; got != want {
+	roaming := roamingGate(t, guest, http.StatusForbidden)
+	if err := roamingLaunch(t, guest, roaming, false); err != nil || !guest.started {
+		t.Fatalf("err = %v, started = %v", err, guest.started)
+	}
+	if got, want := guest.file(t, "actions-runner/.env"), "OTHER=1\nACTIONS_RESULTS_URL="+roaming+"/\nLAST=2\n"; got != want {
 		t.Fatalf(".env = %q, want %q", got, want)
 	}
-	if got, want := guest.file(t, "hosts"), "127.0.0.1 localhost\n"+roaming.Host+" host.containers.internal\n"; got != want {
+	if got, want := guest.file(t, "hosts"), "127.0.0.1 localhost\n127.0.0.1 host.containers.internal\n"; got != want {
 		t.Fatalf("hosts = %q, want %q", got, want)
 	}
 }
 
-// TestAGuestThatCannotReachItsRoamingGateKeepsGitHub: nothing answers, so the guest
-// takes ADR 0078's fallback and its hosts file is left as the image made it.
-func TestAGuestThatCannotReachItsRoamingGateKeepsGitHub(t *testing.T) {
-	guest := roamingGuest(t, imageEnv)
-	roamingLaunch(t, guest, &Roaming{URL: "http://127.0.0.1:1", Host: "127.0.0.1"})
-	if got := guest.file(t, "actions-runner/.env"); got != "OTHER=1\nACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nLAST=2\n" {
-		t.Fatalf(".env = %q", got)
+// TestAGuestThatCannotUseItsRoamingGateKeepsGitHub: anything short of the owner's
+// answer through the guest's own host leaves the guest on ADR 0078's fallback with its
+// hosts file as the image made it.
+func TestAGuestThatCannotUseItsRoamingGateKeepsGitHub(t *testing.T) {
+	tests := []struct {
+		name  string
+		setUp func(*testing.T, *guestShell) string
+	}{
+		{name: "the gate's SSH forward is down", setUp: func(t *testing.T, guest *guestShell) string {
+			return roamingGate(t, guest, http.StatusServiceUnavailable)
+		}},
+		{name: "the gate has no artifact route", setUp: func(t *testing.T, guest *guestShell) string {
+			return roamingGate(t, guest, http.StatusNotFound)
+		}},
+		{name: "nothing answers", setUp: func(t *testing.T, guest *guestShell) string {
+			roamingGate(t, guest, http.StatusForbidden)
+			return "http://127.0.0.1:1"
+		}},
+		{name: "the address is not the guest's own host", setUp: func(t *testing.T, guest *guestShell) string {
+			roaming := roamingGate(t, guest, http.StatusForbidden)
+			guest.standIn(t, "ip", `echo "default via 127.0.0.10 dev enp0s1"`)
+			return roaming
+		}},
+		{name: "sudo is refused", setUp: func(t *testing.T, guest *guestShell) string {
+			roaming := roamingGate(t, guest, http.StatusForbidden)
+			guest.standIn(t, "sudo", "exit 1")
+			return roaming
+		}},
 	}
-	if got := guest.file(t, "hosts"); got != imageHosts {
-		t.Fatalf("hosts = %q", got)
-	}
-}
-
-// TestAGuestThatCannotMoveTheBlobNameKeepsGitHub: a results URL at the roaming gate
-// with blob URLs still naming the LAN gate would fail every artifact, so a refused
-// sudo keeps the whole guest on GitHub.
-func TestAGuestThatCannotMoveTheBlobNameKeepsGitHub(t *testing.T) {
-	guest := roamingGuest(t, imageEnv)
-	guest.standIn(t, "sudo", "exit 1")
-	roamingLaunch(t, guest, roamingGate(t))
-	if got := guest.file(t, "actions-runner/.env"); !strings.Contains(got, "ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\n") {
-		t.Fatalf(".env = %q", got)
-	}
-	if got := guest.file(t, "hosts"); got != imageHosts {
-		t.Fatalf("hosts = %q", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			guest := roamingGuest(t, imageEnv)
+			if err := roamingLaunch(t, guest, test.setUp(t, guest), false); err != nil {
+				t.Fatal(err)
+			}
+			if got := guest.file(t, "actions-runner/.env"); got != "OTHER=1\nACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/\nLAST=2\n" {
+				t.Fatalf(".env = %q", got)
+			}
+			if got := guest.file(t, "hosts"); got != imageHosts {
+				t.Fatalf("hosts = %q", got)
+			}
+		})
 	}
 }
 
@@ -122,7 +143,9 @@ func TestAGuestThatCannotMoveTheBlobNameKeepsGitHub(t *testing.T) {
 // message's results URL, as with the GitHub fallback.
 func TestARoamingGateLeavesAnImageWithNoOverrideAlone(t *testing.T) {
 	guest := roamingGuest(t, "")
-	roamingLaunch(t, guest, roamingGate(t))
+	if err := roamingLaunch(t, guest, roamingGate(t, guest, http.StatusForbidden), false); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(guest.home, "actions-runner", ".env")); !os.IsNotExist(err) {
 		t.Fatalf("created .env: %v", err)
 	}
@@ -131,42 +154,85 @@ func TestARoamingGateLeavesAnImageWithNoOverrideAlone(t *testing.T) {
 	}
 }
 
-// TestAProvenLANGateNeverAsksForTheRoamingGate: at home the guest keeps the image's
-// LAN gate, which already forwards to the owner.
-func TestAProvenLANGateNeverAsksForTheRoamingGate(t *testing.T) {
-	runner := &recordingRunner{}
-	bootstrap := StdinBootstrapper{Runner: runner, Gate: fixedGate(true), Roaming: &Roaming{URL: "http://192.168.64.1:3017", Host: "192.168.64.1"}}
-	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
+// TestAProvenLaunchReturnsARetriedGuestToItsLANGate: a launch retried on a guest an
+// earlier attempt sent to the roaming gate gets the image's LAN gate back, both names.
+func TestAProvenLaunchReturnsARetriedGuestToItsLANGate(t *testing.T) {
+	guest := roamingGuest(t, imageEnv)
+	roaming := roamingGate(t, guest, http.StatusForbidden)
+	if err := roamingLaunch(t, guest, roaming, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 1 || runner.calls[0][3] != bootstrapHelper {
-		t.Fatalf("calls = %q", runner.calls)
+	if err := roamingLaunch(t, guest, roaming, true); err != nil || !guest.started {
+		t.Fatalf("err = %v, started = %v", err, guest.started)
+	}
+	if got := guest.file(t, "actions-runner/.env"); got != imageEnv {
+		t.Fatalf(".env = %q", got)
+	}
+	if got := guest.file(t, "hosts"); got != imageHosts {
+		t.Fatalf("hosts = %q", got)
 	}
 }
 
-// TestAnUnprovenGateAsksForTheRoamingGateWithItsAddress pins the argument vector: the
-// script never has the address spliced into its text.
-func TestAnUnprovenGateAsksForTheRoamingGateWithItsAddress(t *testing.T) {
-	runner := &recordingRunner{}
-	bootstrap := StdinBootstrapper{Runner: runner, Gate: fixedGate(false), Roaming: &Roaming{URL: "http://192.168.64.1:3017/", Host: "192.168.64.1"}}
-	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
+// TestAProvenLaunchLeavesAHomeGuestAlone: a guest that never roamed is not touched.
+func TestAProvenLaunchLeavesAHomeGuestAlone(t *testing.T) {
+	guest := roamingGuest(t, imageEnv)
+	guest.standIn(t, "sed", "exit 1")
+	if err := roamingLaunch(t, guest, roamingGate(t, guest, http.StatusForbidden), true); err != nil || !guest.started {
+		t.Fatalf("err = %v, started = %v", err, guest.started)
+	}
+	if guest.file(t, "actions-runner/.env") != imageEnv || guest.file(t, "hosts") != imageHosts {
+		t.Fatal("a home guest was changed")
+	}
+}
+
+// TestAFailedHomeRestoreStopsTheRunner: like a failed npm clear, a guest that may
+// still name a gate this launch did not choose does not start.
+func TestAFailedHomeRestoreStopsTheRunner(t *testing.T) {
+	guest := roamingGuest(t, imageEnv)
+	roaming := roamingGate(t, guest, http.StatusForbidden)
+	if err := roamingLaunch(t, guest, roaming, false); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"exec", "trf-small-1", "bash", "-c", roamingScript, roamingScriptName, "http://192.168.64.1:3017", "192.168.64.1"}
-	if len(runner.calls) != 2 || strings.Join(runner.calls[0], "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("calls = %q", runner.calls)
+	guest.started = false
+	guest.standIn(t, "sudo", "exit 1")
+	if err := roamingLaunch(t, guest, roaming, true); err == nil || guest.started {
+		t.Fatalf("err = %v, started = %v", err, guest.started)
+	}
+}
+
+// TestTheRoamingScriptsGetTheirAddressesAsArguments pins the argument vectors: no
+// script has an address spliced into its text.
+func TestTheRoamingScriptsGetTheirAddressesAsArguments(t *testing.T) {
+	for verified, want := range map[bool][]string{
+		false: {resultsFallbackScript, roamingScriptName, "http://192.168.64.1:3017", "192.168.64.1"},
+		true: {homeRestoreScript, roamingScriptName, "http://192.168.64.1:3017", "192.168.64.1",
+			"http://192.168.1.64:3017", "192.168.1.64"},
+	} {
+		runner := &recordingRunner{}
+		bootstrap := StdinBootstrapper{Runner: runner, Gate: fixedGate(verified), Roaming: "http://192.168.64.1:3017/", Home: homeGate}
+		if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err != nil {
+			t.Fatal(err)
+		}
+		want = append([]string{"exec", "trf-small-1", "bash", "-c"}, want...)
+		if len(runner.calls) != 2 || strings.Join(runner.calls[0], "\x00") != strings.Join(want, "\x00") {
+			t.Fatalf("calls = %q", runner.calls)
+		}
 	}
 }
 
 // TestAFailedRoamingRewriteStopsTheRunner: as with the GitHub rewrite, a guest whose
-// results URL cannot be shown to have moved does not start.
+// results URL cannot be shown to have moved does not start, and neither does one whose
+// roaming setting cannot be read.
 func TestAFailedRoamingRewriteStopsTheRunner(t *testing.T) {
-	runner := &recordingRunner{failOn: roamingScriptName}
-	bootstrap := StdinBootstrapper{Runner: runner, Gate: fixedGate(false), Roaming: &Roaming{URL: "http://192.168.64.1:3017", Host: "192.168.64.1"}}
-	if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err == nil {
-		t.Fatal("the runner started")
-	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("calls = %q", runner.calls)
+	for _, bootstrap := range []StdinBootstrapper{
+		{Runner: &recordingRunner{failOn: roamingScriptName}, Gate: fixedGate(false), Roaming: "http://192.168.64.1:3017", Home: homeGate},
+		{Runner: &recordingRunner{}, Gate: fixedGate(false), Roaming: "http://[::1", Home: homeGate},
+	} {
+		if err := bootstrap.Bootstrap(context.Background(), "trf-small-1", jitSecret(), nil); err == nil {
+			t.Fatal("the runner started")
+		}
+		if calls := bootstrap.Runner.(*recordingRunner).calls; len(calls) > 1 {
+			t.Fatalf("calls = %q", calls)
+		}
 	}
 }

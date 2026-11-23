@@ -131,6 +131,11 @@ func TestCacheGateRoamingURLValidation(t *testing.T) {
 		{name: "loopback, which a guest cannot reach", gate: roaming("http://127.0.0.1:3017"), want: "roamingUrl"},
 		{name: "https", gate: roaming("https://192.168.64.1:3017"), want: "roamingUrl"},
 		{name: "no port", gate: roaming("http://192.168.64.1"), want: "roamingUrl"},
+		{name: "not the owner's signed port", gate: roaming("http://192.168.64.1:3018"), want: "roamingUrl"},
+		{name: "a LAN gate at a hostname", gate: CacheGate{URL: "http://gate.lan:3017/", PublicKey: testGateKey,
+			RoamingURL: "http://192.168.64.1:3017"}, want: "roamingUrl"},
+		{name: "an https LAN gate", gate: CacheGate{URL: "https://192.168.1.64:3017/", PublicKey: testGateKey,
+			RoamingURL: "http://192.168.64.1:3017"}, want: "roamingUrl"},
 		{name: "a path", gate: roaming("http://192.168.64.1:3017/x"), want: "roamingUrl"},
 		{name: "a query", gate: roaming("http://192.168.64.1:3017/?a=1"), want: "roamingUrl"},
 		{name: "credentials", gate: roaming("http://u:p@192.168.64.1:3017"), want: "roamingUrl"},
@@ -148,12 +153,6 @@ func TestCacheGateRoamingURLValidation(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, test.want)
 			}
 		})
-	}
-	if got := roaming("http://192.168.64.1:3017").RoamingHost(); got != "192.168.64.1" {
-		t.Fatalf("host = %q", got)
-	}
-	if got := (CacheGate{RoamingURL: "http://[::1"}).RoamingHost(); got != "" {
-		t.Fatalf("host = %q", got)
 	}
 }
 

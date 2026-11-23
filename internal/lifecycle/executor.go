@@ -979,8 +979,10 @@ type StdinBootstrapper struct {
 	// (ADR 0093). Nil is the default: no guest is given a registry.
 	NPM *NPMRoute
 	// Roaming is where a guest whose Gate did not prove itself sends its results,
-	// artifacts included (ADR 0097). Nil is the default: such a guest uses GitHub.
-	Roaming *Roaming
+	// artifacts included (ADR 0097), and Home is the Gate's URL, where a proven launch
+	// returns a guest an earlier attempt sent there. Empty Roaming, the default, sends
+	// such a guest to GitHub.
+	Roaming, Home string
 }
 
 func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret,

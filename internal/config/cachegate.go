@@ -27,15 +27,6 @@ type CacheGate struct {
 	RoamingURL  string `json:"roamingUrl,omitempty"`
 }
 
-// RoamingHost is the host of RoamingURL, and empty when there is none.
-func (g CacheGate) RoamingHost() string {
-	parsed, err := url.Parse(g.RoamingURL)
-	if err != nil {
-		return ""
-	}
-	return parsed.Hostname()
-}
-
 // NPMHost is the host of NPMRegistry, and empty when there is none.
 func (g CacheGate) NPMHost() string {
 	parsed, err := url.Parse(g.NPMRegistry)
@@ -96,21 +87,28 @@ func validateNPMRegistry(gate *url.URL, raw string, podman bool) error {
 	return nil
 }
 
+// roamingPort is the port of the owner's signed --artifacts-origin, which a roaming
+// guest reaches through its moved host.containers.internal line.
+const roamingPort = "3017"
+
 // validateRoamingURL holds the roaming gate to the address a guest reaches its own
-// host on: plain HTTP at a private IP literal with a port and nothing else, because
-// the guest maps host.containers.internal to that address and the artifact owner
-// signs its blob URLs for that name. It is not the LAN gate, which already serves
-// every guest that proves it, and a podman guest reaches its host's gate already.
+// host on: plain HTTP at a private IP literal on roamingPort and nothing else,
+// because the guest maps host.containers.internal to that address and the artifact
+// owner signs its blob URLs for that name and port. It is not the LAN gate, which
+// already serves every guest that proves it, and a podman guest reaches its host's
+// gate already. The LAN gate must be plain HTTP at an address too, because a proven
+// launch on a guest an earlier attempt moved writes it back into /etc/hosts.
 func validateRoamingURL(gate *url.URL, raw string, podman bool) error {
 	if raw == "" {
 		return nil
 	}
 	roaming, err := url.Parse(raw)
-	if podman || err != nil || roaming.Scheme != "http" || roaming.User != nil || roaming.Port() == "" ||
+	if podman || err != nil || roaming.Scheme != "http" || roaming.User != nil || roaming.Port() != roamingPort ||
 		(roaming.Path != "" && roaming.Path != "/") || roaming.RawQuery != "" || roaming.Fragment != "" ||
-		!cachegate.DirectLANAddress(roaming.Hostname()) || roaming.Hostname() == gate.Hostname() {
+		!cachegate.DirectLANAddress(roaming.Hostname()) || roaming.Hostname() == gate.Hostname() ||
+		gate.Scheme != "http" || !cachegate.DirectLANAddress(gate.Hostname()) {
 		return fmt.Errorf("cacheGate.roamingUrl %q must be a Tart node's own gate as its guests reach it: "+
-			"http://<private address>:<port>, not the LAN gate", raw)
+			"http://<private address>:%s, beside a LAN gate at http://<private address>", raw, roamingPort)
 	}
 	return nil
 }
