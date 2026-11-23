@@ -2840,16 +2840,24 @@ exists only while a VM runs, hence `0.0.0.0`. The gate is not the network
 boundary; a pf anchor is, and it is required before `roamingUrl` is set. It
 passes TCP 3017 in on `bridge100` from Tart's `192.168.64.0/24` and on `lo0`
 for the host's own checks, and drops it from every other source, whatever
-network the MacBook joins. Load it at boot from a LaunchDaemon, which launchd
-starts before the gate's agent, so the listener never runs without it:
+network the MacBook joins. So that the listener never runs without it, the
+gate runs from one root LaunchDaemon whose every start loads the anchor,
+enables pf, checks both, and only then drops to the fleet user and binds; a
+failed check exits, and launchd retries:
 
 ```sh
+#!/bin/sh
+set -eu
+anchor=com.apple/trf-roaming-gate
 printf '%s\n' \
   'pass in quick on lo0 proto tcp from any to any port 3017' \
   'pass in quick on bridge100 proto tcp from 192.168.64.0/24 to any port 3017' \
   'block drop in quick proto tcp from any to any port 3017' |
-  sudo pfctl -a com.apple/trf-roaming-gate -f -
-sudo pfctl -E
+  /sbin/pfctl -a "$anchor" -f -
+/sbin/pfctl -E >/dev/null 2>&1 || true
+/sbin/pfctl -s info 2>/dev/null | grep -q '^Status: Enabled'
+/sbin/pfctl -a "$anchor" -sr 2>/dev/null | grep -q 'block drop in quick proto tcp from any to any port = 3017'
+exec /usr/bin/sudo -n -u <fleet user> -- fleet cache-gate --listen 0.0.0.0:3017 ...
 ```
 
 Verify it, with the forward and the gate running, before configuring
@@ -2873,11 +2881,9 @@ Rollout order, each step before the next:
 
 1. Install the `fleet` binary that knows `roamingUrl` on the MacBook and
    restart its daemon. An older binary refuses a config with the unknown key.
-2. Load and enable the pf anchor, with its LaunchDaemon so it loads at boot
-   before the gate's agent.
-3. Start the forward and the gate.
-4. Run the guest 403 check and the off-host check above.
-5. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
+2. Start the forward, and the gate through the pf-guarded LaunchDaemon above.
+3. Run the guest 403 check and the off-host check above.
+4. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
 first, as for any artifact route change, then remove `roamingUrl` and restart
 the daemon, and only then roll the binary back; guests return to GitHub on the
 next launch.
