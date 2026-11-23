@@ -2840,8 +2840,8 @@ exists only while a VM runs, hence `0.0.0.0`. The gate is not the network
 boundary; a pf anchor is, and it is required before `roamingUrl` is set. It
 passes TCP 3017 in on `bridge100` from Tart's `192.168.64.0/24` and on `lo0`
 for the host's own checks, and drops it from every other source, whatever
-network the MacBook joins. Load it at boot from the same launchd setup as the
-gate:
+network the MacBook joins. Load it at boot from a LaunchDaemon, which launchd
+starts before the gate's agent, so the listener never runs without it:
 
 ```sh
 printf '%s\n' \
@@ -2852,7 +2852,8 @@ printf '%s\n' \
 sudo pfctl -E
 ```
 
-Verify it before configuring `roamingUrl`, and after every reboot:
+Verify it, with the forward and the gate running, before configuring
+`roamingUrl`, and after every reboot:
 
 ```sh
 sudo pfctl -s info | grep '^Status: Enabled'
@@ -2863,10 +2864,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://192.168.64.1:3017/.trf/artifacts
 curl --max-time 5 http://<MacBook's address on that network>:3017/.trf/artifacts/blobs/0
 ```
 
-Rollout order: install the `fleet` binary that knows `roamingUrl` on the
-MacBook and restart its daemon first, then start the forward and the gate, load
-and verify the pf anchor, and only then add `roamingUrl` and restart the daemon.
-An older binary refuses a config with the unknown key. Rollback: drain runs
+If the guest check times out, pf may see the guest's traffic on the bridge's
+member interface (`vmenetN`) rather than `bridge100`: compare the anchor's rule
+counters in `sudo pfctl -a com.apple/trf-roaming-gate -vvsr` with the members
+listed by `ifconfig bridge100`.
+
+Rollout order, each step before the next:
+
+1. Install the `fleet` binary that knows `roamingUrl` on the MacBook and
+   restart its daemon. An older binary refuses a config with the unknown key.
+2. Load and enable the pf anchor, with its LaunchDaemon so it loads at boot
+   before the gate's agent.
+3. Start the forward and the gate.
+4. Run the guest 403 check and the off-host check above.
+5. Only then add `roamingUrl` and restart the daemon. Rollback: drain runs
 first, as for any artifact route change, then remove `roamingUrl` and restart
 the daemon, and only then roll the binary back; guests return to GitHub on the
 next launch.

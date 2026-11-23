@@ -26,7 +26,8 @@ type GateVerifier interface {
 // passes. The gate must route the guest's traffic, so it is the guest's own host and
 // not something on whatever network the host roams to. An unsigned blob read crosses
 // the gate's SSH forward, and only the owner answers it with 403: a forward that is
-// down answers 503 and a gate with no artifact route 404 from GitHub. Then the image's
+// down answers 503 and a gate with no artifact route 404 from GitHub, and an answer
+// curl does not finish is no answer. Then the image's
 // host.containers.internal line, the name the owner signs blob URLs for, is moved to
 // that address, and only then the results URL.
 const resultsFallbackScript = `set -eu
@@ -34,7 +35,8 @@ env=$HOME/actions-runner/.env
 grep -q '^ACTIONS_RESULTS_URL=' "$env" 2>/dev/null || exit 0
 url=https://results-receiver.actions.githubusercontent.com/
 if [ "$#" = 2 ] && ip route show default | grep -Fq " via $2 " &&
-  [ "$(curl --silent --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null --write-out '%{http_code}' "$1/.trf/artifacts/blobs/0")" = 403 ] &&
+  code=$(curl --silent --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null --write-out '%{http_code}' "$1/.trf/artifacts/blobs/0") &&
+  [ "$code" = 403 ] &&
   sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$2 host.containers.internal/" /etc/hosts &&
   sudo -n grep -Fqx "$2 host.containers.internal" /etc/hosts; then
   url=$1/
@@ -44,10 +46,21 @@ grep -Fqx "ACTIONS_RESULTS_URL=$url" "$env"`
 
 // homeRestoreScript returns a guest an earlier attempt sent to the roaming gate ($1 at
 // $2) to the LAN gate this launch proved ($3 at $4), so a retried guest does not keep
-// a route this launch did not choose. A guest with neither setting is left alone.
+// a route this launch did not choose. A guest with neither setting is left alone, and
+// one whose settings cannot be read fails, so the runner stops.
 const homeRestoreScript = `set -eu
 env=$HOME/actions-runner/.env
-grep -Fqx "ACTIONS_RESULTS_URL=$1/" "$env" 2>/dev/null || sudo -n grep -Fqx "$2 host.containers.internal" /etc/hosts || exit 0
+hosts=$(sudo -n cat /etc/hosts)
+status=1
+if [ -e "$env" ]; then
+  status=0
+  grep -Fqx "ACTIONS_RESULTS_URL=$1/" "$env" || status=$?
+fi
+case "$status" in
+  0) ;;
+  1) printf '%s\n' "$hosts" | grep -Fqx "$2 host.containers.internal" || exit 0 ;;
+  *) exit 1 ;;
+esac
 sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$4 host.containers.internal/" /etc/hosts
 sudo -n grep -Fqx "$4 host.containers.internal" /etc/hosts
 sed -i "s|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=$3/|" "$env"

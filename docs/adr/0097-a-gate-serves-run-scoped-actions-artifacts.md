@@ -414,8 +414,10 @@ pf, not the gate, sets the network boundary. The gate listens on `0.0.0.0`
 because `bridge100` exists only while a VM runs, and it makes no authorization
 decision for artifacts. A pf anchor that passes TCP 3017 only on `bridge100`
 from `192.168.64.0/24` (and on loopback) is a required step before `roamingUrl`
-is set; OPERATIONS gives the rules, their check and the order: the binary first,
-then `roamingUrl`, and `roamingUrl` removed before a binary rollback. The
+is set; OPERATIONS gives the rules, their check and the order: the binary, then
+pf loaded, enabled and loaded at boot before the gate, then the forward and the
+gate, the guest and off-host checks, and only then `roamingUrl`; `roamingUrl` is
+removed before a binary rollback. The
 roaming gate is the existing forwarding mode over the existing SSH local forward
 to the owner's artifact-only listener, so allowlist, auth, retention and the
 no-GitHub-fallback rule are this ADR's, unchanged. Its cache upstream is GitHub's

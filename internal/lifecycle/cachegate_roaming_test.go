@@ -117,6 +117,11 @@ func TestAGuestThatCannotUseItsRoamingGateKeepsGitHub(t *testing.T) {
 			guest.standIn(t, "ip", `echo "default via 127.0.0.10 dev enp0s1"`)
 			return roaming
 		}},
+		{name: "curl fails after the owner's 403", setUp: func(t *testing.T, guest *guestShell) string {
+			roaming := roamingGate(t, guest, http.StatusForbidden)
+			guest.standIn(t, "curl", "printf 403\nexit 18")
+			return roaming
+		}},
 		{name: "sudo is refused", setUp: func(t *testing.T, guest *guestShell) string {
 			roaming := roamingGate(t, guest, http.StatusForbidden)
 			guest.standIn(t, "sudo", "exit 1")
@@ -191,6 +196,24 @@ func TestAFailedHomeRestoreStopsTheRunner(t *testing.T) {
 	guest := roamingGuest(t, imageEnv)
 	roaming := roamingGate(t, guest, http.StatusForbidden)
 	if err := roamingLaunch(t, guest, roaming, false); err != nil {
+		t.Fatal(err)
+	}
+	guest.started = false
+	guest.standIn(t, "sudo", "exit 1")
+	if err := roamingLaunch(t, guest, roaming, true); err == nil || guest.started {
+		t.Fatalf("err = %v, started = %v", err, guest.started)
+	}
+}
+
+// TestAnUnreadableHostsFileStopsTheRunner: a guest whose .env is home again but whose
+// hosts file still names the roaming gate is not left alone when sudo cannot read it.
+func TestAnUnreadableHostsFileStopsTheRunner(t *testing.T) {
+	guest := roamingGuest(t, imageEnv)
+	roaming := roamingGate(t, guest, http.StatusForbidden)
+	if err := roamingLaunch(t, guest, roaming, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(guest.home, "actions-runner", ".env"), []byte(imageEnv), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	guest.started = false
