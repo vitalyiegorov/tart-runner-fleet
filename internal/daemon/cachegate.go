@@ -20,6 +20,8 @@ type publishedGate struct {
 	// container says this node's guests are containers, for which a failed proof
 	// rewrites nothing and changes only the npm setting.
 	container bool
+	// roaming is the node's own gate a guest tries when this one fails its proof.
+	roaming string
 	// warn records why a proof failed; nil records nothing (issue #537).
 	warn func(string, ...any)
 }
@@ -30,7 +32,8 @@ func (g publishedGate) Verified(ctx context.Context) bool {
 	if err != nil && g.warn != nil {
 		g.warn("cache gate did not prove its identity", "gate", g.url, "error", err)
 	}
-	g.health.SetCacheGate(telemetry.CacheGateMetric{URL: g.url, Verified: verified, ProbedAt: g.now(), Container: g.container})
+	g.health.SetCacheGate(telemetry.CacheGateMetric{URL: g.url, Verified: verified, ProbedAt: g.now(), Container: g.container,
+		Roaming: g.roaming})
 	return verified
 }
 
@@ -70,7 +73,8 @@ func newCacheGate(ctx context.Context, cfg config.Config, health *telemetry.Heal
 	}
 	public, _ := cachegate.ParsePublicKey(cfg.CacheGate.PublicKey)
 	published := publishedGate{verifier: cachegate.Verifier{Gate: gateAddress(cfg.CacheGate.URL), Public: public, Fetch: fetch},
-		url: cfg.CacheGate.URL, health: health, now: now, container: cfg.CacheGate.NPMHost() == cachegate.NPMContainerHost, warn: warn}
+		url: cfg.CacheGate.URL, health: health, now: now, container: cfg.CacheGate.NPMHost() == cachegate.NPMContainerHost,
+		roaming: cfg.CacheGate.RoamingURL, warn: warn}
 	published.Verified(ctx)
 	return published
 }
@@ -87,14 +91,25 @@ func newNPMRoute(ctx context.Context, cfg config.Config, health *telemetry.Healt
 	return &lifecycle.NPMRoute{Registry: cfg.CacheGate.NPMRegistry, Host: cfg.CacheGate.NPMHost(), Ready: ready}
 }
 
-// withCacheGate gives a node's bootstrapper the gate to ask and the npm route to use.
-// Tart and podman guests take the same path, since both start through `exec`.
-func withCacheGate(bootstrapper lifecycle.Bootstrapper, gate lifecycle.GateVerifier, npm *lifecycle.NPMRoute) lifecycle.Bootstrapper {
+// newRoaming is nil when the node names no roaming gate, which is the default: a
+// guest whose LAN gate does not prove itself then uses GitHub (ADR 0078).
+func newRoaming(cfg config.Config) *lifecycle.Roaming {
+	if cfg.CacheGate.RoamingURL == "" {
+		return nil
+	}
+	return &lifecycle.Roaming{URL: cfg.CacheGate.RoamingURL, Host: cfg.CacheGate.RoamingHost()}
+}
+
+// withCacheGate gives a node's bootstrapper the gate to ask, the npm route to use and
+// the roaming gate to fall back to. Tart and podman guests take the same path, since
+// both start through `exec`.
+func withCacheGate(bootstrapper lifecycle.Bootstrapper, gate lifecycle.GateVerifier, npm *lifecycle.NPMRoute,
+	roaming *lifecycle.Roaming) lifecycle.Bootstrapper {
 	stdin, ok := bootstrapper.(lifecycle.StdinBootstrapper)
 	if !ok || gate == nil {
 		return bootstrapper
 	}
-	stdin.Gate, stdin.NPM = gate, npm
+	stdin.Gate, stdin.NPM, stdin.Roaming = gate, npm, roaming
 	return stdin
 }
 

@@ -26,6 +26,16 @@ func TestCacheGateResult(t *testing.T) {
 	}
 }
 
+// TestARoamingNodesFailedProofNamesItsRoamingGate: such a guest tries the node's
+// own forwarding gate before GitHub (ADR 0097, issue #446).
+func TestARoamingNodesFailedProofNamesItsRoamingGate(t *testing.T) {
+	got := cacheGateResult(Snapshot{CacheGatePublished: true, CacheGate: CacheGateMetric{URL: "http://192.168.1.64:3017/",
+		ProbedAt: time.Unix(100, 0), Roaming: "http://192.168.64.1:3017"}})
+	if got.OK || !strings.Contains(got.Reasons[0], "use the roaming gate http://192.168.64.1:3017") {
+		t.Fatalf("%+v", got)
+	}
+}
+
 // TestAPodmanNodesFailedProofSaysWhatReallyHappens: on Podman the results URL is image
 // ENV, so nothing was rewritten and only the npm setting changed.
 func TestAPodmanNodesFailedProofSaysWhatReallyHappens(t *testing.T) {

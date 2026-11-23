@@ -978,6 +978,9 @@ type StdinBootstrapper struct {
 	// NPM is the gate's npm cache, which a guest uses only on that launch's proof
 	// (ADR 0093). Nil is the default: no guest is given a registry.
 	NPM *NPMRoute
+	// Roaming is where a guest whose Gate did not prove itself sends its results,
+	// artifacts included (ADR 0097). Nil is the default: such a guest uses GitHub.
+	Roaming *Roaming
 }
 
 func (b StdinBootstrapper) Bootstrap(ctx context.Context, name string, secret *githubscaleset.JITSecret,

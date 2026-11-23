@@ -11,12 +11,15 @@ import (
 // identity proof was last asked. An empty NPMRegistry means the node configures no npm
 // cache (ADR 0093). Otherwise it is the registry a guest may be given, NPMReady is the
 // host's latest answer from the gate's npm route, and NPMProbedAt is when it asked. The
-// two probes run at different moments, so each keeps its own time.
+// two probes run at different moments, so each keeps its own time. An empty Roaming
+// means a failed proof sends guests to GitHub; otherwise it is the node's own gate they
+// try first (ADR 0097).
 type CacheGateMetric struct {
 	URL         string
 	Verified    bool
 	ProbedAt    time.Time
 	Container   bool
+	Roaming     string
 	NPMRegistry string
 	NPMReady    bool
 	NPMProbedAt time.Time
@@ -56,6 +59,10 @@ func cacheGateResult(snapshot Snapshot) *HealthResult {
 		return &HealthResult{OK: false, Reasons: []string{fmt.Sprintf(
 			"cache gate unreachable: %s did not prove its identity at %s, so guests launched since reach npm directly",
 			gate.URL, probed)}}
+	case !gate.Verified && gate.Roaming != "":
+		return &HealthResult{OK: false, Reasons: []string{fmt.Sprintf(
+			"cache gate unreachable: %s did not prove its identity at %s, so guests launched since use the roaming gate %s, "+
+				"or GitHub's results service if they cannot reach it", gate.URL, probed, gate.Roaming)}}
 	case !gate.Verified:
 		return &HealthResult{OK: false, Reasons: []string{fmt.Sprintf(
 			"cache gate unreachable: %s did not prove its identity at %s, so guests launched since use GitHub's results service",

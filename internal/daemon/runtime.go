@@ -1022,7 +1022,7 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			Executors: map[string]operations.Executor{
 				lifecycle.OperationProvision: lifecycle.ProvisionExecutor{State: store, VM: vm, Ready: d.readiness(cfg),
 					Registration: control, Bootstrap: withCacheGate(d.bootstrap(cfg),
-						newCacheGate(ctx, cfg, health, d.now, d.gateFetch, reporter.logger.Warn), newNPMRoute(ctx, cfg, health, d.now, d.gateFetch)), Bases: map[domain.Platform]string{
+						newCacheGate(ctx, cfg, health, d.now, d.gateFetch, reporter.logger.Warn), newNPMRoute(ctx, cfg, health, d.now, d.gateFetch), newRoaming(cfg)), Bases: map[domain.Platform]string{
 						domain.PlatformLinux: d.linuxImage(cfg), domain.PlatformMacOS: cfg.MacOS.BaseVM}, DiskGiB: diskGiB,
 					Capabilities: profileCapabilities(cfg)},
 				lifecycle.OperationDrain: lifecycle.DrainExecutor{State: store, VM: vm, Control: control,

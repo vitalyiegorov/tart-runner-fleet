@@ -1564,6 +1564,9 @@ grep 'identity public key' ~/.local/share/tart-runner-fleet/state/cache-gate.log
 ADR 0078's 2026-11-04 amendment gives the rollout order. To turn the check off,
 remove `cacheGate` from the node's config and restart its daemon.
 
+A node with `cacheGate.roamingUrl` says its guests use that roaming gate instead,
+or GitHub when they cannot reach it; see "Roaming Tart guests" under ADR 0097 below.
+
 On a podman node that configures the gate for its npm cache, the reason says guests
 reach npm directly instead. Its Actions cache is image `ENV`, so a failed proof does
 not change it.
@@ -2623,9 +2626,11 @@ The artifact feature does nothing without explicit owner or forwarding flags.
 The shipped units remain unchanged. Do not enable it as part of a code rollout.
 The single owner is **ubuntu-vitalii**. Omarchy forwards artifact RPCs and blob
 PUT/GET to it; Mini/MacBook Linux guests using Omarchy follow the same route.
-Cache/npm still use their current local stores. macOS Tart, roaming MacBook
-(#446) and explicit `github-token` REST downloads keep using GitHub and cannot
-consume gate-only artifacts. Validate complete handoff reachability first.
+A roaming MacBook's guests reach the owner through the MacBook's own forwarding
+gate once `cacheGate.roamingUrl` is configured (see "Roaming Tart guests" below);
+until then they use GitHub. Cache/npm still use their current local stores.
+macOS Tart and explicit `github-token` REST downloads keep using GitHub and
+cannot consume gate-only artifacts. Validate complete handoff reachability first.
 
 For this repository, main releases publish in `ci.yml` after `Required CI`,
 using the same run's verified candidate without a REST token. The old
@@ -2636,7 +2641,7 @@ After routing both handoff legs to the gate, verify a new main CI run publishes
 both node archives before declaring rollout complete. Default-off uploads
 still face the existing GitHub quota. Producer and publisher must reach the
 same artifact owner: before enabling routing, confirm every `linux-go-4x8`
-provider reaches the gate (an off-LAN MacBook, #446, uploads to GitHub and its
+provider reaches the gate (an off-LAN MacBook, #446, without `roamingUrl` uploads to GitHub and its
 build cannot be published). Recover a failed publish with a complete CI re-run,
 not a failed-jobs-only re-run, until attempt sharing is proven; drain runs before
 changing routes or rolling back. If expiry/LRU removes a candidate, rerun the
@@ -2775,6 +2780,59 @@ streams outside the mutex. Completion, error and panic release the slot.
 Active GET payload buffers total at most 256 MiB (excluding allocator/SQLite
 overhead). A busy owner does not reject queued downloads with 503, preserving
 parallel E2E handoffs whose download client may not retry a busy response.
+
+### Roaming Tart guests (ADR 0097 amendment, #446)
+
+Evidence: knee-doctor job 137580595802 (run 45141478595, E2E Build) ran on the
+MacBook's `trf-linux-4x8-b72723b2c49059cb` while the MacBook was off the home
+LAN. Its pinned LAN gate failed the identity proof (`cache gate did not prove
+its identity`, 09:48 CET), so the launch rewrote the guest's `.env` to GitHub
+and `upload-artifact` hit GitHub's artifact quota. Omarchy's forwarder never saw
+the call.
+
+A Tart node may name its own forwarding gate as `cacheGate.roamingUrl`: the
+address its guests reach the host on, `http://192.168.64.1:3017` for Tart's
+default NAT. Validation accepts only plain HTTP at a private IP literal with a
+port, never the LAN gate's address and never on a podman node. When the LAN
+gate fails its proof, the launch asks that gate from inside the guest (any HTTP
+answer on `/.trf/gate-identity`, 3 s). On an answer it rewrites the image's
+`host.containers.internal` line in `/etc/hosts` to that address with `sudo -n`,
+because the owner signs blob URLs for that name, and then points
+`ACTIONS_RESULTS_URL` at the roaming gate. If the gate does not answer or the
+hosts line cannot be moved, the guest uses GitHub exactly as before. A proven
+LAN gate never triggers any of this. `fleet doctor` names the roaming gate in
+its `cache gate unreachable` reason.
+
+The roaming gate is an ordinary forwarding `fleet cache-gate` on the MacBook,
+plus the same SSH local forward Omarchy uses, both supervised by launchd and
+both an operational task needing owner approval (not run by this change):
+
+```sh
+ssh -N -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:3020:127.0.0.1:3021 ubuntu-vitalii
+
+fleet cache-gate --listen 0.0.0.0:3017 \
+  --upstream https://results-receiver.actions.githubusercontent.com \
+  --identity-key <state>/cache-gate-identity.key \
+  --artifacts-upstream http://127.0.0.1:3020 \
+  --write-budget-path <data volume> --write-min-free-bytes <minFreeDiskGb in bytes> \
+  --cache-write-peak-bytes 1
+```
+
+Cache calls go to GitHub, as they did for a roaming guest, but through the gate,
+so a pull request's cache save is refused there as on the LAN (ADR 0078); reads
+are unchanged. The gate's cache proxy sends the upstream's own Host, which
+GitHub requires and the loopback cache server ignores. Artifacts follow ADR
+0097 exactly: no GitHub fallback once a guest is routed, the owner's allowlist
+and JWT checks, and an explicit failure when the SSH forward is down. The
+listener must reach Tart guests on the `bridge100` NAT interface, which exists
+only while a VM runs, hence `0.0.0.0`; the gate serves no credential, the owner
+verifies every artifact token, and GitHub verifies every cache token. Confirm
+the macOS application firewall admits it from the guest before configuring
+`roamingUrl`. Rollback: remove `roamingUrl` and restart the daemon; guests return
+to GitHub on the next launch. Drain runs first, as for any artifact route change.
 
 ### Old REST jobs assigned to no matching scale set (#520)
 

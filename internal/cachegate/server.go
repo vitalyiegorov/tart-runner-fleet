@@ -58,7 +58,7 @@ func Handler(cache, results *url.URL, logOutput io.Writer) http.Handler {
 func countingHandler(cache, results *url.URL, npm *npmCache, logOutput io.Writer, counters *Counters) http.Handler {
 	logger := slog.New(slog.NewTextHandler(logOutput, nil))
 	proxies := map[Upstream]http.Handler{
-		CacheServer: httputil.NewSingleHostReverseProxy(cache),
+		CacheServer: resultsProxy(cache),
 		Results:     resultsProxy(results),
 	}
 	if npm != nil {
@@ -142,9 +142,10 @@ func newServer(handler http.Handler) *http.Server {
 	return &http.Server{Handler: handler, ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: idleTimeout}
 }
 
-// resultsProxy forwards to GitHub with the Host header GitHub expects; the
-// default director would keep the gate's own host:port, which GitHub's front
-// end does not route.
+// resultsProxy forwards with the target's own Host header; the default director
+// would keep the gate's host:port, which GitHub's front end does not route. The
+// cache upstream gets the same, because a roaming node's gate sends its cache calls
+// to GitHub (ADR 0097), and the loopback cache server signs from its own base URL.
 func resultsProxy(target *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{Rewrite: func(r *httputil.ProxyRequest) {
 		r.SetURL(target)

@@ -24,6 +24,38 @@ grep -q '^ACTIONS_RESULTS_URL=' "$env" 2>/dev/null || exit 0
 sed -i 's|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/|' "$env"
 grep -qx 'ACTIONS_RESULTS_URL=https://results-receiver.actions.githubusercontent.com/' "$env"`
 
+// roamingScript points a guest whose LAN gate did not prove itself at its own host's
+// artifact-forwarding gate instead of GitHub (ADR 0097 amendment, issue #446), so its
+// artifacts reach the one owner like every other Linux guest's. $1 is that gate's
+// origin and $2 its address. The guest first asks the gate from inside, because only
+// the guest can show its host answers there; the gate answers its identity path
+// itself. Then the image's host.containers.internal line, the name the owner signs
+// blob URLs for, is moved to that address, and only then the results URL. A guest whose gate does not
+// answer, or whose name cannot be moved, takes resultsFallbackScript's GitHub URL, as
+// before. An image with no override has an unpatched runner, which needs nothing.
+const roamingScript = `set -eu
+env=$HOME/actions-runner/.env
+grep -q '^ACTIONS_RESULTS_URL=' "$env" 2>/dev/null || exit 0
+url=https://results-receiver.actions.githubusercontent.com/
+if curl --silent --noproxy '*' --proto =http --max-redirs 0 --max-time 3 --output /dev/null "$1/.trf/gate-identity" &&
+  sudo -n sed -i "s/^[^#]*[[:space:]]host\.containers\.internal\$/$2 host.containers.internal/" /etc/hosts &&
+  sudo -n grep -qx "$2 host.containers.internal" /etc/hosts; then
+  url=$1/
+fi
+sed -i "s|^ACTIONS_RESULTS_URL=.*|ACTIONS_RESULTS_URL=$url|" "$env"
+grep -qx "ACTIONS_RESULTS_URL=$url" "$env"`
+
+// roamingScriptName is the roaming script's $0.
+const roamingScriptName = "trf-roaming-gate"
+
+// Roaming is the node's own artifact-forwarding gate as its guests reach it, used only
+// when the LAN gate does not prove itself. A nil route, the default, keeps the GitHub
+// fallback.
+type Roaming struct {
+	URL  string
+	Host string
+}
+
 // NPMRoute is the gate's npm cache as this node's guests reach it (ADR 0093). A nil
 // route, the default, means no guest is ever given a registry. Ready says the route
 // answers now; it is asked only of a gate that has just proved itself.
@@ -79,7 +111,8 @@ printf '%s\nregistry=%s\nnoproxy=%s\nno-proxy=%s\n' '` + npmMarker + `' "$1" "$2
 mv -f "$tmp" "$rc"`
 
 // selectGate is one launch's choice, on one fresh proof. An unproven gate moves the
-// guest's results to GitHub. Then any registry an earlier attempt left is removed, and a
+// guest's results to the node's roaming gate when it has one and the guest reaches it,
+// and to GitHub otherwise. Then any registry an earlier attempt left is removed, and a
 // failure there stops the runner: that guest may still name a gate this launch did not
 // prove. Only after that, a proven gate whose npm route answers gives the guest its
 // registry. A failure writing it costs only a cold job, because no setting means npmjs.
@@ -89,7 +122,11 @@ func (b StdinBootstrapper) selectGate(ctx context.Context, name string) error {
 	}
 	verified := b.Gate.Verified(ctx)
 	if !verified {
-		if err := b.guestScript(ctx, name, "results fallback failed", resultsFallbackScript); err != nil {
+		script := []string{resultsFallbackScript}
+		if b.Roaming != nil {
+			script = []string{roamingScript, roamingScriptName, strings.TrimSuffix(b.Roaming.URL, "/"), b.Roaming.Host}
+		}
+		if err := b.guestScript(ctx, name, "results fallback failed", script...); err != nil {
 			return err
 		}
 	}

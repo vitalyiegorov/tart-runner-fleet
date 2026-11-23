@@ -390,3 +390,39 @@ create.
 The read widening is narrower than GitHub's own rule, under which any job with
 `actions: read` can download any run's artifacts.
 
+
+## Amendment 2026-11-23 — a roaming Tart node forwards through its own gate (#446)
+
+Knee-doctor job 137580595802 hit GitHub's artifact quota on the MacBook's
+`trf-linux-4x8-b72723b2c49059cb`. The MacBook was off the home LAN, so the
+2026-11-04 amendment to ADR 0078 moved the guest to GitHub, which this ADR had
+accepted ("roaming MacBook via #446 keeps GitHub"). That left a producer on the
+other storage system than its consumers, the split this ADR's rollout warns
+against, and the GitHub quota it exists to avoid.
+
+Decision: a Tart node may configure `cacheGate.roamingUrl`, the address at which
+its guests reach the node's own forwarding gate. When the LAN gate fails its
+proof, the launch asks that gate from inside the guest, moves the image's
+`host.containers.internal` line to its address, and only then points the results
+URL there. Anything short of that keeps the GitHub fallback unchanged. The
+roaming gate is the existing forwarding mode over the existing SSH local forward
+to the owner's artifact-only listener, so allowlist, auth, retention and the
+no-GitHub-fallback rule are this ADR's, unchanged. Its cache upstream is GitHub's
+results service, which roaming guests used already; the gate's cache proxy now
+sends the upstream's Host, harmless to the loopback cache server, which signs
+from its own base URL. A roaming pull request's cache save is now refused, as on
+the LAN.
+
+Rejected: withdrawing the node's Linux labels while roaming loses that capacity
+and needs a scheduler input the simulation does not model; routing roaming
+guests to Omarchy's full gate would carry cache over the tunnel, which ADR 0078
+and this ADR forbid.
+
+Owner's three questions: no new process kind, tunnel or store; one optional
+field, one guest script and one proxy constructor shared by both upstreams.
+Off by default, so a release changes nothing until an operator configures it.
+Tested by real-shell guest scripts (reach, unreachable, refused sudo, no
+override), config validation, daemon wiring, the doctor reason and the Host
+test. This is lifecycle and gate wiring, not scheduler state, so the simulation
+is unchanged. No fleet.v1 or fleet.db change; observe/shadow and VM mutation
+authority are unchanged.

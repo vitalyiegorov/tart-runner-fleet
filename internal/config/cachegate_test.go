@@ -107,6 +107,56 @@ func TestCacheGateNPMRegistryValidation(t *testing.T) {
 	}
 }
 
+func TestCacheGateRoamingURLValidation(t *testing.T) {
+	gate := CacheGate{URL: "http://192.168.1.64:3017/", PublicKey: testGateKey}
+	roaming := func(value string) CacheGate {
+		withRoaming := gate
+		withRoaming.RoamingURL = value
+		return withRoaming
+	}
+	tests := []struct {
+		name    string
+		gate    CacheGate
+		backend ExecutorBackend
+		want    string
+	}{
+		{name: "off by default", gate: gate},
+		{name: "tart's host address", gate: roaming("http://192.168.64.1:3017")},
+		{name: "with a trailing slash", gate: roaming("http://192.168.64.1:3017/")},
+		{name: "on podman", gate: CacheGate{URL: "http://127.0.0.1:3017/", PublicKey: testGateKey,
+			NPMRegistry: "http://host.containers.internal:3017/npm/", RoamingURL: "http://192.168.64.1:3017"}, backend: ExecutorPodman, want: "roamingUrl"},
+		{name: "the LAN gate itself", gate: roaming("http://192.168.1.64:3017"), want: "roamingUrl"},
+		{name: "a hostname", gate: roaming("http://host.containers.internal:3017"), want: "roamingUrl"},
+		{name: "a public address", gate: roaming("http://8.8.8.8:3017"), want: "roamingUrl"},
+		{name: "loopback, which a guest cannot reach", gate: roaming("http://127.0.0.1:3017"), want: "roamingUrl"},
+		{name: "https", gate: roaming("https://192.168.64.1:3017"), want: "roamingUrl"},
+		{name: "no port", gate: roaming("http://192.168.64.1"), want: "roamingUrl"},
+		{name: "a path", gate: roaming("http://192.168.64.1:3017/x"), want: "roamingUrl"},
+		{name: "a query", gate: roaming("http://192.168.64.1:3017/?a=1"), want: "roamingUrl"},
+		{name: "credentials", gate: roaming("http://u:p@192.168.64.1:3017"), want: "roamingUrl"},
+		{name: "a newline", gate: roaming("http://192.168.64.1:3017\nX=1"), want: "roamingUrl"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{CacheGate: test.gate}
+			cfg.Executor.Backend = test.backend
+			err := cfg.validateCacheGate()
+			if test.want == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("err = %v, want %q", err, test.want)
+			}
+		})
+	}
+	if got := roaming("http://192.168.64.1:3017").RoamingHost(); got != "192.168.64.1" {
+		t.Fatalf("host = %q", got)
+	}
+	if got := (CacheGate{RoamingURL: "http://[::1"}).RoamingHost(); got != "" {
+		t.Fatalf("host = %q", got)
+	}
+}
+
 // TestAnNPMRegistryIsOffByDefault: a node's file that has never heard of it encodes
 // and decodes exactly as it did, and a Tart gate keeps validating without one.
 func TestAnNPMRegistryIsOffByDefault(t *testing.T) {
@@ -116,10 +166,11 @@ func TestAnNPMRegistryIsOffByDefault(t *testing.T) {
 	if err := Encode(&encoded, valid); err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(encoded.Bytes(), []byte("npmRegistry")) {
-		t.Fatal("a node with no npm registry encoded the key")
+	if bytes.Contains(encoded.Bytes(), []byte("npmRegistry")) || bytes.Contains(encoded.Bytes(), []byte("roamingUrl")) {
+		t.Fatal("a node with no npm registry or roaming gate encoded the key")
 	}
 	valid.CacheGate.NPMRegistry = "http://192.168.1.64:3017/npm/"
+	valid.CacheGate.RoamingURL = "http://192.168.64.1:3017"
 	encoded.Reset()
 	if err := Encode(&encoded, valid); err != nil {
 		t.Fatal(err)

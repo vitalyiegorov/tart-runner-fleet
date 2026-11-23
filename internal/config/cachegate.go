@@ -16,10 +16,24 @@ import (
 // 0093). Empty, which is the default, means no guest is ever given a registry. It is
 // what makes a podman node able to configure a gate at all: its guests' results URL
 // is image ENV and needs no check, but a registry setting does.
+//
+// RoamingURL is the optional address at which a Tart node's guests reach the node's
+// own artifact-forwarding gate when the LAN gate does not prove itself (ADR 0097
+// amendment, issue #446). Empty, the default, keeps ADR 0078's GitHub fallback.
 type CacheGate struct {
 	URL         string `json:"url"`
 	PublicKey   string `json:"publicKey"`
 	NPMRegistry string `json:"npmRegistry,omitempty"`
+	RoamingURL  string `json:"roamingUrl,omitempty"`
+}
+
+// RoamingHost is the host of RoamingURL, and empty when there is none.
+func (g CacheGate) RoamingHost() string {
+	parsed, err := url.Parse(g.RoamingURL)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 // NPMHost is the host of NPMRegistry, and empty when there is none.
@@ -46,6 +60,9 @@ func (c Config) validateCacheGate() error {
 	}
 	if _, err := cachegate.ParsePublicKey(c.CacheGate.PublicKey); err != nil {
 		return fmt.Errorf("cacheGate.publicKey: %w", err)
+	}
+	if err := validateRoamingURL(parsed, c.CacheGate.RoamingURL, podman); err != nil {
+		return err
 	}
 	if c.CacheGate.NPMRegistry == "" {
 		return nil
@@ -75,6 +92,25 @@ func validateNPMRegistry(gate *url.URL, raw string, podman bool) error {
 	if registry.Scheme != "http" || registry.User != nil || registry.RawQuery != "" || registry.Fragment != "" ||
 		registry.Path != cachegate.NPMPrefix || registry.Hostname() != want || registry.Port() == "" || registry.Port() != gate.Port() {
 		return fmt.Errorf("cacheGate.npmRegistry %q must be exactly http://%s:%s%s", raw, want, gate.Port(), cachegate.NPMPrefix)
+	}
+	return nil
+}
+
+// validateRoamingURL holds the roaming gate to the address a guest reaches its own
+// host on: plain HTTP at a private IP literal with a port and nothing else, because
+// the guest maps host.containers.internal to that address and the artifact owner
+// signs its blob URLs for that name. It is not the LAN gate, which already serves
+// every guest that proves it, and a podman guest reaches its host's gate already.
+func validateRoamingURL(gate *url.URL, raw string, podman bool) error {
+	if raw == "" {
+		return nil
+	}
+	roaming, err := url.Parse(raw)
+	if podman || err != nil || roaming.Scheme != "http" || roaming.User != nil || roaming.Port() == "" ||
+		(roaming.Path != "" && roaming.Path != "/") || roaming.RawQuery != "" || roaming.Fragment != "" ||
+		!cachegate.DirectLANAddress(roaming.Hostname()) || roaming.Hostname() == gate.Hostname() {
+		return fmt.Errorf("cacheGate.roamingUrl %q must be a Tart node's own gate as its guests reach it: "+
+			"http://<private address>:<port>, not the LAN gate", raw)
 	}
 	return nil
 }
