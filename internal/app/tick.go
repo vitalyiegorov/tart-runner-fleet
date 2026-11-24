@@ -33,6 +33,8 @@ type Engine struct {
 	ControllerID string
 	Mode         reconcile.Mode
 	Now          func() time.Time
+	// BindingWithdrawn reports whether the local session refuses job acquisition.
+	BindingWithdrawn func(Binding) bool
 	// Refusals is what this node's guests' logs say about their images. It is display
 	// only: a job can write that log, so nothing here reaches a plan (ADR 0094).
 	Refusals *RunnerRefusals
@@ -279,7 +281,11 @@ func (e Engine) Tick(ctx context.Context) (TickResult, error) {
 		} else if err != nil {
 			return TickResult{}, classifyTick(ReasonDemandUnreadable, err)
 		}
-		demands = append(demands, schedulable...)
+		// Durable demand stays visible during withdrawal. It can provision
+		// again once its local session accepts work.
+		if e.BindingWithdrawn == nil || !e.BindingWithdrawn(binding) {
+			demands = append(demands, schedulable...)
+		}
 		summary, err := coordinator.QueueSummary(ctx, binding, queued)
 		if err != nil {
 			return TickResult{}, classifyTick(ReasonQueueSummaryUnreadable, err)
