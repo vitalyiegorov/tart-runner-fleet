@@ -105,6 +105,33 @@ func TestEngineTickPlansAndCommitsFreshSnapshot(t *testing.T) {
 	}
 }
 
+func TestEngineTickWaitsForWithdrawnBindingToResume(t *testing.T) {
+	now := time.Date(2026, 11, 24, 7, 48, 0, 0, time.UTC)
+	cfg := tickConfig()
+	store := &tickStore{fakeDemandStore: fakeDemandStore{
+		statistics: operations.DemandStatistics{MessageID: 1, Available: 1, ObservedAt: now.Add(-3 * time.Minute)},
+		records: []operations.DemandRecord{{
+			Status: operations.DemandJobAvailable, RunnerRequestID: 10, Owner: "owner", Repository: "repo", WorkflowRunID: 8, QueueTime: now.Add(-time.Minute),
+		}},
+	}}
+	binding := Binding{ScaleSetID: 1, Profile: cfg.Profiles["small"]}
+	host := domain.Host{Available: cfg.LinuxCapacity, Pressure: domain.HostPressure{FreeDiskGB: 200, AdmissionAllowed: true}}
+	withdrawn := true
+	engine := Engine{Store: store, Inventory: fakeInventory{
+		instances: domain.Fresh([]domain.Instance(nil), now), host: domain.Fresh(host, now),
+	}, Config: cfg, Bindings: []Binding{binding}, BindingWithdrawn: func(Binding) bool { return withdrawn },
+		ControllerID: "controller", Mode: reconcile.Authority, Now: func() time.Time { return now }}
+	result, err := engine.Tick(context.Background())
+	if err != nil || len(result.Plan.Operations) != 0 || result.Queues["small"].Count != 1 {
+		t.Fatalf("withdrawn binding: operations=%v queues=%v err=%v", result.Plan.Operations, result.Queues, err)
+	}
+	withdrawn = false
+	result, err = engine.Tick(context.Background())
+	if err != nil || !result.Applied || len(result.Plan.Operations) != 1 {
+		t.Fatalf("resumed binding: applied=%v operations=%v err=%v", result.Applied, result.Plan.Operations, err)
+	}
+}
+
 func TestEngineTickReseedsMissingSchedulerStateAndRecovers(t *testing.T) {
 	now := time.Date(2026, 7, 22, 20, 0, 0, 0, time.UTC)
 	store := &tickStore{stateErr: operations.ErrSchedulerStateMissing}

@@ -994,7 +994,11 @@ func runWithDependencies(ctx context.Context, opts options, d dependencies) (ret
 			now: d.now, warn: reporter.logger.Warn})
 	}
 	engine := app.Engine{Refusals: refusals, Images: d.imageGenerations(cfg), Store: store, Demand: coordinator, Inventory: d.inventory(store, cfg, recovery, updateDrain), Config: schedulerConfig,
-		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode}
+		Bindings: bindings, ControllerID: "tart-runner-fleet", Mode: opts.Mode,
+		BindingWithdrawn: func(binding app.Binding) bool {
+			source := memberSources[membership.Key{Scope: binding.Scope, ID: int(binding.ScaleSetID)}]
+			return source != nil && source.Suspended()
+		}}
 	yield := newSessionYieldController(yieldState, closers, reporter)
 	member := newMembershipController(membershipMode(opts.Mode, cfg), cfg.GitHub.ParkedScaleSetAuditInterval(),
 		memberSources, reporter)

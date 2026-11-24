@@ -102,6 +102,12 @@ Four constraints make the rule safe:
    that caused it. The invisibility, not the waiting, is what cost eleven
    hours.
 
+5. **Provisioning waits for each withdrawn binding.** A host can reopen its
+   admission gate before a binding rejoins. Retained demand remains visible in
+   queue summaries, and the planner excludes it from new provisioning until
+   that binding can acquire work again. Cleanup and runner administration
+   continue through their existing paths ([issue #543](https://github.com/vitalyiegorov/tart-runner-fleet/issues/543)).
+
 ## Consequences
 
 Timeliness is bounded by prevention, not rescue. Withdrawal cannot move a job
